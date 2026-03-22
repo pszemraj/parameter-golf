@@ -297,25 +297,36 @@ The current measured under-cap anchors from direct `EVAL_ONLY=1` size probes are
 
 That gives you a real near-cap family sweep across FF ratios `1.5`, `2.0`, `2.5`, and `3.0`, plus one higher-unique-block tall variant.
 
-The training helper `scripts/run_allama_ablations.sh` is intentionally training-only and focuses on behavior over those measured near-cap anchors:
+The training helper `scripts/run_allama_ablations.sh` is intentionally training-only and uses blocked ablations over those measured near-cap anchors:
 
 ```bash
 bash scripts/run_allama_ablations.sh
 ```
 
-It trains:
+It is structured as:
 
-- the five canonical near-cap families above
-- `prenorm` and `rmsnorm` behavior checks on `balanced_ff25`
-- a `repeat_2` sharing-pattern check on `tall_ff30`
-- a `no_x0` check on `shortfat_ff20`
-- a `chunk` vs `cycle` check on `wide_ff15`
+- baseline block: all five families at the same canonical settings
+- share-pattern block: `chunk` and `repeat_2`, applied to the same five families
+- norm block: `prenorm+layernorm` and `postnorm+rmsnorm`, applied to the same five families
+- shortcut block: `resid_mix_init=0.05` and `no_x0`, applied to the same five families
+
+That means family comparisons and factor comparisons are not confounded by silently changing the family set underneath them.
+
+You can disable blocks explicitly if you want to stage the work:
+
+```bash
+RUN_BASELINE_BLOCK=1 \
+RUN_SHARE_BLOCK=0 \
+RUN_NORM_BLOCK=0 \
+RUN_SHORTCUT_BLOCK=0 \
+bash scripts/run_allama_ablations.sh
+```
 
 That sweep is finally testing something real:
 - near-cap compressed artifacts under the actual 16,000,000-byte rule
 - shape families spanning wide, balanced, tall, and multi-block variants
 - FF ratio effects across `1.5`, `2.0`, `2.5`, and `3.0`
-- actual behavior decisions instead of just size guessing
+- one factor at a time within each ablation block
 
 ## Full validation vs sampled validation
 

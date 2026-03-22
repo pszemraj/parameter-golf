@@ -4,8 +4,8 @@ set -euo pipefail
 
 export WANDB=1
 export WANDB_PROJECT=param-golf-ablations
-export WANDB_GROUP=allama-nearcap-train
-export WANDB_TAGS=5090,allama,nearcap,behavior
+export WANDB_GROUP="${WANDB_GROUP:-allama-blocked-ablations}"
+export WANDB_TAGS="${WANDB_TAGS:-5090,allama,nearcap,behavior,blocked}"
 
 BASE_ENV=(
   OUT_DIR=./runs_allama
@@ -25,16 +25,25 @@ BASE_ENV=(
   VAL_BATCHES=8
 )
 
+FAMILIES=(
+  wide_ff15
+  shortfat_ff20
+  balanced_ff25
+  tall_ff30
+  tallmulti_ff25
+)
+
+RUN_BASELINE_BLOCK="${RUN_BASELINE_BLOCK:-1}"
+RUN_SHARE_BLOCK="${RUN_SHARE_BLOCK:-1}"
+RUN_NORM_BLOCK="${RUN_NORM_BLOCK:-1}"
+RUN_SHORTCUT_BLOCK="${RUN_SHORTCUT_BLOCK:-1}"
+
 run_one () {
   local RUN_ID="$1"
   local FAMILY="$2"
-  local NORM_LAYOUT="$3"
-  local NORM_KIND="$4"
-  local SHARE_PATTERN="$5"
-  local USE_X0_SHORTCUT="$6"
-  local RESID_MIX_INIT="$7"
-
+  local VARIANT="$3"
   local MODEL_DIM EMBED_DIM NUM_LAYERS NUM_HEADS NUM_KV_HEADS NUM_SHARED_BLOCKS MLP_MULT
+  local NORM_LAYOUT NORM_KIND SHARE_PATTERN USE_X0_SHORTCUT RESID_MIX_INIT
 
   case "$FAMILY" in
     wide_ff15)
@@ -88,6 +97,62 @@ run_one () {
       ;;
   esac
 
+  case "$VARIANT" in
+    baseline)
+      NORM_LAYOUT=postnorm
+      NORM_KIND=layernorm
+      SHARE_PATTERN=cycle
+      USE_X0_SHORTCUT=1
+      RESID_MIX_INIT=0.10
+      ;;
+    share_chunk)
+      NORM_LAYOUT=postnorm
+      NORM_KIND=layernorm
+      SHARE_PATTERN=chunk
+      USE_X0_SHORTCUT=1
+      RESID_MIX_INIT=0.10
+      ;;
+    share_repeat2)
+      NORM_LAYOUT=postnorm
+      NORM_KIND=layernorm
+      SHARE_PATTERN=repeat_2
+      USE_X0_SHORTCUT=1
+      RESID_MIX_INIT=0.10
+      ;;
+    norm_prenorm_ln)
+      NORM_LAYOUT=prenorm
+      NORM_KIND=layernorm
+      SHARE_PATTERN=cycle
+      USE_X0_SHORTCUT=1
+      RESID_MIX_INIT=0.10
+      ;;
+    norm_post_rms)
+      NORM_LAYOUT=postnorm
+      NORM_KIND=rmsnorm
+      SHARE_PATTERN=cycle
+      USE_X0_SHORTCUT=1
+      RESID_MIX_INIT=0.10
+      ;;
+    shortcut_mix005)
+      NORM_LAYOUT=postnorm
+      NORM_KIND=layernorm
+      SHARE_PATTERN=cycle
+      USE_X0_SHORTCUT=1
+      RESID_MIX_INIT=0.05
+      ;;
+    shortcut_no_x0)
+      NORM_LAYOUT=postnorm
+      NORM_KIND=layernorm
+      SHARE_PATTERN=cycle
+      USE_X0_SHORTCUT=0
+      RESID_MIX_INIT=0.00
+      ;;
+    *)
+      echo "unknown VARIANT=$VARIANT" >&2
+      return 1
+      ;;
+  esac
+
   env "${BASE_ENV[@]}" \
     RUN_ID="$RUN_ID" \
     MODEL_DIM="$MODEL_DIM" \
@@ -107,6 +172,13 @@ run_one () {
     python train_allama_reborn.py
 }
 
+run_variant_block() {
+  local VARIANT="$1"
+  for FAMILY in "${FAMILIES[@]}"; do
+    run_one "${FAMILY}_${VARIANT}" "${FAMILY}" "${VARIANT}"
+  done
+}
+
 # Measured compressed artifact sizes from direct EVAL_ONLY probes:
 # - wide_ff15:      15,994,336 bytes
 # - shortfat_ff20:  15,659,236 bytes
@@ -114,14 +186,21 @@ run_one () {
 # - tall_ff30:      15,614,669 bytes
 # - tallmulti_ff25: 15,882,909 bytes
 
-run_one wide_ff15_cycle_x0_010      wide_ff15      postnorm layernorm cycle    1 0.10
-run_one shortfat_ff20_cycle_x0_010  shortfat_ff20  postnorm layernorm cycle    1 0.10
-run_one balanced_ff25_cycle_x0_010  balanced_ff25  postnorm layernorm cycle    1 0.10
-run_one tall_ff30_cycle_x0_010      tall_ff30      postnorm layernorm cycle    1 0.10
-run_one tallmulti_ff25_cycle_x0_010 tallmulti_ff25 postnorm layernorm cycle    1 0.10
+if [[ "${RUN_BASELINE_BLOCK}" == "1" ]]; then
+  run_variant_block baseline
+fi
 
-run_one balanced_ff25_pre_ln        balanced_ff25  prenorm  layernorm cycle    1 0.10
-run_one balanced_ff25_post_rms      balanced_ff25  postnorm rmsnorm   cycle    1 0.10
-run_one tall_ff30_repeat2           tall_ff30      postnorm layernorm repeat_2 1 0.10
-run_one shortfat_ff20_no_x0         shortfat_ff20  postnorm layernorm cycle    0 0.00
-run_one wide_ff15_chunk             wide_ff15      postnorm layernorm chunk    1 0.10
+if [[ "${RUN_SHARE_BLOCK}" == "1" ]]; then
+  run_variant_block share_chunk
+  run_variant_block share_repeat2
+fi
+
+if [[ "${RUN_NORM_BLOCK}" == "1" ]]; then
+  run_variant_block norm_prenorm_ln
+  run_variant_block norm_post_rms
+fi
+
+if [[ "${RUN_SHORTCUT_BLOCK}" == "1" ]]; then
+  run_variant_block shortcut_mix005
+  run_variant_block shortcut_no_x0
+fi
