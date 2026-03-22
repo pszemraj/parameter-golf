@@ -89,6 +89,7 @@ RUN_SHARE_BLOCK="${RUN_SHARE_BLOCK:-${DEFAULT_RUN_SHARE_BLOCK}}"
 RUN_NORM_BLOCK="${RUN_NORM_BLOCK:-${DEFAULT_RUN_NORM_BLOCK}}"
 RUN_SHORTCUT_BLOCK="${RUN_SHORTCUT_BLOCK:-${DEFAULT_RUN_SHORTCUT_BLOCK}}"
 RUN_COMPILE="${RUN_COMPILE:-1}"
+FORCE_RERUN="${FORCE_RERUN:-0}"
 
 VARIANT_COUNT=0
 if [[ "${RUN_BASELINE_BLOCK}" == "1" ]]; then
@@ -106,7 +107,7 @@ fi
 TOTAL_RUNS=$(( VARIANT_COUNT * ${#FAMILIES[@]} ))
 LOCAL_BATCH_SIZE=$(( TRAIN_BATCH_TOKENS_VALUE / (GRAD_ACCUM_STEPS_VALUE * TRAIN_SEQ_LEN_VALUE) ))
 
-echo "sweep_profile=${SWEEP_PROFILE} compile=${RUN_COMPILE} train_batch_tokens=${TRAIN_BATCH_TOKENS_VALUE} grad_accum_steps=${GRAD_ACCUM_STEPS_VALUE} local_batch_size=${LOCAL_BATCH_SIZE} iterations=${ITERATIONS_VALUE} val_loss_every=${VAL_LOSS_EVERY_VALUE} total_runs=${TOTAL_RUNS}"
+echo "sweep_profile=${SWEEP_PROFILE} compile=${RUN_COMPILE} force_rerun=${FORCE_RERUN} train_batch_tokens=${TRAIN_BATCH_TOKENS_VALUE} grad_accum_steps=${GRAD_ACCUM_STEPS_VALUE} local_batch_size=${LOCAL_BATCH_SIZE} iterations=${ITERATIONS_VALUE} val_loss_every=${VAL_LOSS_EVERY_VALUE} total_runs=${TOTAL_RUNS}"
 
 run_one () {
   local RUN_ID="$1"
@@ -215,8 +216,16 @@ run_one () {
   esac
 
   local PYTHON_FLAGS=()
+  local RUN_DIR="./runs_allama/${RUN_ID}"
+  local SAVE_PATH_FILE="${RUN_DIR}/model.pt"
+  local EXPORT_INT8_PATH_FILE="${RUN_DIR}/model_int8.pt"
   if [[ "${RUN_COMPILE}" == "1" ]]; then
     PYTHON_FLAGS+=(--compile)
+  fi
+
+  if [[ "${FORCE_RERUN}" != "1" && -f "${SAVE_PATH_FILE}" && -f "${EXPORT_INT8_PATH_FILE}" ]]; then
+    echo "skip_existing run_id=${RUN_ID} checkpoint=${SAVE_PATH_FILE} int8=${EXPORT_INT8_PATH_FILE}"
+    return 0
   fi
 
   env "${BASE_ENV[@]}" \
@@ -233,9 +242,13 @@ run_one () {
     SHARE_PATTERN="$SHARE_PATTERN" \
     USE_X0_SHORTCUT="$USE_X0_SHORTCUT" \
     RESID_MIX_INIT="$RESID_MIX_INIT" \
-    SAVE_PATH="./runs_allama/${RUN_ID}/model.pt" \
-    EXPORT_INT8_PATH="./runs_allama/${RUN_ID}/model_int8.pt" \
+    SAVE_PATH="${SAVE_PATH_FILE}" \
+    EXPORT_INT8_PATH="${EXPORT_INT8_PATH_FILE}" \
     python train_allama_reborn.py "${PYTHON_FLAGS[@]}"
+
+  if [[ -f "${SAVE_PATH_FILE}" && -f "${EXPORT_INT8_PATH_FILE}" ]]; then
+    touch "${RUN_DIR}/.complete"
+  fi
 }
 
 run_variant_block() {

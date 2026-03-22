@@ -318,6 +318,10 @@ There are three intended modes:
 - default `SWEEP_PROFILE=explore`: 28 runs total, all blocks enabled, reduced step count
 - `SWEEP_PROFILE=full`: 28 runs total, all blocks enabled, long run
 
+It also skips already-completed run directories by default when both
+`runs_allama/<run_id>/model.pt` and `runs_allama/<run_id>/model_int8.pt`
+exist. Use `FORCE_RERUN=1` if you want to rerun them anyway.
+
 It also exports `TORCH_BLAS_PREFER_CUBLASLT=1` for 5090-friendly CUDA BLAS selection.
 The trainer now supports `SDPA_BACKEND=auto|flash|efficient|math|cudnn` for explicit SDPA backend experiments.
 
