@@ -209,14 +209,14 @@ probe_one probe_m1152_l24_s2 1152 288 24 18 6 2.5 2 cycle
 ```
 
 Interpretation:
-- if `model_artifact_bytes_init` in W&B config or `size_init ... artifact_bytes=...` in the local log is nowhere near 16MB, go bigger
-- if it is too high, trim width or `MLP_MULT`
-- once you are near budget, **then** do real ablations inside that size regime
-- with the current coarse probe results, `probe_m1024_l24_s2` is one sensible budget-closing starting point at about 14.5MB, while the one-shared-block variants are still undersized and `probe_m1152_l24_s2` overshoots the cap
+- use these only to bracket rough architecture families; `size_init ... artifact_bytes=...` is not reliable enough to pick final training runs by itself
+- if init size is far below budget, go bigger; if it is wildly above budget, trim width or `MLP_MULT`
+- once a family is in the right ballpark, switch to short training-based sizing rather than trusting init compression
+- with the current coarse probe results, `probe_m1024_l24_s2` was a sensible first budget-closing starting point at about 14.5MB init, while the one-shared-block variants were undersized and `probe_m1152_l24_s2` overshot the cap
 - do not assume the best near-cap family is balanced by default; wide, short-fat, tall, and higher-unique-block variants can all fit under the cap with different `MLP_MULT` choices
 - ignore tiny `val_loss` / `val_bpb` differences in this phase because `EVAL_ONLY=1` makes these runs size probes, not learned-model comparisons
 
-### Phase 2: budget-closing sweep
+### Phase 2: final-size calibration
 
 Per [README.md](README.md), the thing that counts is compressed artifact size, defined as:
 
@@ -224,80 +224,63 @@ Per [README.md](README.md), the thing that counts is compressed artifact size, d
 artifact_bytes = code_bytes + int8_payload_zlib_bytes
 ```
 
-So once a family is in the right ballpark, getting closer to the 16,000,000-byte cap is itself a core ablation, not a cleanup step.
-One easy way to do that is to hold a candidate family fixed and sweep `MLP_MULT`.
+Two things matter here:
 
-```bash
-export WANDB=1
-export WANDB_PROJECT=param-golf-ablations
-export WANDB_GROUP=allama-budget-close-probes
-export WANDB_TAGS=allama,5090,budget-close
+- `size_final` drifts upward quickly during training because the int8 payload becomes much less compressible
+- that drift is not caused by checkpoint junk; the payload/checkpoint metadata is tiny, and the growth comes from model entropy
 
-BASE_ENV=(
-  OUT_DIR=./runs_allama
-  DATA_PATH=./data/datasets/fineweb10B_sp1024
-  TOKENIZER_PATH=./data/tokenizers/fineweb_1024_bpe.model
-  DEVICE=cuda
-  DTYPE=bf16
-  MODEL_DIM=1024
-  EMBED_DIM=256
-  NUM_LAYERS=24
-  NUM_HEADS=16
-  NUM_KV_HEADS=4
-  NUM_SHARED_BLOCKS=2
-  TRAIN_SEQ_LEN=1024
-  EVAL_SEQ_LEN=1024
-  TRAIN_BATCH_TOKENS=65536
-  GRAD_ACCUM_STEPS=4
-  NUM_EPOCHS=1
-  EVAL_ONLY=1
-  EVAL_MODE=sampled
-  VAL_BATCH_SIZE=8
-  VAL_BATCHES=8
-  NORM_LAYOUT=postnorm
-  NORM_KIND=layernorm
-  SHARE_PATTERN=cycle
-  USE_X0_SHORTCUT=1
-  RESID_MIX_INIT=0.1
-)
+Representative drift on the old `balanced_ff25` anchor (`1056/264/24`, `NUM_SHARED_BLOCKS=2`, `MLP_MULT=2.5`) using repeated short runs:
 
-probe_budget () {
-  local RUN_ID="$1"
-  local MLP_MULT="$2"
+- step 0: `artifact_bytes=15,498,554`
+- step 50: `artifact_bytes=22,148,785`
+- step 100: `artifact_bytes=22,488,958`
+- step 150: `artifact_bytes=22,653,383`
 
-  env "${BASE_ENV[@]}" \
-    RUN_ID="$RUN_ID" \
-    MLP_MULT="$MLP_MULT" \
-    python train_allama_reborn.py
-}
+What changed was compression, not file structure:
 
-probe_budget budget_mlp250 2.50
-probe_budget budget_mlp265 2.65
-probe_budget budget_mlp275 2.75
-probe_budget budget_mlp285 2.85
-probe_budget budget_mlp290 2.90
+- `saved_int8_payload_bytes` stayed constant across those checkpoints
+- `int8_payload_zlib_bytes` rose from `15,399,405` to `22,554,234`
+- checkpoint config overhead was only about `1.7 KB` compressed
+- payload metadata overhead was tiny; the large delta was the quantized tensors becoming less compressible
+
+Across 50-step runs, the trained payload landed very close to a fixed fraction of the raw payload bytes:
+
+- `wide_ff15` old anchor: `0.9355`
+- `shortfat_ff20` old anchor: `0.9373`
+- `balanced_ff25` old anchor: `0.9380`
+- `tall_ff30` old anchor: `0.9365`
+- `wide_ff15` resized anchor: `0.9395`
+- `balanced_ff25` resized-but-too-large anchor (`896/224/24`): `0.9426`
+- `tall_ff30` resized anchor: `0.9412`
+
+So the practical sizing proxy is:
+
+```text
+artifact_proxy_bytes ~= code_bytes + 0.945 * int8_payload_bytes_init
 ```
 
-Interpretation:
-- choose the highest `artifact_bytes` that stays under 16,000,000
-- from the current probes, `2.85` is a reasonable first guess by linear extrapolation, but that is an inference, not a verified result
-- if `2.90` still fits, refine upward in smaller increments
-- if `2.85` overshoots, refine downward around `2.80` to `2.84`
+Use `0.945` instead of the tighter `~0.937` mean because the smaller near-cap models came in slightly worse.
+Then validate any near-cap finalist with a real short run and actual `size_final`.
 
 ### Phase 3: serious ablations
 
-These are the actual first ablations I would run once the size probe says the family is sensible.
-The current measured under-cap anchors from direct `EVAL_ONLY=1` size probes are:
+These are the actual first ablations I would run once the family has been made final-size-aware instead of init-size-aware.
+The current blocked sweep uses four anchors:
 
-- `wide_ff15`: `MODEL_DIM=1280`, `EMBED_DIM=320`, `NUM_LAYERS=16`, `NUM_SHARED_BLOCKS=2`, `MLP_MULT=1.5`, `artifact_bytes=15994336`
-- `shortfat_ff20`: `MODEL_DIM=1152`, `EMBED_DIM=288`, `NUM_LAYERS=20`, `NUM_SHARED_BLOCKS=2`, `MLP_MULT=2.0`, `artifact_bytes=15659236`
-- `balanced_ff25`: `MODEL_DIM=1056`, `EMBED_DIM=264`, `NUM_LAYERS=24`, `NUM_SHARED_BLOCKS=2`, `MLP_MULT=2.5`, `artifact_bytes=15496683`
-- `tall_ff30`: `MODEL_DIM=992`, `EMBED_DIM=248`, `NUM_LAYERS=32`, `NUM_SHARED_BLOCKS=2`, `MLP_MULT=3.0`, `artifact_bytes=15614669`
-- `tallmulti_ff25`: `MODEL_DIM=896`, `EMBED_DIM=224`, `NUM_LAYERS=40`, `NUM_SHARED_BLOCKS=3`, `MLP_MULT=2.5`, `artifact_bytes=15882909`
+- `wide_ff15`: `MODEL_DIM=1056`, `EMBED_DIM=264`, `NUM_LAYERS=16`, `NUM_SHARED_BLOCKS=2`, `MLP_MULT=1.5`, `size_final@50=15826095`
+- `shortfat_ff20`: `MODEL_DIM=960`, `EMBED_DIM=240`, `NUM_LAYERS=20`, `NUM_SHARED_BLOCKS=2`, `MLP_MULT=2.0`, `artifact_proxy_bytes=15777074`
+- `balanced_ff25`: `MODEL_DIM=864`, `EMBED_DIM=216`, `NUM_LAYERS=24`, `NUM_SHARED_BLOCKS=2`, `MLP_MULT=2.5`, `artifact_proxy_bytes=15062987`
+- `tall_ff30`: `MODEL_DIM=832`, `EMBED_DIM=208`, `NUM_LAYERS=32`, `NUM_SHARED_BLOCKS=2`, `MLP_MULT=3.0`, `size_final@50=15869614`
 
-That gives you a real near-cap family sweep across FF ratios `1.5`, `2.0`, `2.5`, and `3.0`, plus one higher-unique-block tall variant.
+Why these and not the earlier near-16MB init probes:
 
-The training helper `scripts/run_allama_ablations.sh` is intentionally training-only and uses blocked ablations over those measured near-cap anchors:
+- the old anchors were all far over budget once trained even for 50 steps
+- `balanced_ff25` at `896/224/24` reached `size_final@50=16048727`, so the next valid 16-head step down is `864/216/24`
+- the valid 40-layer multi-block candidate (`768/192/40`, `NUM_SHARED_BLOCKS=3`) still had `artifact_proxy_bytes=17312748`, and the larger one also OOMed at the sweep batch size, so it is out for now
+
+That still gives you a real family sweep across FF ratios `1.5`, `2.0`, `2.5`, and `3.0`, but now the family set is at least compatible with the actual compressed-size objective.
+
+The training helper `scripts/run_allama_ablations.sh` is intentionally training-only and uses blocked ablations over those final-size-aware anchors:
 
 ```bash
 bash scripts/run_allama_ablations.sh
@@ -307,10 +290,10 @@ It also exports `TORCH_BLAS_PREFER_CUBLASLT=1` for 5090-friendly CUDA BLAS selec
 
 It is structured as:
 
-- baseline block: all five families at the same canonical settings
-- share-pattern block: `chunk` and `repeat_2`, applied to the same five families
-- norm block: `prenorm+layernorm` and `postnorm+rmsnorm`, applied to the same five families
-- shortcut block: `resid_mix_init=0.05` and `no_x0`, applied to the same five families
+- baseline block: all four families at the same canonical settings
+- share-pattern block: `chunk` and `repeat_2`, applied to the same four families
+- norm block: `prenorm+layernorm` and `postnorm+rmsnorm`, applied to the same four families
+- shortcut block: `resid_mix_init=0.05` and `no_x0`, applied to the same four families
 
 That means family comparisons and factor comparisons are not confounded by silently changing the family set underneath them.
 
@@ -331,8 +314,8 @@ RUN_COMPILE=0 bash scripts/run_allama_ablations.sh
 ```
 
 That sweep is finally testing something real:
-- near-cap compressed artifacts under the actual 16,000,000-byte rule
-- shape families spanning wide, balanced, tall, and multi-block variants
+- near-cap compressed artifacts under the actual 16,000,000-byte rule, using a conservative final-size proxy instead of init-only compression
+- shape families spanning wide, short-fat, balanced, and tall variants
 - FF ratio effects across `1.5`, `2.0`, `2.5`, and `3.0`
 - one factor at a time within each ablation block
 

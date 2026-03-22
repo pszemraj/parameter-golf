@@ -5,7 +5,7 @@ set -euo pipefail
 export WANDB=1
 export WANDB_PROJECT=param-golf-ablations
 export WANDB_GROUP="${WANDB_GROUP:-allama-blocked-ablations}"
-export WANDB_TAGS="${WANDB_TAGS:-5090,allama,nearcap,behavior,blocked}"
+export WANDB_TAGS="${WANDB_TAGS:-5090,allama,nearcap,finalsize,behavior,blocked}"
 export TORCH_BLAS_PREFER_CUBLASLT=1
 
 BASE_ENV=(
@@ -31,7 +31,6 @@ FAMILIES=(
   shortfat_ff20
   balanced_ff25
   tall_ff30
-  tallmulti_ff25
 )
 
 RUN_BASELINE_BLOCK="${RUN_BASELINE_BLOCK:-1}"
@@ -49,8 +48,8 @@ run_one () {
 
   case "$FAMILY" in
     wide_ff15)
-      MODEL_DIM=1280
-      EMBED_DIM=320
+      MODEL_DIM=1056
+      EMBED_DIM=264
       NUM_LAYERS=16
       NUM_HEADS=16
       NUM_KV_HEADS=4
@@ -58,8 +57,8 @@ run_one () {
       MLP_MULT=1.5
       ;;
     shortfat_ff20)
-      MODEL_DIM=1152
-      EMBED_DIM=288
+      MODEL_DIM=960
+      EMBED_DIM=240
       NUM_LAYERS=20
       NUM_HEADS=16
       NUM_KV_HEADS=4
@@ -67,8 +66,8 @@ run_one () {
       MLP_MULT=2.0
       ;;
     balanced_ff25)
-      MODEL_DIM=1056
-      EMBED_DIM=264
+      MODEL_DIM=864
+      EMBED_DIM=216
       NUM_LAYERS=24
       NUM_HEADS=16
       NUM_KV_HEADS=4
@@ -76,22 +75,13 @@ run_one () {
       MLP_MULT=2.5
       ;;
     tall_ff30)
-      MODEL_DIM=992
-      EMBED_DIM=248
+      MODEL_DIM=832
+      EMBED_DIM=208
       NUM_LAYERS=32
       NUM_HEADS=16
       NUM_KV_HEADS=4
       NUM_SHARED_BLOCKS=2
       MLP_MULT=3.0
-      ;;
-    tallmulti_ff25)
-      MODEL_DIM=896
-      EMBED_DIM=224
-      NUM_LAYERS=40
-      NUM_HEADS=14
-      NUM_KV_HEADS=2
-      NUM_SHARED_BLOCKS=3
-      MLP_MULT=2.5
       ;;
     *)
       echo "unknown FAMILY=$FAMILY" >&2
@@ -186,12 +176,13 @@ run_variant_block() {
   done
 }
 
-# Measured compressed artifact sizes from direct EVAL_ONLY probes:
-# - wide_ff15:      15,994,336 bytes
-# - shortfat_ff20:  15,659,236 bytes
-# - balanced_ff25:  15,496,683 bytes
-# - tall_ff30:      15,614,669 bytes
-# - tallmulti_ff25: 15,882,909 bytes
+# Final-size-aware anchors selected from short-horizon sizing checks.
+# Safe proxy: code_bytes + 0.945 * int8_payload_bytes_init
+# - wide_ff15     1056/264/16  -> size_final@50 = 15,826,095
+# - shortfat_ff20  960/240/20  -> proxy945      = 15,777,074
+# - balanced_ff25  864/216/24  -> proxy945      = 15,062,987
+#   note: 896/224/24 reached size_final@50 = 16,048,727, so the next valid 16-head step down is used
+# - tall_ff30      832/208/32  -> size_final@50 = 15,869,614
 
 if [[ "${RUN_BASELINE_BLOCK}" == "1" ]]; then
   run_variant_block baseline
