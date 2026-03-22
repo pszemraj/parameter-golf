@@ -303,6 +303,8 @@ The training helper `scripts/run_allama_ablations.sh` is intentionally training-
 bash scripts/run_allama_ablations.sh
 ```
 
+It also exports `TORCH_BLAS_PREFER_CUBLASLT=1` for 5090-friendly CUDA BLAS selection and passes `--compile` by default to the trainer.
+
 It is structured as:
 
 - baseline block: all five families at the same canonical settings
@@ -320,6 +322,12 @@ RUN_SHARE_BLOCK=0 \
 RUN_NORM_BLOCK=0 \
 RUN_SHORTCUT_BLOCK=0 \
 bash scripts/run_allama_ablations.sh
+```
+
+If `torch.compile` causes trouble on a specific stack, disable only that part:
+
+```bash
+RUN_COMPILE=0 bash scripts/run_allama_ablations.sh
 ```
 
 That sweep is finally testing something real:

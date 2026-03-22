@@ -17,6 +17,7 @@ Key features in this version:
 
 from __future__ import annotations
 
+import argparse
 import glob
 import gzip
 import io
@@ -65,6 +66,31 @@ def env_bool(name: str, default: bool) -> bool:
 def env_csv(name: str, default: str = "") -> list[str]:
     raw = os.environ.get(name, default)
     return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+@dataclass(frozen=True)
+class CliOverrides:
+    compile_model: Optional[bool]
+
+
+def parse_cli_overrides(argv: Sequence[str]) -> CliOverrides:
+    parser = argparse.ArgumentParser(allow_abbrev=False)
+    compile_group = parser.add_mutually_exclusive_group()
+    compile_group.add_argument(
+        "--compile",
+        dest="compile_model",
+        action="store_true",
+        help="Enable torch.compile() for single-process runs.",
+    )
+    compile_group.add_argument(
+        "--no-compile",
+        dest="compile_model",
+        action="store_false",
+        help="Disable torch.compile() even if COMPILE=1 is set.",
+    )
+    parser.set_defaults(compile_model=None)
+    parsed = parser.parse_args(argv)
+    return CliOverrides(compile_model=parsed.compile_model)
 
 
 @dataclass
@@ -163,10 +189,13 @@ class Hyperparameters:
     model_summary_show_shapes: bool
 
     @classmethod
-    def from_env(cls) -> "Hyperparameters":
+    def from_env(cls, cli: Optional[CliOverrides] = None) -> "Hyperparameters":
         data_path = os.environ.get("DATA_PATH", "./data/datasets/fineweb10B_sp1024")
         wandb_project = os.environ.get("WANDB_PROJECT", "")
         wandb_enable = env_bool("WANDB", False) or bool(wandb_project)
+        compile_model = env_bool("COMPILE", False)
+        if cli is not None and cli.compile_model is not None:
+            compile_model = cli.compile_model
         eval_seq_len_default = int(
             os.environ.get("EVAL_SEQ_LEN", os.environ.get("TRAIN_SEQ_LEN", "1024"))
         )
@@ -191,7 +220,7 @@ class Hyperparameters:
             seed=int(os.environ.get("SEED", "1337")),
             device=os.environ.get("DEVICE", "auto"),
             dtype=os.environ.get("DTYPE", "auto"),
-            compile_model=env_bool("COMPILE", False),
+            compile_model=compile_model,
             load_path=os.environ.get("LOAD_PATH", ""),
             save_path=os.environ.get("SAVE_PATH", ""),
             export_int8_path=os.environ.get("EXPORT_INT8_PATH", ""),
@@ -1506,6 +1535,18 @@ def resolve_dtype(
     return device.type, dtype, use_autocast
 
 
+def configure_cuda_precision() -> None:
+    if hasattr(torch.backends, "fp32_precision"):
+        # PyTorch 2.10+ precision hierarchy: keep IEEE globally, enable TF32 where
+        # it is the standard low-risk training fast path.
+        torch.backends.fp32_precision = "ieee"
+        torch.backends.cuda.matmul.fp32_precision = "tf32"
+        torch.backends.cudnn.conv.fp32_precision = "tf32"
+        return
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+
+
 def autocast_context(device_type: str, amp_dtype: torch.dtype, use_autocast: bool):
     if use_autocast:
         return torch.autocast(device_type=device_type, dtype=amp_dtype)
@@ -2023,14 +2064,14 @@ def maybe_load_model_weights(
 
 
 def main() -> None:
-    args = Hyperparameters.from_env()
+    cli = parse_cli_overrides(tuple(os.sys.argv[1:]))
+    args = Hyperparameters.from_env(cli)
     distributed, rank, world_size, _local_rank, device, master_process = (
         init_distributed_and_device(args)
     )
 
     if device.type == "cuda":
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
+        configure_cuda_precision()
 
     set_seed(args.seed + rank)
     backend = infer_backend(args)
@@ -2092,8 +2133,17 @@ def main() -> None:
 
     maybe_load_model_weights(report_model, args, log)
 
-    if args.compile_model and hasattr(torch, "compile") and not distributed:
-        model_no_ddp = torch.compile(model_no_ddp)  # type: ignore[assignment]
+    compile_enabled = False
+    if args.compile_model:
+        if not hasattr(torch, "compile"):
+            log("note=torch.compile requested but unavailable in this PyTorch build")
+        elif distributed:
+            log(
+                "note=torch.compile requested but skipped because distributed training is enabled"
+            )
+        else:
+            model_no_ddp = torch.compile(model_no_ddp)  # type: ignore[assignment]
+            compile_enabled = True
 
     if distributed:
         ddp_device_ids = [device.index] if device.type == "cuda" else None
@@ -2160,7 +2210,7 @@ def main() -> None:
             f.write(summary_text + "\n")
 
     log(
-        f"run_id={args.run_id} backend={backend} device={device} dtype={amp_dtype} "
+        f"run_id={args.run_id} backend={backend} device={device} dtype={amp_dtype} compile={int(compile_enabled)} "
         f"stored_params={physical_param_count} functional_params={logical_param_count} "
         f"sharing_ratio={sharing_ratio:.4f} logical_layers={args.num_layers} shared_blocks={args.num_shared_blocks} "
         f"share_pattern={args.share_pattern} layer_map={report_model.layer_to_block_map()} eval_mode={eval_mode}"

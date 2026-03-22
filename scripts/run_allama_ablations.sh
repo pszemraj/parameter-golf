@@ -6,6 +6,7 @@ export WANDB=1
 export WANDB_PROJECT=param-golf-ablations
 export WANDB_GROUP="${WANDB_GROUP:-allama-blocked-ablations}"
 export WANDB_TAGS="${WANDB_TAGS:-5090,allama,nearcap,behavior,blocked}"
+export TORCH_BLAS_PREFER_CUBLASLT=1
 
 BASE_ENV=(
   OUT_DIR=./runs_allama
@@ -37,6 +38,7 @@ RUN_BASELINE_BLOCK="${RUN_BASELINE_BLOCK:-1}"
 RUN_SHARE_BLOCK="${RUN_SHARE_BLOCK:-1}"
 RUN_NORM_BLOCK="${RUN_NORM_BLOCK:-1}"
 RUN_SHORTCUT_BLOCK="${RUN_SHORTCUT_BLOCK:-1}"
+RUN_COMPILE="${RUN_COMPILE:-1}"
 
 run_one () {
   local RUN_ID="$1"
@@ -153,6 +155,11 @@ run_one () {
       ;;
   esac
 
+  local PYTHON_FLAGS=()
+  if [[ "${RUN_COMPILE}" == "1" ]]; then
+    PYTHON_FLAGS+=(--compile)
+  fi
+
   env "${BASE_ENV[@]}" \
     RUN_ID="$RUN_ID" \
     MODEL_DIM="$MODEL_DIM" \
@@ -169,7 +176,7 @@ run_one () {
     RESID_MIX_INIT="$RESID_MIX_INIT" \
     SAVE_PATH="./runs_allama/${RUN_ID}/model.pt" \
     EXPORT_INT8_PATH="./runs_allama/${RUN_ID}/model_int8.pt" \
-    python train_allama_reborn.py
+    python train_allama_reborn.py "${PYTHON_FLAGS[@]}"
 }
 
 run_variant_block() {
