@@ -1723,22 +1723,6 @@ def serialized_nbytes(obj: object) -> int:
     return len(buf.getvalue())
 
 
-def cast_state_dict_floats(
-    state_dict: Mapping[str, Tensor], dtype: torch.dtype
-) -> dict[str, Tensor]:
-    """Move a state dict to CPU and cast floating tensors to a target dtype.
-
-    :param Mapping[str, Tensor] state_dict: Source state dict.
-    :param torch.dtype dtype: Target dtype for floating tensors.
-    :return dict[str, Tensor]: CPU state dict with requested float dtype.
-    """
-    out: dict[str, Tensor] = {}
-    for name, tensor in state_dict.items():
-        t = tensor.detach().to("cpu").contiguous()
-        out[name] = t.to(dtype) if t.is_floating_point() else t
-    return out
-
-
 def payload_tensor_numel(payload: Mapping[str, object]) -> dict[str, int]:
     """Count tensor elements stored in each section of an exported int8 payload.
 
@@ -1808,6 +1792,59 @@ def model_footprint_report(
         "artifact_bytes": code_bytes + int8_payload_zlib_bytes,
     }
     return report
+
+
+def format_model_count_report(prefix: str, report: Mapping[str, float | int]) -> str:
+    """Format parameter-count statistics for logs.
+
+    :param str prefix: Log line prefix such as ``model_init``.
+    :param Mapping[str, float | int] report: Parameter report mapping.
+    :return str: Formatted single-line log message.
+    """
+    return (
+        f"{prefix} "
+        f"stored_params={int(report['stored_params'])} "
+        f"stored_trainable_params={int(report['stored_trainable_params'])} "
+        f"functional_params={int(report['functional_params'])} "
+        f"functional_trainable_params={int(report['functional_trainable_params'])} "
+        f"shared_block_stored_params={int(report['shared_block_stored_params'])} "
+        f"shared_block_functional_params={int(report['shared_block_functional_params'])} "
+        f"nonshared_stored_params={int(report['nonshared_stored_params'])} "
+        f"sharing_ratio={float(report['sharing_ratio']):.6f}"
+    )
+
+
+def format_artifact_size_report(
+    prefix: str,
+    report: Mapping[str, float | int],
+    *,
+    include_saved_bytes: bool = False,
+) -> str:
+    """Format artifact-size statistics for logs.
+
+    :param str prefix: Log line prefix such as ``size_init``.
+    :param Mapping[str, float | int] report: Artifact-size report mapping.
+    :param bool include_saved_bytes: Whether to append on-disk saved sizes.
+    :return str: Formatted single-line log message.
+    """
+    line = (
+        f"{prefix} "
+        f"stored_parameter_bytes={int(report['stored_parameter_bytes'])} "
+        f"state_dict_bytes={int(report['state_dict_bytes'])} "
+        f"checkpoint_bytes={int(report['checkpoint_bytes'])} "
+        f"checkpoint_zlib_bytes={int(report['checkpoint_zlib_bytes'])} "
+        f"int8_payload_bytes={int(report['int8_payload_bytes'])} "
+        f"int8_payload_zlib_bytes={int(report['int8_payload_zlib_bytes'])} "
+        f"code_bytes={int(report['code_bytes'])} "
+        f"artifact_bytes={int(report['artifact_bytes'])}"
+    )
+    if not include_saved_bytes:
+        return line
+    return (
+        f"{line} "
+        f"saved_checkpoint_bytes={int(report.get('saved_checkpoint_bytes', 0))} "
+        f"saved_int8_payload_bytes={int(report.get('saved_int8_payload_bytes', 0))}"
+    )
 
 
 def render_model_summary(
@@ -1910,23 +1947,6 @@ def render_model_summary(
         ]
     )
     return "\n".join(lines)
-
-
-def model_summary(
-    model: nn.Module, max_depth: int = 4, show_param_shapes: bool = False
-) -> None:
-    """Print the rendered model summary to stdout.
-
-    :param nn.Module model: Model to summarize.
-    :param int max_depth: Maximum module depth to include.
-    :param bool show_param_shapes: Whether to include representative parameter shapes.
-    """
-    print(
-        render_model_summary(
-            model, max_depth=max_depth, show_param_shapes=show_param_shapes
-        ),
-        flush=True,
-    )
 
 
 def get_local_batch_size(args: Hyperparameters, world_size: int) -> int:
@@ -2219,6 +2239,26 @@ def make_eval_starts(num_tokens: int, seq_len: int, total_sequences: int) -> Ten
     return torch.linspace(0, max_start, steps=total_sequences).long()
 
 
+def sentencepiece_target_byte_count(
+    prev_ids: Tensor, tgt_ids: Tensor, metric: BpbMetric
+) -> Tensor:
+    """Count UTF-8 bytes contributed by sentencepiece targets.
+
+    :param Tensor prev_ids: Previous-token ids used for space-boundary handling.
+    :param Tensor tgt_ids: Target-token ids whose byte counts should be summed.
+    :param BpbMetric metric: Sentencepiece byte-accounting metadata.
+    :return Tensor: Total byte count on the same device as the lookup tables.
+    """
+    assert metric.base_bytes_lut is not None
+    assert metric.has_leading_space_lut is not None
+    assert metric.is_boundary_token_lut is not None
+    token_bytes = metric.base_bytes_lut[tgt_ids].to(torch.float32)
+    token_bytes += (
+        metric.has_leading_space_lut[tgt_ids] & ~metric.is_boundary_token_lut[prev_ids]
+    ).to(torch.float32)
+    return token_bytes.sum()
+
+
 @torch.no_grad()
 def evaluate_sampled(
     model: nn.Module,
@@ -2274,17 +2314,11 @@ def evaluate_sampled(
         if metric.kind == "bytes":
             total_bytes += float(y.numel())
         elif metric.kind == "sentencepiece":
-            assert metric.base_bytes_lut is not None
-            assert metric.has_leading_space_lut is not None
-            assert metric.is_boundary_token_lut is not None
-            prev_ids = x.reshape(-1)
-            tgt_ids = y.reshape(-1)
-            token_bytes = metric.base_bytes_lut[tgt_ids].to(torch.float32)
-            token_bytes += (
-                metric.has_leading_space_lut[tgt_ids]
-                & ~metric.is_boundary_token_lut[prev_ids]
-            ).to(torch.float32)
-            total_bytes += float(token_bytes.sum().item())
+            total_bytes += float(
+                sentencepiece_target_byte_count(
+                    x.reshape(-1), y.reshape(-1), metric
+                ).item()
+            )
 
     avg_loss = total_loss / float(max(1, total_tokens))
     val_bpb = (
@@ -2372,17 +2406,9 @@ def evaluate_full(
         if metric.kind == "bytes":
             val_byte_count += batch_token_count
         elif metric.kind == "sentencepiece":
-            assert metric.base_bytes_lut is not None
-            assert metric.has_leading_space_lut is not None
-            assert metric.is_boundary_token_lut is not None
-            prev_ids = x.reshape(-1)
-            tgt_ids = y.reshape(-1)
-            token_bytes = metric.base_bytes_lut[tgt_ids].to(dtype=torch.int16)
-            token_bytes += (
-                metric.has_leading_space_lut[tgt_ids]
-                & ~metric.is_boundary_token_lut[prev_ids]
-            ).to(dtype=torch.int16)
-            val_byte_count += token_bytes.to(torch.float64).sum()
+            val_byte_count += sentencepiece_target_byte_count(
+                x.reshape(-1), y.reshape(-1), metric
+            ).to(torch.float64)
 
     if distributed:
         dist.all_reduce(val_loss_sum, op=dist.ReduceOp.SUM)
@@ -2564,24 +2590,6 @@ def serialized_zlib_nbytes(obj: object) -> int:
     return len(zlib.compress(buf.getvalue(), level=9))
 
 
-def artifact_report(
-    model: nn.Module, code_path: Path, args: Hyperparameters
-) -> dict[str, int]:
-    """Return the compact artifact-size summary used in logs and docs.
-
-    :param nn.Module model: Model to summarize.
-    :param Path code_path: Trainer source file path included in the artifact.
-    :param Hyperparameters args: Export and quantization settings.
-    :return dict[str, int]: Compact artifact-size summary.
-    """
-    report = model_footprint_report(model, code_path, args)
-    return {
-        "code_bytes": int(report["code_bytes"]),
-        "int8_payload_zlib_bytes": int(report["int8_payload_zlib_bytes"]),
-        "artifact_bytes": int(report["artifact_bytes"]),
-    }
-
-
 # -----------------------------------------------------------------------------
 # CHECKPOINT IO / LOGGING
 # -----------------------------------------------------------------------------
@@ -2660,12 +2668,6 @@ class WandbLogger:
         if log_fn is not None:
             log_fn(f"wandb_watch mode={mode} log_freq={max(1, log_freq)}")
 
-    def update_config(self, values: dict[str, Any]) -> None:
-        """Merge additional static fields into the W&B config."""
-        if self.run is None:
-            return
-        self.run.config.update(values, allow_val_change=True)
-
     def update_summary(self, values: dict[str, Any]) -> None:
         """Write final scalar values directly to the W&B run summary."""
         if self.run is None:
@@ -2719,6 +2721,48 @@ def maybe_load_model_weights(
         log("missing_keys=" + ",".join(missing))
     if unexpected:
         log("unexpected_keys=" + ",".join(unexpected))
+
+
+def save_run_artifacts(
+    state_dict: Mapping[str, Tensor],
+    args: Hyperparameters,
+    log: Callable[[str], None],
+) -> dict[str, int]:
+    """Persist optional checkpoint artifacts and return their on-disk byte counts.
+
+    :param Mapping[str, Tensor] state_dict: State dict to save or export.
+    :param Hyperparameters args: Trainer configuration with output paths.
+    :param Callable[[str], None] log: Local logger used for save-status messages.
+    :return dict[str, int]: Saved artifact sizes keyed by summary field name.
+    """
+    saved_artifact_bytes: dict[str, int] = {}
+    if args.save_path:
+        checkpoint_path = Path(args.save_path)
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save({"config": asdict(args), "model": state_dict}, checkpoint_path)
+        saved_artifact_bytes["saved_checkpoint_bytes"] = int(
+            checkpoint_path.stat().st_size
+        )
+        log(
+            f"saved_checkpoint={checkpoint_path} bytes={saved_artifact_bytes['saved_checkpoint_bytes']}"
+        )
+    if args.export_int8_path:
+        export_path = Path(args.export_int8_path)
+        export_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = build_int8_payload(
+            dict(state_dict),
+            keep_float_numel=args.quant_keep_float_numel,
+            control_patterns=args.control_tensor_name_patterns,
+        )
+        torch.save(payload, export_path)
+        saved_artifact_bytes["saved_int8_payload_bytes"] = int(
+            export_path.stat().st_size
+        )
+        log(
+            f"saved_int8_payload={export_path} bytes={saved_artifact_bytes['saved_int8_payload_bytes']} "
+            f"zlib_bytes={serialized_zlib_nbytes(payload)}"
+        )
+    return saved_artifact_bytes
 
 
 # -----------------------------------------------------------------------------
@@ -2827,7 +2871,6 @@ def main() -> None:
         model = model_no_ddp
 
     local_batch_size = get_local_batch_size(args, world_size)
-    local_batch_size * world_size
     sampled_eval_batch_size = (
         args.val_batch_size if args.val_batch_size > 0 else local_batch_size
     )
@@ -2919,17 +2962,7 @@ def main() -> None:
         f"x0_shortcut={args.use_x0_shortcut} resid_mix_init={args.resid_mix_init} "
         f"global_rotary=1 enable_gqa_probe={int(SDPA_ENABLE_GQA)}"
     )
-    log(
-        "model_init "
-        f"stored_params={int(param_report['stored_params'])} "
-        f"stored_trainable_params={int(param_report['stored_trainable_params'])} "
-        f"functional_params={int(param_report['functional_params'])} "
-        f"functional_trainable_params={int(param_report['functional_trainable_params'])} "
-        f"shared_block_stored_params={int(param_report['shared_block_stored_params'])} "
-        f"shared_block_functional_params={int(param_report['shared_block_functional_params'])} "
-        f"nonshared_stored_params={int(param_report['nonshared_stored_params'])} "
-        f"sharing_ratio={float(param_report['sharing_ratio']):.6f}"
-    )
+    log(format_model_count_report("model_init", param_report))
     if metric.kind == "none":
         log(
             "val_bpb=disabled (no byte accounting available for this backend/environment)"
@@ -2938,17 +2971,7 @@ def main() -> None:
         log(f"val_bpb=enabled metric_kind={metric.kind}")
 
     if args.report_artifact:
-        log(
-            "size_init "
-            f"stored_parameter_bytes={int(footprint_report['stored_parameter_bytes'])} "
-            f"state_dict_bytes={int(footprint_report['state_dict_bytes'])} "
-            f"checkpoint_bytes={int(footprint_report['checkpoint_bytes'])} "
-            f"checkpoint_zlib_bytes={int(footprint_report['checkpoint_zlib_bytes'])} "
-            f"int8_payload_bytes={int(footprint_report['int8_payload_bytes'])} "
-            f"int8_payload_zlib_bytes={int(footprint_report['int8_payload_zlib_bytes'])} "
-            f"code_bytes={int(footprint_report['code_bytes'])} "
-            f"artifact_bytes={int(footprint_report['artifact_bytes'])}"
-        )
+        log(format_artifact_size_report("size_init", footprint_report))
         log(
             "payload_init "
             f"int8_payload_quantized_numel={int(footprint_report['int8_payload_quantized_numel'])} "
@@ -3043,15 +3066,11 @@ def main() -> None:
         )
 
     def record_run_footprint(
-        step: int,
-        checkpoint_path: Optional[Path] = None,
-        export_path: Optional[Path] = None,
+        saved_artifact_bytes: Mapping[str, int],
     ) -> None:
         """Record final parameter and artifact-size statistics for the current run.
 
-        :param int step: Training step associated with the final footprint snapshot.
-        :param Optional[Path] checkpoint_path: Optional saved checkpoint path.
-        :param Optional[Path] export_path: Optional saved int8 payload path.
+        :param Mapping[str, int] saved_artifact_bytes: Optional on-disk artifact sizes.
         """
         if not master_process:
             return
@@ -3060,44 +3079,18 @@ def main() -> None:
             if args.report_artifact
             else compute_logical_parameter_counts(report_model)
         )
-        if checkpoint_path is not None and checkpoint_path.exists():
-            final_report["saved_checkpoint_bytes"] = int(checkpoint_path.stat().st_size)
-        if export_path is not None and export_path.exists():
-            final_report["saved_int8_payload_bytes"] = int(export_path.stat().st_size)
-        log(
-            "model_final "
-            f"stored_params={int(final_report['stored_params'])} "
-            f"stored_trainable_params={int(final_report['stored_trainable_params'])} "
-            f"functional_params={int(final_report['functional_params'])} "
-            f"functional_trainable_params={int(final_report['functional_trainable_params'])} "
-            f"shared_block_stored_params={int(final_report['shared_block_stored_params'])} "
-            f"shared_block_functional_params={int(final_report['shared_block_functional_params'])} "
-            f"nonshared_stored_params={int(final_report['nonshared_stored_params'])} "
-            f"sharing_ratio={float(final_report['sharing_ratio']):.6f}"
-        )
+        final_report.update(saved_artifact_bytes)
+        log(format_model_count_report("model_final", final_report))
         if args.report_artifact:
             log(
-                "size_final "
-                f"stored_parameter_bytes={int(final_report['stored_parameter_bytes'])} "
-                f"state_dict_bytes={int(final_report['state_dict_bytes'])} "
-                f"checkpoint_bytes={int(final_report['checkpoint_bytes'])} "
-                f"checkpoint_zlib_bytes={int(final_report['checkpoint_zlib_bytes'])} "
-                f"int8_payload_bytes={int(final_report['int8_payload_bytes'])} "
-                f"int8_payload_zlib_bytes={int(final_report['int8_payload_zlib_bytes'])} "
-                f"code_bytes={int(final_report['code_bytes'])} "
-                f"artifact_bytes={int(final_report['artifact_bytes'])} "
-                f"saved_checkpoint_bytes={int(final_report.get('saved_checkpoint_bytes', 0))} "
-                f"saved_int8_payload_bytes={int(final_report.get('saved_int8_payload_bytes', 0))}"
+                format_artifact_size_report(
+                    "size_final", final_report, include_saved_bytes=True
+                )
             )
-            final_artifact_summary = {}
-            if "saved_checkpoint_bytes" in final_report:
-                final_artifact_summary["artifact/saved_checkpoint_bytes"] = int(
-                    final_report["saved_checkpoint_bytes"]
-                )
-            if "saved_int8_payload_bytes" in final_report:
-                final_artifact_summary["artifact/saved_int8_payload_bytes"] = int(
-                    final_report["saved_int8_payload_bytes"]
-                )
+            final_artifact_summary = {
+                f"artifact/{name}": int(value)
+                for name, value in saved_artifact_bytes.items()
+            }
             if final_artifact_summary:
                 wandb_logger.update_summary(final_artifact_summary)
 
@@ -3166,33 +3159,8 @@ def main() -> None:
         run_eval(step=0)
         if master_process:
             final_state = report_model.state_dict()
-            checkpoint_path: Optional[Path] = None
-            export_path: Optional[Path] = None
-            if args.save_path:
-                checkpoint_path = Path(args.save_path)
-                checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-                torch.save(
-                    {"config": asdict(args), "model": final_state}, checkpoint_path
-                )
-                log(
-                    f"saved_checkpoint={checkpoint_path} bytes={checkpoint_path.stat().st_size}"
-                )
-            if args.export_int8_path:
-                export_path = Path(args.export_int8_path)
-                export_path.parent.mkdir(parents=True, exist_ok=True)
-                payload = build_int8_payload(
-                    final_state,
-                    keep_float_numel=args.quant_keep_float_numel,
-                    control_patterns=args.control_tensor_name_patterns,
-                )
-                torch.save(payload, export_path)
-                log(
-                    f"saved_int8_payload={export_path} bytes={export_path.stat().st_size} "
-                    f"zlib_bytes={serialized_zlib_nbytes(payload)}"
-                )
-            record_run_footprint(
-                step=0, checkpoint_path=checkpoint_path, export_path=export_path
-            )
+            saved_artifact_bytes = save_run_artifacts(final_state, args, log)
+            record_run_footprint(saved_artifact_bytes)
         wandb_logger.finish()
         if distributed:
             dist.destroy_process_group()
@@ -3317,33 +3285,8 @@ def main() -> None:
     if master_process:
         log(f"train_stop step={completed_steps} reason={stop_reason}")
         final_state = report_model.state_dict()
-        checkpoint_path: Optional[Path] = None
-        export_path: Optional[Path] = None
-        if args.save_path:
-            checkpoint_path = Path(args.save_path)
-            checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-            torch.save({"config": asdict(args), "model": final_state}, checkpoint_path)
-            log(
-                f"saved_checkpoint={checkpoint_path} bytes={checkpoint_path.stat().st_size}"
-            )
-        if args.export_int8_path:
-            export_path = Path(args.export_int8_path)
-            export_path.parent.mkdir(parents=True, exist_ok=True)
-            payload = build_int8_payload(
-                final_state,
-                keep_float_numel=args.quant_keep_float_numel,
-                control_patterns=args.control_tensor_name_patterns,
-            )
-            torch.save(payload, export_path)
-            log(
-                f"saved_int8_payload={export_path} bytes={export_path.stat().st_size} "
-                f"zlib_bytes={serialized_zlib_nbytes(payload)}"
-            )
-        record_run_footprint(
-            step=completed_steps,
-            checkpoint_path=checkpoint_path,
-            export_path=export_path,
-        )
+        saved_artifact_bytes = save_run_artifacts(final_state, args, log)
+        record_run_footprint(saved_artifact_bytes)
 
     wandb_logger.finish()
     if progress_bar is not None:
