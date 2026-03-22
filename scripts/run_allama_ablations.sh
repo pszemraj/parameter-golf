@@ -187,6 +187,17 @@ run_variant_block() {
 # - shortfat_ff20  896/1152/20 h14/kv2 hd64  hidden1792 qkv1152 -> proxy945 = 15,935,714
 # - balanced_ff25  768/1792/24 h12/kv4 hd64  hidden1920 qkv1280 -> proxy945 = 15,969,643
 # - tall_ff30      768/1088/32 h12/kv4 hd64  hidden2304 qkv1280 -> proxy945 = 15,986,759
+# 20-step checked-size sanity at the actual sweep batch:
+# - wide_ff15     -> 14,959,072 bytes
+# - shortfat_ff20 -> 14,990,094 bytes
+# - balanced_ff25 -> 15,236,675 bytes
+# - tall_ff30     -> 15,115,258 bytes
+# Closest layer-upsized aligned variants were rejected because they added very
+# little checked size for a real speed hit:
+# - wide 16->24:   +41,622 bytes, about -33% eager tok/s
+# - shortfat 20->24: +12,186 bytes, about -16% eager tok/s
+# - balanced 24->28: +3,018 bytes, about -14% eager tok/s
+# - tall 32->34:   +7,811 bytes, about -6% eager tok/s
 # Cold compile speed audit on the 5090 favored these aligned shapes over the old
 # 1056/960/864/832 anchors while the Inductor online-softmax warning persisted.
 

@@ -289,6 +289,22 @@ Cold `--compile` 4-step speed audit on the 5090, using the same sweep batch sett
 
 The Inductor `Online softmax is disabled on the fly since Inductor decides to split the reduction` warning still appeared on every old and new family in that audit, so the shape cleanup improved speed but did not eliminate the warning.
 
+I also checked trained saved size directly with 20-step one-GPU runs at the actual sweep batch settings. The current anchors are not lazily undersized:
+
+- `wide_ff15`: `14,959,072`
+- `shortfat_ff20`: `14,990,094`
+- `balanced_ff25`: `15,236,675`
+- `tall_ff30`: `15,115,258`
+
+Two are technically a hair below `15,000,000`, so I tried the closest layer-upsized aligned variants:
+
+- `wide_ff15 16 -> 24 layers`: `15,000,694`, but eager `tok/s` fell from `100,020` to `67,150`
+- `shortfat_ff20 20 -> 24 layers`: `15,002,280`, but eager `tok/s` fell from `88,626` to `74,254`
+- `balanced_ff25 24 -> 28 layers`: `15,239,693`, but eager `tok/s` fell from `77,062` to `66,440`
+- `tall_ff30 32 -> 34 layers`: `15,123,069`, but eager `tok/s` fell from `55,245` to `52,097`
+
+So the current family set stays as-is. The important conclusion is that the remaining gap is not from a lazy search; the nearest layer-based upsizes are mostly bad speed trades for tiny checked-size gains. If we want another improvement pass, the next search should focus on same-depth alternatives, not just adding layers.
+
 The training helper `scripts/run_allama_ablations.sh` is intentionally training-only and uses blocked ablations over those final-size-aware anchors:
 
 ```bash
