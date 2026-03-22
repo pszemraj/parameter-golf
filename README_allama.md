@@ -286,7 +286,17 @@ The training helper `scripts/run_allama_ablations.sh` is intentionally training-
 bash scripts/run_allama_ablations.sh
 ```
 
-It also exports `TORCH_BLAS_PREFER_CUBLASLT=1` for 5090-friendly CUDA BLAS selection and passes `--compile` by default to the trainer.
+It also exports `TORCH_BLAS_PREFER_CUBLASLT=1` for 5090-friendly CUDA BLAS selection.
+
+Current 5090 VRAM check on the heaviest family (`tall_ff30`, `832/208/32`) says the default batch sizing is already about right:
+
+- idle desktop load on this box was about `2.9 GiB`
+- with the current script setting `TRAIN_BATCH_TOKENS=65536`, `GRAD_ACCUM_STEPS=4` (`local_batch_size=16`), a 1-step smoke hit `max_memory_reserved=22.965 GiB` and `max_memory_allocated=22.649 GiB`
+- trying to keep the same total batch but cut to `GRAD_ACCUM_STEPS=2` (`local_batch_size=32`) OOMed on that family
+
+So the sweep keeps `TRAIN_BATCH_TOKENS=65536` and `GRAD_ACCUM_STEPS=4`. It is not leaving huge VRAM on the table, and the obvious next reduction in accumulation is already too large for the worst-case model.
+
+`torch.compile` is still supported, but it is opt-in rather than default here because on the current 5090 stack the same `tall_ff30` run hit an Inductor/Triton shared-memory failure (`No valid triton configs`) before finishing the first training step.
 
 It is structured as:
 
@@ -307,10 +317,10 @@ RUN_SHORTCUT_BLOCK=0 \
 bash scripts/run_allama_ablations.sh
 ```
 
-If `torch.compile` causes trouble on a specific stack, disable only that part:
+If you want to try `torch.compile` on your current stack, enable only that part explicitly:
 
 ```bash
-RUN_COMPILE=0 bash scripts/run_allama_ablations.sh
+RUN_COMPILE=1 bash scripts/run_allama_ablations.sh
 ```
 
 That sweep is finally testing something real:
