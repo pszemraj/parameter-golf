@@ -288,15 +288,33 @@ bash scripts/run_allama_ablations.sh
 
 It also exports `TORCH_BLAS_PREFER_CUBLASLT=1` for 5090-friendly CUDA BLAS selection.
 
-Current 5090 VRAM check on the heaviest family (`tall_ff30`, `832/208/32`) says the default batch sizing is already about right:
+Batch semantics matter here:
+
+- in [train_gpt.py](train_gpt.py), `TRAIN_BATCH_TOKENS=524288` is the effective optimizer-step batch, not the one-GPU microbatch
+- on `WORLD_SIZE=1`, that trainer also uses `grad_accum_steps=8`, so the per-microstep token count is `524288 / 8 = 65536`
+- the old allama `65536` setting came from that microstep number, not from `train_gpt.py`'s actual effective batch
+
+So the allama training sweep now uses the `train_gpt.py` effective batch target directly:
+
+- `TRAIN_BATCH_TOKENS=524288`
+
+The trainer's own default env values are still smaller; this is a sweep-script override, not a global trainer-default change.
+
+Current 5090 compile/VRAM check on the heaviest family (`tall_ff30`, `832/208/32`) says the compile-safe accumulation setting is:
 
 - idle desktop load on this box was about `2.9 GiB`
-- with the current script setting `TRAIN_BATCH_TOKENS=65536`, `GRAD_ACCUM_STEPS=4` (`local_batch_size=16`), a 1-step smoke hit `max_memory_reserved=22.965 GiB` and `max_memory_allocated=22.649 GiB`
-- trying to keep the same total batch but cut to `GRAD_ACCUM_STEPS=2` (`local_batch_size=32`) OOMed on that family
+- `GRAD_ACCUM_STEPS=32` (`local_batch_size=16`) failed under `--compile` with `No valid triton configs`
+- `GRAD_ACCUM_STEPS=64` (`local_batch_size=8`) failed with the same Triton shared-memory limit
+- `GRAD_ACCUM_STEPS=128` (`local_batch_size=4`) succeeded under `--compile`
+- at that passing point, a 1-step smoke hit `max_memory_reserved=4.834 GiB` and `max_memory_allocated=4.776 GiB`
 
-So the sweep keeps `TRAIN_BATCH_TOKENS=65536` and `GRAD_ACCUM_STEPS=4`. It is not leaving huge VRAM on the table, and the obvious next reduction in accumulation is already too large for the worst-case model.
+So the sweep defaults are:
 
-`torch.compile` is still supported, but it is opt-in rather than default here because on the current 5090 stack the same `tall_ff30` run hit an Inductor/Triton shared-memory failure (`No valid triton configs`) before finishing the first training step.
+- `TRAIN_BATCH_TOKENS=524288`
+- `GRAD_ACCUM_STEPS=128`
+- `RUN_COMPILE=1`
+
+That is conservative on VRAM, but it is the first verified compile-safe point for the worst-case family on the current 5090 stack. If you disable compile, you can experiment with lower accumulation separately, but the training helper keeps the compile-safe default.
 
 It is structured as:
 
@@ -317,10 +335,10 @@ RUN_SHORTCUT_BLOCK=0 \
 bash scripts/run_allama_ablations.sh
 ```
 
-If you want to try `torch.compile` on your current stack, enable only that part explicitly:
+If you want to disable compile and test a different accumulation regime manually:
 
 ```bash
-RUN_COMPILE=1 bash scripts/run_allama_ablations.sh
+RUN_COMPILE=0 bash scripts/run_allama_ablations.sh
 ```
 
 That sweep is finally testing something real:
