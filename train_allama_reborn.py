@@ -85,6 +85,23 @@ def normalize_wandb_watch_mode(value: str) -> str:
     return mode
 
 
+def normalize_sdpa_backend(value: str) -> str:
+    backend = value.strip().lower()
+    aliases = {
+        "default": "auto",
+        "fa": "flash",
+        "flash_attention": "flash",
+        "mem_efficient": "efficient",
+        "mem-efficient": "efficient",
+    }
+    backend = aliases.get(backend, backend)
+    if backend not in {"auto", "flash", "efficient", "math", "cudnn"}:
+        raise ValueError(
+            f"Unsupported SDPA_BACKEND={value!r}; expected auto, flash, efficient, math, or cudnn."
+        )
+    return backend
+
+
 @dataclass(frozen=True)
 class CliOverrides:
     compile_model: Optional[bool]
@@ -158,6 +175,7 @@ class Hyperparameters:
     adam_eps: float
     grad_clip_norm: float
     max_wallclock_seconds: float
+    sdpa_backend: str
 
     # Model
     num_layers: int
@@ -268,6 +286,7 @@ class Hyperparameters:
             adam_eps=float(os.environ.get("ADAM_EPS", "1e-8")),
             grad_clip_norm=float(os.environ.get("GRAD_CLIP_NORM", "1.0")),
             max_wallclock_seconds=float(os.environ.get("MAX_WALLCLOCK_SECONDS", "0.0")),
+            sdpa_backend=normalize_sdpa_backend(os.environ.get("SDPA_BACKEND", "auto")),
             num_layers=int(os.environ.get("NUM_LAYERS", "24")),
             num_shared_blocks=int(os.environ.get("NUM_SHARED_BLOCKS", "1")),
             share_pattern=os.environ.get("SHARE_PATTERN", "chunk"),
@@ -1571,6 +1590,37 @@ def configure_cuda_precision() -> None:
     torch.backends.cudnn.allow_tf32 = True
 
 
+def configure_sdpa_backend(sdpa_backend: str) -> dict[str, bool | str]:
+    if sdpa_backend == "flash":
+        torch.backends.cuda.enable_flash_sdp(True)
+        torch.backends.cuda.enable_math_sdp(False)
+        torch.backends.cuda.enable_mem_efficient_sdp(False)
+        torch.backends.cuda.enable_cudnn_sdp(False)
+    elif sdpa_backend == "efficient":
+        torch.backends.cuda.enable_flash_sdp(False)
+        torch.backends.cuda.enable_math_sdp(False)
+        torch.backends.cuda.enable_mem_efficient_sdp(True)
+        torch.backends.cuda.enable_cudnn_sdp(False)
+    elif sdpa_backend == "math":
+        torch.backends.cuda.enable_flash_sdp(False)
+        torch.backends.cuda.enable_math_sdp(True)
+        torch.backends.cuda.enable_mem_efficient_sdp(False)
+        torch.backends.cuda.enable_cudnn_sdp(False)
+    elif sdpa_backend == "cudnn":
+        torch.backends.cuda.enable_flash_sdp(False)
+        torch.backends.cuda.enable_math_sdp(False)
+        torch.backends.cuda.enable_mem_efficient_sdp(False)
+        torch.backends.cuda.enable_cudnn_sdp(True)
+    return {
+        "requested": sdpa_backend,
+        "flash_available": bool(torch.backends.cuda.is_flash_attention_available()),
+        "flash_enabled": bool(torch.backends.cuda.flash_sdp_enabled()),
+        "math_enabled": bool(torch.backends.cuda.math_sdp_enabled()),
+        "efficient_enabled": bool(torch.backends.cuda.mem_efficient_sdp_enabled()),
+        "cudnn_enabled": bool(torch.backends.cuda.cudnn_sdp_enabled()),
+    }
+
+
 def autocast_context(device_type: str, amp_dtype: torch.dtype, use_autocast: bool):
     if use_autocast:
         return torch.autocast(device_type=device_type, dtype=amp_dtype)
@@ -2113,9 +2163,15 @@ def main() -> None:
     distributed, rank, world_size, _local_rank, device, master_process = (
         init_distributed_and_device(args)
     )
+    sdpa_status: dict[str, bool | str] = {"requested": args.sdpa_backend}
 
     if device.type == "cuda":
         configure_cuda_precision()
+        sdpa_status = configure_sdpa_backend(args.sdpa_backend)
+    elif args.sdpa_backend != "auto":
+        raise ValueError(
+            f"SDPA_BACKEND={args.sdpa_backend} requires CUDA; got device={device}"
+        )
 
     set_seed(args.seed + rank)
     backend = infer_backend(args)
@@ -2270,6 +2326,12 @@ def main() -> None:
         f"sharing_ratio={sharing_ratio:.4f} logical_layers={args.num_layers} shared_blocks={args.num_shared_blocks} "
         f"share_pattern={args.share_pattern} layer_map={report_model.layer_to_block_map()} eval_mode={eval_mode}"
     )
+    if device.type == "cuda":
+        log(
+            f"sdpa_config requested={sdpa_status['requested']} flash_available={int(bool(sdpa_status['flash_available']))} "
+            f"flash_enabled={int(bool(sdpa_status['flash_enabled']))} math_enabled={int(bool(sdpa_status['math_enabled']))} "
+            f"efficient_enabled={int(bool(sdpa_status['efficient_enabled']))} cudnn_enabled={int(bool(sdpa_status['cudnn_enabled']))}"
+        )
     log(
         f"train_plan epochs={args.num_epochs} max_steps={args.max_steps} steps_per_epoch={epoch_plan_info['steps_per_epoch']} "
         f"planned_total_steps={planned_total_steps} total_training_steps={total_training_steps} "
@@ -2327,6 +2389,11 @@ def main() -> None:
     wandb_config = asdict(args) | {
         "backend": backend,
         "resolved_eval_mode": eval_mode,
+        "sdpa_flash_available": bool(sdpa_status.get("flash_available", False)),
+        "sdpa_flash_enabled": bool(sdpa_status.get("flash_enabled", False)),
+        "sdpa_math_enabled": bool(sdpa_status.get("math_enabled", False)),
+        "sdpa_efficient_enabled": bool(sdpa_status.get("efficient_enabled", False)),
+        "sdpa_cudnn_enabled": bool(sdpa_status.get("cudnn_enabled", False)),
         "layer_map": report_model.layer_to_block_map(),
         "steps_per_epoch": epoch_plan_info["steps_per_epoch"],
         "planned_total_steps": planned_total_steps,

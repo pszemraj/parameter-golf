@@ -8,6 +8,7 @@ export WANDB_GROUP="${WANDB_GROUP:-allama-blocked-ablations}"
 export WANDB_TAGS="${WANDB_TAGS:-5090,allama,nearcap,finalsize,behavior,blocked,bs524k}"
 export WANDB_WATCH="${WANDB_WATCH:-all}"
 export WANDB_WATCH_LOG_FREQ="${WANDB_WATCH_LOG_FREQ:-100}"
+export SDPA_BACKEND="${SDPA_BACKEND:-auto}"
 export TORCH_BLAS_PREFER_CUBLASLT=1
 
 BASE_ENV=(

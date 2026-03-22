@@ -289,6 +289,7 @@ bash scripts/run_allama_ablations.sh
 ```
 
 It also exports `TORCH_BLAS_PREFER_CUBLASLT=1` for 5090-friendly CUDA BLAS selection.
+The trainer now supports `SDPA_BACKEND=auto|flash|efficient|math|cudnn` for explicit SDPA backend experiments.
 
 For short diagnostic runs it also enables W&B parameter/gradient watching by default:
 
@@ -323,6 +324,16 @@ So the sweep defaults are:
 - `VAL_LOSS_EVERY=500`
 
 That is conservative on VRAM, but it is the first verified compile-safe point for the worst-case family on the current 5090 stack. If you disable compile, you can experiment with lower accumulation separately, but the training helper keeps the compile-safe default.
+
+One backend knob is worth keeping available but not forcing by default:
+
+- cold-cache 1-step compile smoke on `balanced_ff25` at `TRAIN_BATCH_TOKENS=524288`, `GRAD_ACCUM_STEPS=128` showed no meaningful gain from forcing flash
+- isolated-cache result:
+- `SDPA_BACKEND=auto`: `elapsed_s=74.18`, `tokens_per_s=7068`
+- `SDPA_BACKEND=flash`: `elapsed_s=74.14`, `tokens_per_s=7071`
+- both runs emitted Inductor's `Online softmax is disabled on the fly since Inductor decides to split the reduction` warning
+
+So the sweep helper leaves `SDPA_BACKEND=auto` as the default, but the trainer still exposes the override for targeted experiments.
 
 It is structured as:
 
