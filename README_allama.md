@@ -143,7 +143,7 @@ The log prints concise init/final lines:
 
 ## Recommended flow on a 5090
 
-Do this in two phases.
+Do this in three phases.
 
 ### Phase 1: size probes
 
@@ -215,16 +215,22 @@ Interpretation:
 - with the current probe results, `probe_m1024_l24_s2` is the sensible phase-2 anchor at about 14.5MB, while the one-shared-block variants are still undersized and `probe_m1152_l24_s2` overshoots the cap
 - ignore tiny `val_loss` / `val_bpb` differences in this phase because `EVAL_ONLY=1` makes these runs size probes, not learned-model comparisons
 
-### Phase 2: serious ablations
+### Phase 2: budget-closing sweep
 
-These are the actual first ablations I would run once the size probe says the family is sensible.
-Given the current probes, anchor on the near-budget `1024/256/24` family with `NUM_SHARED_BLOCKS=2` and vary only knobs that keep artifact size roughly fixed.
+Per [README.md](README.md), the thing that counts is compressed artifact size, defined as:
+
+```text
+artifact_bytes = code_bytes + int8_payload_zlib_bytes
+```
+
+So once a family is in the right ballpark, getting closer to the 16,000,000-byte cap is itself a core ablation, not a cleanup step.
+For the current `1024/256/24` with `NUM_SHARED_BLOCKS=2` anchor, the easiest knob to sweep is `MLP_MULT`.
 
 ```bash
 export WANDB=1
 export WANDB_PROJECT=param-golf-ablations
-export WANDB_GROUP=allama-budget-matched-ablations
-export WANDB_TAGS=allama,5090,budget-matched
+export WANDB_GROUP=allama-budget-close-probes
+export WANDB_TAGS=allama,5090,budget-close
 
 BASE_ENV=(
   OUT_DIR=./runs_allama
@@ -237,13 +243,77 @@ BASE_ENV=(
   NUM_LAYERS=24
   NUM_HEADS=16
   NUM_KV_HEADS=4
-  MLP_MULT=2.5
   NUM_SHARED_BLOCKS=2
   TRAIN_SEQ_LEN=1024
   EVAL_SEQ_LEN=1024
   TRAIN_BATCH_TOKENS=65536
   GRAD_ACCUM_STEPS=4
   NUM_EPOCHS=1
+  EVAL_ONLY=1
+  EVAL_MODE=sampled
+  VAL_BATCH_SIZE=8
+  VAL_BATCHES=8
+  NORM_LAYOUT=postnorm
+  NORM_KIND=layernorm
+  SHARE_PATTERN=cycle
+  USE_X0_SHORTCUT=1
+  RESID_MIX_INIT=0.1
+)
+
+probe_budget () {
+  local RUN_ID="$1"
+  local MLP_MULT="$2"
+
+  env "${BASE_ENV[@]}" \
+    RUN_ID="$RUN_ID" \
+    MLP_MULT="$MLP_MULT" \
+    python train_allama_reborn.py
+}
+
+probe_budget budget_mlp250 2.50
+probe_budget budget_mlp265 2.65
+probe_budget budget_mlp275 2.75
+probe_budget budget_mlp285 2.85
+probe_budget budget_mlp290 2.90
+```
+
+Interpretation:
+- choose the highest `artifact_bytes` that stays under 16,000,000
+- from the current probes, `2.85` is a reasonable first guess by linear extrapolation, but that is an inference, not a verified result
+- if `2.90` still fits, refine upward in smaller increments
+- if `2.85` overshoots, refine downward around `2.80` to `2.84`
+
+### Phase 3: serious ablations
+
+These are the actual first ablations I would run once the size probe says the family is sensible.
+First, choose `ABLATION_MLP_MULT` from the budget-closing sweep above.
+Then keep that near-cap family fixed while varying the architectural decisions you actually want to compare.
+
+```bash
+export WANDB=1
+export WANDB_PROJECT=param-golf-ablations
+export WANDB_GROUP=allama-budget-matched-ablations
+export WANDB_TAGS=allama,5090,budget-matched
+export ABLATION_MLP_MULT=2.85  # replace with the best verified under-cap value
+
+BASE_ENV=(
+  OUT_DIR=./runs_allama
+  DATA_PATH=./data/datasets/fineweb10B_sp1024
+  TOKENIZER_PATH=./data/tokenizers/fineweb_1024_bpe.model
+  DEVICE=cuda
+  DTYPE=bf16
+  MODEL_DIM=1024
+  EMBED_DIM=256
+  NUM_LAYERS=24
+  NUM_HEADS=16
+  NUM_KV_HEADS=4
+  MLP_MULT=${ABLATION_MLP_MULT}
+  NUM_SHARED_BLOCKS=2
+  TRAIN_SEQ_LEN=1024
+  EVAL_SEQ_LEN=1024
+  TRAIN_BATCH_TOKENS=65536
+  GRAD_ACCUM_STEPS=4
+  ITERATIONS=2000
   VAL_LOSS_EVERY=250
   TRAIN_LOG_EVERY=25
   EVAL_MODE=sampled
@@ -285,7 +355,7 @@ run_one post_ln_cycle_no_x0    postnorm layernorm cycle    0 0.00
 
 That sweep is finally testing something real:
 - same serious width/depth family
-- same artifact regime
+- same near-cap artifact regime
 - actual sharing-pattern, norm, and shortcut decisions
 - no toy 512x12 baseline pretending to be an ALBERT experiment
 

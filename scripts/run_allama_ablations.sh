@@ -4,8 +4,6 @@ set -euo pipefail
 
 export WANDB=1
 export WANDB_PROJECT=param-golf-ablations
-export WANDB_GROUP=allama-budget-matched-ablations
-export WANDB_TAGS=5090,allama,budget-matched
 
 BASE_ENV=(
   OUT_DIR=./runs_allama
@@ -19,12 +17,10 @@ BASE_ENV=(
   NUM_SHARED_BLOCKS=2
   NUM_HEADS=16
   NUM_KV_HEADS=4
-  MLP_MULT=2.5
   TRAIN_SEQ_LEN=1024
   EVAL_SEQ_LEN=1024
   TRAIN_BATCH_TOKENS=65536
   GRAD_ACCUM_STEPS=4
-  NUM_EPOCHS=1
   VAL_LOSS_EVERY=250
   TRAIN_LOG_EVERY=25
   EVAL_MODE=sampled
@@ -33,6 +29,27 @@ BASE_ENV=(
   USE_X0_SHORTCUT=1
   RESID_MIX_INIT=0.1
 )
+
+RUN_SIZE_SWEEP="${RUN_SIZE_SWEEP:-1}"
+RUN_BEHAVIOR_SWEEP="${RUN_BEHAVIOR_SWEEP:-1}"
+ABLATION_MLP_MULT="${ABLATION_MLP_MULT:-2.85}"
+
+probe_budget() {
+  local RUN_ID="$1"
+  local MLP_MULT="$2"
+
+  env \
+    WANDB_GROUP=allama-budget-close-probes \
+    WANDB_TAGS=5090,allama,budget-close \
+    "${BASE_ENV[@]}" \
+    RUN_ID="$RUN_ID" \
+    MLP_MULT="$MLP_MULT" \
+    EVAL_ONLY=1 \
+    NORM_LAYOUT=postnorm \
+    NORM_KIND=layernorm \
+    SHARE_PATTERN=cycle \
+    python train_allama_reborn.py
+}
 
 run_one () {
   local RUN_ID="$1"
@@ -43,7 +60,11 @@ run_one () {
   local RESID_MIX_INIT="$6"
 
   env "${BASE_ENV[@]}" \
+    WANDB_GROUP=allama-budget-matched-ablations \
+    WANDB_TAGS=5090,allama,budget-matched \
     RUN_ID="$RUN_ID" \
+    MLP_MULT="$ABLATION_MLP_MULT" \
+    ITERATIONS=2000 \
     NORM_LAYOUT="$NORM_LAYOUT" \
     NORM_KIND="$NORM_KIND" \
     SHARE_PATTERN="$SHARE_PATTERN" \
@@ -54,11 +75,21 @@ run_one () {
     python train_allama_reborn.py
 }
 
-run_one post_ln_chunk_x0_010   postnorm layernorm chunk    1 0.10
-run_one post_ln_cycle_x0_010   postnorm layernorm cycle    1 0.10
-run_one post_ln_repeat2_x0_010 postnorm layernorm repeat_2 1 0.10
-run_one pre_ln_cycle_x0_010    prenorm  layernorm cycle    1 0.10
-run_one post_rms_cycle_x0_010  postnorm rmsnorm   cycle    1 0.10
-run_one pre_rms_cycle_x0_010   prenorm  rmsnorm   cycle    1 0.10
-run_one post_ln_cycle_x0_005   postnorm layernorm cycle    1 0.05
-run_one post_ln_cycle_no_x0    postnorm layernorm cycle    0 0.00
+if [[ "${RUN_SIZE_SWEEP}" == "1" ]]; then
+  probe_budget budget_mlp250 2.50
+  probe_budget budget_mlp265 2.65
+  probe_budget budget_mlp275 2.75
+  probe_budget budget_mlp285 2.85
+  probe_budget budget_mlp290 2.90
+fi
+
+if [[ "${RUN_BEHAVIOR_SWEEP}" == "1" ]]; then
+  run_one post_ln_chunk_x0_010   postnorm layernorm chunk    1 0.10
+  run_one post_ln_cycle_x0_010   postnorm layernorm cycle    1 0.10
+  run_one post_ln_repeat2_x0_010 postnorm layernorm repeat_2 1 0.10
+  run_one pre_ln_cycle_x0_010    prenorm  layernorm cycle    1 0.10
+  run_one post_rms_cycle_x0_010  postnorm rmsnorm   cycle    1 0.10
+  run_one pre_rms_cycle_x0_010   prenorm  rmsnorm   cycle    1 0.10
+  run_one post_ln_cycle_x0_005   postnorm layernorm cycle    1 0.05
+  run_one post_ln_cycle_no_x0    postnorm layernorm cycle    0 0.00
+fi
