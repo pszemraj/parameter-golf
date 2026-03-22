@@ -312,10 +312,11 @@ bash scripts/run_allama_ablations.sh
 ```
 
 It now prints its own launch summary before starting, including `total_runs`, batch settings, and local batch size.
-There are two intended modes:
+There are three intended modes:
 
-- default `SWEEP_PROFILE=screen`: 4 runs total, baseline block only
-- `SWEEP_PROFILE=full`: 28 runs total, all blocks enabled
+- `SWEEP_PROFILE=screen`: 4 runs total, baseline block only
+- default `SWEEP_PROFILE=explore`: 28 runs total, all blocks enabled, reduced step count
+- `SWEEP_PROFILE=full`: 28 runs total, all blocks enabled, long run
 
 It also exports `TORCH_BLAS_PREFER_CUBLASLT=1` for 5090-friendly CUDA BLAS selection.
 The trainer now supports `SDPA_BACKEND=auto|flash|efficient|math|cudnn` for explicit SDPA backend experiments.
@@ -332,11 +333,18 @@ Batch semantics matter here:
 - the old allama `65536` setting came from that microstep number, not from `train_gpt.py`'s actual effective batch
 - the display-attached 5090 locally proved happier with `local_batch_size=2` than with `local_batch_size=4`; the old `524288/128` setting eventually hit a launch-timeout failure on `wide_ff15`
 
-So the script now defaults to the safer local screen profile:
+So the script now keeps the safer local microbatch, but uses a middle-ground no-arg default:
 
 - `TRAIN_BATCH_TOKENS=262144`
 - `GRAD_ACCUM_STEPS=128`
 - `local_batch_size=2`
+- default `SWEEP_PROFILE=explore`
+- default `ITERATIONS=500`
+- default `VAL_LOSS_EVERY=250`
+
+The explicit short screen profile is:
+
+- `SWEEP_PROFILE=screen`
 - `ITERATIONS=750`
 - `VAL_LOSS_EVERY=250`
 
@@ -358,21 +366,27 @@ The current aligned family set also passed serialized cold `--compile` 4-step sm
 
 So the sweep defaults are:
 
-- `SWEEP_PROFILE=screen`
+- `SWEEP_PROFILE=explore`
 - `TRAIN_BATCH_TOKENS=262144`
 - `GRAD_ACCUM_STEPS=128`
 - `local_batch_size=2`
-- `ITERATIONS=750`
+- `ITERATIONS=500`
 - `RUN_COMPILE=1`
 - `VAL_LOSS_EVERY=250`
 
-And the opt-in full blocked sweep is:
+The explicit short screen pass is:
+
+- `SWEEP_PROFILE=screen`
+- `total_runs=4`
+- `ITERATIONS=750`
+
+And the opt-in long blocked sweep is:
 
 - `SWEEP_PROFILE=full`
 - `total_runs=28`
 - `ITERATIONS=2000`
 
-That keeps the local default in the “useful screen, not overnight accident” regime while still leaving the full sweep available explicitly.
+That keeps the no-arg default in the “real blocked sweep, but not an overnight accident” regime while still leaving both the tiny screen pass and the full long run available explicitly.
 
 One backend knob is worth keeping available but not forcing by default:
 
