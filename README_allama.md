@@ -110,12 +110,10 @@ Per run, the config includes the model identity and size fields you actually wan
 - `model_int8_payload_zlib_bytes_init`
 - `model_artifact_bytes_init`
 
-And the metrics stream includes:
+These are intentionally recorded in W&B config rather than `wandb.log()` history, because they are derived static values, not training metrics.
 
-- `model/stored_params`
-- `model/functional_params`
-- `model/sharing_ratio`
-- `artifact/*`
+The metrics stream includes only actual run-time signals:
+
 - `train/*`
 - `eval/*`
 
@@ -139,6 +137,7 @@ The log prints concise init/final lines:
 
 - `model_init ...`
 - `size_init ...`
+- `payload_init ...`
 - `model_final ...`
 - `size_final ...`
 
@@ -210,7 +209,7 @@ probe_one probe_m1152_l24_s2 1152 288 24 18 6 2.5 2 cycle
 ```
 
 Interpretation:
-- if `artifact/artifact_bytes` is nowhere near 16MB, go bigger
+- if `model_artifact_bytes_init` in W&B config or `size_init ... artifact_bytes=...` in the local log is nowhere near 16MB, go bigger
 - if it is too high, trim width or `MLP_MULT`
 - once you are near budget, **then** do real ablations inside that size regime
 

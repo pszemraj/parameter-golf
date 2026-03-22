@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """
 ALlama Reborn: a decoder-only ALBERT-style trainer for OpenAI Parameter Golf.
 
@@ -16,6 +14,8 @@ Key features in this version:
 - checkpoint save/load plus compact int8 payload export/load for local iteration
 - concise size/parameter reporting for W&B and logs
 """
+
+from __future__ import annotations
 
 import glob
 import gzip
@@ -2271,40 +2271,6 @@ def main() -> None:
         enabled=master_process and args.wandb_enable,
         config=wandb_config,
     )
-    if master_process:
-        init_metrics = {
-            "model/stored_params": int(param_report["stored_params"]),
-            "model/stored_trainable_params": int(
-                param_report["stored_trainable_params"]
-            ),
-            "model/functional_params": int(param_report["functional_params"]),
-            "model/functional_trainable_params": int(
-                param_report["functional_trainable_params"]
-            ),
-            "model/shared_block_stored_params": int(
-                param_report["shared_block_stored_params"]
-            ),
-            "model/shared_block_functional_params": int(
-                param_report["shared_block_functional_params"]
-            ),
-            "model/nonshared_stored_params": int(
-                param_report["nonshared_stored_params"]
-            ),
-            "model/sharing_ratio": float(param_report["sharing_ratio"]),
-            "train/total_steps": total_training_steps,
-        }
-        if args.report_artifact:
-            init_metrics.update(
-                {
-                    f"artifact/{k}": v
-                    for k, v in footprint_report.items()
-                    if k not in param_report
-                }
-            )
-        wandb_logger.log(init_metrics, step=0)
-        wandb_logger.update_summary(init_metrics)
-
-    param_report_keys = set(param_report.keys())
 
     def record_run_footprint(
         step: int,
@@ -2333,28 +2299,6 @@ def main() -> None:
             f"nonshared_stored_params={int(final_report['nonshared_stored_params'])} "
             f"sharing_ratio={float(final_report['sharing_ratio']):.6f}"
         )
-        final_param_metrics = {
-            "model/stored_params": int(final_report["stored_params"]),
-            "model/stored_trainable_params": int(
-                final_report["stored_trainable_params"]
-            ),
-            "model/functional_params": int(final_report["functional_params"]),
-            "model/functional_trainable_params": int(
-                final_report["functional_trainable_params"]
-            ),
-            "model/shared_block_stored_params": int(
-                final_report["shared_block_stored_params"]
-            ),
-            "model/shared_block_functional_params": int(
-                final_report["shared_block_functional_params"]
-            ),
-            "model/nonshared_stored_params": int(
-                final_report["nonshared_stored_params"]
-            ),
-            "model/sharing_ratio": float(final_report["sharing_ratio"]),
-        }
-        wandb_logger.log(final_param_metrics, step=step)
-        wandb_logger.update_summary(final_param_metrics)
         if args.report_artifact:
             log(
                 "size_final "
@@ -2369,13 +2313,17 @@ def main() -> None:
                 f"saved_checkpoint_bytes={int(final_report.get('saved_checkpoint_bytes', 0))} "
                 f"saved_int8_payload_bytes={int(final_report.get('saved_int8_payload_bytes', 0))}"
             )
-            artifact_metrics = {
-                f"artifact/{k}": v
-                for k, v in final_report.items()
-                if k not in param_report_keys
-            }
-            wandb_logger.log(artifact_metrics, step=step)
-            wandb_logger.update_summary(artifact_metrics)
+            final_artifact_summary = {}
+            if "saved_checkpoint_bytes" in final_report:
+                final_artifact_summary["artifact/saved_checkpoint_bytes"] = int(
+                    final_report["saved_checkpoint_bytes"]
+                )
+            if "saved_int8_payload_bytes" in final_report:
+                final_artifact_summary["artifact/saved_int8_payload_bytes"] = int(
+                    final_report["saved_int8_payload_bytes"]
+                )
+            if final_artifact_summary:
+                wandb_logger.update_summary(final_artifact_summary)
 
     def run_eval(step: int) -> None:
         nonlocal eval_batch_tokens
