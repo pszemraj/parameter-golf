@@ -231,7 +231,7 @@ Two things matter here:
 - `size_final` drifts upward quickly during training because the int8 payload becomes much less compressible
 - that drift is not caused by checkpoint junk; the payload/checkpoint metadata is tiny, and the growth comes from model entropy
 
-Representative drift on the old `balanced_ff25` anchor (`1056/264/24`, `NUM_SHARED_BLOCKS=2`, `MLP_MULT=2.5`) using repeated short runs:
+Representative drift on an old near-cap anchor using repeated short runs:
 
 - step 0: `artifact_bytes=15,498,554`
 - step 50: `artifact_bytes=22,148,785`
@@ -267,20 +267,27 @@ Then validate any near-cap finalist with a real short run and actual `size_final
 ### Phase 3: serious ablations
 
 These are the actual first ablations I would run once the family has been made final-size-aware instead of init-size-aware.
-The current blocked sweep uses four anchors:
+The current blocked sweep uses four aligned anchors:
 
-- `wide_ff15`: `MODEL_DIM=1056`, `EMBED_DIM=264`, `NUM_LAYERS=16`, `NUM_SHARED_BLOCKS=2`, `MLP_MULT=1.5`, `size_final@50=15826095`
-- `shortfat_ff20`: `MODEL_DIM=960`, `EMBED_DIM=240`, `NUM_LAYERS=20`, `NUM_SHARED_BLOCKS=2`, `MLP_MULT=2.0`, `artifact_proxy_bytes=15777074`
-- `balanced_ff25`: `MODEL_DIM=864`, `EMBED_DIM=216`, `NUM_LAYERS=24`, `NUM_SHARED_BLOCKS=2`, `MLP_MULT=2.5`, `artifact_proxy_bytes=15062987`
-- `tall_ff30`: `MODEL_DIM=832`, `EMBED_DIM=208`, `NUM_LAYERS=32`, `NUM_SHARED_BLOCKS=2`, `MLP_MULT=3.0`, `size_final@50=15869614`
+- `wide_ff15`: `MODEL_DIM=1024`, `EMBED_DIM=256`, `NUM_LAYERS=16`, `NUM_HEADS=8`, `NUM_KV_HEADS=4`, `NUM_SHARED_BLOCKS=2`, `MLP_MULT=1.5`, `MLP_MULTIPLE_OF=128`, `artifact_proxy_bytes=15896523`
+- `shortfat_ff20`: `MODEL_DIM=896`, `EMBED_DIM=1152`, `NUM_LAYERS=20`, `NUM_HEADS=14`, `NUM_KV_HEADS=2`, `NUM_SHARED_BLOCKS=2`, `MLP_MULT=2.0`, `MLP_MULTIPLE_OF=128`, `artifact_proxy_bytes=15935714`
+- `balanced_ff25`: `MODEL_DIM=768`, `EMBED_DIM=1792`, `NUM_LAYERS=24`, `NUM_HEADS=12`, `NUM_KV_HEADS=4`, `NUM_SHARED_BLOCKS=2`, `MLP_MULT=2.5`, `MLP_MULTIPLE_OF=128`, `artifact_proxy_bytes=15969643`
+- `tall_ff30`: `MODEL_DIM=768`, `EMBED_DIM=1088`, `NUM_LAYERS=32`, `NUM_HEADS=12`, `NUM_KV_HEADS=4`, `NUM_SHARED_BLOCKS=2`, `MLP_MULT=3.0`, `MLP_MULTIPLE_OF=128`, `artifact_proxy_bytes=15986759`
 
-Why these and not the earlier near-16MB init probes:
+Why these and not the earlier near-cap anchors:
 
-- the old anchors were all far over budget once trained even for 50 steps
-- `balanced_ff25` at `896/224/24` reached `size_final@50=16048727`, so the next valid 16-head step down is `864/216/24`
-- the valid 40-layer multi-block candidate (`768/192/40`, `NUM_SHARED_BLOCKS=3`) still had `artifact_proxy_bytes=17312748`, and the larger one also OOMed at the sweep batch size, so it is out for now
+- the old anchors were all shape-sloppy for the GPU: head dims `66`, `60`, `54`, and `52`
+- the new anchors keep the important matmul shapes on `64`/`128` boundaries, with head dims `128`, `64`, `64`, and `64`
+- they still span FF ratios `1.5`, `2.0`, `2.5`, and `3.0`, but they now do it with near-cap final-size-aware proxies instead of init-only artifact guesses
 
-That still gives you a real family sweep across FF ratios `1.5`, `2.0`, `2.5`, and `3.0`, but now the family set is at least compatible with the actual compressed-size objective.
+Cold `--compile` 4-step speed audit on the 5090, using the same sweep batch settings, favored the aligned family set across the board:
+
+- `wide_ff15`: `25704.60 -> 35657.95` avg `tok/s`, `119427.79 -> 131400.50` last-step `tok/s`
+- `shortfat_ff20`: `27425.31 -> 29549.36` avg `tok/s`, `105703.23 -> 118886.17` last-step `tok/s`
+- `balanced_ff25`: `23216.30 -> 24842.72` avg `tok/s`, `90864.47 -> 105067.74` last-step `tok/s`
+- `tall_ff30`: `16913.22 -> 18408.88` avg `tok/s`, `67216.41 -> 75220.66` last-step `tok/s`
+
+The Inductor `Online softmax is disabled on the fly since Inductor decides to split the reduction` warning still appeared on every old and new family in that audit, so the shape cleanup improved speed but did not eliminate the warning.
 
 The training helper `scripts/run_allama_ablations.sh` is intentionally training-only and uses blocked ablations over those final-size-aware anchors:
 
@@ -308,13 +315,15 @@ So the allama training sweep now uses the `train_gpt.py` effective batch target 
 
 The trainer's own default env values are still smaller; this is a sweep-script override, not a global trainer-default change.
 
-Current 5090 compile/VRAM check on the heaviest family (`tall_ff30`, `832/208/32`) says the compile-safe accumulation setting is:
+Current 5090 compile/VRAM check says the compile-safe accumulation setting is:
 
 - idle desktop load on this box was about `2.9 GiB`
 - `GRAD_ACCUM_STEPS=32` (`local_batch_size=16`) failed under `--compile` with `No valid triton configs`
 - `GRAD_ACCUM_STEPS=64` (`local_batch_size=8`) failed with the same Triton shared-memory limit
 - `GRAD_ACCUM_STEPS=128` (`local_batch_size=4`) succeeded under `--compile`
 - at that passing point, a 1-step smoke hit `max_memory_reserved=4.834 GiB` and `max_memory_allocated=4.776 GiB`
+
+The current aligned family set also passed serialized cold `--compile` 4-step smokes at those same batch settings.
 
 So the sweep defaults are:
 
@@ -332,6 +341,7 @@ One backend knob is worth keeping available but not forcing by default:
 - `SDPA_BACKEND=auto`: `elapsed_s=74.18`, `tokens_per_s=7068`
 - `SDPA_BACKEND=flash`: `elapsed_s=74.14`, `tokens_per_s=7071`
 - both runs emitted Inductor's `Online softmax is disabled on the fly since Inductor decides to split the reduction` warning
+- the later old-vs-aligned family audit showed that the warning still appears even on the cleaned-up `64`/`128`-aligned shapes
 
 So the sweep helper leaves `SDPA_BACKEND=auto` as the default, but the trainer still exposes the override for targeted experiments.
 

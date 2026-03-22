@@ -4,8 +4,8 @@ set -euo pipefail
 
 export WANDB=1
 export WANDB_PROJECT=param-golf-ablations
-export WANDB_GROUP="${WANDB_GROUP:-allama-blocked-ablations}"
-export WANDB_TAGS="${WANDB_TAGS:-5090,allama,nearcap,finalsize,behavior,blocked,bs524k}"
+export WANDB_GROUP="${WANDB_GROUP:-allama-aligned-blocked-ablations}"
+export WANDB_TAGS="${WANDB_TAGS:-5090,allama,nearcap,finalsize,behavior,blocked,bs524k,aligned}"
 export WANDB_WATCH="${WANDB_WATCH:-all}"
 export WANDB_WATCH_LOG_FREQ="${WANDB_WATCH_LOG_FREQ:-100}"
 export SDPA_BACKEND="${SDPA_BACKEND:-auto}"
@@ -27,6 +27,7 @@ BASE_ENV=(
   EVAL_MODE=sampled
   VAL_BATCH_SIZE=8
   VAL_BATCHES=8
+  MLP_MULTIPLE_OF=128
 )
 
 FAMILIES=(
@@ -51,37 +52,37 @@ run_one () {
 
   case "$FAMILY" in
     wide_ff15)
-      MODEL_DIM=1056
-      EMBED_DIM=264
+      MODEL_DIM=1024
+      EMBED_DIM=256
       NUM_LAYERS=16
-      NUM_HEADS=16
+      NUM_HEADS=8
       NUM_KV_HEADS=4
       NUM_SHARED_BLOCKS=2
       MLP_MULT=1.5
       ;;
     shortfat_ff20)
-      MODEL_DIM=960
-      EMBED_DIM=240
+      MODEL_DIM=896
+      EMBED_DIM=1152
       NUM_LAYERS=20
-      NUM_HEADS=16
-      NUM_KV_HEADS=4
+      NUM_HEADS=14
+      NUM_KV_HEADS=2
       NUM_SHARED_BLOCKS=2
       MLP_MULT=2.0
       ;;
     balanced_ff25)
-      MODEL_DIM=864
-      EMBED_DIM=216
+      MODEL_DIM=768
+      EMBED_DIM=1792
       NUM_LAYERS=24
-      NUM_HEADS=16
+      NUM_HEADS=12
       NUM_KV_HEADS=4
       NUM_SHARED_BLOCKS=2
       MLP_MULT=2.5
       ;;
     tall_ff30)
-      MODEL_DIM=832
-      EMBED_DIM=208
+      MODEL_DIM=768
+      EMBED_DIM=1088
       NUM_LAYERS=32
-      NUM_HEADS=16
+      NUM_HEADS=12
       NUM_KV_HEADS=4
       NUM_SHARED_BLOCKS=2
       MLP_MULT=3.0
@@ -179,13 +180,15 @@ run_variant_block() {
   done
 }
 
-# Final-size-aware anchors selected from short-horizon sizing checks.
+# Final-size-aware aligned anchors selected from short-horizon sizing checks.
 # Safe proxy: code_bytes + 0.945 * int8_payload_bytes_init
-# - wide_ff15     1056/264/16  -> size_final@50 = 15,826,095
-# - shortfat_ff20  960/240/20  -> proxy945      = 15,777,074
-# - balanced_ff25  864/216/24  -> proxy945      = 15,062,987
-#   note: 896/224/24 reached size_final@50 = 16,048,727, so the next valid 16-head step down is used
-# - tall_ff30      832/208/32  -> size_final@50 = 15,869,614
+# All families use MLP_MULTIPLE_OF=128 and 64/128-friendly dimensions.
+# - wide_ff15     1024/256/16  h8/kv4  hd128 hidden1536 qkv2048 -> proxy945 = 15,896,523
+# - shortfat_ff20  896/1152/20 h14/kv2 hd64  hidden1792 qkv1152 -> proxy945 = 15,935,714
+# - balanced_ff25  768/1792/24 h12/kv4 hd64  hidden1920 qkv1280 -> proxy945 = 15,969,643
+# - tall_ff30      768/1088/32 h12/kv4 hd64  hidden2304 qkv1280 -> proxy945 = 15,986,759
+# Cold compile speed audit on the 5090 favored these aligned shapes over the old
+# 1056/960/864/832 anchors while the Inductor online-softmax warning persisted.
 
 if [[ "${RUN_BASELINE_BLOCK}" == "1" ]]; then
   run_variant_block baseline
