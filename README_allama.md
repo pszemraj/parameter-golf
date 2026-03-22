@@ -212,16 +212,19 @@ Interpretation:
 - if `model_artifact_bytes_init` in W&B config or `size_init ... artifact_bytes=...` in the local log is nowhere near 16MB, go bigger
 - if it is too high, trim width or `MLP_MULT`
 - once you are near budget, **then** do real ablations inside that size regime
+- with the current probe results, `probe_m1024_l24_s2` is the sensible phase-2 anchor at about 14.5MB, while the one-shared-block variants are still undersized and `probe_m1152_l24_s2` overshoots the cap
+- ignore tiny `val_loss` / `val_bpb` differences in this phase because `EVAL_ONLY=1` makes these runs size probes, not learned-model comparisons
 
 ### Phase 2: serious ablations
 
 These are the actual first ablations I would run once the size probe says the family is sensible.
+Given the current probes, anchor on the near-budget `1024/256/24` family with `NUM_SHARED_BLOCKS=2` and vary only knobs that keep artifact size roughly fixed.
 
 ```bash
 export WANDB=1
 export WANDB_PROJECT=param-golf-ablations
-export WANDB_GROUP=allama-initial-ablations
-export WANDB_TAGS=allama,5090,initial
+export WANDB_GROUP=allama-budget-matched-ablations
+export WANDB_TAGS=allama,5090,budget-matched
 
 BASE_ENV=(
   OUT_DIR=./runs_allama
@@ -235,6 +238,7 @@ BASE_ENV=(
   NUM_HEADS=16
   NUM_KV_HEADS=4
   MLP_MULT=2.5
+  NUM_SHARED_BLOCKS=2
   TRAIN_SEQ_LEN=1024
   EVAL_SEQ_LEN=1024
   TRAIN_BATCH_TOKENS=65536
@@ -253,35 +257,37 @@ run_one () {
   local RUN_ID="$1"
   local NORM_LAYOUT="$2"
   local NORM_KIND="$3"
-  local NUM_SHARED_BLOCKS="$4"
-  local SHARE_PATTERN="$5"
+  local SHARE_PATTERN="$4"
+  local USE_X0_SHORTCUT="$5"
+  local RESID_MIX_INIT="$6"
 
   env "${BASE_ENV[@]}" \
     RUN_ID="$RUN_ID" \
     NORM_LAYOUT="$NORM_LAYOUT" \
     NORM_KIND="$NORM_KIND" \
-    NUM_SHARED_BLOCKS="$NUM_SHARED_BLOCKS" \
     SHARE_PATTERN="$SHARE_PATTERN" \
+    USE_X0_SHORTCUT="$USE_X0_SHORTCUT" \
+    RESID_MIX_INIT="$RESID_MIX_INIT" \
     SAVE_PATH="./runs_allama/${RUN_ID}/model.pt" \
     EXPORT_INT8_PATH="./runs_allama/${RUN_ID}/model_int8.pt" \
     python train_allama_reborn.py
 }
 
-run_one post_ln_share1_chunk   postnorm layernorm 1 chunk
-run_one post_ln_share2_chunk   postnorm layernorm 2 chunk
-run_one post_ln_share2_cycle   postnorm layernorm 2 cycle
-run_one post_ln_share4_chunk   postnorm layernorm 4 chunk
-run_one post_ln_share4_cycle   postnorm layernorm 4 cycle
-run_one post_ln_share2_repeat2 postnorm layernorm 2 repeat_2
-run_one pre_ln_share1_chunk    prenorm  layernorm 1 chunk
-run_one pre_ln_share2_cycle    prenorm  layernorm 2 cycle
+run_one post_ln_chunk_x0_010   postnorm layernorm chunk    1 0.10
+run_one post_ln_cycle_x0_010   postnorm layernorm cycle    1 0.10
+run_one post_ln_repeat2_x0_010 postnorm layernorm repeat_2 1 0.10
+run_one pre_ln_cycle_x0_010    prenorm  layernorm cycle    1 0.10
+run_one post_rms_cycle_x0_010  postnorm rmsnorm   cycle    1 0.10
+run_one pre_rms_cycle_x0_010   prenorm  rmsnorm   cycle    1 0.10
+run_one post_ln_cycle_x0_005   postnorm layernorm cycle    1 0.05
+run_one post_ln_cycle_no_x0    postnorm layernorm cycle    0 0.00
 ```
 
 That sweep is finally testing something real:
 - same serious width/depth family
 - same artifact regime
-- actual sharing/norm decisions
-- no baseline-sized toy model pretending to be an ALBERT experiment
+- actual sharing-pattern, norm, and shortcut decisions
+- no toy 512x12 baseline pretending to be an ALBERT experiment
 
 ## Full validation vs sampled validation
 
