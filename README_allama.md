@@ -212,7 +212,8 @@ Interpretation:
 - if `model_artifact_bytes_init` in W&B config or `size_init ... artifact_bytes=...` in the local log is nowhere near 16MB, go bigger
 - if it is too high, trim width or `MLP_MULT`
 - once you are near budget, **then** do real ablations inside that size regime
-- with the current probe results, `probe_m1024_l24_s2` is the sensible phase-2 anchor at about 14.5MB, while the one-shared-block variants are still undersized and `probe_m1152_l24_s2` overshoots the cap
+- with the current coarse probe results, `probe_m1024_l24_s2` is one sensible budget-closing starting point at about 14.5MB, while the one-shared-block variants are still undersized and `probe_m1152_l24_s2` overshoots the cap
+- do not assume the best near-cap family is balanced by default; wide, short-fat, tall, and higher-unique-block variants can all fit under the cap with different `MLP_MULT` choices
 - ignore tiny `val_loss` / `val_bpb` differences in this phase because `EVAL_ONLY=1` makes these runs size probes, not learned-model comparisons
 
 ### Phase 2: budget-closing sweep
@@ -224,7 +225,7 @@ artifact_bytes = code_bytes + int8_payload_zlib_bytes
 ```
 
 So once a family is in the right ballpark, getting closer to the 16,000,000-byte cap is itself a core ablation, not a cleanup step.
-For the current `1024/256/24` with `NUM_SHARED_BLOCKS=2` anchor, the easiest knob to sweep is `MLP_MULT`.
+One easy way to do that is to hold a candidate family fixed and sweep `MLP_MULT`.
 
 ```bash
 export WANDB=1
@@ -286,78 +287,35 @@ Interpretation:
 ### Phase 3: serious ablations
 
 These are the actual first ablations I would run once the size probe says the family is sensible.
-First, choose `ABLATION_MLP_MULT` from the budget-closing sweep above.
-Then keep that near-cap family fixed while varying the architectural decisions you actually want to compare.
+The current measured under-cap anchors from direct `EVAL_ONLY=1` size probes are:
+
+- `wide_ff15`: `MODEL_DIM=1280`, `EMBED_DIM=320`, `NUM_LAYERS=16`, `NUM_SHARED_BLOCKS=2`, `MLP_MULT=1.5`, `artifact_bytes=15994336`
+- `shortfat_ff20`: `MODEL_DIM=1152`, `EMBED_DIM=288`, `NUM_LAYERS=20`, `NUM_SHARED_BLOCKS=2`, `MLP_MULT=2.0`, `artifact_bytes=15659236`
+- `balanced_ff25`: `MODEL_DIM=1056`, `EMBED_DIM=264`, `NUM_LAYERS=24`, `NUM_SHARED_BLOCKS=2`, `MLP_MULT=2.5`, `artifact_bytes=15496683`
+- `tall_ff30`: `MODEL_DIM=992`, `EMBED_DIM=248`, `NUM_LAYERS=32`, `NUM_SHARED_BLOCKS=2`, `MLP_MULT=3.0`, `artifact_bytes=15614669`
+- `tallmulti_ff25`: `MODEL_DIM=896`, `EMBED_DIM=224`, `NUM_LAYERS=40`, `NUM_SHARED_BLOCKS=3`, `MLP_MULT=2.5`, `artifact_bytes=15882909`
+
+That gives you a real near-cap family sweep across FF ratios `1.5`, `2.0`, `2.5`, and `3.0`, plus one higher-unique-block tall variant.
+
+The training helper `scripts/run_allama_ablations.sh` is intentionally training-only and focuses on behavior over those measured near-cap anchors:
 
 ```bash
-export WANDB=1
-export WANDB_PROJECT=param-golf-ablations
-export WANDB_GROUP=allama-budget-matched-ablations
-export WANDB_TAGS=allama,5090,budget-matched
-export ABLATION_MLP_MULT=2.85  # replace with the best verified under-cap value
-
-BASE_ENV=(
-  OUT_DIR=./runs_allama
-  DATA_PATH=./data/datasets/fineweb10B_sp1024
-  TOKENIZER_PATH=./data/tokenizers/fineweb_1024_bpe.model
-  DEVICE=cuda
-  DTYPE=bf16
-  MODEL_DIM=1024
-  EMBED_DIM=256
-  NUM_LAYERS=24
-  NUM_HEADS=16
-  NUM_KV_HEADS=4
-  MLP_MULT=${ABLATION_MLP_MULT}
-  NUM_SHARED_BLOCKS=2
-  TRAIN_SEQ_LEN=1024
-  EVAL_SEQ_LEN=1024
-  TRAIN_BATCH_TOKENS=65536
-  GRAD_ACCUM_STEPS=4
-  ITERATIONS=2000
-  VAL_LOSS_EVERY=250
-  TRAIN_LOG_EVERY=25
-  EVAL_MODE=sampled
-  VAL_BATCH_SIZE=8
-  VAL_BATCHES=8
-  USE_X0_SHORTCUT=1
-  RESID_MIX_INIT=0.1
-)
-
-run_one () {
-  local RUN_ID="$1"
-  local NORM_LAYOUT="$2"
-  local NORM_KIND="$3"
-  local SHARE_PATTERN="$4"
-  local USE_X0_SHORTCUT="$5"
-  local RESID_MIX_INIT="$6"
-
-  env "${BASE_ENV[@]}" \
-    RUN_ID="$RUN_ID" \
-    NORM_LAYOUT="$NORM_LAYOUT" \
-    NORM_KIND="$NORM_KIND" \
-    SHARE_PATTERN="$SHARE_PATTERN" \
-    USE_X0_SHORTCUT="$USE_X0_SHORTCUT" \
-    RESID_MIX_INIT="$RESID_MIX_INIT" \
-    SAVE_PATH="./runs_allama/${RUN_ID}/model.pt" \
-    EXPORT_INT8_PATH="./runs_allama/${RUN_ID}/model_int8.pt" \
-    python train_allama_reborn.py
-}
-
-run_one post_ln_chunk_x0_010   postnorm layernorm chunk    1 0.10
-run_one post_ln_cycle_x0_010   postnorm layernorm cycle    1 0.10
-run_one post_ln_repeat2_x0_010 postnorm layernorm repeat_2 1 0.10
-run_one pre_ln_cycle_x0_010    prenorm  layernorm cycle    1 0.10
-run_one post_rms_cycle_x0_010  postnorm rmsnorm   cycle    1 0.10
-run_one pre_rms_cycle_x0_010   prenorm  rmsnorm   cycle    1 0.10
-run_one post_ln_cycle_x0_005   postnorm layernorm cycle    1 0.05
-run_one post_ln_cycle_no_x0    postnorm layernorm cycle    0 0.00
+bash scripts/run_allama_ablations.sh
 ```
 
+It trains:
+
+- the five canonical near-cap families above
+- `prenorm` and `rmsnorm` behavior checks on `balanced_ff25`
+- a `repeat_2` sharing-pattern check on `tall_ff30`
+- a `no_x0` check on `shortfat_ff20`
+- a `chunk` vs `cycle` check on `wide_ff15`
+
 That sweep is finally testing something real:
-- same serious width/depth family
-- same near-cap artifact regime
-- actual sharing-pattern, norm, and shortcut decisions
-- no toy 512x12 baseline pretending to be an ALBERT experiment
+- near-cap compressed artifacts under the actual 16,000,000-byte rule
+- shape families spanning wide, balanced, tall, and multi-block variants
+- FF ratio effects across `1.5`, `2.0`, `2.5`, and `3.0`
+- actual behavior decisions instead of just size guessing
 
 ## Full validation vs sampled validation
 
