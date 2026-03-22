@@ -1,208 +1,246 @@
-# ALlama Reborn trainer
+# ALlama
 
-This README is for **`train_allama_reborn.py`** only.
+## What this trainer fixes
 
-It replaces the earlier mismatched notes. The goal here is simple: one trainer file, one README, same behavior.
+This version is the one meant for actual local ablations on a 5090:
 
-## What is in this trainer
+- decoder-only ALBERT-style sharing with `ALL`, `SOME`, or untied-ish schedules
+- `x0` / `resid_mix` shortcut for deep virtual depth
+- one global RoPE cache
+- GQA via `enable_gqa=True` when the local PyTorch SDPA path supports it
+- epoch-driven training over **all available** downloaded train shards by default
+- sampled or full validation, both wired into the same trainer
+- W&B logging of the metrics that actually matter for shared models:
+  - `stored_params`
+  - `functional_params`
+  - `sharing_ratio`
+  - `stored_parameter_bytes`
+  - `checkpoint_bytes`
+  - `checkpoint_zlib_bytes`
+  - `int8_payload_bytes`
+  - `int8_payload_zlib_bytes`
+  - `artifact_bytes`
+- hierarchical deduped model summary saved per run
 
-`train_allama_reborn.py` is a decoder-only ALBERT-style trainer aimed at the OpenAI Parameter Golf setup.
+## Defaults
 
-Main features:
+The defaults are no longer the toy baseline-sized smoke settings.
 
-- configurable cross-layer sharing with `NUM_SHARED_BLOCKS`
-- sharing layouts:
-  - `SHARE_PATTERN=chunk` or `contiguous`
-  - `SHARE_PATTERN=cycle` or `round_robin`
-  - `SHARE_PATTERN=repeat_2`, `repeat_4`, etc.
-- `NORM_LAYOUT=postnorm` or `prenorm`
-- `NORM_KIND=layernorm` or `rmsnorm`
-- factorized embeddings with `EMBED_DIM != MODEL_DIM`
-- optional tied embeddings
-- global RoPE cache shared by all blocks
-- **ALBERT-style `x0` shortcut / `resid_mix`**, controlled by:
-  - `USE_X0_SHORTCUT=1`
-  - `RESID_MIX_INIT=0.1`
-- GQA using `enable_gqa=True` inside SDPA when the local PyTorch supports it
-- full fixed-validation scanning for Parameter Golf via `EVAL_MODE=full`
-- faster proxy eval via `EVAL_MODE=sampled`
-- optional `q_deltas` / `v_deltas` hooks and `loss_reduction=none` path for TTT-style work
-- checkpoint save/load
-- compact int8 payload export/load for local iteration
-- optional W&B logging built directly into the trainer
+The trainer now defaults to a serious ALlama family:
+
+```text
+MODEL_DIM=1024
+EMBED_DIM=256
+NUM_LAYERS=24
+NUM_HEADS=16
+NUM_KV_HEADS=4
+MLP_MULT=2.5
+TRAIN_SEQ_LEN=1024
+TRAIN_BATCH_TOKENS=65536
+GRAD_ACCUM_STEPS=4
+DTYPE=bf16 on CUDA
+NUM_EPOCHS=1
+```
+
+That means the default behavior is:
+- one full pass over all downloaded train shards
+- validation every `VAL_LOSS_EVERY` steps
+- no arbitrary `ITERATIONS` cap
+
+`MAX_STEPS` still exists, but only as a debug cap.
+
+## Working directory
+
+Work inside a local clone or fork of `openai/parameter-golf` and place `train_allama_reborn.py` in the repo root.
+
+You are using the repo mainly for:
+- `data/cached_challenge_fineweb.py`
+- the expected tokenizer/data layout
+- easy baseline comparison
+
+The trainer itself is otherwise self-contained.
 
 ## Setup
 
-From the Parameter Golf repo root:
+From the repo root:
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install --upgrade pip
-
-# your CUDA torch install here; example if you already have it, skip this
-# pip install torch torchvision
-
+python -m pip install --upgrade pip
 pip install sentencepiece wandb huggingface-hub datasets tqdm
 ```
 
-Notes:
+Use your existing CUDA PyTorch install on the 5090.
 
-- `sentencepiece` is needed if you want correct `val_bpb` on the official SP-1024 tokenizer.
-- `wandb` is optional. If missing, the trainer still runs.
-- On a 5090, use `DTYPE=bf16` unless you have a specific reason not to.
+## Download the official challenge data
 
-## Get the official Parameter Golf data
-
-From the same repo root:
+Small first pass:
 
 ```bash
 python3 data/cached_challenge_fineweb.py --variant sp1024 --train-shards 10
 ```
 
-This should populate paths like:
-
-- `./data/datasets/fineweb10B_sp1024/fineweb_train_*.bin`
-- `./data/datasets/fineweb10B_sp1024/fineweb_val_*.bin`
-- `./data/tokenizers/fineweb_1024_bpe.model`
-
-For larger confirmatory runs later, rerun with more train shards, for example:
+Larger pass once the sweep is behaving:
 
 ```bash
 python3 data/cached_challenge_fineweb.py --variant sp1024 --train-shards 80
 ```
 
-## Minimal single-run command
+Expected layout:
 
-This is a good first real run on one GPU:
-
-```bash
-RUN_ID=allama_post_ln_share1 \
-OUT_DIR=./runs_allama_reborn \
-DATA_PATH=./data/datasets/fineweb10B_sp1024 \
-TOKENIZER_PATH=./data/tokenizers/fineweb_1024_bpe.model \
-DEVICE=cuda \
-DTYPE=bf16 \
-NUM_LAYERS=12 \
-NUM_SHARED_BLOCKS=1 \
-SHARE_PATTERN=chunk \
-NORM_LAYOUT=postnorm \
-NORM_KIND=layernorm \
-MODEL_DIM=512 \
-EMBED_DIM=128 \
-NUM_HEADS=8 \
-NUM_KV_HEADS=4 \
-MLP_MULT=2.0 \
-TRAIN_SEQ_LEN=1024 \
-EVAL_SEQ_LEN=1024 \
-TRAIN_BATCH_TOKENS=65536 \
-ITERATIONS=2000 \
-VAL_LOSS_EVERY=250 \
-EVAL_MODE=sampled \
-VAL_BATCH_SIZE=8 \
-VAL_BATCHES=8 \
-SAVE_PATH=./runs_allama_reborn/allama_post_ln_share1/model.pt \
-EXPORT_INT8_PATH=./runs_allama_reborn/allama_post_ln_share1/model_int8.pt \
-python train_allama_reborn.py
+```text
+./data/datasets/fineweb10B_sp1024/fineweb_train_*.bin
+./data/datasets/fineweb10B_sp1024/fineweb_val_*.bin
+./data/tokenizers/fineweb_1024_bpe.model
 ```
 
-### Important eval note
+## What gets recorded to W&B
 
-`EVAL_MODE` behaves like this:
+Per run, the config includes the model identity and size fields you actually want for ALlama-style sharing:
 
-- `auto`: `full` on Parameter Golf data, `sampled` on enwik8
-- `full`: exhaustive fixed-val scan
-- `sampled`: faster proxy eval using evenly spaced windows
+- `model_stored_params`
+- `model_stored_trainable_params`
+- `model_functional_params`
+- `model_functional_trainable_params`
+- `sharing_ratio`
+- `model_stored_parameter_bytes_init`
+- `model_checkpoint_bytes_init`
+- `model_checkpoint_zlib_bytes_init`
+- `model_int8_payload_zlib_bytes_init`
+- `model_artifact_bytes_init`
 
-For sweeps, use `EVAL_MODE=sampled`.
+And the metrics stream includes:
 
-For final reruns and honest local numbers, use `EVAL_MODE=full`.
+- `model/stored_params`
+- `model/functional_params`
+- `model/sharing_ratio`
+- `artifact/*`
+- `train/*`
+- `eval/*`
 
-Also note the split in eval knobs:
+So for every run you can directly compare:
+- what is **stored once on disk**
+- what is **functionally traversed** after virtual unrolling
+- how close the export path is to the 16MB cap
 
-- `VAL_BATCH_SIZE` is the **sampled-eval batch size in sequences**
-- `VAL_BATCHES` is the number of sampled-eval batches
-- `EVAL_BATCH_TOKENS` is the **throughput knob for full eval**
+## Output files per run
 
-## W&B logging
+For a run with `RUN_ID=my_run`, the trainer writes:
 
-The trainer logs to W&B if either of these is true:
+```text
+<OUT_DIR>/my_run/train.log
+<OUT_DIR>/my_run/model_summary.txt
+<OUT_DIR>/my_run/model.pt            # if SAVE_PATH is set
+<OUT_DIR>/my_run/model_int8.pt       # if EXPORT_INT8_PATH is set
+```
 
-- `WANDB=1`
-- `WANDB_PROJECT` is set
+The log prints concise init/final lines:
 
-Recommended W&B env for your use case:
+- `model_init ...`
+- `size_init ...`
+- `model_final ...`
+- `size_final ...`
+
+## Recommended flow on a 5090
+
+Do this in two phases.
+
+### Phase 1: size probes
+
+The point is to stop wasting time on tiny models that leave most of the 16MB artifact budget unused.
+
+Use `EVAL_ONLY=1` to get immediate model-size accounting without training.
 
 ```bash
 export WANDB=1
 export WANDB_PROJECT=param-golf-ablations
-export WANDB_GROUP=allama-core-5090
-export WANDB_TAGS=5090,allama,parameter-golf
-wandb login
-```
-
-Logged metrics include:
-
-- `train/loss`
-- `train/lr`
-- `train/tokens_per_s`
-- `eval/loss`
-- `eval/bpb` when byte accounting is available
-- `artifact/code_bytes`
-- `artifact/int8_zlib_model_bytes`
-- `artifact/total_artifact_bytes`
-- `model/param_count`
-
-## Recommended 5090 sweep
-
-I would do this in two passes.
-
-### Pass 1: cheap ranking pass
-
-Use:
-
-- `train-shards=10`
-- `ITERATIONS=2000`
-- `TRAIN_BATCH_TOKENS=65536`
-- `EVAL_MODE=sampled`
-- `VAL_LOSS_EVERY=250`
-- W&B project `param-golf-ablations`
-
-Recommended first ablation set:
-
-1. `postnorm + layernorm + share1 + chunk`
-2. `postnorm + layernorm + share2 + chunk`
-3. `postnorm + layernorm + share2 + cycle`
-4. `postnorm + layernorm + share4 + chunk`
-5. `postnorm + layernorm + share4 + cycle`
-6. `postnorm + layernorm + share2 + repeat_2`
-7. `prenorm + layernorm + share1 + chunk`
-8. `prenorm + layernorm + share2 + cycle`
-
-A bash loop that runs exactly those under W&B:
-
-```bash
-export WANDB=1
-export WANDB_PROJECT=param-golf-ablations
-export WANDB_GROUP=allama-core-5090
-export WANDB_TAGS=5090,allama,core
+export WANDB_GROUP=allama-size-probes
+export WANDB_TAGS=5090,allama,size-probe
 
 BASE_ENV=(
-  OUT_DIR=./runs_allama_reborn
+  OUT_DIR=./runs_allama
   DATA_PATH=./data/datasets/fineweb10B_sp1024
   TOKENIZER_PATH=./data/tokenizers/fineweb_1024_bpe.model
   DEVICE=cuda
   DTYPE=bf16
-  MODEL_DIM=512
-  EMBED_DIM=128
-  NUM_LAYERS=12
-  NUM_HEADS=8
-  NUM_KV_HEADS=4
-  MLP_MULT=2.0
   TRAIN_SEQ_LEN=1024
   EVAL_SEQ_LEN=1024
   TRAIN_BATCH_TOKENS=65536
-  ITERATIONS=2000
+  GRAD_ACCUM_STEPS=4
+  NUM_EPOCHS=1
+  EVAL_ONLY=1
+  EVAL_MODE=sampled
+  VAL_BATCH_SIZE=8
+  VAL_BATCHES=8
+  USE_X0_SHORTCUT=1
+  RESID_MIX_INIT=0.1
+)
+
+probe_one () {
+  local RUN_ID="$1"
+  local MODEL_DIM="$2"
+  local EMBED_DIM="$3"
+  local NUM_LAYERS="$4"
+  local NUM_HEADS="$5"
+  local NUM_KV_HEADS="$6"
+  local MLP_MULT="$7"
+  local NUM_SHARED_BLOCKS="$8"
+  local SHARE_PATTERN="$9"
+
+  env "${BASE_ENV[@]}" \
+    RUN_ID="$RUN_ID" \
+    MODEL_DIM="$MODEL_DIM" \
+    EMBED_DIM="$EMBED_DIM" \
+    NUM_LAYERS="$NUM_LAYERS" \
+    NUM_HEADS="$NUM_HEADS" \
+    NUM_KV_HEADS="$NUM_KV_HEADS" \
+    MLP_MULT="$MLP_MULT" \
+    NUM_SHARED_BLOCKS="$NUM_SHARED_BLOCKS" \
+    SHARE_PATTERN="$SHARE_PATTERN" \
+    NORM_LAYOUT=postnorm \
+    NORM_KIND=layernorm \
+    python train_allama_reborn.py
+}
+
+probe_one probe_m1024_l24_s1 1024 256 24 16 4 2.5 1 chunk
+probe_one probe_m1024_l24_s2 1024 256 24 16 4 2.5 2 cycle
+probe_one probe_m1152_l24_s1 1152 288 24 18 6 2.5 1 chunk
+probe_one probe_m1152_l24_s2 1152 288 24 18 6 2.5 2 cycle
+```
+
+Interpretation:
+- if `artifact/artifact_bytes` is nowhere near 16MB, go bigger
+- if it is too high, trim width or `MLP_MULT`
+- once you are near budget, **then** do real ablations inside that size regime
+
+### Phase 2: serious ablations
+
+These are the actual first ablations I would run once the size probe says the family is sensible.
+
+```bash
+export WANDB=1
+export WANDB_PROJECT=param-golf-ablations
+export WANDB_GROUP=allama-initial-ablations
+export WANDB_TAGS=allama,5090,initial
+
+BASE_ENV=(
+  OUT_DIR=./runs_allama
+  DATA_PATH=./data/datasets/fineweb10B_sp1024
+  TOKENIZER_PATH=./data/tokenizers/fineweb_1024_bpe.model
+  DEVICE=cuda
+  DTYPE=bf16
+  MODEL_DIM=1024
+  EMBED_DIM=256
+  NUM_LAYERS=24
+  NUM_HEADS=16
+  NUM_KV_HEADS=4
+  MLP_MULT=2.5
+  TRAIN_SEQ_LEN=1024
+  EVAL_SEQ_LEN=1024
+  TRAIN_BATCH_TOKENS=65536
+  GRAD_ACCUM_STEPS=4
+  NUM_EPOCHS=1
   VAL_LOSS_EVERY=250
   TRAIN_LOG_EVERY=25
   EVAL_MODE=sampled
@@ -212,323 +250,84 @@ BASE_ENV=(
   RESID_MIX_INIT=0.1
 )
 
-CONFIGS=(
-  "RUN_ID=post_ln_share1_chunk NORM_LAYOUT=postnorm NORM_KIND=layernorm NUM_SHARED_BLOCKS=1 SHARE_PATTERN=chunk"
-  "RUN_ID=post_ln_share2_chunk NORM_LAYOUT=postnorm NORM_KIND=layernorm NUM_SHARED_BLOCKS=2 SHARE_PATTERN=chunk"
-  "RUN_ID=post_ln_share2_cycle NORM_LAYOUT=postnorm NORM_KIND=layernorm NUM_SHARED_BLOCKS=2 SHARE_PATTERN=cycle"
-  "RUN_ID=post_ln_share4_chunk NORM_LAYOUT=postnorm NORM_KIND=layernorm NUM_SHARED_BLOCKS=4 SHARE_PATTERN=chunk"
-  "RUN_ID=post_ln_share4_cycle NORM_LAYOUT=postnorm NORM_KIND=layernorm NUM_SHARED_BLOCKS=4 SHARE_PATTERN=cycle"
-  "RUN_ID=post_ln_share2_repeat2 NORM_LAYOUT=postnorm NORM_KIND=layernorm NUM_SHARED_BLOCKS=2 SHARE_PATTERN=repeat_2"
-  "RUN_ID=pre_ln_share1_chunk NORM_LAYOUT=prenorm NORM_KIND=layernorm NUM_SHARED_BLOCKS=1 SHARE_PATTERN=chunk"
-  "RUN_ID=pre_ln_share2_cycle NORM_LAYOUT=prenorm NORM_KIND=layernorm NUM_SHARED_BLOCKS=2 SHARE_PATTERN=cycle"
-)
-
-for cfg in "${CONFIGS[@]}"; do
-  echo "Running: $cfg"
-  env "${BASE_ENV[@]}" $cfg \
-    SAVE_PATH=./runs_allama_reborn/$(echo $cfg | sed -n 's/.*RUN_ID=\([^ ]*\).*/\1/p')/model.pt \
-    EXPORT_INT8_PATH=./runs_allama_reborn/$(echo $cfg | sed -n 's/.*RUN_ID=\([^ ]*\).*/\1/p')/model_int8.pt \
-    python train_allama_reborn.py
- done
-```
-
-If your shell chokes on that substitution inside `env`, use the simpler manual version below instead.
-
-### Cleaner manual loop version
-
-```bash
 run_one () {
   local RUN_ID="$1"
-  shift
-  env \
-    WANDB=1 \
-    WANDB_PROJECT=param-golf-ablations \
-    WANDB_GROUP=allama-core-5090 \
-    WANDB_TAGS=5090,allama,core \
-    OUT_DIR=./runs_allama_reborn \
-    DATA_PATH=./data/datasets/fineweb10B_sp1024 \
-    TOKENIZER_PATH=./data/tokenizers/fineweb_1024_bpe.model \
-    DEVICE=cuda \
-    DTYPE=bf16 \
-    MODEL_DIM=512 \
-    EMBED_DIM=128 \
-    NUM_LAYERS=12 \
-    NUM_HEADS=8 \
-    NUM_KV_HEADS=4 \
-    MLP_MULT=2.0 \
-    TRAIN_SEQ_LEN=1024 \
-    EVAL_SEQ_LEN=1024 \
-    TRAIN_BATCH_TOKENS=65536 \
-    ITERATIONS=2000 \
-    VAL_LOSS_EVERY=250 \
-    TRAIN_LOG_EVERY=25 \
-    EVAL_MODE=sampled \
-    VAL_BATCH_SIZE=8 \
-    VAL_BATCHES=8 \
-    USE_X0_SHORTCUT=1 \
-    RESID_MIX_INIT=0.1 \
+  local NORM_LAYOUT="$2"
+  local NORM_KIND="$3"
+  local NUM_SHARED_BLOCKS="$4"
+  local SHARE_PATTERN="$5"
+
+  env "${BASE_ENV[@]}" \
     RUN_ID="$RUN_ID" \
-    SAVE_PATH=./runs_allama_reborn/$RUN_ID/model.pt \
-    EXPORT_INT8_PATH=./runs_allama_reborn/$RUN_ID/model_int8.pt \
-    "$@" \
+    NORM_LAYOUT="$NORM_LAYOUT" \
+    NORM_KIND="$NORM_KIND" \
+    NUM_SHARED_BLOCKS="$NUM_SHARED_BLOCKS" \
+    SHARE_PATTERN="$SHARE_PATTERN" \
+    SAVE_PATH="./runs_allama/${RUN_ID}/model.pt" \
+    EXPORT_INT8_PATH="./runs_allama/${RUN_ID}/model_int8.pt" \
     python train_allama_reborn.py
 }
 
-run_one post_ln_share1_chunk  NORM_LAYOUT=postnorm NORM_KIND=layernorm NUM_SHARED_BLOCKS=1 SHARE_PATTERN=chunk
-run_one post_ln_share2_chunk  NORM_LAYOUT=postnorm NORM_KIND=layernorm NUM_SHARED_BLOCKS=2 SHARE_PATTERN=chunk
-run_one post_ln_share2_cycle  NORM_LAYOUT=postnorm NORM_KIND=layernorm NUM_SHARED_BLOCKS=2 SHARE_PATTERN=cycle
-run_one post_ln_share4_chunk  NORM_LAYOUT=postnorm NORM_KIND=layernorm NUM_SHARED_BLOCKS=4 SHARE_PATTERN=chunk
-run_one post_ln_share4_cycle  NORM_LAYOUT=postnorm NORM_KIND=layernorm NUM_SHARED_BLOCKS=4 SHARE_PATTERN=cycle
-run_one post_ln_share2_repeat2 NORM_LAYOUT=postnorm NORM_KIND=layernorm NUM_SHARED_BLOCKS=2 SHARE_PATTERN=repeat_2
-run_one pre_ln_share1_chunk   NORM_LAYOUT=prenorm NORM_KIND=layernorm NUM_SHARED_BLOCKS=1 SHARE_PATTERN=chunk
-run_one pre_ln_share2_cycle   NORM_LAYOUT=prenorm NORM_KIND=layernorm NUM_SHARED_BLOCKS=2 SHARE_PATTERN=cycle
+run_one post_ln_share1_chunk   postnorm layernorm 1 chunk
+run_one post_ln_share2_chunk   postnorm layernorm 2 chunk
+run_one post_ln_share2_cycle   postnorm layernorm 2 cycle
+run_one post_ln_share4_chunk   postnorm layernorm 4 chunk
+run_one post_ln_share4_cycle   postnorm layernorm 4 cycle
+run_one post_ln_share2_repeat2 postnorm layernorm 2 repeat_2
+run_one pre_ln_share1_chunk    prenorm  layernorm 1 chunk
+run_one pre_ln_share2_cycle    prenorm  layernorm 2 cycle
 ```
 
-### Pass 2: confirm the winners
+That sweep is finally testing something real:
+- same serious width/depth family
+- same artifact regime
+- actual sharing/norm decisions
+- no baseline-sized toy model pretending to be an ALBERT experiment
 
-Take the best 2 or 3 runs from Pass 1 and rerun them with:
+## Full validation vs sampled validation
 
-- `train-shards=80`
-- `ITERATIONS=4000` to `8000`
-- `EVAL_MODE=full`
-- `EVAL_BATCH_TOKENS=65536` or `131072`, depending on memory
-
-Example:
+For local ranking, use:
 
 ```bash
-RUN_ID=post_ln_share2_cycle_full \
-OUT_DIR=./runs_allama_reborn \
+EVAL_MODE=sampled
+```
+
+For an honest full pass over the validation tokens, use:
+
+```bash
+EVAL_MODE=full
+```
+
+`VAL_LOSS_EVERY` still controls cadence in either mode.
+
+Sampled mode is faster for sweep triage.
+Full mode is what you should run on the finalists.
+
+## Single-run sanity check
+
+```bash
+RUN_ID=allama_sanity \
+OUT_DIR=./runs_allama \
 DATA_PATH=./data/datasets/fineweb10B_sp1024 \
 TOKENIZER_PATH=./data/tokenizers/fineweb_1024_bpe.model \
 DEVICE=cuda \
 DTYPE=bf16 \
-NUM_LAYERS=12 \
-NUM_SHARED_BLOCKS=2 \
-SHARE_PATTERN=cycle \
-NORM_LAYOUT=postnorm \
-NORM_KIND=layernorm \
-MODEL_DIM=512 \
-EMBED_DIM=128 \
-NUM_HEADS=8 \
-NUM_KV_HEADS=4 \
-MLP_MULT=2.0 \
-TRAIN_SEQ_LEN=1024 \
-EVAL_SEQ_LEN=1024 \
-TRAIN_BATCH_TOKENS=65536 \
-EVAL_BATCH_TOKENS=65536 \
-ITERATIONS=4000 \
-VAL_LOSS_EVERY=1000 \
-EVAL_MODE=full \
+NUM_EPOCHS=1 \
+MAX_STEPS=20 \
+VAL_LOSS_EVERY=10 \
+TRAIN_LOG_EVERY=5 \
+SAVE_PATH=./runs_allama/allama_sanity/model.pt \
+EXPORT_INT8_PATH=./runs_allama/allama_sanity/model_int8.pt \
 WANDB=1 \
 WANDB_PROJECT=param-golf-ablations \
-WANDB_GROUP=allama-confirm-5090 \
-SAVE_PATH=./runs_allama_reborn/post_ln_share2_cycle_full/model.pt \
-EXPORT_INT8_PATH=./runs_allama_reborn/post_ln_share2_cycle_full/model_int8.pt \
+WANDB_GROUP=allama-sanity \
+WANDB_TAGS=5090,allama,sanity \
 python train_allama_reborn.py
 ```
 
-## Eval-only mode
+## Notes
 
-The trainer can load a saved checkpoint or its own compact payload and evaluate it.
-
-### Eval a saved checkpoint
-
-```bash
-RUN_ID=eval_post_ln_share2_cycle \
-OUT_DIR=./runs_allama_reborn \
-DATA_PATH=./data/datasets/fineweb10B_sp1024 \
-TOKENIZER_PATH=./data/tokenizers/fineweb_1024_bpe.model \
-DEVICE=cuda \
-DTYPE=bf16 \
-EVAL_ONLY=1 \
-LOAD_PATH=./runs_allama_reborn/post_ln_share2_cycle/model.pt \
-NUM_LAYERS=12 \
-NUM_SHARED_BLOCKS=2 \
-SHARE_PATTERN=cycle \
-NORM_LAYOUT=postnorm \
-NORM_KIND=layernorm \
-MODEL_DIM=512 \
-EMBED_DIM=128 \
-NUM_HEADS=8 \
-NUM_KV_HEADS=4 \
-MLP_MULT=2.0 \
-TRAIN_SEQ_LEN=1024 \
-EVAL_SEQ_LEN=1024 \
-EVAL_MODE=full \
-EVAL_BATCH_TOKENS=65536 \
-python train_allama_reborn.py
-```
-
-### Eval a compact payload exported by the same trainer
-
-```bash
-RUN_ID=eval_compact_post_ln_share2_cycle \
-OUT_DIR=./runs_allama_reborn \
-DATA_PATH=./data/datasets/fineweb10B_sp1024 \
-TOKENIZER_PATH=./data/tokenizers/fineweb_1024_bpe.model \
-DEVICE=cuda \
-DTYPE=bf16 \
-EVAL_ONLY=1 \
-LOAD_PATH=./runs_allama_reborn/post_ln_share2_cycle/model_int8.pt \
-NUM_LAYERS=12 \
-NUM_SHARED_BLOCKS=2 \
-SHARE_PATTERN=cycle \
-NORM_LAYOUT=postnorm \
-NORM_KIND=layernorm \
-MODEL_DIM=512 \
-EMBED_DIM=128 \
-NUM_HEADS=8 \
-NUM_KV_HEADS=4 \
-MLP_MULT=2.0 \
-TRAIN_SEQ_LEN=1024 \
-EVAL_SEQ_LEN=1024 \
-EVAL_MODE=full \
-EVAL_BATCH_TOKENS=65536 \
-python train_allama_reborn.py
-```
-
-## Most useful environment variables
-
-### Data
-
-- `DATA_BACKEND=auto|parameter_golf|enwik8`
-- `DATA_PATH=...`
-- `TRAIN_FILES=...`
-- `VAL_FILES=...`
-- `TOKENIZER_PATH=...`
-- `VOCAB_SIZE=...`
-
-### Training
-
-- `TRAIN_SEQ_LEN`
-- `TRAIN_BATCH_TOKENS`
-- `GRAD_ACCUM_STEPS`
-- `ITERATIONS`
-- `LEARNING_RATE`
-- `MIN_LR`
-- `WARMUP_STEPS`
-- `WEIGHT_DECAY`
-- `GRAD_CLIP_NORM`
-- `MAX_WALLCLOCK_SECONDS`
-
-### Eval
-
-- `EVAL_MODE=auto|full|sampled`
-- `EVAL_SEQ_LEN`
-- `EVAL_BATCH_TOKENS`
-- `VAL_BATCH_SIZE`
-- `VAL_BATCHES`
-- `VAL_LOSS_EVERY`
-
-### Model
-
-- `NUM_LAYERS`
-- `NUM_SHARED_BLOCKS`
-- `SHARE_PATTERN`
-- `MODEL_DIM`
-- `EMBED_DIM`
-- `NUM_HEADS`
-- `NUM_KV_HEADS`
-- `MLP_MULT`
-- `NORM_LAYOUT=postnorm|prenorm`
-- `NORM_KIND=layernorm|rmsnorm`
-- `TIE_EMBEDDINGS=1|0`
-- `QK_NORM=1|0`
-- `USE_X0_SHORTCUT=1|0`
-- `RESID_MIX_INIT=0.1`
-- `LAYER_SCALE_INIT`
-- `LOGIT_SOFTCAP`
-
-### Save / load
-
-- `SAVE_PATH`
-- `EXPORT_INT8_PATH`
-- `LOAD_PATH`
-- `EVAL_ONLY=1`
-- `STRICT_LOAD=1|0`
-
-### W&B
-
-- `WANDB=1`
-- `WANDB_PROJECT=param-golf-ablations`
-- `WANDB_ENTITY=...`
-- `WANDB_GROUP=...`
-- `WANDB_RUN_NAME=...`
-- `WANDB_TAGS=tag1,tag2`
-- `WANDB_NOTES=...`
-- `WANDB_MODE=online|offline|disabled`
-
-## Outputs
-
-For each run, the trainer writes:
-
-- `OUT_DIR/RUN_ID/config.json`
-- `OUT_DIR/RUN_ID/train.log`
-
-And optionally:
-
-- `SAVE_PATH` for the regular checkpoint
-- `EXPORT_INT8_PATH` for the compact payload
-
-## Behavior details worth remembering
-
-### 1. Full eval is the honest local check
-
-On Parameter Golf data, `EVAL_MODE=full` scans the fixed validation tokens exhaustively in `EVAL_SEQ_LEN` chunks.
-
-### 2. Sampled eval is only a proxy
-
-`EVAL_MODE=sampled` is intended for fast sweep ranking. Do not treat those BPB numbers as final.
-
-### 3. `x0` shortcut is on by default in this trainer
-
-This is the ALBERT-style residual mixing path that helps repeated/shared depth avoid washing out the original signal.
-
-### 4. GQA kernel behavior depends on your local torch
-
-If your PyTorch SDPA supports `enable_gqa=True`, the trainer uses it. Otherwise it falls back to explicit KV expansion.
-
-## Local smoke test example
-
-If you just want to see that the trainer works end-to-end before a real run, use a tiny config on CPU:
-
-```bash
-RUN_ID=cpu_smoke \
-OUT_DIR=./runs_allama_reborn \
-DATA_BACKEND=enwik8 \
-ENWIK8_PATH=./data/enwik8.gz \
-DEVICE=cpu \
-DTYPE=fp32 \
-NUM_LAYERS=4 \
-NUM_SHARED_BLOCKS=2 \
-SHARE_PATTERN=repeat_2 \
-MODEL_DIM=64 \
-EMBED_DIM=32 \
-NUM_HEADS=4 \
-NUM_KV_HEADS=2 \
-MLP_MULT=2.0 \
-TRAIN_SEQ_LEN=64 \
-EVAL_SEQ_LEN=64 \
-TRAIN_BATCH_TOKENS=256 \
-ITERATIONS=2 \
-VAL_LOSS_EVERY=1 \
-EVAL_MODE=sampled \
-VAL_BATCH_SIZE=2 \
-VAL_BATCHES=2 \
-python train_allama_reborn.py
-```
-
-## My default recommendation
-
-For ALlama on this challenge, I would start here:
-
-- `NORM_LAYOUT=postnorm`
-- `NORM_KIND=layernorm`
-- `NUM_SHARED_BLOCKS=1` or `2`
-- `SHARE_PATTERN=chunk` first, then `cycle`
-- `USE_X0_SHORTCUT=1`
-- `EMBED_DIM=128`, `MODEL_DIM=512`
-- `NUM_HEADS=8`, `NUM_KV_HEADS=4`
-- `MLP_MULT=2.0`
-
-Then expand only after the sweep tells you where the real win is.
+- `MAX_STEPS` is for debug and sanity checks only.
+- On CUDA, the trainer uses `bf16` autocast. There is no user-facing half-precision path to care about here.
+- `model_summary.txt` is deduped by parameter identity, so shared blocks are counted once in the stored-parameter view.
+- The meaningful comparison for this project is not just loss. It is **loss at a given artifact size**.

@@ -14,6 +14,7 @@ Key features in this version:
 - optional q_delta / v_delta hooks and per-token loss return path for TTT-style eval work
 - optional W&B logging directly from the trainer
 - checkpoint save/load plus compact int8 payload export/load for local iteration
+- concise size/parameter reporting for W&B and logs
 """
 
 import glob
@@ -29,7 +30,7 @@ import zlib
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping, Optional, Sequence
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 import numpy as np
 import torch
@@ -93,7 +94,8 @@ class Hyperparameters:
     strict_load: bool
 
     # Training / eval
-    iterations: int
+    num_epochs: int
+    max_steps: int
     train_seq_len: int
     train_batch_tokens: int
     grad_accum_steps: int
@@ -155,6 +157,11 @@ class Hyperparameters:
     wandb_notes: str
     wandb_mode: str
 
+    # Local reporting
+    print_model_summary: bool
+    model_summary_max_depth: int
+    model_summary_show_shapes: bool
+
     @classmethod
     def from_env(cls) -> "Hyperparameters":
         data_path = os.environ.get("DATA_PATH", "./data/datasets/fineweb10B_sp1024")
@@ -190,17 +197,20 @@ class Hyperparameters:
             export_int8_path=os.environ.get("EXPORT_INT8_PATH", ""),
             eval_only=env_bool("EVAL_ONLY", False),
             strict_load=env_bool("STRICT_LOAD", True),
-            iterations=int(os.environ.get("ITERATIONS", "1000")),
-            train_seq_len=int(os.environ.get("TRAIN_SEQ_LEN", "256")),
-            train_batch_tokens=int(os.environ.get("TRAIN_BATCH_TOKENS", "32768")),
-            grad_accum_steps=int(os.environ.get("GRAD_ACCUM_STEPS", "1")),
+            num_epochs=int(os.environ.get("NUM_EPOCHS", "1")),
+            max_steps=int(
+                os.environ.get("MAX_STEPS", os.environ.get("ITERATIONS", "0"))
+            ),
+            train_seq_len=int(os.environ.get("TRAIN_SEQ_LEN", "1024")),
+            train_batch_tokens=int(os.environ.get("TRAIN_BATCH_TOKENS", "65536")),
+            grad_accum_steps=int(os.environ.get("GRAD_ACCUM_STEPS", "4")),
             eval_mode=os.environ.get("EVAL_MODE", "auto"),
             eval_seq_len=eval_seq_len_default,
             eval_batch_tokens=int(os.environ.get("EVAL_BATCH_TOKENS", "0")),
             val_batch_size=int(os.environ.get("VAL_BATCH_SIZE", "0")),
             val_batches=int(os.environ.get("VAL_BATCHES", "8")),
-            val_loss_every=int(os.environ.get("VAL_LOSS_EVERY", "100")),
-            train_log_every=int(os.environ.get("TRAIN_LOG_EVERY", "10")),
+            val_loss_every=int(os.environ.get("VAL_LOSS_EVERY", "250")),
+            train_log_every=int(os.environ.get("TRAIN_LOG_EVERY", "25")),
             learning_rate=float(os.environ.get("LEARNING_RATE", "3e-4")),
             min_lr=float(os.environ.get("MIN_LR", "3e-5")),
             warmup_steps=int(os.environ.get("WARMUP_STEPS", "50")),
@@ -210,14 +220,14 @@ class Hyperparameters:
             adam_eps=float(os.environ.get("ADAM_EPS", "1e-8")),
             grad_clip_norm=float(os.environ.get("GRAD_CLIP_NORM", "1.0")),
             max_wallclock_seconds=float(os.environ.get("MAX_WALLCLOCK_SECONDS", "0.0")),
-            num_layers=int(os.environ.get("NUM_LAYERS", "12")),
+            num_layers=int(os.environ.get("NUM_LAYERS", "24")),
             num_shared_blocks=int(os.environ.get("NUM_SHARED_BLOCKS", "1")),
             share_pattern=os.environ.get("SHARE_PATTERN", "chunk"),
-            model_dim=int(os.environ.get("MODEL_DIM", "512")),
-            embed_dim=int(os.environ.get("EMBED_DIM", "128")),
-            num_heads=int(os.environ.get("NUM_HEADS", "8")),
+            model_dim=int(os.environ.get("MODEL_DIM", "1024")),
+            embed_dim=int(os.environ.get("EMBED_DIM", "256")),
+            num_heads=int(os.environ.get("NUM_HEADS", "16")),
             num_kv_heads=int(os.environ.get("NUM_KV_HEADS", "4")),
-            mlp_mult=float(os.environ.get("MLP_MULT", "2.0")),
+            mlp_mult=float(os.environ.get("MLP_MULT", "2.5")),
             mlp_multiple_of=int(os.environ.get("MLP_MULTIPLE_OF", "32")),
             norm_kind=os.environ.get("NORM_KIND", "layernorm"),
             norm_layout=os.environ.get("NORM_LAYOUT", "postnorm"),
@@ -252,6 +262,9 @@ class Hyperparameters:
             wandb_tags=env_csv("WANDB_TAGS", ""),
             wandb_notes=os.environ.get("WANDB_NOTES", ""),
             wandb_mode=os.environ.get("WANDB_MODE", ""),
+            print_model_summary=env_bool("PRINT_MODEL_SUMMARY", True),
+            model_summary_max_depth=int(os.environ.get("MODEL_SUMMARY_MAX_DEPTH", "4")),
+            model_summary_show_shapes=env_bool("MODEL_SUMMARY_SHOW_SHAPES", False),
         )
 
 
@@ -326,80 +339,199 @@ def load_parameter_golf_shard(file: Path) -> Tensor:
     return torch.from_numpy(tokens_np.astype(np.uint16, copy=False))
 
 
-class TokenStream:
-    def __init__(self, pattern: str):
-        self.files = [Path(p) for p in sorted(glob.glob(pattern))]
-        if not self.files:
-            raise FileNotFoundError(f"No files found for pattern: {pattern}")
-        self.file_idx = 0
-        self.tokens = load_parameter_golf_shard(self.files[0])
-        self.pos = 0
+def count_parameter_golf_shard_tokens(file: Path) -> int:
+    header = np.fromfile(file, dtype="<i4", count=256)
+    if header.size != 256 or int(header[0]) != 20240520 or int(header[1]) != 1:
+        raise ValueError(f"Unexpected shard header for {file}")
+    return int(header[2])
+
+
+class FiniteTokenStream:
+    def __init__(
+        self, files: Optional[list[Path]] = None, tensor: Optional[Tensor] = None
+    ):
+        if (files is None) == (tensor is None):
+            raise ValueError(
+                "Provide exactly one of files or tensor to FiniteTokenStream"
+            )
+        self.files = files
+        self.tensor = tensor.contiguous() if tensor is not None else None
+        if self.files is not None:
+            if not self.files:
+                raise FileNotFoundError("No training files were provided")
+            self.total_tokens = int(
+                sum(count_parameter_golf_shard_tokens(file) for file in self.files)
+            )
+        else:
+            assert self.tensor is not None
+            if self.tensor.ndim != 1:
+                raise ValueError("FiniteTokenStream tensor mode expects a 1D tensor")
+            self.total_tokens = int(self.tensor.numel())
+        self.reset()
+
+    def reset(self) -> None:
+        self.read_tokens = 0
+        self.carry: Optional[Tensor] = None
+        if self.files is not None:
+            self.file_idx = 0
+            self.current_tokens: Optional[Tensor] = None
+            self.current_pos = 0
+        else:
+            self.file_idx = 0
+            self.current_tokens = None
+            self.current_pos = 0
+
+    def _ensure_file_loaded(self) -> None:
+        if self.files is None:
+            return
+        while self.current_tokens is None and self.file_idx < len(self.files):
+            self.current_tokens = load_parameter_golf_shard(self.files[self.file_idx])
+            self.current_pos = 0
+            if int(self.current_tokens.numel()) == 0:
+                self.file_idx += 1
+                self.current_tokens = None
 
     def _advance_file(self) -> None:
-        self.file_idx = (self.file_idx + 1) % len(self.files)
-        self.tokens = load_parameter_golf_shard(self.files[self.file_idx])
-        self.pos = 0
+        if self.files is None:
+            return
+        self.file_idx += 1
+        self.current_tokens = None
+        self.current_pos = 0
+        self._ensure_file_loaded()
 
-    def take(self, n: int) -> Tensor:
+    def _read_new_exact(self, n: int) -> Tensor:
+        if n < 0:
+            raise ValueError(f"n must be non-negative, got {n}")
+        if n == 0:
+            return torch.empty((0,), dtype=torch.int64)
+        if self.read_tokens + n > self.total_tokens:
+            raise EOFError(
+                f"Requested {n} tokens with only {self.total_tokens - self.read_tokens} unread tokens remaining"
+            )
+        if self.tensor is not None:
+            start = self.read_tokens
+            end = start + n
+            self.read_tokens = end
+            return self.tensor[start:end]
         chunks: list[Tensor] = []
         remaining = n
         while remaining > 0:
-            available = int(self.tokens.numel() - self.pos)
+            self._ensure_file_loaded()
+            if self.current_tokens is None:
+                raise EOFError(f"Requested {n} tokens but hit end of training files")
+            available = int(self.current_tokens.numel() - self.current_pos)
             if available <= 0:
                 self._advance_file()
                 continue
             k = min(remaining, available)
-            chunks.append(self.tokens[self.pos : self.pos + k])
-            self.pos += k
+            chunks.append(self.current_tokens[self.current_pos : self.current_pos + k])
+            self.current_pos += k
+            self.read_tokens += k
             remaining -= k
+            if self.current_pos >= int(self.current_tokens.numel()):
+                self._advance_file()
         return chunks[0] if len(chunks) == 1 else torch.cat(chunks, dim=0)
 
+    def remaining_unread_tokens(self) -> int:
+        return max(0, self.total_tokens - self.read_tokens)
 
-class DistributedShardLoader:
-    def __init__(self, pattern: str, rank: int, world_size: int, device: torch.device):
+    def remaining_target_tokens(self) -> int:
+        unread = self.remaining_unread_tokens()
+        if self.carry is None:
+            return max(0, unread - 1)
+        return unread
+
+    def take_targets_exact(self, target_tokens: int) -> Tensor:
+        if target_tokens <= 0:
+            raise ValueError(f"target_tokens must be positive, got {target_tokens}")
+        if target_tokens > self.remaining_target_tokens():
+            raise EOFError(
+                f"Requested {target_tokens} targets with only {self.remaining_target_tokens()} targets remaining"
+            )
+        if self.carry is None:
+            chunk = self._read_new_exact(target_tokens + 1)
+        else:
+            fresh = self._read_new_exact(target_tokens)
+            chunk = torch.cat([self.carry, fresh], dim=0)
+        self.carry = chunk[-1:].clone()
+        return chunk
+
+
+class SequentialDistributedTokenLoader:
+    def __init__(
+        self,
+        stream: FiniteTokenStream,
+        rank: int,
+        world_size: int,
+        device: torch.device,
+    ):
         self.rank = rank
         self.world_size = world_size
         self.device = device
-        self.stream = TokenStream(pattern)
+        self.stream = stream
 
-    def next_batch(self, global_batch_size: int, seq_len: int) -> tuple[Tensor, Tensor]:
-        if global_batch_size % self.world_size != 0:
+    @classmethod
+    def from_pattern(
+        cls, pattern: str, rank: int, world_size: int, device: torch.device
+    ) -> "SequentialDistributedTokenLoader":
+        files = [Path(p) for p in sorted(glob.glob(pattern))]
+        if not files:
+            raise FileNotFoundError(f"No files found for pattern: {pattern}")
+        return cls(
+            FiniteTokenStream(files=files),
+            rank=rank,
+            world_size=world_size,
+            device=device,
+        )
+
+    @classmethod
+    def from_tensor(
+        cls, tokens: Tensor, rank: int, world_size: int, device: torch.device
+    ) -> "SequentialDistributedTokenLoader":
+        return cls(
+            FiniteTokenStream(tensor=tokens.long().contiguous()),
+            rank=rank,
+            world_size=world_size,
+            device=device,
+        )
+
+    @property
+    def total_tokens(self) -> int:
+        return self.stream.total_tokens
+
+    @property
+    def total_target_tokens(self) -> int:
+        total = max(0, self.total_tokens - 1)
+        if self.world_size > 1:
+            total -= total % self.world_size
+        return total
+
+    def reset(self) -> None:
+        self.stream.reset()
+
+    def remaining_target_tokens(self) -> int:
+        remaining = self.stream.remaining_target_tokens()
+        if self.world_size > 1:
+            remaining -= remaining % self.world_size
+        return max(0, remaining)
+
+    def next_batch(self, local_batch_size: int, seq_len: int) -> tuple[Tensor, Tensor]:
+        if local_batch_size <= 0 or seq_len <= 0:
             raise ValueError(
-                f"global_batch_size={global_batch_size} must divide world_size={self.world_size}"
+                f"local_batch_size and seq_len must be positive, got {local_batch_size}, {seq_len}"
             )
-        local_batch_size = global_batch_size // self.world_size
         local_tokens = local_batch_size * seq_len
-        per_rank_span = local_tokens + 1
-        chunk = self.stream.take(per_rank_span * self.world_size)
-        start = self.rank * per_rank_span
-        local = chunk[start : start + per_rank_span].long()
+        global_target_tokens = local_tokens * self.world_size
+        if global_target_tokens > self.remaining_target_tokens():
+            raise EOFError(
+                f"Requested {global_target_tokens} global targets with only {self.remaining_target_tokens()} remaining"
+            )
+        chunk = self.stream.take_targets_exact(global_target_tokens)
+        start = self.rank * local_tokens
+        end = start + local_tokens + 1
+        local = chunk[start:end].long()
         x = local[:-1].reshape(local_batch_size, seq_len)
         y = local[1:].reshape(local_batch_size, seq_len)
-        return x.to(self.device, non_blocking=True), y.to(
-            self.device, non_blocking=True
-        )
-
-
-class ArrayTokenLoader:
-    def __init__(self, tokens: Tensor, device: torch.device, seed: int, rank: int):
-        if tokens.ndim != 1:
-            raise ValueError("ArrayTokenLoader expects a 1D token tensor")
-        self.tokens = tokens.long().contiguous()
-        self.device = device
-        self.generator = torch.Generator(device="cpu")
-        self.generator.manual_seed(int(seed + 100003 * rank))
-
-    def next_batch(self, batch_size: int, seq_len: int) -> tuple[Tensor, Tensor]:
-        max_start = int(self.tokens.numel() - seq_len - 1)
-        if max_start <= 0:
-            raise ValueError(f"Token array too short for seq_len={seq_len}")
-        starts = torch.randint(
-            0, max_start + 1, (batch_size,), generator=self.generator
-        )
-        offsets = torch.arange(seq_len + 1)
-        windows = self.tokens[starts[:, None] + offsets[None, :]]
-        x = windows[:, :-1]
-        y = windows[:, 1:]
         return x.to(self.device, non_blocking=True), y.to(
             self.device, non_blocking=True
         )
@@ -1043,8 +1175,287 @@ class ALlama(nn.Module):
 # -----------------------------------------------------------------------------
 
 
+@dataclass
+class _LayerSummary:
+    """Summary statistics for a single layer in the model."""
+
+    name: str
+    param_shape: Optional[torch.Size]
+    inclusive_total_params: int
+    inclusive_trainable_params: int
+
+
+def _unique_param_info(model: nn.Module) -> Dict[int, Tuple[int, bool]]:
+    info: Dict[int, Tuple[int, bool]] = {}
+    for p in model.parameters(recurse=True):
+        pid = id(p)
+        if pid not in info:
+            info[pid] = (int(p.numel()), bool(p.requires_grad))
+    return info
+
+
+def _format_number(num: int) -> str:
+    return f"{num:,}" if num > 0 else "--"
+
+
+def _format_shape(shape: Optional[torch.Size]) -> str:
+    return "x".join(map(str, shape)) if shape else "N/A"
+
+
 def count_parameters(model: nn.Module) -> int:
-    return sum(int(p.numel()) for p in model.parameters())
+    return sum(n for (n, _rg) in _unique_param_info(model).values())
+
+
+def count_trainable_parameters(model: nn.Module) -> int:
+    return sum(n for (n, rg) in _unique_param_info(model).values() if rg)
+
+
+def module_parameter_counts(module: nn.Module) -> tuple[int, int]:
+    info = _unique_param_info(module)
+    total = sum(n for (n, _rg) in info.values())
+    trainable = sum(n for (n, rg) in info.values() if rg)
+    return total, trainable
+
+
+def compute_logical_parameter_counts(model: nn.Module) -> dict[str, float | int]:
+    unique_total = count_parameters(model)
+    unique_trainable = count_trainable_parameters(model)
+    if not isinstance(model, ALlama):
+        return {
+            "stored_params": unique_total,
+            "stored_trainable_params": unique_trainable,
+            "functional_params": unique_total,
+            "functional_trainable_params": unique_trainable,
+            "shared_block_stored_params": 0,
+            "shared_block_stored_trainable_params": 0,
+            "shared_block_functional_params": 0,
+            "shared_block_functional_trainable_params": 0,
+            "nonshared_stored_params": unique_total,
+            "nonshared_stored_trainable_params": unique_trainable,
+            "sharing_ratio": 1.0,
+        }
+
+    block_totals: list[int] = []
+    block_trainables: list[int] = []
+    for block in model.shared_blocks:
+        total, trainable = module_parameter_counts(block)
+        block_totals.append(total)
+        block_trainables.append(trainable)
+
+    shared_unique = int(sum(block_totals))
+    shared_unique_trainable = int(sum(block_trainables))
+    nonshared_unique = int(unique_total - shared_unique)
+    nonshared_unique_trainable = int(unique_trainable - shared_unique_trainable)
+    layer_map = model.layer_to_block_map()
+    shared_logical = int(sum(block_totals[idx] for idx in layer_map))
+    shared_logical_trainable = int(sum(block_trainables[idx] for idx in layer_map))
+    logical_total = int(nonshared_unique + shared_logical)
+    logical_trainable = int(nonshared_unique_trainable + shared_logical_trainable)
+    sharing_ratio = float(logical_total) / float(max(1, unique_total))
+
+    return {
+        "stored_params": unique_total,
+        "stored_trainable_params": unique_trainable,
+        "functional_params": logical_total,
+        "functional_trainable_params": logical_trainable,
+        "shared_block_stored_params": shared_unique,
+        "shared_block_stored_trainable_params": shared_unique_trainable,
+        "shared_block_functional_params": shared_logical,
+        "shared_block_functional_trainable_params": shared_logical_trainable,
+        "nonshared_stored_params": nonshared_unique,
+        "nonshared_stored_trainable_params": nonshared_unique_trainable,
+        "sharing_ratio": sharing_ratio,
+    }
+
+
+def stored_parameter_bytes(model: nn.Module) -> int:
+    seen: Set[int] = set()
+    total_bytes = 0
+    for p in model.parameters(recurse=True):
+        pid = id(p)
+        if pid in seen:
+            continue
+        seen.add(pid)
+        total_bytes += int(p.numel()) * int(p.element_size())
+    return total_bytes
+
+
+def state_dict_bytes(state_dict: Mapping[str, Tensor]) -> int:
+    return int(sum(int(t.numel()) * int(t.element_size()) for t in state_dict.values()))
+
+
+def serialized_nbytes(obj: object) -> int:
+    buf = io.BytesIO()
+    torch.save(obj, buf)
+    return len(buf.getvalue())
+
+
+def cast_state_dict_floats(
+    state_dict: Mapping[str, Tensor], dtype: torch.dtype
+) -> dict[str, Tensor]:
+    out: dict[str, Tensor] = {}
+    for name, tensor in state_dict.items():
+        t = tensor.detach().to("cpu").contiguous()
+        out[name] = t.to(dtype) if t.is_floating_point() else t
+    return out
+
+
+def payload_tensor_numel(payload: Mapping[str, object]) -> dict[str, int]:
+    quantized = payload.get("quantized", {})
+    scales = payload.get("scales", {})
+    passthrough = payload.get("passthrough", {})
+    assert isinstance(quantized, Mapping)
+    assert isinstance(scales, Mapping)
+    assert isinstance(passthrough, Mapping)
+    quantized_numel = int(
+        sum(int(t.numel()) for t in quantized.values() if isinstance(t, Tensor))
+    )
+    scale_numel = int(
+        sum(int(t.numel()) for t in scales.values() if isinstance(t, Tensor))
+    )
+    passthrough_numel = int(
+        sum(int(t.numel()) for t in passthrough.values() if isinstance(t, Tensor))
+    )
+    return {
+        "int8_payload_quantized_numel": quantized_numel,
+        "int8_payload_scale_numel": scale_numel,
+        "int8_payload_passthrough_numel": passthrough_numel,
+        "int8_payload_total_tensor_numel": quantized_numel
+        + scale_numel
+        + passthrough_numel,
+    }
+
+
+def model_footprint_report(
+    model: nn.Module, code_path: Path, args: Hyperparameters
+) -> dict[str, float | int]:
+    state = {
+        name: tensor.detach().to("cpu").contiguous()
+        for name, tensor in model.state_dict().items()
+    }
+    param_report = compute_logical_parameter_counts(model)
+    code_bytes = int(code_path.stat().st_size)
+    checkpoint = {"config": asdict(args), "model": state}
+    payload = build_int8_payload(
+        state,
+        keep_float_numel=args.quant_keep_float_numel,
+        control_patterns=args.control_tensor_name_patterns,
+    )
+    payload_numel = payload_tensor_numel(payload)
+    int8_payload_bytes = serialized_nbytes(payload)
+    int8_payload_zlib_bytes = serialized_zlib_nbytes(payload)
+    report: dict[str, float | int] = {
+        **param_report,
+        **payload_numel,
+        "stored_parameter_bytes": stored_parameter_bytes(model),
+        "state_dict_bytes": state_dict_bytes(state),
+        "checkpoint_bytes": serialized_nbytes(checkpoint),
+        "checkpoint_zlib_bytes": serialized_zlib_nbytes(checkpoint),
+        "int8_payload_bytes": int8_payload_bytes,
+        "int8_payload_zlib_bytes": int8_payload_zlib_bytes,
+        "code_bytes": code_bytes,
+        "artifact_bytes": code_bytes + int8_payload_zlib_bytes,
+    }
+    return report
+
+
+def render_model_summary(
+    model: nn.Module, max_depth: int = 4, show_param_shapes: bool = False
+) -> str:
+    param_info = _unique_param_info(model)
+    if max_depth <= 0:
+        total_params = sum(n for (n, _rg) in param_info.values())
+        trainable_params = sum(n for (n, rg) in param_info.values() if rg)
+        lines = [
+            "=" * 50,
+            f"Total params: {_format_number(total_params)}",
+            f"Trainable params: {_format_number(trainable_params)}",
+            f"Non-trainable params: {_format_number(total_params - trainable_params)}",
+            "=" * 50,
+        ]
+        return "\n".join(lines)
+
+    summary_list: List[_LayerSummary] = []
+
+    def summarize_recursive(module: nn.Module, depth: int, prefix: str) -> Set[int]:
+        if depth > max_depth:
+            return {id(p) for p in module.parameters(recurse=True)}
+        direct_ids: Set[int] = {id(p) for p in module.parameters(recurse=False)}
+        child_ids: Set[int] = set()
+        for child in module.children():
+            child_ids |= summarize_recursive(child, depth + 1, prefix + "  ")
+        all_ids = direct_ids | child_ids
+        total = sum(param_info[i][0] for i in all_ids)
+        trainable = sum(param_info[i][0] for i in all_ids if param_info[i][1])
+        param_shape = next(
+            (p.shape for p in module.parameters(recurse=False) if p.requires_grad), None
+        )
+        summary_list.append(
+            _LayerSummary(
+                name=f"{prefix}{type(module).__name__}",
+                param_shape=param_shape,
+                inclusive_total_params=total,
+                inclusive_trainable_params=trainable,
+            )
+        )
+        return all_ids
+
+    summarize_recursive(model, 1, "")
+    total_params = sum(n for (n, _rg) in param_info.values())
+    trainable_params = sum(n for (n, rg) in param_info.values() if rg)
+
+    name_col_width = max(len("Layer (type)"), max(len(s.name) for s in summary_list))
+    shape_col_width = 0
+    if show_param_shapes:
+        shape_col_width = max(
+            len("Param Shape"),
+            max(len(_format_shape(s.param_shape)) for s in summary_list),
+        )
+    params_col_width = 12
+    trainable_col_width = 10
+    col_spacing = "  "
+
+    header_parts = [f"{'Layer (type)':<{name_col_width}}"]
+    if show_param_shapes:
+        header_parts.append(f"{'Param Shape':>{shape_col_width}}")
+    header_parts.append(f"{'Param #':>{params_col_width}}")
+    header_parts.append(f"{'Trainable':>{trainable_col_width}}")
+    header = col_spacing.join(header_parts)
+    sep = "=" * len(header)
+
+    lines = [sep, header, sep]
+    for entry in summary_list:
+        parts = [f"{entry.name:<{name_col_width}}"]
+        if show_param_shapes:
+            parts.append(f"{_format_shape(entry.param_shape):>{shape_col_width}}")
+        parts.append(
+            f"{_format_number(entry.inclusive_total_params):>{params_col_width}}"
+        )
+        parts.append(
+            f"{str(entry.inclusive_trainable_params > 0):>{trainable_col_width}}"
+        )
+        lines.append(col_spacing.join(parts))
+    lines.extend(
+        [
+            sep,
+            f"Total params: {_format_number(total_params)}",
+            f"Trainable params: {_format_number(trainable_params)}",
+            f"Non-trainable params: {_format_number(total_params - trainable_params)}",
+            sep,
+        ]
+    )
+    return "\n".join(lines)
+
+
+def model_summary(
+    model: nn.Module, max_depth: int = 4, show_param_shapes: bool = False
+) -> None:
+    print(
+        render_model_summary(
+            model, max_depth=max_depth, show_param_shapes=show_param_shapes
+        ),
+        flush=True,
+    )
 
 
 def get_local_batch_size(args: Hyperparameters, world_size: int) -> int:
@@ -1079,19 +1490,19 @@ def resolve_dtype(
             "fp32": torch.float32,
             "bfloat16": torch.bfloat16,
             "bf16": torch.bfloat16,
-            "float16": torch.float16,
-            "fp16": torch.float16,
         }
         key = args.dtype.lower()
         if key not in mapping:
-            raise ValueError(f"Unknown DTYPE={args.dtype}")
+            raise ValueError(
+                f"Unknown DTYPE={args.dtype}. Use bf16/bfloat16 or fp32/float32."
+            )
         dtype = mapping[key]
     elif device.type == "cuda":
         dtype = torch.bfloat16
     else:
         dtype = torch.float32
 
-    use_autocast = device.type == "cuda" and dtype in {torch.bfloat16, torch.float16}
+    use_autocast = device.type == "cuda" and dtype == torch.bfloat16
     return device.type, dtype, use_autocast
 
 
@@ -1101,13 +1512,106 @@ def autocast_context(device_type: str, amp_dtype: torch.dtype, use_autocast: boo
     return nullcontext()
 
 
-def get_lr(step: int, args: Hyperparameters) -> float:
+@dataclass(frozen=True)
+class MicroBatchSpec:
+    local_batch_size: int
+    seq_len: int
+    global_target_tokens: int
+
+
+def pick_microbatch_spec(
+    max_global_target_tokens: int,
+    max_local_batch_size: int,
+    max_seq_len: int,
+    world_size: int,
+) -> Optional[MicroBatchSpec]:
+    best: Optional[MicroBatchSpec] = None
+    for local_batch_size in range(1, max_local_batch_size + 1):
+        denom = local_batch_size * world_size
+        if denom > max_global_target_tokens:
+            break
+        seq_len = min(max_seq_len, max_global_target_tokens // denom)
+        if seq_len < 1:
+            continue
+        global_target_tokens = denom * seq_len
+        if best is None:
+            best = MicroBatchSpec(local_batch_size, seq_len, global_target_tokens)
+            continue
+        if global_target_tokens > best.global_target_tokens:
+            best = MicroBatchSpec(local_batch_size, seq_len, global_target_tokens)
+            continue
+        if global_target_tokens == best.global_target_tokens and seq_len > best.seq_len:
+            best = MicroBatchSpec(local_batch_size, seq_len, global_target_tokens)
+    return best
+
+
+def plan_epoch_steps(
+    total_tokens: int,
+    train_batch_tokens: int,
+    max_local_batch_size: int,
+    max_seq_len: int,
+    world_size: int,
+) -> tuple[list[list[MicroBatchSpec]], dict[str, int]]:
+    total_target_tokens = max(0, total_tokens - 1)
+    effective_target_tokens = total_target_tokens - (
+        total_target_tokens % max(1, world_size)
+    )
+    max_micro_global_tokens = max_local_batch_size * max_seq_len * world_size
+    if effective_target_tokens <= 0:
+        return [], {
+            "total_tokens": total_tokens,
+            "total_target_tokens": total_target_tokens,
+            "usable_target_tokens": effective_target_tokens,
+            "planned_target_tokens": 0,
+            "dropped_target_tokens": total_target_tokens,
+            "steps_per_epoch": 0,
+            "microbatches_per_epoch": 0,
+        }
+    steps: list[list[MicroBatchSpec]] = []
+    remaining_targets = effective_target_tokens
+    planned_target_tokens = 0
+    microbatch_count = 0
+    while remaining_targets > 0:
+        step_budget = min(train_batch_tokens, remaining_targets)
+        step_specs: list[MicroBatchSpec] = []
+        while step_budget > 0 and remaining_targets > 0:
+            allowed = min(step_budget, remaining_targets, max_micro_global_tokens)
+            spec = pick_microbatch_spec(
+                max_global_target_tokens=allowed,
+                max_local_batch_size=max_local_batch_size,
+                max_seq_len=max_seq_len,
+                world_size=world_size,
+            )
+            if spec is None:
+                break
+            step_specs.append(spec)
+            step_budget -= spec.global_target_tokens
+            remaining_targets -= spec.global_target_tokens
+            planned_target_tokens += spec.global_target_tokens
+            microbatch_count += 1
+        if not step_specs:
+            break
+        steps.append(step_specs)
+    dropped_target_tokens = total_target_tokens - planned_target_tokens
+    info = {
+        "total_tokens": total_tokens,
+        "total_target_tokens": total_target_tokens,
+        "usable_target_tokens": effective_target_tokens,
+        "planned_target_tokens": planned_target_tokens,
+        "dropped_target_tokens": dropped_target_tokens,
+        "steps_per_epoch": len(steps),
+        "microbatches_per_epoch": microbatch_count,
+    }
+    return steps, info
+
+
+def get_lr(step: int, total_steps: int, args: Hyperparameters) -> float:
     if step < args.warmup_steps:
         return args.learning_rate * float(step + 1) / float(max(1, args.warmup_steps))
-    if args.iterations <= args.warmup_steps:
+    if total_steps <= args.warmup_steps:
         return args.min_lr
     progress = float(step - args.warmup_steps) / float(
-        max(1, args.iterations - args.warmup_steps)
+        max(1, total_steps - args.warmup_steps)
     )
     progress = min(max(progress, 0.0), 1.0)
     cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
@@ -1290,9 +1794,9 @@ def evaluate_full(
 # -----------------------------------------------------------------------------
 
 
-FLOAT16_STORE_DTYPE = torch.float16
+BF16_STORE_DTYPE = torch.bfloat16
 FLOAT32_CONTROL_STORE_DTYPE = torch.float32
-INT8_PER_ROW_SCALE_DTYPE = torch.float16
+INT8_PER_ROW_SCALE_DTYPE = torch.bfloat16
 
 
 def quantize_float_tensor(t: Tensor) -> tuple[Tensor, Tensor]:
@@ -1350,7 +1854,7 @@ def build_int8_payload(
             store_dtype = (
                 FLOAT32_CONTROL_STORE_DTYPE
                 if any(pattern in name for pattern in control_patterns)
-                else FLOAT16_STORE_DTYPE
+                else BF16_STORE_DTYPE
             )
             passthrough[name] = t.to(store_dtype) if t.is_floating_point() else t
             dtypes[name] = str(t.dtype).removeprefix("torch.")
@@ -1377,7 +1881,6 @@ def dequantize_payload(payload: Mapping[str, object]) -> dict[str, Tensor]:
 
     dtype_map = {
         "float32": torch.float32,
-        "float16": torch.float16,
         "bfloat16": torch.bfloat16,
         "int64": torch.int64,
         "int32": torch.int32,
@@ -1421,17 +1924,11 @@ def serialized_zlib_nbytes(obj: object) -> int:
 def artifact_report(
     model: nn.Module, code_path: Path, args: Hyperparameters
 ) -> dict[str, int]:
-    code_bytes = int(code_path.stat().st_size)
-    payload = build_int8_payload(
-        model.state_dict(),
-        keep_float_numel=args.quant_keep_float_numel,
-        control_patterns=args.control_tensor_name_patterns,
-    )
-    model_bytes = serialized_zlib_nbytes(payload)
+    report = model_footprint_report(model, code_path, args)
     return {
-        "code_bytes": code_bytes,
-        "int8_zlib_model_bytes": model_bytes,
-        "total_artifact_bytes": code_bytes + model_bytes,
+        "code_bytes": int(report["code_bytes"]),
+        "int8_payload_zlib_bytes": int(report["int8_payload_zlib_bytes"]),
+        "artifact_bytes": int(report["artifact_bytes"]),
     }
 
 
@@ -1472,6 +1969,17 @@ class WandbLogger:
         if self.run is None:
             return
         wandb.log(metrics, step=step)
+
+    def update_config(self, values: dict[str, Any]) -> None:
+        if self.run is None:
+            return
+        self.run.config.update(values, allow_val_change=True)
+
+    def update_summary(self, values: dict[str, Any]) -> None:
+        if self.run is None:
+            return
+        for key, value in values.items():
+            self.run.summary[key] = value
 
     def finish(self) -> None:
         if self.run is not None:
@@ -1535,14 +2043,20 @@ def main() -> None:
         vocab_size = args.vocab_size if args.vocab_size > 0 else 256
         if vocab_size < 256:
             raise ValueError("VOCAB_SIZE must be >= 256 for enwik8")
-        train_loader = ArrayTokenLoader(
-            train_tokens, device=device, seed=args.seed, rank=rank
+        train_loader = SequentialDistributedTokenLoader.from_tensor(
+            train_tokens,
+            rank=rank,
+            world_size=world_size,
+            device=device,
         )
     elif backend == "parameter_golf":
         vocab_size = args.vocab_size if args.vocab_size > 0 else 1024
         val_tokens = load_validation_tokens(args.val_files)
-        train_loader = DistributedShardLoader(
-            args.train_files, rank=rank, world_size=world_size, device=device
+        train_loader = SequentialDistributedTokenLoader.from_pattern(
+            args.train_files,
+            rank=rank,
+            world_size=world_size,
+            device=device,
         )
     else:
         raise ValueError(f"Unsupported DATA_BACKEND={backend}")
@@ -1567,6 +2081,15 @@ def main() -> None:
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(msg + "\n")
 
+    if (
+        os.environ.get("ITERATIONS")
+        and not os.environ.get("MAX_STEPS")
+        and master_process
+    ):
+        log(
+            "note=ITERATIONS was provided; in this trainer it is treated only as a MAX_STEPS override. Data traversal is epoch-driven."
+        )
+
     maybe_load_model_weights(report_model, args, log)
 
     if args.compile_model and hasattr(torch, "compile") and not distributed:
@@ -1579,7 +2102,7 @@ def main() -> None:
         model = model_no_ddp
 
     local_batch_size = get_local_batch_size(args, world_size)
-    global_batch_size = local_batch_size * world_size
+    local_batch_size * world_size
     sampled_eval_batch_size = (
         args.val_batch_size if args.val_batch_size > 0 else local_batch_size
     )
@@ -1588,6 +2111,22 @@ def main() -> None:
         if args.eval_batch_tokens > 0
         else args.train_batch_tokens
     )
+    epoch_steps, epoch_plan_info = plan_epoch_steps(
+        total_tokens=train_loader.total_tokens,
+        train_batch_tokens=args.train_batch_tokens,
+        max_local_batch_size=local_batch_size,
+        max_seq_len=args.train_seq_len,
+        world_size=world_size,
+    )
+    if not epoch_steps and not args.eval_only:
+        raise ValueError(
+            f"Not enough training tokens to form even one batch: total_tokens={train_loader.total_tokens}"
+        )
+    planned_total_steps = len(epoch_steps) * max(1, args.num_epochs)
+    if args.max_steps > 0:
+        total_training_steps = min(planned_total_steps, args.max_steps)
+    else:
+        total_training_steps = planned_total_steps
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -1598,15 +2137,55 @@ def main() -> None:
         fused=(device.type == "cuda"),
     )
 
-    param_count = count_parameters(report_model)
+    param_report = compute_logical_parameter_counts(report_model)
+    if args.report_artifact:
+        footprint_report = model_footprint_report(report_model, Path(__file__), args)
+    else:
+        footprint_report = dict(param_report)
+
+    physical_param_count = int(param_report["stored_params"])
+    logical_param_count = int(param_report["functional_params"])
+    sharing_ratio = float(param_report["sharing_ratio"])
+
+    if master_process and args.print_model_summary:
+        summary_text = render_model_summary(
+            report_model,
+            max_depth=args.model_summary_max_depth,
+            show_param_shapes=args.model_summary_show_shapes,
+        )
+        print(summary_text, flush=True)
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(summary_text + "\n")
+        with open(run_dir / "model_summary.txt", "w", encoding="utf-8") as f:
+            f.write(summary_text + "\n")
+
     log(
         f"run_id={args.run_id} backend={backend} device={device} dtype={amp_dtype} "
-        f"params={param_count} logical_layers={args.num_layers} shared_blocks={args.num_shared_blocks} "
+        f"stored_params={physical_param_count} functional_params={logical_param_count} "
+        f"sharing_ratio={sharing_ratio:.4f} logical_layers={args.num_layers} shared_blocks={args.num_shared_blocks} "
         f"share_pattern={args.share_pattern} layer_map={report_model.layer_to_block_map()} eval_mode={eval_mode}"
+    )
+    log(
+        f"train_plan epochs={args.num_epochs} max_steps={args.max_steps} steps_per_epoch={epoch_plan_info['steps_per_epoch']} "
+        f"planned_total_steps={planned_total_steps} total_training_steps={total_training_steps} "
+        f"usable_target_tokens_per_epoch={epoch_plan_info['usable_target_tokens']} "
+        f"planned_target_tokens_per_epoch={epoch_plan_info['planned_target_tokens']} "
+        f"dropped_target_tokens_per_epoch={epoch_plan_info['dropped_target_tokens']}"
     )
     log(
         f"x0_shortcut={args.use_x0_shortcut} resid_mix_init={args.resid_mix_init} "
         f"global_rotary=1 enable_gqa_probe={int(SDPA_ENABLE_GQA)}"
+    )
+    log(
+        "model_init "
+        f"stored_params={int(param_report['stored_params'])} "
+        f"stored_trainable_params={int(param_report['stored_trainable_params'])} "
+        f"functional_params={int(param_report['functional_params'])} "
+        f"functional_trainable_params={int(param_report['functional_trainable_params'])} "
+        f"shared_block_stored_params={int(param_report['shared_block_stored_params'])} "
+        f"shared_block_functional_params={int(param_report['shared_block_functional_params'])} "
+        f"nonshared_stored_params={int(param_report['nonshared_stored_params'])} "
+        f"sharing_ratio={float(param_report['sharing_ratio']):.6f}"
     )
     if metric.kind == "none":
         log(
@@ -1616,26 +2195,187 @@ def main() -> None:
         log(f"val_bpb=enabled metric_kind={metric.kind}")
 
     if args.report_artifact:
-        report = artifact_report(report_model, Path(__file__), args)
-        log("artifact_init " + " ".join(f"{k}={v}" for k, v in report.items()))
-    else:
-        report = {}
+        log(
+            "size_init "
+            f"stored_parameter_bytes={int(footprint_report['stored_parameter_bytes'])} "
+            f"state_dict_bytes={int(footprint_report['state_dict_bytes'])} "
+            f"checkpoint_bytes={int(footprint_report['checkpoint_bytes'])} "
+            f"checkpoint_zlib_bytes={int(footprint_report['checkpoint_zlib_bytes'])} "
+            f"int8_payload_bytes={int(footprint_report['int8_payload_bytes'])} "
+            f"int8_payload_zlib_bytes={int(footprint_report['int8_payload_zlib_bytes'])} "
+            f"code_bytes={int(footprint_report['code_bytes'])} "
+            f"artifact_bytes={int(footprint_report['artifact_bytes'])}"
+        )
+        log(
+            "payload_init "
+            f"int8_payload_quantized_numel={int(footprint_report['int8_payload_quantized_numel'])} "
+            f"int8_payload_scale_numel={int(footprint_report['int8_payload_scale_numel'])} "
+            f"int8_payload_passthrough_numel={int(footprint_report['int8_payload_passthrough_numel'])} "
+            f"int8_payload_total_tensor_numel={int(footprint_report['int8_payload_total_tensor_numel'])}"
+        )
+
+    wandb_config = asdict(args) | {
+        "backend": backend,
+        "resolved_eval_mode": eval_mode,
+        "layer_map": report_model.layer_to_block_map(),
+        "steps_per_epoch": epoch_plan_info["steps_per_epoch"],
+        "planned_total_steps": planned_total_steps,
+        "total_training_steps": total_training_steps,
+        "model_stored_params": int(param_report["stored_params"]),
+        "model_stored_trainable_params": int(param_report["stored_trainable_params"]),
+        "model_functional_params": int(param_report["functional_params"]),
+        "model_functional_trainable_params": int(
+            param_report["functional_trainable_params"]
+        ),
+        "model_shared_block_stored_params": int(
+            param_report["shared_block_stored_params"]
+        ),
+        "model_shared_block_functional_params": int(
+            param_report["shared_block_functional_params"]
+        ),
+        "model_nonshared_stored_params": int(param_report["nonshared_stored_params"]),
+        "sharing_ratio": float(param_report["sharing_ratio"]),
+    }
+    if args.report_artifact:
+        wandb_config |= {
+            "model_stored_parameter_bytes_init": int(
+                footprint_report["stored_parameter_bytes"]
+            ),
+            "model_state_dict_bytes_init": int(footprint_report["state_dict_bytes"]),
+            "model_checkpoint_bytes_init": int(footprint_report["checkpoint_bytes"]),
+            "model_checkpoint_zlib_bytes_init": int(
+                footprint_report["checkpoint_zlib_bytes"]
+            ),
+            "int8_payload_bytes_init": int(footprint_report["int8_payload_bytes"]),
+            "model_int8_payload_zlib_bytes_init": int(
+                footprint_report["int8_payload_zlib_bytes"]
+            ),
+            "model_code_bytes": int(footprint_report["code_bytes"]),
+            "model_artifact_bytes_init": int(footprint_report["artifact_bytes"]),
+            "int8_payload_quantized_numel": int(
+                footprint_report["int8_payload_quantized_numel"]
+            ),
+            "int8_payload_scale_numel": int(
+                footprint_report["int8_payload_scale_numel"]
+            ),
+            "int8_payload_passthrough_numel": int(
+                footprint_report["int8_payload_passthrough_numel"]
+            ),
+            "int8_payload_total_tensor_numel": int(
+                footprint_report["int8_payload_total_tensor_numel"]
+            ),
+        }
 
     wandb_logger = WandbLogger(
         args,
         enabled=master_process and args.wandb_enable,
-        config=asdict(args)
-        | {
-            "backend": backend,
-            "resolved_eval_mode": eval_mode,
-            "param_count": param_count,
-            "layer_map": report_model.layer_to_block_map(),
-        },
+        config=wandb_config,
     )
     if master_process:
-        init_metrics = {"model/param_count": param_count}
-        init_metrics.update({f"artifact/{k}": v for k, v in report.items()})
+        init_metrics = {
+            "model/stored_params": int(param_report["stored_params"]),
+            "model/stored_trainable_params": int(
+                param_report["stored_trainable_params"]
+            ),
+            "model/functional_params": int(param_report["functional_params"]),
+            "model/functional_trainable_params": int(
+                param_report["functional_trainable_params"]
+            ),
+            "model/shared_block_stored_params": int(
+                param_report["shared_block_stored_params"]
+            ),
+            "model/shared_block_functional_params": int(
+                param_report["shared_block_functional_params"]
+            ),
+            "model/nonshared_stored_params": int(
+                param_report["nonshared_stored_params"]
+            ),
+            "model/sharing_ratio": float(param_report["sharing_ratio"]),
+            "train/total_steps": total_training_steps,
+        }
+        if args.report_artifact:
+            init_metrics.update(
+                {
+                    f"artifact/{k}": v
+                    for k, v in footprint_report.items()
+                    if k not in param_report
+                }
+            )
         wandb_logger.log(init_metrics, step=0)
+        wandb_logger.update_summary(init_metrics)
+
+    param_report_keys = set(param_report.keys())
+
+    def record_run_footprint(
+        step: int,
+        checkpoint_path: Optional[Path] = None,
+        export_path: Optional[Path] = None,
+    ) -> None:
+        if not master_process:
+            return
+        final_report = (
+            model_footprint_report(report_model, Path(__file__), args)
+            if args.report_artifact
+            else compute_logical_parameter_counts(report_model)
+        )
+        if checkpoint_path is not None and checkpoint_path.exists():
+            final_report["saved_checkpoint_bytes"] = int(checkpoint_path.stat().st_size)
+        if export_path is not None and export_path.exists():
+            final_report["saved_int8_payload_bytes"] = int(export_path.stat().st_size)
+        log(
+            "model_final "
+            f"stored_params={int(final_report['stored_params'])} "
+            f"stored_trainable_params={int(final_report['stored_trainable_params'])} "
+            f"functional_params={int(final_report['functional_params'])} "
+            f"functional_trainable_params={int(final_report['functional_trainable_params'])} "
+            f"shared_block_stored_params={int(final_report['shared_block_stored_params'])} "
+            f"shared_block_functional_params={int(final_report['shared_block_functional_params'])} "
+            f"nonshared_stored_params={int(final_report['nonshared_stored_params'])} "
+            f"sharing_ratio={float(final_report['sharing_ratio']):.6f}"
+        )
+        final_param_metrics = {
+            "model/stored_params": int(final_report["stored_params"]),
+            "model/stored_trainable_params": int(
+                final_report["stored_trainable_params"]
+            ),
+            "model/functional_params": int(final_report["functional_params"]),
+            "model/functional_trainable_params": int(
+                final_report["functional_trainable_params"]
+            ),
+            "model/shared_block_stored_params": int(
+                final_report["shared_block_stored_params"]
+            ),
+            "model/shared_block_functional_params": int(
+                final_report["shared_block_functional_params"]
+            ),
+            "model/nonshared_stored_params": int(
+                final_report["nonshared_stored_params"]
+            ),
+            "model/sharing_ratio": float(final_report["sharing_ratio"]),
+        }
+        wandb_logger.log(final_param_metrics, step=step)
+        wandb_logger.update_summary(final_param_metrics)
+        if args.report_artifact:
+            log(
+                "size_final "
+                f"stored_parameter_bytes={int(final_report['stored_parameter_bytes'])} "
+                f"state_dict_bytes={int(final_report['state_dict_bytes'])} "
+                f"checkpoint_bytes={int(final_report['checkpoint_bytes'])} "
+                f"checkpoint_zlib_bytes={int(final_report['checkpoint_zlib_bytes'])} "
+                f"int8_payload_bytes={int(final_report['int8_payload_bytes'])} "
+                f"int8_payload_zlib_bytes={int(final_report['int8_payload_zlib_bytes'])} "
+                f"code_bytes={int(final_report['code_bytes'])} "
+                f"artifact_bytes={int(final_report['artifact_bytes'])} "
+                f"saved_checkpoint_bytes={int(final_report.get('saved_checkpoint_bytes', 0))} "
+                f"saved_int8_payload_bytes={int(final_report.get('saved_int8_payload_bytes', 0))}"
+            )
+            artifact_metrics = {
+                f"artifact/{k}": v
+                for k, v in final_report.items()
+                if k not in param_report_keys
+            }
+            wandb_logger.log(artifact_metrics, step=step)
+            wandb_logger.update_summary(artifact_metrics)
 
     def run_eval(step: int) -> None:
         nonlocal eval_batch_tokens
@@ -1711,6 +2451,17 @@ def main() -> None:
         run_eval(step=0)
         if master_process:
             final_state = report_model.state_dict()
+            checkpoint_path: Optional[Path] = None
+            export_path: Optional[Path] = None
+            if args.save_path:
+                checkpoint_path = Path(args.save_path)
+                checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+                torch.save(
+                    {"config": asdict(args), "model": final_state}, checkpoint_path
+                )
+                log(
+                    f"saved_checkpoint={checkpoint_path} bytes={checkpoint_path.stat().st_size}"
+                )
             if args.export_int8_path:
                 export_path = Path(args.export_int8_path)
                 export_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1721,101 +2472,139 @@ def main() -> None:
                 )
                 torch.save(payload, export_path)
                 log(
-                    f"saved_int8_payload={export_path} zlib_bytes={serialized_zlib_nbytes(payload)}"
+                    f"saved_int8_payload={export_path} bytes={export_path.stat().st_size} "
+                    f"zlib_bytes={serialized_zlib_nbytes(payload)}"
                 )
+            record_run_footprint(
+                step=0, checkpoint_path=checkpoint_path, export_path=export_path
+            )
         wandb_logger.finish()
         if distributed:
             dist.destroy_process_group()
         return
 
     start_time = time.time()
+    completed_steps = 0
+    processed_train_tokens = 0
+    last_eval_step = -1
+    stop_reason = "end_of_data"
 
-    for step in range(1, args.iterations + 1):
-        if (
-            args.max_wallclock_seconds > 0.0
-            and (time.time() - start_time) >= args.max_wallclock_seconds
-        ):
-            log(
-                f"Stopping at step={step - 1} due to MAX_WALLCLOCK_SECONDS={args.max_wallclock_seconds}"
+    for epoch in range(1, args.num_epochs + 1):
+        train_loader.reset()
+        for epoch_step_idx, micro_specs in enumerate(epoch_steps, start=1):
+            if args.max_steps > 0 and completed_steps >= args.max_steps:
+                stop_reason = f"max_steps={args.max_steps}"
+                break
+            if (
+                args.max_wallclock_seconds > 0.0
+                and (time.time() - start_time) >= args.max_wallclock_seconds
+            ):
+                stop_reason = f"max_wallclock_seconds={args.max_wallclock_seconds}"
+                break
+
+            completed_steps += 1
+            model.train()
+            optimizer.zero_grad(set_to_none=True)
+            step_loss_sum = 0.0
+            step_token_count = 0
+            step_global_token_count = int(
+                sum(spec.global_target_tokens for spec in micro_specs)
             )
+            step_local_token_count = int(
+                sum(spec.local_batch_size * spec.seq_len for spec in micro_specs)
+            )
+
+            lr = get_lr(completed_steps - 1, total_training_steps, args)
+            for group in optimizer.param_groups:
+                group["lr"] = lr
+
+            for micro_step, spec in enumerate(micro_specs):
+                x, y = train_loader.next_batch(
+                    local_batch_size=spec.local_batch_size, seq_len=spec.seq_len
+                )
+                is_last_micro = micro_step == len(micro_specs) - 1
+                sync_context = (
+                    model.no_sync if distributed and not is_last_micro else nullcontext
+                )
+                with sync_context():
+                    with autocast_context(device_type, amp_dtype, use_autocast):
+                        loss_sum = model(x, y, loss_reduction="sum")
+                        token_count = int(y.numel())
+                        loss = loss_sum / float(max(1, step_local_token_count))
+                    loss.backward()
+
+                step_loss_sum += float(loss_sum.item())
+                step_token_count += token_count
+
+            if args.grad_clip_norm > 0.0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip_norm)
+            optimizer.step()
+            processed_train_tokens += step_global_token_count
+
+            stats = torch.tensor(
+                [step_loss_sum, float(step_token_count)],
+                device=device,
+                dtype=torch.float64,
+            )
+            if distributed:
+                dist.all_reduce(stats, op=dist.ReduceOp.SUM)
+            train_loss = float(stats[0].item() / max(1.0, stats[1].item()))
+
+            should_log = (
+                completed_steps == 1
+                or completed_steps % args.train_log_every == 0
+                or completed_steps == total_training_steps
+            )
+            if master_process and should_log:
+                elapsed = time.time() - start_time
+                toks_per_sec = float(processed_train_tokens) / max(elapsed, 1e-6)
+                log(
+                    f"epoch={epoch} epoch_step={epoch_step_idx}/{len(epoch_steps)} step={completed_steps}/{total_training_steps} "
+                    f"lr={lr:.6g} train_loss={train_loss:.6f} step_tokens={step_global_token_count} "
+                    f"processed_tokens={processed_train_tokens} elapsed_s={elapsed:.2f} tokens_per_s={toks_per_sec:.2f}"
+                )
+                wandb_logger.log(
+                    {
+                        "train/loss": train_loss,
+                        "train/lr": lr,
+                        "train/step_tokens": step_global_token_count,
+                        "train/processed_tokens": processed_train_tokens,
+                        "train/tokens_per_s": toks_per_sec,
+                        "train/epoch": epoch,
+                    },
+                    step=completed_steps,
+                )
+
+            should_eval = args.val_loss_every > 0 and (
+                completed_steps % args.val_loss_every == 0
+                or completed_steps == total_training_steps
+            )
+            if should_eval:
+                run_eval(completed_steps)
+                last_eval_step = completed_steps
+
+        if stop_reason != "end_of_data":
             break
 
-        model.train()
-        optimizer.zero_grad(set_to_none=True)
-        step_loss_sum = 0.0
-        step_token_count = 0
-
-        lr = get_lr(step - 1, args)
-        for group in optimizer.param_groups:
-            group["lr"] = lr
-
-        for micro_step in range(args.grad_accum_steps):
-            if backend == "parameter_golf":
-                x, y = train_loader.next_batch(
-                    global_batch_size=global_batch_size, seq_len=args.train_seq_len
-                )
-            else:
-                x, y = train_loader.next_batch(
-                    batch_size=local_batch_size, seq_len=args.train_seq_len
-                )
-
-            sync_context = (
-                model.no_sync
-                if distributed and micro_step < args.grad_accum_steps - 1
-                else nullcontext
-            )
-            with sync_context():
-                with autocast_context(device_type, amp_dtype, use_autocast):
-                    loss_sum = model(x, y, loss_reduction="sum")
-                    token_count = int(y.numel())
-                    loss = loss_sum / float(token_count * args.grad_accum_steps)
-                loss.backward()
-
-            step_loss_sum += float(loss_sum.item())
-            step_token_count += token_count
-
-        if args.grad_clip_norm > 0.0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip_norm)
-        optimizer.step()
-
-        stats = torch.tensor(
-            [step_loss_sum, float(step_token_count)], device=device, dtype=torch.float64
-        )
-        if distributed:
-            dist.all_reduce(stats, op=dist.ReduceOp.SUM)
-        train_loss = float(stats[0].item() / max(1.0, stats[1].item()))
-
-        if master_process and (
-            step == 1 or step % args.train_log_every == 0 or step == args.iterations
-        ):
-            elapsed = time.time() - start_time
-            toks_per_sec = float(step * args.train_batch_tokens) / max(elapsed, 1e-6)
-            log(
-                f"step={step} lr={lr:.6g} train_loss={train_loss:.6f} "
-                f"elapsed_s={elapsed:.2f} tokens_per_s={toks_per_sec:.2f}"
-            )
-            wandb_logger.log(
-                {
-                    "train/loss": train_loss,
-                    "train/lr": lr,
-                    "train/tokens_per_s": toks_per_sec,
-                },
-                step=step,
-            )
-
-        should_eval = args.val_loss_every > 0 and (
-            step % args.val_loss_every == 0 or step == args.iterations
-        )
-        if should_eval:
-            run_eval(step)
-
+    if (
+        completed_steps > 0
+        and args.val_loss_every > 0
+        and last_eval_step != completed_steps
+    ):
+        run_eval(completed_steps)
+        last_eval_step = completed_steps
     if master_process:
+        log(f"train_stop step={completed_steps} reason={stop_reason}")
         final_state = report_model.state_dict()
+        checkpoint_path: Optional[Path] = None
+        export_path: Optional[Path] = None
         if args.save_path:
-            save_path = Path(args.save_path)
-            save_path.parent.mkdir(parents=True, exist_ok=True)
-            torch.save({"config": asdict(args), "model": final_state}, save_path)
-            log(f"saved_checkpoint={save_path}")
+            checkpoint_path = Path(args.save_path)
+            checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+            torch.save({"config": asdict(args), "model": final_state}, checkpoint_path)
+            log(
+                f"saved_checkpoint={checkpoint_path} bytes={checkpoint_path.stat().st_size}"
+            )
         if args.export_int8_path:
             export_path = Path(args.export_int8_path)
             export_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1826,14 +2615,14 @@ def main() -> None:
             )
             torch.save(payload, export_path)
             log(
-                f"saved_int8_payload={export_path} zlib_bytes={serialized_zlib_nbytes(payload)}"
+                f"saved_int8_payload={export_path} bytes={export_path.stat().st_size} "
+                f"zlib_bytes={serialized_zlib_nbytes(payload)}"
             )
-        if args.report_artifact:
-            report = artifact_report(report_model, Path(__file__), args)
-            log("artifact_final " + " ".join(f"{k}={v}" for k, v in report.items()))
-            wandb_logger.log(
-                {f"artifact/{k}": v for k, v in report.items()}, step=args.iterations
-            )
+        record_run_footprint(
+            step=completed_steps,
+            checkpoint_path=checkpoint_path,
+            export_path=export_path,
+        )
 
     wandb_logger.finish()
 
