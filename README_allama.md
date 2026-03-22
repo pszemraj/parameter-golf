@@ -311,6 +311,12 @@ The training helper `scripts/run_allama_ablations.sh` is intentionally training-
 bash scripts/run_allama_ablations.sh
 ```
 
+It now prints its own launch summary before starting, including `total_runs`, batch settings, and local batch size.
+There are two intended modes:
+
+- default `SWEEP_PROFILE=screen`: 4 runs total, baseline block only
+- `SWEEP_PROFILE=full`: 28 runs total, all blocks enabled
+
 It also exports `TORCH_BLAS_PREFER_CUBLASLT=1` for 5090-friendly CUDA BLAS selection.
 The trainer now supports `SDPA_BACKEND=auto|flash|efficient|math|cudnn` for explicit SDPA backend experiments.
 
@@ -324,12 +330,21 @@ Batch semantics matter here:
 - in [train_gpt.py](train_gpt.py), `TRAIN_BATCH_TOKENS=524288` is the effective optimizer-step batch, not the one-GPU microbatch
 - on `WORLD_SIZE=1`, that trainer also uses `grad_accum_steps=8`, so the per-microstep token count is `524288 / 8 = 65536`
 - the old allama `65536` setting came from that microstep number, not from `train_gpt.py`'s actual effective batch
+- the display-attached 5090 locally proved happier with `local_batch_size=2` than with `local_batch_size=4`; the old `524288/128` setting eventually hit a launch-timeout failure on `wide_ff15`
 
-So the allama training sweep now uses the `train_gpt.py` effective batch target directly:
+So the script now defaults to the safer local screen profile:
 
-- `TRAIN_BATCH_TOKENS=524288`
+- `TRAIN_BATCH_TOKENS=262144`
+- `GRAD_ACCUM_STEPS=128`
+- `local_batch_size=2`
+- `ITERATIONS=750`
+- `VAL_LOSS_EVERY=250`
 
-The trainer's own default env values are still smaller; this is a sweep-script override, not a global trainer-default change.
+If you want the larger effective batch while keeping the same safe local microbatch, override both:
+
+```bash
+TRAIN_BATCH_TOKENS=524288 GRAD_ACCUM_STEPS=256 bash scripts/run_allama_ablations.sh
+```
 
 Current 5090 compile/VRAM check says the compile-safe accumulation setting is:
 
@@ -339,16 +354,25 @@ Current 5090 compile/VRAM check says the compile-safe accumulation setting is:
 - `GRAD_ACCUM_STEPS=128` (`local_batch_size=4`) succeeded under `--compile`
 - at that passing point, a 1-step smoke hit `max_memory_reserved=4.834 GiB` and `max_memory_allocated=4.776 GiB`
 
-The current aligned family set also passed serialized cold `--compile` 4-step smokes at those same batch settings.
+The current aligned family set also passed serialized cold `--compile` 4-step smokes at those same batch settings, and the script now defaults to the smaller `262144/128` screen profile to avoid the later desktop-watchdog timeout that showed up in a longer real run.
 
 So the sweep defaults are:
 
-- `TRAIN_BATCH_TOKENS=524288`
+- `SWEEP_PROFILE=screen`
+- `TRAIN_BATCH_TOKENS=262144`
 - `GRAD_ACCUM_STEPS=128`
+- `local_batch_size=2`
+- `ITERATIONS=750`
 - `RUN_COMPILE=1`
-- `VAL_LOSS_EVERY=500`
+- `VAL_LOSS_EVERY=250`
 
-That is conservative on VRAM, but it is the first verified compile-safe point for the worst-case family on the current 5090 stack. If you disable compile, you can experiment with lower accumulation separately, but the training helper keeps the compile-safe default.
+And the opt-in full blocked sweep is:
+
+- `SWEEP_PROFILE=full`
+- `total_runs=28`
+- `ITERATIONS=2000`
+
+That keeps the local default in the “useful screen, not overnight accident” regime while still leaving the full sweep available explicitly.
 
 One backend knob is worth keeping available but not forcing by default:
 
