@@ -25,6 +25,7 @@ import json
 import math
 import os
 import random
+import sys
 import time
 import uuid
 import zlib
@@ -1540,6 +1541,7 @@ def configure_cuda_precision() -> None:
         # PyTorch 2.10+ precision hierarchy: keep IEEE globally, enable TF32 where
         # it is the standard low-risk training fast path.
         torch.backends.fp32_precision = "ieee"
+        torch.backends.cudnn.fp32_precision = "ieee"
         torch.backends.cuda.matmul.fp32_precision = "tf32"
         torch.backends.cudnn.conv.fp32_precision = "tf32"
         return
@@ -2064,7 +2066,7 @@ def maybe_load_model_weights(
 
 
 def main() -> None:
-    cli = parse_cli_overrides(tuple(os.sys.argv[1:]))
+    cli = parse_cli_overrides(tuple(sys.argv[1:]))
     args = Hyperparameters.from_env(cli)
     distributed, rank, world_size, _local_rank, device, master_process = (
         init_distributed_and_device(args)
