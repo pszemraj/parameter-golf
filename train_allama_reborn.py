@@ -29,7 +29,7 @@ import sys
 import time
 import uuid
 import zlib
-from contextlib import nullcontext
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
@@ -63,6 +63,12 @@ except Exception:  # pragma: no cover
 
 
 def env_bool(name: str, default: bool) -> bool:
+    """Parse a boolean environment variable with permissive truthy aliases.
+
+    :param str name: Environment variable name to read.
+    :param bool default: Value to use when the variable is unset.
+    :return bool: Parsed boolean value.
+    """
     value = os.environ.get(name)
     if value is None:
         return default
@@ -70,11 +76,22 @@ def env_bool(name: str, default: bool) -> bool:
 
 
 def env_csv(name: str, default: str = "") -> list[str]:
+    """Split a comma-delimited environment variable into trimmed items.
+
+    :param str name: Environment variable name to read.
+    :param str default: Fallback CSV string when the variable is unset.
+    :return list[str]: Non-empty trimmed items.
+    """
     raw = os.environ.get(name, default)
     return [part.strip() for part in raw.split(",") if part.strip()]
 
 
 def normalize_wandb_watch_mode(value: str) -> str:
+    """Normalize the configured W&B watch mode to a supported value.
+
+    :param str value: Raw watch mode string from configuration.
+    :return str: Canonical W&B watch mode.
+    """
     mode = value.strip().lower()
     if mode in {"", "0", "false", "none", "off"}:
         return "off"
@@ -86,6 +103,11 @@ def normalize_wandb_watch_mode(value: str) -> str:
 
 
 def normalize_sdpa_backend(value: str) -> str:
+    """Normalize SDPA backend aliases to the trainer's canonical names.
+
+    :param str value: Raw backend selection string from configuration.
+    :return str: Canonical SDPA backend name.
+    """
     backend = value.strip().lower()
     aliases = {
         "default": "auto",
@@ -104,10 +126,17 @@ def normalize_sdpa_backend(value: str) -> str:
 
 @dataclass(frozen=True)
 class CliOverrides:
+    """Command-line overrides that take precedence over environment defaults."""
+
     compile_model: Optional[bool]
 
 
 def parse_cli_overrides(argv: Sequence[str]) -> CliOverrides:
+    """Parse supported one-off CLI overrides for the trainer entrypoint.
+
+    :param Sequence[str] argv: Command-line arguments passed after the script name.
+    :return CliOverrides: Parsed CLI override values.
+    """
     parser = argparse.ArgumentParser(allow_abbrev=False)
     compile_group = parser.add_mutually_exclusive_group()
     compile_group.add_argument(
@@ -129,6 +158,8 @@ def parse_cli_overrides(argv: Sequence[str]) -> CliOverrides:
 
 @dataclass
 class Hyperparameters:
+    """Fully resolved trainer configuration loaded from environment variables."""
+
     # Data
     data_backend: str
     data_path: str
@@ -227,6 +258,11 @@ class Hyperparameters:
 
     @classmethod
     def from_env(cls, cli: Optional[CliOverrides] = None) -> "Hyperparameters":
+        """Build a hyperparameter bundle from environment variables and CLI overrides.
+
+        :param Optional[CliOverrides] cli: Parsed CLI overrides, if any.
+        :return Hyperparameters: Fully resolved trainer configuration.
+        """
         data_path = os.environ.get("DATA_PATH", "./data/datasets/fineweb10B_sp1024")
         wandb_project = os.environ.get("WANDB_PROJECT", "")
         wandb_enable = env_bool("WANDB", False) or bool(wandb_project)
@@ -344,7 +380,15 @@ class Hyperparameters:
 # -----------------------------------------------------------------------------
 
 
-def init_distributed_and_device(args: Hyperparameters):
+def init_distributed_and_device(
+    args: Hyperparameters,
+) -> tuple[bool, int, int, int, torch.device, bool]:
+    """Initialize distributed state and return the resolved runtime device tuple.
+
+    :param Hyperparameters args: Trainer configuration with the requested device.
+    :return tuple[bool, int, int, int, torch.device, bool]: Distributed flag, rank,
+        world size, local rank, resolved device, and master-process flag.
+    """
     distributed = "RANK" in os.environ and "WORLD_SIZE" in os.environ
     rank = int(os.environ.get("RANK", "0"))
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
@@ -387,6 +431,11 @@ def init_distributed_and_device(args: Hyperparameters):
 
 
 def infer_backend(args: Hyperparameters) -> str:
+    """Infer which dataset backend to use from the configured paths.
+
+    :param Hyperparameters args: Trainer configuration with dataset paths.
+    :return str: Resolved dataset backend name.
+    """
     if args.data_backend != "auto":
         return args.data_backend
     if glob.glob(args.train_files):
@@ -399,6 +448,11 @@ def infer_backend(args: Hyperparameters) -> str:
 
 
 def load_parameter_golf_shard(file: Path) -> Tensor:
+    """Load one Parameter Golf shard file into a 1D token tensor.
+
+    :param Path file: Shard file to load.
+    :return Tensor: Flat token tensor read from the shard.
+    """
     header = np.fromfile(file, dtype="<i4", count=256)
     if header.size != 256 or int(header[0]) != 20240520 or int(header[1]) != 1:
         raise ValueError(f"Unexpected shard header for {file}")
@@ -411,6 +465,11 @@ def load_parameter_golf_shard(file: Path) -> Tensor:
 
 
 def count_parameter_golf_shard_tokens(file: Path) -> int:
+    """Read only the token count from a Parameter Golf shard header.
+
+    :param Path file: Shard file whose header should be inspected.
+    :return int: Token count recorded in the shard header.
+    """
     header = np.fromfile(file, dtype="<i4", count=256)
     if header.size != 256 or int(header[0]) != 20240520 or int(header[1]) != 1:
         raise ValueError(f"Unexpected shard header for {file}")
@@ -418,9 +477,16 @@ def count_parameter_golf_shard_tokens(file: Path) -> int:
 
 
 class FiniteTokenStream:
+    """Finite token reader that yields exact contiguous spans across files or tensors."""
+
     def __init__(
         self, files: Optional[list[Path]] = None, tensor: Optional[Tensor] = None
     ):
+        """Create a token stream backed by shard files or a single in-memory tensor.
+
+        :param Optional[list[Path]] files: Ordered shard files to stream from.
+        :param Optional[Tensor] tensor: In-memory flat token tensor to stream from.
+        """
         if (files is None) == (tensor is None):
             raise ValueError(
                 "Provide exactly one of files or tensor to FiniteTokenStream"
@@ -441,6 +507,7 @@ class FiniteTokenStream:
         self.reset()
 
     def reset(self) -> None:
+        """Reset traversal state so the stream can be read again from the start."""
         self.read_tokens = 0
         self.carry: Optional[Tensor] = None
         if self.files is not None:
@@ -453,6 +520,7 @@ class FiniteTokenStream:
             self.current_pos = 0
 
     def _ensure_file_loaded(self) -> None:
+        """Load the current shard if needed and skip empty files."""
         if self.files is None:
             return
         while self.current_tokens is None and self.file_idx < len(self.files):
@@ -463,6 +531,7 @@ class FiniteTokenStream:
                 self.current_tokens = None
 
     def _advance_file(self) -> None:
+        """Advance to the next shard and prefetch it if available."""
         if self.files is None:
             return
         self.file_idx += 1
@@ -471,6 +540,11 @@ class FiniteTokenStream:
         self._ensure_file_loaded()
 
     def _read_new_exact(self, n: int) -> Tensor:
+        """Read exactly ``n`` unread tokens without reusing the carry token.
+
+        :param int n: Number of unread source tokens to consume.
+        :return Tensor: Contiguous token chunk of length ``n``.
+        """
         if n < 0:
             raise ValueError(f"n must be non-negative, got {n}")
         if n == 0:
@@ -504,15 +578,28 @@ class FiniteTokenStream:
         return chunks[0] if len(chunks) == 1 else torch.cat(chunks, dim=0)
 
     def remaining_unread_tokens(self) -> int:
+        """Return the number of unread source tokens left in the stream.
+
+        :return int: Remaining unread source tokens.
+        """
         return max(0, self.total_tokens - self.read_tokens)
 
     def remaining_target_tokens(self) -> int:
+        """Return the number of next-token prediction targets still available.
+
+        :return int: Remaining usable next-token targets.
+        """
         unread = self.remaining_unread_tokens()
         if self.carry is None:
             return max(0, unread - 1)
         return unread
 
     def take_targets_exact(self, target_tokens: int) -> Tensor:
+        """Return a chunk containing exactly ``target_tokens`` prediction targets.
+
+        :param int target_tokens: Number of next-token targets to materialize.
+        :return Tensor: Token chunk of length ``target_tokens + 1`` including carry.
+        """
         if target_tokens <= 0:
             raise ValueError(f"target_tokens must be positive, got {target_tokens}")
         if target_tokens > self.remaining_target_tokens():
@@ -529,6 +616,8 @@ class FiniteTokenStream:
 
 
 class SequentialDistributedTokenLoader:
+    """Rank-aware sequential batch loader for next-token training data."""
+
     def __init__(
         self,
         stream: FiniteTokenStream,
@@ -536,6 +625,13 @@ class SequentialDistributedTokenLoader:
         world_size: int,
         device: torch.device,
     ):
+        """Wrap a finite token stream for one rank in a distributed job.
+
+        :param FiniteTokenStream stream: Backing token stream.
+        :param int rank: Current distributed rank.
+        :param int world_size: Total number of distributed ranks.
+        :param torch.device device: Device that batches should be moved onto.
+        """
         self.rank = rank
         self.world_size = world_size
         self.device = device
@@ -545,6 +641,14 @@ class SequentialDistributedTokenLoader:
     def from_pattern(
         cls, pattern: str, rank: int, world_size: int, device: torch.device
     ) -> "SequentialDistributedTokenLoader":
+        """Build a loader from a glob pattern of Parameter Golf shards.
+
+        :param str pattern: Glob pattern matching training shards.
+        :param int rank: Current distributed rank.
+        :param int world_size: Total number of distributed ranks.
+        :param torch.device device: Device that batches should be moved onto.
+        :return SequentialDistributedTokenLoader: Loader backed by matching shards.
+        """
         files = [Path(p) for p in sorted(glob.glob(pattern))]
         if not files:
             raise FileNotFoundError(f"No files found for pattern: {pattern}")
@@ -559,6 +663,14 @@ class SequentialDistributedTokenLoader:
     def from_tensor(
         cls, tokens: Tensor, rank: int, world_size: int, device: torch.device
     ) -> "SequentialDistributedTokenLoader":
+        """Build a loader from a flat token tensor.
+
+        :param Tensor tokens: Flat token tensor used as the data source.
+        :param int rank: Current distributed rank.
+        :param int world_size: Total number of distributed ranks.
+        :param torch.device device: Device that batches should be moved onto.
+        :return SequentialDistributedTokenLoader: Loader backed by ``tokens``.
+        """
         return cls(
             FiniteTokenStream(tensor=tokens.long().contiguous()),
             rank=rank,
@@ -568,25 +680,44 @@ class SequentialDistributedTokenLoader:
 
     @property
     def total_tokens(self) -> int:
+        """Return the total number of source tokens visible to the stream.
+
+        :return int: Total number of source tokens.
+        """
         return self.stream.total_tokens
 
     @property
     def total_target_tokens(self) -> int:
+        """Return the total number of usable next-token targets after rank trimming.
+
+        :return int: Total usable next-token targets for the loader.
+        """
         total = max(0, self.total_tokens - 1)
         if self.world_size > 1:
             total -= total % self.world_size
         return total
 
     def reset(self) -> None:
+        """Reset the underlying stream to the beginning."""
         self.stream.reset()
 
     def remaining_target_tokens(self) -> int:
+        """Return the remaining usable next-token targets for the loader.
+
+        :return int: Remaining usable next-token targets.
+        """
         remaining = self.stream.remaining_target_tokens()
         if self.world_size > 1:
             remaining -= remaining % self.world_size
         return max(0, remaining)
 
     def next_batch(self, local_batch_size: int, seq_len: int) -> tuple[Tensor, Tensor]:
+        """Materialize the next local training batch on the target device.
+
+        :param int local_batch_size: Number of sequences assigned to this rank.
+        :param int seq_len: Sequence length per sample.
+        :return tuple[Tensor, Tensor]: Input and target batches on ``self.device``.
+        """
         if local_batch_size <= 0 or seq_len <= 0:
             raise ValueError(
                 f"local_batch_size and seq_len must be positive, got {local_batch_size}, {seq_len}"
@@ -611,6 +742,13 @@ class SequentialDistributedTokenLoader:
 def load_enwik8(
     path: Path, train_split: float, byte_limit: int
 ) -> tuple[Tensor, Tensor]:
+    """Load enwik8 bytes and split them into train and validation tensors.
+
+    :param Path path: Compressed enwik8 file path.
+    :param float train_split: Fraction of bytes assigned to training.
+    :param int byte_limit: Maximum number of bytes to read from the archive.
+    :return tuple[Tensor, Tensor]: Training and validation byte tensors.
+    """
     if not path.exists():
         raise FileNotFoundError(f"Missing enwik8 file: {path}")
     with gzip.open(path, "rb") as f:
@@ -623,6 +761,11 @@ def load_enwik8(
 
 
 def load_validation_tokens(pattern: str) -> Tensor:
+    """Load and concatenate validation shards for full-dataset evaluation.
+
+    :param str pattern: Glob pattern matching validation shards.
+    :return Tensor: Concatenated validation tokens.
+    """
     files = [Path(p) for p in sorted(glob.glob(pattern))]
     if not files:
         raise FileNotFoundError(f"No files found for pattern: {pattern}")
@@ -640,6 +783,8 @@ def load_validation_tokens(pattern: str) -> Tensor:
 
 @dataclass
 class BpbMetric:
+    """Lookup tables and metadata required to estimate bits-per-byte."""
+
     kind: str
     base_bytes_lut: Optional[Tensor] = None
     has_leading_space_lut: Optional[Tensor] = None
@@ -649,6 +794,13 @@ class BpbMetric:
 def build_sentencepiece_luts(
     sp: "spm.SentencePieceProcessor", vocab_size: int, device: torch.device
 ) -> tuple[Tensor, Tensor, Tensor]:
+    """Build sentencepiece byte-accounting lookup tables on the target device.
+
+    :param spm.SentencePieceProcessor sp: Loaded sentencepiece tokenizer.
+    :param int vocab_size: Model vocabulary size.
+    :param torch.device device: Device where the lookup tables should live.
+    :return tuple[Tensor, Tensor, Tensor]: Base-byte, leading-space, and boundary LUTs.
+    """
     sp_vocab_size = int(sp.vocab_size())
     table_size = max(sp_vocab_size, vocab_size)
     base_bytes_np = np.zeros((table_size,), dtype=np.int16)
@@ -676,6 +828,14 @@ def build_sentencepiece_luts(
 def setup_bpb_metric(
     backend: str, args: Hyperparameters, vocab_size: int, device: torch.device
 ) -> BpbMetric:
+    """Configure byte-accounting metadata for the selected dataset backend.
+
+    :param str backend: Resolved dataset backend name.
+    :param Hyperparameters args: Trainer configuration with tokenizer paths.
+    :param int vocab_size: Model vocabulary size.
+    :param torch.device device: Device where metric lookup tables should live.
+    :return BpbMetric: Byte-accounting metadata for evaluation.
+    """
     if backend == "enwik8":
         return BpbMetric(kind="bytes")
     if (
@@ -702,12 +862,24 @@ def setup_bpb_metric(
 
 
 class RMSNorm(nn.Module):
+    """Root-mean-square normalization with a learned per-channel scale."""
+
     def __init__(self, dim: int, eps: float = 1e-5):
+        """Initialize the RMSNorm scale parameter and epsilon.
+
+        :param int dim: Hidden dimension to normalize.
+        :param float eps: Numerical stability epsilon.
+        """
         super().__init__()
         self.weight = nn.Parameter(torch.ones(dim))
         self.eps = eps
 
     def forward(self, x: Tensor) -> Tensor:
+        """Normalize the last dimension by RMS while preserving input dtype.
+
+        :param Tensor x: Input activations.
+        :return Tensor: RMS-normalized activations.
+        """
         x32 = x.float()
         rms = torch.rsqrt(x32.pow(2).mean(dim=-1, keepdim=True) + self.eps)
         y = x32 * rms
@@ -715,6 +887,13 @@ class RMSNorm(nn.Module):
 
 
 def make_norm(dim: int, norm_kind: str, eps: float) -> nn.Module:
+    """Construct the requested normalization module for one hidden dimension.
+
+    :param int dim: Hidden dimension to normalize.
+    :param str norm_kind: Normalization type name.
+    :param float eps: Numerical stability epsilon.
+    :return nn.Module: Instantiated normalization layer.
+    """
     kind = norm_kind.lower()
     if kind == "rmsnorm":
         return RMSNorm(dim, eps)
@@ -724,7 +903,14 @@ def make_norm(dim: int, norm_kind: str, eps: float) -> nn.Module:
 
 
 class Rotary(nn.Module):
+    """RoPE cache that lazily materializes cosine and sine tables."""
+
     def __init__(self, dim: int, base: float = 10000.0):
+        """Create a rotary embedding helper for one attention head size.
+
+        :param int dim: Rotary dimension per attention head.
+        :param float base: RoPE frequency base.
+        """
         super().__init__()
         inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
@@ -735,6 +921,13 @@ class Rotary(nn.Module):
     def forward(
         self, seq_len: int, device: torch.device, dtype: torch.dtype
     ) -> tuple[Tensor, Tensor]:
+        """Return cached cosine and sine tensors for the requested sequence length.
+
+        :param int seq_len: Sequence length requiring rotary tables.
+        :param torch.device device: Device where the tables should live.
+        :param torch.dtype dtype: Dtype to cast the cached tables to.
+        :return tuple[Tensor, Tensor]: Cosine and sine RoPE caches.
+        """
         if (
             self._cos is None
             or self._sin is None
@@ -753,12 +946,23 @@ class Rotary(nn.Module):
 
 
 def apply_rotary_emb(x: Tensor, cos: Tensor, sin: Tensor) -> Tensor:
+    """Apply rotary position embedding to a query or key tensor.
+
+    :param Tensor x: Query or key tensor with even last dimension.
+    :param Tensor cos: Cosine rotary cache.
+    :param Tensor sin: Sine rotary cache.
+    :return Tensor: Rotated tensor.
+    """
     half = x.size(-1) // 2
     x1, x2 = x[..., :half], x[..., half:]
     return torch.cat((x1 * cos + x2 * sin, x2 * cos - x1 * sin), dim=-1)
 
 
 def probe_sdpa_enable_gqa() -> bool:
+    """Check whether the local PyTorch build accepts ``enable_gqa=True`` in SDPA.
+
+    :return bool: ``True`` when grouped-query SDPA is supported by the runtime.
+    """
     try:
         q = torch.randn(1, 4, 2, 8)
         k = torch.randn(1, 2, 2, 8)
@@ -776,6 +980,12 @@ DeltaSpec = Any
 
 
 def materialize_delta(delta: DeltaSpec, x: Tensor) -> Optional[Tensor]:
+    """Resolve an optional tensor or callback delta against the current activations.
+
+    :param DeltaSpec delta: Tensor, callback, mapping entry, or ``None``.
+    :param Tensor x: Reference activation tensor for device and dtype.
+    :return Optional[Tensor]: Materialized delta tensor or ``None``.
+    """
     if delta is None:
         return None
     out = delta
@@ -794,6 +1004,11 @@ def materialize_delta(delta: DeltaSpec, x: Tensor) -> Optional[Tensor]:
 
 
 def parse_share_pattern(pattern: str) -> tuple[str, int]:
+    """Parse the configured layer-sharing pattern into a normalized representation.
+
+    :param str pattern: Raw share-pattern string from configuration.
+    :return tuple[str, int]: Canonical pattern name and repeat count.
+    """
     p = pattern.strip().lower()
     if p in {"chunk", "contiguous"}:
         return "chunk", 0
@@ -820,6 +1035,8 @@ def parse_share_pattern(pattern: str) -> tuple[str, int]:
 
 
 class CausalSelfAttention(nn.Module):
+    """Causal self-attention block with optional grouped-query attention."""
+
     def __init__(
         self,
         dim: int,
@@ -830,6 +1047,16 @@ class CausalSelfAttention(nn.Module):
         resid_dropout: float,
         use_bias: bool,
     ):
+        """Initialize the shared QKV projection and output projection layers.
+
+        :param int dim: Model hidden dimension.
+        :param int num_heads: Number of query heads.
+        :param int num_kv_heads: Number of key/value heads.
+        :param bool qk_norm: Whether to RMS-normalize queries and keys.
+        :param float attn_dropout: Attention dropout probability.
+        :param float resid_dropout: Residual dropout probability.
+        :param bool use_bias: Whether linear layers use bias terms.
+        """
         super().__init__()
         if dim % num_heads != 0:
             raise ValueError("MODEL_DIM must be divisible by NUM_HEADS")
@@ -855,6 +1082,14 @@ class CausalSelfAttention(nn.Module):
         q_delta: DeltaSpec = None,
         v_delta: DeltaSpec = None,
     ) -> Tensor:
+        """Run causal attention, optional deltas, and the output projection.
+
+        :param Tensor x: Input activations.
+        :param Rotary rotary: Rotary cache helper.
+        :param DeltaSpec q_delta: Optional additive query delta.
+        :param DeltaSpec v_delta: Optional additive value delta.
+        :return Tensor: Attention output after projection and residual dropout.
+        """
         bsz, seq_len, _ = x.shape
         kv_dim = self.num_kv_heads * self.head_dim
         q, k, v = self.qkv(x).split(
@@ -909,6 +1144,8 @@ class CausalSelfAttention(nn.Module):
 
 
 class SwiGLU(nn.Module):
+    """SwiGLU feed-forward block with rounded hidden width."""
+
     def __init__(
         self,
         dim: int,
@@ -917,6 +1154,14 @@ class SwiGLU(nn.Module):
         resid_dropout: float,
         use_bias: bool,
     ):
+        """Initialize the gated MLP projections for one transformer block.
+
+        :param int dim: Model hidden dimension.
+        :param float mlp_mult: Feed-forward expansion ratio before rounding.
+        :param int multiple_of: Hidden width alignment multiple.
+        :param float resid_dropout: Residual dropout probability.
+        :param bool use_bias: Whether linear layers use bias terms.
+        """
         super().__init__()
         hidden = int(dim * mlp_mult)
         hidden = multiple_of * ((hidden + multiple_of - 1) // multiple_of)
@@ -925,11 +1170,18 @@ class SwiGLU(nn.Module):
         self.resid_dropout = nn.Dropout(resid_dropout)
 
     def forward(self, x: Tensor) -> Tensor:
+        """Apply gated activation, down projection, and residual dropout.
+
+        :param Tensor x: Input activations.
+        :return Tensor: Feed-forward output.
+        """
         gate, up = self.gate_up(x).chunk(2, dim=-1)
         return self.resid_dropout(self.down(F.silu(gate) * up))
 
 
 class ALlamaBlock(nn.Module):
+    """One virtual transformer layer combining attention, MLP, and norms."""
+
     def __init__(
         self,
         dim: int,
@@ -945,6 +1197,21 @@ class ALlamaBlock(nn.Module):
         resid_dropout: float,
         use_bias: bool,
     ):
+        """Construct one shared block instance used across virtual layers.
+
+        :param int dim: Model hidden dimension.
+        :param int num_heads: Number of query heads.
+        :param int num_kv_heads: Number of key/value heads.
+        :param float mlp_mult: Feed-forward expansion ratio before rounding.
+        :param int mlp_multiple_of: Hidden width alignment multiple.
+        :param str norm_kind: Normalization type name.
+        :param str norm_layout: Whether norms are pre- or post-residual.
+        :param float norm_eps: Numerical stability epsilon for normalization.
+        :param bool qk_norm: Whether to RMS-normalize queries and keys.
+        :param float attn_dropout: Attention dropout probability.
+        :param float resid_dropout: Residual dropout probability.
+        :param bool use_bias: Whether linear layers use bias terms.
+        """
         super().__init__()
         self.norm_layout = norm_layout.lower()
         if self.norm_layout not in {"prenorm", "postnorm"}:
@@ -979,6 +1246,18 @@ class ALlamaBlock(nn.Module):
         q_delta: DeltaSpec = None,
         v_delta: DeltaSpec = None,
     ) -> Tensor:
+        """Run one virtual layer update with optional x0 mixing and deltas.
+
+        :param Tensor x: Current hidden state.
+        :param Optional[Tensor] x0: Optional original hidden state shortcut.
+        :param Rotary rotary: Rotary cache helper.
+        :param Tensor | float attn_gain: Per-layer attention residual scale.
+        :param Tensor | float ffn_gain: Per-layer MLP residual scale.
+        :param Optional[Tensor] resid_mix_logits: Optional logits for x/x0 mixing.
+        :param DeltaSpec q_delta: Optional additive query delta.
+        :param DeltaSpec v_delta: Optional additive value delta.
+        :return Tensor: Updated hidden state.
+        """
         if isinstance(attn_gain, Tensor):
             attn_gain = attn_gain.to(dtype=x.dtype).view(1, 1, 1)
         if isinstance(ffn_gain, Tensor):
@@ -1003,7 +1282,14 @@ class ALlamaBlock(nn.Module):
 
 
 class ALlama(nn.Module):
+    """Decoder-only ALBERT-style language model with configurable layer sharing."""
+
     def __init__(self, args: Hyperparameters, vocab_size: int):
+        """Build the model modules and sharing layout from resolved hyperparameters.
+
+        :param Hyperparameters args: Resolved trainer and model configuration.
+        :param int vocab_size: Vocabulary size used for embeddings and logits.
+        """
         super().__init__()
         if args.num_layers <= 0:
             raise ValueError("NUM_LAYERS must be positive")
@@ -1093,6 +1379,11 @@ class ALlama(nn.Module):
         self._init_weights()
 
     def _layer_to_block(self, layer_idx: int) -> int:
+        """Map a virtual layer index to its backing shared block index.
+
+        :param int layer_idx: Virtual layer index.
+        :return int: Shared block index used for that virtual layer.
+        """
         if self.share_pattern == "cycle":
             return layer_idx % self.num_shared_blocks
         if self.share_pattern == "repeat":
@@ -1100,9 +1391,14 @@ class ALlama(nn.Module):
         return (layer_idx * self.num_shared_blocks) // self.num_layers
 
     def layer_to_block_map(self) -> list[int]:
+        """Return the full virtual-layer to shared-block assignment map.
+
+        :return list[int]: Shared block index for each virtual layer.
+        """
         return [self._layer_to_block(i) for i in range(self.num_layers)]
 
     def _init_weights(self) -> None:
+        """Initialize weights and apply optional residual-zeroing heuristics."""
         nn.init.normal_(self.token_embedding.weight, mean=0.0, std=0.02)
         for module in self.modules():
             if isinstance(module, nn.Linear):
@@ -1127,6 +1423,13 @@ class ALlama(nn.Module):
     def _resolve_layer_delta(
         self, deltas: DeltaSpec, layer_idx: int, block_idx: int
     ) -> DeltaSpec:
+        """Select the delta specification that applies to one virtual layer.
+
+        :param DeltaSpec deltas: Per-layer, per-block, or global delta specification.
+        :param int layer_idx: Virtual layer index.
+        :param int block_idx: Shared block index for the virtual layer.
+        :return DeltaSpec: Delta value to apply for this layer.
+        """
         if deltas is None:
             return None
         if isinstance(deltas, Tensor):
@@ -1182,6 +1485,15 @@ class ALlama(nn.Module):
         v_deltas: DeltaSpec = None,
         loss_reduction: str = "mean",
     ) -> Tensor:
+        """Run the model and optionally return reduced or tokenwise training loss.
+
+        :param Tensor input_ids: Input token ids.
+        :param Optional[Tensor] target_ids: Optional next-token targets.
+        :param DeltaSpec q_deltas: Optional per-layer query deltas.
+        :param DeltaSpec v_deltas: Optional per-layer value deltas.
+        :param str loss_reduction: Loss reduction mode when targets are provided.
+        :return Tensor: Logits when no targets are given, otherwise the requested loss.
+        """
         x = self.token_embedding(input_ids)
         x = self.embed_to_model(x)
         x0 = x if self.args.use_x0_shortcut else None
@@ -1257,6 +1569,11 @@ class _LayerSummary:
 
 
 def _unique_param_info(model: nn.Module) -> Dict[int, Tuple[int, bool]]:
+    """Collect unique parameter sizes and trainability keyed by object id.
+
+    :param nn.Module model: Module whose parameters should be inspected.
+    :return Dict[int, Tuple[int, bool]]: Mapping from parameter id to size and trainability.
+    """
     info: Dict[int, Tuple[int, bool]] = {}
     for p in model.parameters(recurse=True):
         pid = id(p)
@@ -1266,22 +1583,47 @@ def _unique_param_info(model: nn.Module) -> Dict[int, Tuple[int, bool]]:
 
 
 def _format_number(num: int) -> str:
+    """Format a parameter count for human-readable summaries.
+
+    :param int num: Integer count to format.
+    :return str: Human-readable count string.
+    """
     return f"{num:,}" if num > 0 else "--"
 
 
 def _format_shape(shape: Optional[torch.Size]) -> str:
+    """Format an optional parameter shape for summary tables.
+
+    :param Optional[torch.Size] shape: Optional parameter shape.
+    :return str: Human-readable shape string.
+    """
     return "x".join(map(str, shape)) if shape else "N/A"
 
 
 def count_parameters(model: nn.Module) -> int:
+    """Count unique stored parameters in a module tree.
+
+    :param nn.Module model: Module whose parameters should be counted.
+    :return int: Unique stored parameter count.
+    """
     return sum(n for (n, _rg) in _unique_param_info(model).values())
 
 
 def count_trainable_parameters(model: nn.Module) -> int:
+    """Count unique trainable parameters in a module tree.
+
+    :param nn.Module model: Module whose trainable parameters should be counted.
+    :return int: Unique trainable parameter count.
+    """
     return sum(n for (n, rg) in _unique_param_info(model).values() if rg)
 
 
 def module_parameter_counts(module: nn.Module) -> tuple[int, int]:
+    """Return total and trainable unique parameter counts for one module.
+
+    :param nn.Module module: Module to summarize.
+    :return tuple[int, int]: Total and trainable unique parameter counts.
+    """
     info = _unique_param_info(module)
     total = sum(n for (n, _rg) in info.values())
     trainable = sum(n for (n, rg) in info.values() if rg)
@@ -1289,6 +1631,11 @@ def module_parameter_counts(module: nn.Module) -> tuple[int, int]:
 
 
 def compute_logical_parameter_counts(model: nn.Module) -> dict[str, float | int]:
+    """Report stored and functional parameter counts, accounting for shared blocks.
+
+    :param nn.Module model: Model to summarize.
+    :return dict[str, float | int]: Stored and logical parameter statistics.
+    """
     unique_total = count_parameters(model)
     unique_trainable = count_trainable_parameters(model)
     if not isinstance(model, ALlama):
@@ -1340,6 +1687,11 @@ def compute_logical_parameter_counts(model: nn.Module) -> dict[str, float | int]
 
 
 def stored_parameter_bytes(model: nn.Module) -> int:
+    """Sum the unique in-memory byte footprint of model parameters.
+
+    :param nn.Module model: Model whose parameters should be measured.
+    :return int: Unique parameter bytes.
+    """
     seen: Set[int] = set()
     total_bytes = 0
     for p in model.parameters(recurse=True):
@@ -1352,10 +1704,20 @@ def stored_parameter_bytes(model: nn.Module) -> int:
 
 
 def state_dict_bytes(state_dict: Mapping[str, Tensor]) -> int:
+    """Estimate raw tensor storage bytes for a state dict.
+
+    :param Mapping[str, Tensor] state_dict: State dict to measure.
+    :return int: Raw tensor bytes in the state dict.
+    """
     return int(sum(int(t.numel()) * int(t.element_size()) for t in state_dict.values()))
 
 
 def serialized_nbytes(obj: object) -> int:
+    """Measure the byte size of an in-memory ``torch.save`` serialization.
+
+    :param object obj: Object to serialize.
+    :return int: Serialized byte size.
+    """
     buf = io.BytesIO()
     torch.save(obj, buf)
     return len(buf.getvalue())
@@ -1364,6 +1726,12 @@ def serialized_nbytes(obj: object) -> int:
 def cast_state_dict_floats(
     state_dict: Mapping[str, Tensor], dtype: torch.dtype
 ) -> dict[str, Tensor]:
+    """Move a state dict to CPU and cast floating tensors to a target dtype.
+
+    :param Mapping[str, Tensor] state_dict: Source state dict.
+    :param torch.dtype dtype: Target dtype for floating tensors.
+    :return dict[str, Tensor]: CPU state dict with requested float dtype.
+    """
     out: dict[str, Tensor] = {}
     for name, tensor in state_dict.items():
         t = tensor.detach().to("cpu").contiguous()
@@ -1372,6 +1740,11 @@ def cast_state_dict_floats(
 
 
 def payload_tensor_numel(payload: Mapping[str, object]) -> dict[str, int]:
+    """Count tensor elements stored in each section of an exported int8 payload.
+
+    :param Mapping[str, object] payload: Export payload to inspect.
+    :return dict[str, int]: Element counts for quantized, scale, and passthrough tensors.
+    """
     quantized = payload.get("quantized", {})
     scales = payload.get("scales", {})
     passthrough = payload.get("passthrough", {})
@@ -1400,6 +1773,13 @@ def payload_tensor_numel(payload: Mapping[str, object]) -> dict[str, int]:
 def model_footprint_report(
     model: nn.Module, code_path: Path, args: Hyperparameters
 ) -> dict[str, float | int]:
+    """Compute stored, serialized, and compressed size statistics for a model.
+
+    :param nn.Module model: Model to summarize.
+    :param Path code_path: Trainer source file path included in the artifact.
+    :param Hyperparameters args: Export and quantization settings.
+    :return dict[str, float | int]: Parameter and artifact size statistics.
+    """
     state = {
         name: tensor.detach().to("cpu").contiguous()
         for name, tensor in model.state_dict().items()
@@ -1433,6 +1813,13 @@ def model_footprint_report(
 def render_model_summary(
     model: nn.Module, max_depth: int = 4, show_param_shapes: bool = False
 ) -> str:
+    """Render a text table summarizing module hierarchy and parameter counts.
+
+    :param nn.Module model: Model to summarize.
+    :param int max_depth: Maximum module depth to include.
+    :param bool show_param_shapes: Whether to include representative parameter shapes.
+    :return str: Multi-line summary table.
+    """
     param_info = _unique_param_info(model)
     if max_depth <= 0:
         total_params = sum(n for (n, _rg) in param_info.values())
@@ -1449,6 +1836,13 @@ def render_model_summary(
     summary_list: List[_LayerSummary] = []
 
     def summarize_recursive(module: nn.Module, depth: int, prefix: str) -> Set[int]:
+        """Accumulate summary rows and return all parameter ids below one node.
+
+        :param nn.Module module: Current module being summarized.
+        :param int depth: Current recursion depth.
+        :param str prefix: Text prefix used for indentation.
+        :return Set[int]: Parameter ids contained in this subtree.
+        """
         if depth > max_depth:
             return {id(p) for p in module.parameters(recurse=True)}
         direct_ids: Set[int] = {id(p) for p in module.parameters(recurse=False)}
@@ -1521,6 +1915,12 @@ def render_model_summary(
 def model_summary(
     model: nn.Module, max_depth: int = 4, show_param_shapes: bool = False
 ) -> None:
+    """Print the rendered model summary to stdout.
+
+    :param nn.Module model: Model to summarize.
+    :param int max_depth: Maximum module depth to include.
+    :param bool show_param_shapes: Whether to include representative parameter shapes.
+    """
     print(
         render_model_summary(
             model, max_depth=max_depth, show_param_shapes=show_param_shapes
@@ -1530,6 +1930,12 @@ def model_summary(
 
 
 def get_local_batch_size(args: Hyperparameters, world_size: int) -> int:
+    """Derive the per-rank microbatch size from token, seq, and accum settings.
+
+    :param Hyperparameters args: Trainer configuration with batch settings.
+    :param int world_size: Number of distributed ranks.
+    :return int: Per-rank local batch size.
+    """
     denom = args.train_seq_len * args.grad_accum_steps * world_size
     if args.train_batch_tokens % denom != 0:
         raise ValueError(
@@ -1545,6 +1951,7 @@ def get_local_batch_size(args: Hyperparameters, world_size: int) -> int:
 
 
 def set_seed(seed: int) -> None:
+    """Seed Python, NumPy, and PyTorch RNGs for the current process."""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -1555,6 +1962,12 @@ def set_seed(seed: int) -> None:
 def resolve_dtype(
     args: Hyperparameters, device: torch.device
 ) -> tuple[str, torch.dtype, bool]:
+    """Resolve the runtime dtype and whether autocast should be enabled.
+
+    :param Hyperparameters args: Trainer configuration with dtype preferences.
+    :param torch.device device: Runtime device.
+    :return tuple[str, torch.dtype, bool]: Device type, amp dtype, and autocast flag.
+    """
     if args.dtype != "auto":
         mapping = {
             "float32": torch.float32,
@@ -1578,6 +1991,7 @@ def resolve_dtype(
 
 
 def configure_cuda_precision() -> None:
+    """Enable the trainer's preferred CUDA FP32/TF32 precision policy."""
     if hasattr(torch.backends, "fp32_precision"):
         # PyTorch 2.10+ precision hierarchy: keep IEEE globally, enable TF32 where
         # it is the standard low-risk training fast path.
@@ -1591,6 +2005,11 @@ def configure_cuda_precision() -> None:
 
 
 def configure_sdpa_backend(sdpa_backend: str) -> dict[str, bool | str]:
+    """Apply an optional CUDA SDPA backend override and report the resulting state.
+
+    :param str sdpa_backend: Requested SDPA backend.
+    :return dict[str, bool | str]: Requested backend and enabled-backend status flags.
+    """
     if sdpa_backend == "flash":
         torch.backends.cuda.enable_flash_sdp(True)
         torch.backends.cuda.enable_math_sdp(False)
@@ -1621,7 +2040,16 @@ def configure_sdpa_backend(sdpa_backend: str) -> dict[str, bool | str]:
     }
 
 
-def autocast_context(device_type: str, amp_dtype: torch.dtype, use_autocast: bool):
+def autocast_context(
+    device_type: str, amp_dtype: torch.dtype, use_autocast: bool
+) -> AbstractContextManager[None]:
+    """Return an autocast context manager when mixed precision is enabled.
+
+    :param str device_type: Device type passed to ``torch.autocast``.
+    :param torch.dtype amp_dtype: Dtype used for autocast.
+    :param bool use_autocast: Whether autocast should be enabled.
+    :return AbstractContextManager[None]: Autocast or null context manager.
+    """
     if use_autocast:
         return torch.autocast(device_type=device_type, dtype=amp_dtype)
     return nullcontext()
@@ -1629,6 +2057,8 @@ def autocast_context(device_type: str, amp_dtype: torch.dtype, use_autocast: boo
 
 @dataclass(frozen=True)
 class MicroBatchSpec:
+    """Description of one microbatch used to assemble a training step."""
+
     local_batch_size: int
     seq_len: int
     global_target_tokens: int
@@ -1640,6 +2070,14 @@ def pick_microbatch_spec(
     max_seq_len: int,
     world_size: int,
 ) -> Optional[MicroBatchSpec]:
+    """Pick the largest legal microbatch under the provided token budget.
+
+    :param int max_global_target_tokens: Global token budget for one microbatch.
+    :param int max_local_batch_size: Maximum allowed local batch size.
+    :param int max_seq_len: Maximum allowed sequence length.
+    :param int world_size: Number of distributed ranks.
+    :return Optional[MicroBatchSpec]: Best feasible microbatch spec, if any.
+    """
     best: Optional[MicroBatchSpec] = None
     for local_batch_size in range(1, max_local_batch_size + 1):
         denom = local_batch_size * world_size
@@ -1667,6 +2105,16 @@ def plan_epoch_steps(
     max_seq_len: int,
     world_size: int,
 ) -> tuple[list[list[MicroBatchSpec]], dict[str, int]]:
+    """Split one epoch into variable microbatch plans that exhaust usable tokens.
+
+    :param int total_tokens: Total source tokens available for the epoch.
+    :param int train_batch_tokens: Target global tokens per optimizer step.
+    :param int max_local_batch_size: Maximum local batch size per microbatch.
+    :param int max_seq_len: Maximum sequence length per microbatch.
+    :param int world_size: Number of distributed ranks.
+    :return tuple[list[list[MicroBatchSpec]], dict[str, int]]: Planned step specs and
+        epoch-level accounting info.
+    """
     total_target_tokens = max(0, total_tokens - 1)
     effective_target_tokens = total_target_tokens - (
         total_target_tokens % max(1, world_size)
@@ -1721,6 +2169,13 @@ def plan_epoch_steps(
 
 
 def get_lr(step: int, total_steps: int, args: Hyperparameters) -> float:
+    """Compute the warmup-plus-cosine learning rate for one optimizer step.
+
+    :param int step: Zero-based optimizer step index.
+    :param int total_steps: Total planned optimizer steps.
+    :param Hyperparameters args: Trainer configuration with LR schedule settings.
+    :return float: Learning rate for the current step.
+    """
     if step < args.warmup_steps:
         return args.learning_rate * float(step + 1) / float(max(1, args.warmup_steps))
     if total_steps <= args.warmup_steps:
@@ -1734,6 +2189,12 @@ def get_lr(step: int, total_steps: int, args: Hyperparameters) -> float:
 
 
 def resolve_eval_mode(args: Hyperparameters, backend: str) -> str:
+    """Resolve whether evaluation should be full-dataset or sampled.
+
+    :param Hyperparameters args: Trainer configuration with eval preferences.
+    :param str backend: Resolved dataset backend.
+    :return str: Evaluation mode name.
+    """
     mode = args.eval_mode.strip().lower()
     if mode == "auto":
         return "full" if backend == "parameter_golf" else "sampled"
@@ -1743,6 +2204,13 @@ def resolve_eval_mode(args: Hyperparameters, backend: str) -> str:
 
 
 def make_eval_starts(num_tokens: int, seq_len: int, total_sequences: int) -> Tensor:
+    """Generate evenly spaced starting offsets for sampled validation windows.
+
+    :param int num_tokens: Total validation tokens.
+    :param int seq_len: Validation sequence length.
+    :param int total_sequences: Number of sampled windows to generate.
+    :return Tensor: Start offsets for sampled validation windows.
+    """
     max_start = num_tokens - seq_len - 1
     if max_start <= 0:
         raise ValueError(f"Validation tokens too short for seq_len={seq_len}")
@@ -1764,6 +2232,20 @@ def evaluate_sampled(
     use_autocast: bool,
     metric: BpbMetric,
 ) -> tuple[float, Optional[float]]:
+    """Evaluate on a fixed set of sampled validation windows.
+
+    :param nn.Module model: Model to evaluate.
+    :param Tensor val_tokens: Validation token stream.
+    :param int seq_len: Validation sequence length.
+    :param int batch_size: Number of windows per sampled batch.
+    :param int num_batches: Number of sampled batches to evaluate.
+    :param torch.device device: Runtime device.
+    :param str device_type: Device type passed to autocast.
+    :param torch.dtype amp_dtype: Dtype used for autocast.
+    :param bool use_autocast: Whether autocast should be enabled.
+    :param BpbMetric metric: Byte-accounting metadata for optional BPB reporting.
+    :return tuple[float, Optional[float]]: Average loss and optional bits-per-byte.
+    """
     was_training = model.training
     model.eval()
 
@@ -1831,6 +2313,22 @@ def evaluate_full(
     use_autocast: bool,
     metric: BpbMetric,
 ) -> tuple[float, Optional[float]]:
+    """Evaluate across the full validation split, optionally distributed by rank.
+
+    :param nn.Module model: Model to evaluate.
+    :param Tensor val_tokens: Validation token stream.
+    :param int seq_len: Validation sequence length.
+    :param int eval_batch_tokens: Global validation token budget per batch.
+    :param int rank: Current distributed rank.
+    :param int world_size: Number of distributed ranks.
+    :param bool distributed: Whether distributed collectives are active.
+    :param torch.device device: Runtime device.
+    :param str device_type: Device type passed to autocast.
+    :param torch.dtype amp_dtype: Dtype used for autocast.
+    :param bool use_autocast: Whether autocast should be enabled.
+    :param BpbMetric metric: Byte-accounting metadata for optional BPB reporting.
+    :return tuple[float, Optional[float]]: Average loss and optional bits-per-byte.
+    """
     was_training = model.training
     model.eval()
 
@@ -1915,6 +2413,11 @@ INT8_PER_ROW_SCALE_DTYPE = torch.bfloat16
 
 
 def quantize_float_tensor(t: Tensor) -> tuple[Tensor, Tensor]:
+    """Quantize a floating tensor to int8 with per-row or scalar scales.
+
+    :param Tensor t: Floating tensor to quantize.
+    :return tuple[Tensor, Tensor]: Quantized tensor and scale tensor.
+    """
     t32 = t.float().contiguous()
     if t32.ndim >= 2:
         flat = t32.view(t32.shape[0], -1)
@@ -1934,6 +2437,14 @@ def quantize_float_tensor(t: Tensor) -> tuple[Tensor, Tensor]:
 def should_keep_float(
     name: str, t: Tensor, keep_float_numel: int, control_patterns: Sequence[str]
 ) -> bool:
+    """Decide whether a tensor should bypass int8 quantization in the export payload.
+
+    :param str name: Tensor name in the state dict.
+    :param Tensor t: Tensor under consideration.
+    :param int keep_float_numel: Max size that should remain unquantized.
+    :param Sequence[str] control_patterns: Name substrings that force float storage.
+    :return bool: ``True`` when the tensor should stay in float form.
+    """
     if not t.is_floating_point():
         return True
     if t.numel() <= keep_float_numel:
@@ -1946,6 +2457,13 @@ def build_int8_payload(
     keep_float_numel: int = 4096,
     control_patterns: Sequence[str] = (),
 ) -> dict[str, object]:
+    """Build the compact mixed int8/bfloat16 payload used for size checks and export.
+
+    :param dict[str, Tensor] state_dict: Source state dict to export.
+    :param int keep_float_numel: Max tensor size that should remain unquantized.
+    :param Sequence[str] control_patterns: Name substrings that force float storage.
+    :return dict[str, object]: Compact export payload.
+    """
     payload: dict[str, object] = {
         "format": "allama_reborn_int8_v1",
         "quantized": {},
@@ -1982,6 +2500,11 @@ def build_int8_payload(
 
 
 def dequantize_payload(payload: Mapping[str, object]) -> dict[str, Tensor]:
+    """Reconstruct a full-precision-ish state dict from a compact int8 payload.
+
+    :param Mapping[str, object] payload: Compact export payload.
+    :return dict[str, Tensor]: Reconstructed state dict.
+    """
     if payload.get("format") != "allama_reborn_int8_v1":
         raise ValueError(f"Unsupported payload format: {payload.get('format')}")
     state: dict[str, Tensor] = {}
@@ -2031,6 +2554,11 @@ def dequantize_payload(payload: Mapping[str, object]) -> dict[str, Tensor]:
 
 
 def serialized_zlib_nbytes(obj: object) -> int:
+    """Measure the zlib-compressed size of an in-memory ``torch.save`` blob.
+
+    :param object obj: Object to serialize and compress.
+    :return int: Compressed byte size.
+    """
     buf = io.BytesIO()
     torch.save(obj, buf)
     return len(zlib.compress(buf.getvalue(), level=9))
@@ -2039,6 +2567,13 @@ def serialized_zlib_nbytes(obj: object) -> int:
 def artifact_report(
     model: nn.Module, code_path: Path, args: Hyperparameters
 ) -> dict[str, int]:
+    """Return the compact artifact-size summary used in logs and docs.
+
+    :param nn.Module model: Model to summarize.
+    :param Path code_path: Trainer source file path included in the artifact.
+    :param Hyperparameters args: Export and quantization settings.
+    :return dict[str, int]: Compact artifact-size summary.
+    """
     report = model_footprint_report(model, code_path, args)
     return {
         "code_bytes": int(report["code_bytes"]),
@@ -2053,7 +2588,15 @@ def artifact_report(
 
 
 class WandbLogger:
+    """Small wrapper around W&B init, logging, config, and summary updates."""
+
     def __init__(self, args: Hyperparameters, enabled: bool, config: dict[str, Any]):
+        """Initialize an optional W&B run for the current trainer invocation.
+
+        :param Hyperparameters args: Trainer configuration with W&B settings.
+        :param bool enabled: Whether W&B logging should be activated.
+        :param dict[str, Any] config: Static config payload passed to ``wandb.init``.
+        """
         self.run = None
         if not enabled:
             return
@@ -2081,6 +2624,11 @@ class WandbLogger:
         self.run = wandb.init(**init_kwargs)
 
     def log(self, metrics: dict[str, Any], step: Optional[int] = None) -> None:
+        """Log runtime metrics to W&B when a run is active.
+
+        :param dict[str, Any] metrics: Metrics to log.
+        :param Optional[int] step: Optional explicit step index.
+        """
         if self.run is None:
             return
         self.run.log(metrics, step=step)
@@ -2092,6 +2640,13 @@ class WandbLogger:
         log_freq: int,
         log_fn: Optional[Callable[[str], None]] = None,
     ) -> None:
+        """Enable optional W&B parameter or gradient watching for a model.
+
+        :param nn.Module model: Model to watch.
+        :param str mode: W&B watch mode.
+        :param int log_freq: Watch logging frequency.
+        :param Optional[Callable[[str], None]] log_fn: Optional local logger for status.
+        """
         if self.run is None or mode == "off":
             return
         try:
@@ -2106,22 +2661,30 @@ class WandbLogger:
             log_fn(f"wandb_watch mode={mode} log_freq={max(1, log_freq)}")
 
     def update_config(self, values: dict[str, Any]) -> None:
+        """Merge additional static fields into the W&B config."""
         if self.run is None:
             return
         self.run.config.update(values, allow_val_change=True)
 
     def update_summary(self, values: dict[str, Any]) -> None:
+        """Write final scalar values directly to the W&B run summary."""
         if self.run is None:
             return
         for key, value in values.items():
             self.run.summary[key] = value
 
     def finish(self) -> None:
+        """Finish the active W&B run if one exists."""
         if self.run is not None:
             wandb.finish()
 
 
 def extract_state_dict_for_load(obj: object) -> dict[str, Tensor]:
+    """Extract a plain state dict from a checkpoint or compact payload object.
+
+    :param object obj: Loaded checkpoint-like object.
+    :return dict[str, Tensor]: Plain tensor state dict ready for ``load_state_dict``.
+    """
     if isinstance(obj, Mapping):
         if obj.get("format") == "allama_reborn_int8_v1":
             return dequantize_payload(obj)
@@ -2138,6 +2701,12 @@ def extract_state_dict_for_load(obj: object) -> dict[str, Tensor]:
 def maybe_load_model_weights(
     model: nn.Module, args: Hyperparameters, log: Callable[[str], None]
 ) -> None:
+    """Load model weights from ``LOAD_PATH`` when one is configured.
+
+    :param nn.Module model: Model whose weights should be updated.
+    :param Hyperparameters args: Trainer configuration with optional load path.
+    :param Callable[[str], None] log: Local logger used for load-status messages.
+    """
     if not args.load_path:
         return
     obj = torch.load(args.load_path, map_location="cpu")
@@ -2158,6 +2727,7 @@ def maybe_load_model_weights(
 
 
 def main() -> None:
+    """Train or evaluate one ALlama configuration from environment-driven settings."""
     cli = parse_cli_overrides(tuple(sys.argv[1:]))
     args = Hyperparameters.from_env(cli)
     distributed, rank, world_size, _local_rank, device, master_process = (
@@ -2217,6 +2787,7 @@ def main() -> None:
             json.dump(asdict(args), f, indent=2)
 
     def log(msg: str) -> None:
+        """Write one line to stdout or tqdm and append it to the run log file."""
         if not master_process:
             return
         if progress_bar is not None:
@@ -2476,6 +3047,12 @@ def main() -> None:
         checkpoint_path: Optional[Path] = None,
         export_path: Optional[Path] = None,
     ) -> None:
+        """Record final parameter and artifact-size statistics for the current run.
+
+        :param int step: Training step associated with the final footprint snapshot.
+        :param Optional[Path] checkpoint_path: Optional saved checkpoint path.
+        :param Optional[Path] export_path: Optional saved int8 payload path.
+        """
         if not master_process:
             return
         final_report = (
@@ -2525,6 +3102,7 @@ def main() -> None:
                 wandb_logger.update_summary(final_artifact_summary)
 
     def run_eval(step: int) -> None:
+        """Run the configured evaluation path and emit logs plus W&B metrics."""
         nonlocal eval_batch_tokens
         if distributed and eval_mode == "sampled":
             dist.barrier()
