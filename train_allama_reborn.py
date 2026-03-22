@@ -51,6 +51,11 @@ try:
 except Exception:  # pragma: no cover
     wandb = None
 
+try:
+    from tqdm.auto import tqdm
+except Exception:  # pragma: no cover
+    tqdm = None
+
 
 # -----------------------------------------------------------------------------
 # CONFIG
@@ -67,6 +72,17 @@ def env_bool(name: str, default: bool) -> bool:
 def env_csv(name: str, default: str = "") -> list[str]:
     raw = os.environ.get(name, default)
     return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+def normalize_wandb_watch_mode(value: str) -> str:
+    mode = value.strip().lower()
+    if mode in {"", "0", "false", "none", "off"}:
+        return "off"
+    if mode not in {"gradients", "parameters", "all"}:
+        raise ValueError(
+            f"Unsupported WANDB_WATCH={value!r}; expected off, gradients, parameters, or all."
+        )
+    return mode
 
 
 @dataclass(frozen=True)
@@ -183,6 +199,8 @@ class Hyperparameters:
     wandb_tags: list[str]
     wandb_notes: str
     wandb_mode: str
+    wandb_watch: str
+    wandb_watch_log_freq: int
 
     # Local reporting
     print_model_summary: bool
@@ -239,7 +257,7 @@ class Hyperparameters:
             eval_batch_tokens=int(os.environ.get("EVAL_BATCH_TOKENS", "0")),
             val_batch_size=int(os.environ.get("VAL_BATCH_SIZE", "0")),
             val_batches=int(os.environ.get("VAL_BATCHES", "8")),
-            val_loss_every=int(os.environ.get("VAL_LOSS_EVERY", "250")),
+            val_loss_every=int(os.environ.get("VAL_LOSS_EVERY", "500")),
             train_log_every=int(os.environ.get("TRAIN_LOG_EVERY", "25")),
             learning_rate=float(os.environ.get("LEARNING_RATE", "3e-4")),
             min_lr=float(os.environ.get("MIN_LR", "3e-5")),
@@ -292,6 +310,10 @@ class Hyperparameters:
             wandb_tags=env_csv("WANDB_TAGS", ""),
             wandb_notes=os.environ.get("WANDB_NOTES", ""),
             wandb_mode=os.environ.get("WANDB_MODE", ""),
+            wandb_watch=normalize_wandb_watch_mode(
+                os.environ.get("WANDB_WATCH", "off")
+            ),
+            wandb_watch_log_freq=int(os.environ.get("WANDB_WATCH_LOG_FREQ", "100")),
             print_model_summary=env_bool("PRINT_MODEL_SUMMARY", True),
             model_summary_max_depth=int(os.environ.get("MODEL_SUMMARY_MAX_DEPTH", "4")),
             model_summary_show_shapes=env_bool("MODEL_SUMMARY_SHOW_SHAPES", False),
@@ -2011,7 +2033,27 @@ class WandbLogger:
     def log(self, metrics: dict[str, Any], step: Optional[int] = None) -> None:
         if self.run is None:
             return
-        wandb.log(metrics, step=step)
+        self.run.log(metrics, step=step)
+
+    def watch(
+        self,
+        model: nn.Module,
+        mode: str,
+        log_freq: int,
+        log_fn: Optional[Callable[[str], None]] = None,
+    ) -> None:
+        if self.run is None or mode == "off":
+            return
+        try:
+            self.run.watch(model, log=mode, log_freq=max(1, log_freq))
+        except Exception as exc:
+            if log_fn is not None:
+                log_fn(
+                    f"wandb_watch_warning mode={mode} log_freq={log_freq} error={exc}"
+                )
+            return
+        if log_fn is not None:
+            log_fn(f"wandb_watch mode={mode} log_freq={max(1, log_freq)}")
 
     def update_config(self, values: dict[str, Any]) -> None:
         if self.run is None:
@@ -2112,6 +2154,7 @@ def main() -> None:
 
     run_dir = Path(args.out_dir) / args.run_id
     log_path = run_dir / "train.log"
+    progress_bar: Optional[Any] = None
     if master_process:
         run_dir.mkdir(parents=True, exist_ok=True)
         with open(run_dir / "config.json", "w", encoding="utf-8") as f:
@@ -2120,7 +2163,10 @@ def main() -> None:
     def log(msg: str) -> None:
         if not master_process:
             return
-        print(msg, flush=True)
+        if progress_bar is not None:
+            progress_bar.write(msg)
+        else:
+            print(msg, flush=True)
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(msg + "\n")
 
@@ -2179,6 +2225,13 @@ def main() -> None:
         total_training_steps = min(planned_total_steps, args.max_steps)
     else:
         total_training_steps = planned_total_steps
+    epoch_step_token_counts = [
+        int(sum(spec.global_target_tokens for spec in step_specs))
+        for step_specs in epoch_steps
+    ]
+    nominal_step_tokens = epoch_step_token_counts[0] if epoch_step_token_counts else 0
+    final_step_tokens = epoch_step_token_counts[-1] if epoch_step_token_counts else 0
+    variable_step_tokens = len(set(epoch_step_token_counts)) > 1
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -2223,6 +2276,11 @@ def main() -> None:
         f"usable_target_tokens_per_epoch={epoch_plan_info['usable_target_tokens']} "
         f"planned_target_tokens_per_epoch={epoch_plan_info['planned_target_tokens']} "
         f"dropped_target_tokens_per_epoch={epoch_plan_info['dropped_target_tokens']}"
+    )
+    log(
+        f"train_static nominal_step_tokens={nominal_step_tokens} final_step_tokens={final_step_tokens} "
+        f"variable_step_tokens={int(variable_step_tokens)} grad_accum_steps={args.grad_accum_steps} "
+        f"train_log_every={args.train_log_every} val_loss_every={args.val_loss_every}"
     )
     log(
         f"x0_shortcut={args.use_x0_shortcut} resid_mix_init={args.resid_mix_init} "
@@ -2273,6 +2331,9 @@ def main() -> None:
         "steps_per_epoch": epoch_plan_info["steps_per_epoch"],
         "planned_total_steps": planned_total_steps,
         "total_training_steps": total_training_steps,
+        "train_nominal_step_tokens": nominal_step_tokens,
+        "train_final_step_tokens": final_step_tokens,
+        "train_variable_step_tokens": variable_step_tokens,
         "model_stored_params": int(param_report["stored_params"]),
         "model_stored_trainable_params": int(param_report["stored_trainable_params"]),
         "model_functional_params": int(param_report["functional_params"]),
@@ -2323,6 +2384,25 @@ def main() -> None:
         enabled=master_process and args.wandb_enable,
         config=wandb_config,
     )
+    wandb_logger.watch(
+        report_model,
+        mode=args.wandb_watch,
+        log_freq=args.wandb_watch_log_freq,
+        log_fn=log,
+    )
+
+    if (
+        master_process
+        and not args.eval_only
+        and total_training_steps > 0
+        and tqdm is not None
+    ):
+        progress_bar = tqdm(
+            total=total_training_steps,
+            desc="train",
+            dynamic_ncols=True,
+            leave=True,
+        )
 
     def record_run_footprint(
         step: int,
@@ -2399,20 +2479,13 @@ def main() -> None:
             if master_process:
                 if val_bpb is None:
                     log(f"eval step={step} eval_mode=full val_loss={val_loss:.6f}")
-                    wandb_logger.log(
-                        {"eval/loss": val_loss, "eval/mode_full": 1.0}, step=step
-                    )
+                    wandb_logger.log({"eval/loss": val_loss}, step=step)
                 else:
                     log(
                         f"eval step={step} eval_mode=full val_loss={val_loss:.6f} val_bpb={val_bpb:.6f}"
                     )
                     wandb_logger.log(
-                        {
-                            "eval/loss": val_loss,
-                            "eval/bpb": val_bpb,
-                            "eval/mode_full": 1.0,
-                        },
-                        step=step,
+                        {"eval/loss": val_loss, "eval/bpb": val_bpb}, step=step
                     )
             if distributed:
                 dist.barrier()
@@ -2433,16 +2506,13 @@ def main() -> None:
             )
             if val_bpb is None:
                 log(f"eval step={step} eval_mode=sampled val_loss={val_loss:.6f}")
-                wandb_logger.log(
-                    {"eval/loss": val_loss, "eval/mode_full": 0.0}, step=step
-                )
+                wandb_logger.log({"eval/loss": val_loss}, step=step)
             else:
                 log(
                     f"eval step={step} eval_mode=sampled val_loss={val_loss:.6f} val_bpb={val_bpb:.6f}"
                 )
                 wandb_logger.log(
-                    {"eval/loss": val_loss, "eval/bpb": val_bpb, "eval/mode_full": 0.0},
-                    step=step,
+                    {"eval/loss": val_loss, "eval/bpb": val_bpb}, step=step
                 )
         if distributed:
             dist.barrier()
@@ -2549,6 +2619,16 @@ def main() -> None:
             if distributed:
                 dist.all_reduce(stats, op=dist.ReduceOp.SUM)
             train_loss = float(stats[0].item() / max(1.0, stats[1].item()))
+            elapsed = time.time() - start_time
+            toks_per_sec = float(processed_train_tokens) / max(elapsed, 1e-6)
+            if progress_bar is not None:
+                progress_bar.update(1)
+                progress_bar.set_postfix(
+                    loss=f"{train_loss:.4f}",
+                    lr=f"{lr:.2e}",
+                    tok_s=f"{toks_per_sec:.0f}",
+                    refresh=False,
+                )
 
             should_log = (
                 completed_steps == 1
@@ -2556,21 +2636,17 @@ def main() -> None:
                 or completed_steps == total_training_steps
             )
             if master_process and should_log:
-                elapsed = time.time() - start_time
-                toks_per_sec = float(processed_train_tokens) / max(elapsed, 1e-6)
                 log(
-                    f"epoch={epoch} epoch_step={epoch_step_idx}/{len(epoch_steps)} step={completed_steps}/{total_training_steps} "
-                    f"lr={lr:.6g} train_loss={train_loss:.6f} step_tokens={step_global_token_count} "
+                    f"step={completed_steps}/{total_training_steps} epoch_step={epoch_step_idx}/{len(epoch_steps)} "
+                    f"lr={lr:.6g} train_loss={train_loss:.6f} "
                     f"processed_tokens={processed_train_tokens} elapsed_s={elapsed:.2f} tokens_per_s={toks_per_sec:.2f}"
                 )
                 wandb_logger.log(
                     {
                         "train/loss": train_loss,
                         "train/lr": lr,
-                        "train/step_tokens": step_global_token_count,
                         "train/processed_tokens": processed_train_tokens,
                         "train/tokens_per_s": toks_per_sec,
-                        "train/epoch": epoch,
                     },
                     step=completed_steps,
                 )
@@ -2625,6 +2701,8 @@ def main() -> None:
         )
 
     wandb_logger.finish()
+    if progress_bar is not None:
+        progress_bar.close()
 
     if distributed:
         dist.destroy_process_group()

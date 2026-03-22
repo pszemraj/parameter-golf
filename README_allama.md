@@ -112,10 +112,12 @@ Per run, the config includes the model identity and size fields you actually wan
 
 These are intentionally recorded in W&B config rather than `wandb.log()` history, because they are derived static values, not training metrics.
 
-The metrics stream includes only actual run-time signals:
+The metrics stream includes only actual run-time signals that can move during the run:
 
 - `train/*`
 - `eval/*`
+
+That means invariant run descriptors such as resolved eval mode, epoch count, and planned per-step token counts belong in W&B config and the local startup log, not in W&B history.
 
 So for every run you can directly compare:
 - what is **stored once on disk**
@@ -288,6 +290,11 @@ bash scripts/run_allama_ablations.sh
 
 It also exports `TORCH_BLAS_PREFER_CUBLASLT=1` for 5090-friendly CUDA BLAS selection.
 
+For short diagnostic runs it also enables W&B parameter/gradient watching by default:
+
+- `WANDB_WATCH=all`
+- `WANDB_WATCH_LOG_FREQ=100`
+
 Batch semantics matter here:
 
 - in [train_gpt.py](train_gpt.py), `TRAIN_BATCH_TOKENS=524288` is the effective optimizer-step batch, not the one-GPU microbatch
@@ -313,6 +320,7 @@ So the sweep defaults are:
 - `TRAIN_BATCH_TOKENS=524288`
 - `GRAD_ACCUM_STEPS=128`
 - `RUN_COMPILE=1`
+- `VAL_LOSS_EVERY=500`
 
 That is conservative on VRAM, but it is the first verified compile-safe point for the worst-case family on the current 5090 stack. If you disable compile, you can experiment with lower accumulation separately, but the training helper keeps the compile-safe default.
 

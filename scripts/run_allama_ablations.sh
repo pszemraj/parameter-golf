@@ -6,6 +6,8 @@ export WANDB=1
 export WANDB_PROJECT=param-golf-ablations
 export WANDB_GROUP="${WANDB_GROUP:-allama-blocked-ablations}"
 export WANDB_TAGS="${WANDB_TAGS:-5090,allama,nearcap,finalsize,behavior,blocked,bs524k}"
+export WANDB_WATCH="${WANDB_WATCH:-all}"
+export WANDB_WATCH_LOG_FREQ="${WANDB_WATCH_LOG_FREQ:-100}"
 export TORCH_BLAS_PREFER_CUBLASLT=1
 
 BASE_ENV=(
@@ -19,7 +21,7 @@ BASE_ENV=(
   TRAIN_BATCH_TOKENS="${TRAIN_BATCH_TOKENS:-524288}"
   GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-128}"
   ITERATIONS=2000
-  VAL_LOSS_EVERY=250
+  VAL_LOSS_EVERY=500
   TRAIN_LOG_EVERY=25
   EVAL_MODE=sampled
   VAL_BATCH_SIZE=8
