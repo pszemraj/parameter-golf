@@ -2150,7 +2150,7 @@ def plan_epoch_steps(
     :param int max_seq_len: Maximum sequence length per microbatch.
     :param int world_size: Number of distributed ranks.
     :return tuple[list[list[MicroBatchSpec]], dict[str, int]]: Planned step specs and
-        epoch-level accounting info.
+        epoch-level accounting info, including detailed tail-drop accounting.
     """
     if max_local_batch_size <= 0:
         raise ValueError(
@@ -2172,14 +2172,19 @@ def plan_epoch_steps(
     usable_target_tokens = effective_target_tokens - (
         effective_target_tokens % tokens_per_sequence
     )
+    rank_alignment_dropped_target_tokens = total_target_tokens - effective_target_tokens
+    seq_alignment_dropped_target_tokens = effective_target_tokens - usable_target_tokens
     max_micro_global_tokens = max_local_batch_size * tokens_per_sequence
     if usable_target_tokens <= 0:
         return [], {
             "total_tokens": total_tokens,
             "total_target_tokens": total_target_tokens,
+            "rank_aligned_target_tokens": effective_target_tokens,
             "usable_target_tokens": 0,
             "planned_target_tokens": 0,
             "dropped_target_tokens": total_target_tokens,
+            "rank_alignment_dropped_target_tokens": rank_alignment_dropped_target_tokens,
+            "seq_alignment_dropped_target_tokens": seq_alignment_dropped_target_tokens,
             "steps_per_epoch": 0,
             "microbatches_per_epoch": 0,
         }
@@ -2214,9 +2219,12 @@ def plan_epoch_steps(
     info = {
         "total_tokens": total_tokens,
         "total_target_tokens": total_target_tokens,
-        "usable_target_tokens": effective_target_tokens,
+        "rank_aligned_target_tokens": effective_target_tokens,
+        "usable_target_tokens": usable_target_tokens,
         "planned_target_tokens": planned_target_tokens,
         "dropped_target_tokens": dropped_target_tokens,
+        "rank_alignment_dropped_target_tokens": rank_alignment_dropped_target_tokens,
+        "seq_alignment_dropped_target_tokens": seq_alignment_dropped_target_tokens,
         "steps_per_epoch": len(steps),
         "microbatches_per_epoch": microbatch_count,
     }
@@ -3099,14 +3107,22 @@ def main() -> None:
     log(
         f"train_plan epochs={args.num_epochs} max_steps={args.max_steps} steps_per_epoch={epoch_plan_info['steps_per_epoch']} "
         f"planned_total_steps={planned_total_steps} total_training_steps={total_training_steps} "
+        f"rank_aligned_target_tokens_per_epoch={epoch_plan_info['rank_aligned_target_tokens']} "
         f"usable_target_tokens_per_epoch={epoch_plan_info['usable_target_tokens']} "
         f"planned_target_tokens_per_epoch={epoch_plan_info['planned_target_tokens']} "
         f"dropped_target_tokens_per_epoch={epoch_plan_info['dropped_target_tokens']}"
     )
     if epoch_plan_info["dropped_target_tokens"] > 0:
+        tail_drop_reasons: list[str] = []
+        if epoch_plan_info["rank_alignment_dropped_target_tokens"] > 0:
+            tail_drop_reasons.append("world_size_alignment")
+        if epoch_plan_info["seq_alignment_dropped_target_tokens"] > 0:
+            tail_drop_reasons.append("fixed_train_seq_len")
         log(
             f"train_tail_drop dropped_target_tokens_per_epoch={epoch_plan_info['dropped_target_tokens']} "
-            f"reason=fixed_train_seq_len"
+            f"rank_alignment_dropped_target_tokens_per_epoch={epoch_plan_info['rank_alignment_dropped_target_tokens']} "
+            f"seq_alignment_dropped_target_tokens_per_epoch={epoch_plan_info['seq_alignment_dropped_target_tokens']} "
+            f"reason={'+'.join(tail_drop_reasons) if tail_drop_reasons else 'unknown'}"
         )
     log(
         f"train_static nominal_step_tokens={nominal_step_tokens} final_step_tokens={final_step_tokens} "
@@ -3165,9 +3181,18 @@ def main() -> None:
         "sdpa_cudnn_enabled": bool(sdpa_status.get("cudnn_enabled", False)),
         "layer_map": report_model.layer_to_block_map(),
         "steps_per_epoch": epoch_plan_info["steps_per_epoch"],
+        "rank_aligned_target_tokens_per_epoch": epoch_plan_info[
+            "rank_aligned_target_tokens"
+        ],
         "usable_target_tokens_per_epoch": epoch_plan_info["usable_target_tokens"],
         "planned_target_tokens_per_epoch": epoch_plan_info["planned_target_tokens"],
         "dropped_target_tokens_per_epoch": epoch_plan_info["dropped_target_tokens"],
+        "rank_alignment_dropped_target_tokens_per_epoch": epoch_plan_info[
+            "rank_alignment_dropped_target_tokens"
+        ],
+        "seq_alignment_dropped_target_tokens_per_epoch": epoch_plan_info[
+            "seq_alignment_dropped_target_tokens"
+        ],
         "planned_total_steps": planned_total_steps,
         "total_training_steps": total_training_steps,
         "train_nominal_step_tokens": nominal_step_tokens,
@@ -3348,7 +3373,17 @@ def main() -> None:
         if device.type == "cuda":
             torch.cuda.synchronize(device)
 
-    if compile_enabled and args.compile_warmup_steps > 0 and total_training_steps > 0:
+    training_time_ms = 0.0
+    stop_after_step: Optional[int] = None
+    synchronize_device()
+    t0 = time.perf_counter()
+
+    if (
+        compile_enabled
+        and not args.eval_only
+        and args.compile_warmup_steps > 0
+        and total_training_steps > 0
+    ):
         initial_model_state = {
             name: tensor.detach().cpu().clone()
             for name, tensor in report_model.state_dict().items()
@@ -3391,6 +3426,13 @@ def main() -> None:
         optimizer.zero_grad(set_to_none=True)
         train_loader.reset()
         synchronize_device()
+        training_time_ms += 1000.0 * (time.perf_counter() - t0)
+        if (
+            args.max_wallclock_seconds > 0.0
+            and training_time_ms >= 1000.0 * args.max_wallclock_seconds
+        ):
+            stop_after_step = 0
+        t0 = time.perf_counter()
 
     if args.eval_only:
         run_eval(step=0)
@@ -3403,10 +3445,6 @@ def main() -> None:
             dist.destroy_process_group()
         return
 
-    training_time_ms = 0.0
-    stop_after_step: Optional[int] = None
-    synchronize_device()
-    t0 = time.perf_counter()
     completed_steps = 0
     processed_train_tokens = 0
     last_eval_step = -1

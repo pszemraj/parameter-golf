@@ -49,7 +49,14 @@ That means the default behavior is:
 - no arbitrary `MAX_STEPS` cap
 
 `MAX_STEPS` still exists, but only as a debug cap.
-The startup log prints both `dropped_target_tokens_per_epoch` and a `train_tail_drop ... reason=fixed_train_seq_len` line when that tail-drop path is active.
+The startup log now distinguishes:
+- `rank_aligned_target_tokens_per_epoch`: targets left after any `WORLD_SIZE` alignment trim
+- `usable_target_tokens_per_epoch`: targets left after the fixed-`TRAIN_SEQ_LEN` trim
+- `planned_target_tokens_per_epoch`: targets actually scheduled into epoch microbatches
+
+When any tail-drop path is active, `train_tail_drop ...` now reports the separate
+rank-alignment and fixed-sequence drop counts instead of folding them into one
+ambiguous number.
 
 ## Working directory
 
@@ -338,6 +345,11 @@ It prints its launch summary before starting, including planned vs scheduled
 run counts, the resolved batch settings, local batch size, compile mode,
 planned train-token budget, and wallclock cap.
 
+That wallclock cap still defaults to uncapped local ablations. If you
+explicitly set `MAX_WALLCLOCK_SECONDS>0`, the trainer now counts compile warmup
+against that cap instead of treating it as a free prelude. Evaluation time
+remains separate.
+
 There are now four intended sweep profiles:
 
 - default `SWEEP_PROFILE=ablate`: 29 planned runs total, `1` `train_gpt.py`
@@ -382,7 +394,8 @@ Completion checks respect intentional wallclock-capped runs. If
 `MAX_WALLCLOCK_SECONDS` is part of the run spec, a matching
 `train_stop ... reason=max_wallclock_seconds=...` is accepted as completion for
 that capped plan, but it still does not alias an uncapped or longer plan with
-a different run spec.
+a different run spec. This only affects explicitly capped runs; the default
+ablation contract remains uncapped.
 
 It also exports `TORCH_BLAS_PREFER_CUBLASLT=1` for 5090-friendly CUDA BLAS selection.
 The trainer now supports `SDPA_BACKEND=auto|flash|efficient|math|cudnn` for explicit SDPA backend experiments.
