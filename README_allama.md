@@ -411,6 +411,12 @@ that same resolved batch contract now:
 - both trainers exclude compile warmup and eval time from the ranked training
   window, so `elapsed_s`, `tokens_per_s`, and `MAX_WALLCLOCK_SECONDS` reflect
   train-only time rather than cold compile time
+- ALlama now derives its default `EVAL_BATCH_TOKENS` from the eval microbatch
+  (`sampled_eval_batch_size * EVAL_SEQ_LEN * WORLD_SIZE`) instead of the full
+  optimizer-step token budget, so default full-eval memory matches the intended
+  microbatch contract rather than secretly jumping to a much larger batch
+- the trainer startup log now prints `eval_plan ...` and the final log prints
+  peak CUDA allocated/reserved memory so hidden phase spikes are easier to spot
 
 The older blocked-sweep profiles are still available unchanged as explicit
 alternatives:

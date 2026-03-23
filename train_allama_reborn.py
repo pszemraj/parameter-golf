@@ -3023,7 +3023,11 @@ def main() -> None:
     eval_batch_tokens = (
         args.eval_batch_tokens
         if args.eval_batch_tokens > 0
-        else args.train_batch_tokens
+        else sampled_eval_batch_size * args.eval_seq_len * world_size
+    )
+    full_eval_local_batch_tokens = eval_batch_tokens // max(1, world_size)
+    full_eval_local_batch_size = full_eval_local_batch_tokens // max(
+        1, args.eval_seq_len
     )
     epoch_steps, epoch_plan_info = plan_epoch_steps(
         total_tokens=train_loader.total_tokens,
@@ -3110,6 +3114,21 @@ def main() -> None:
         f"train_log_every={args.train_log_every} val_loss_every={args.val_loss_every} "
         f"lr_warmup_steps={args.warmup_steps} compile_warmup_steps={args.compile_warmup_steps}"
     )
+    log(
+        f"eval_plan train_local_batch_size={local_batch_size} sampled_eval_batch_size={sampled_eval_batch_size} "
+        f"eval_batch_tokens={eval_batch_tokens} full_eval_local_batch_size={full_eval_local_batch_size}"
+    )
+    if (
+        sampled_eval_batch_size > local_batch_size
+        or full_eval_local_batch_size > local_batch_size
+    ):
+        log(
+            "eval_memory_note "
+            f"sampled_eval_batch_size={sampled_eval_batch_size} "
+            f"full_eval_local_batch_size={full_eval_local_batch_size} "
+            f"train_local_batch_size={local_batch_size} "
+            "note=eval_batch_is_larger_than_train_microbatch"
+        )
     log(
         f"x0_shortcut={args.use_x0_shortcut} resid_mix_init={args.resid_mix_init} "
         f"global_rotary=1 enable_gqa_probe={int(SDPA_ENABLE_GQA)}"
@@ -3535,6 +3554,11 @@ def main() -> None:
         last_eval_step = completed_steps
     if master_process:
         log(f"train_stop step={completed_steps} reason={stop_reason}")
+        if device.type == "cuda":
+            log(
+                f"peak memory allocated: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB "
+                f"reserved: {torch.cuda.max_memory_reserved() // 1024 // 1024} MiB"
+            )
         final_state = report_model.state_dict()
         saved_artifact_bytes = save_run_artifacts(final_state, args, log)
         record_run_footprint(saved_artifact_bytes)
