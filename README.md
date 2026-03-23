@@ -53,13 +53,14 @@ Happy training!
 
 ## Getting Started
 
-### Training Your First Model (Mac with Apple Silicon)
+### Training Your First Model
 
-If you have an Apple laptop or desktop with Apple Silicon, we've set up a simple MLX training script to help you start iterating locally.
+The baseline starter path in this repo is `train_gpt.py`, which targets CUDA.
+If you do not have a local CUDA machine, skip to the remote-machine section
+below instead of trying to run the trainer on CPU.
 
-If you don't have a Mac with Apple Silicon, you can run an adapted version of this script without MLX support. Just ask [Codex](https://openai.com/codex/) to refactor it; the change is straightforward. It may still be fairly slow, so we recommend jumping straight to cloud GPUs with Runpod.
-
-First, clone the repository, create a fresh Python environment, and install the packages needed for the MLX path plus dataset download:
+First, clone the repository, create a fresh Python environment, and install the
+packages needed for dataset download plus the baseline trainer:
 
 ```bash
 git clone https://github.com/openai/parameter-golf.git
@@ -67,7 +68,7 @@ cd parameter-golf
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-pip install mlx numpy sentencepiece huggingface-hub datasets tqdm
+pip install numpy sentencepiece huggingface-hub datasets tqdm
 ```
 
 Download our cached version of FineWeb with the 1024-token vocabulary:
@@ -79,15 +80,15 @@ python3 data/cached_challenge_fineweb.py --variant sp1024 --train-shards 10
 This populates `./data/datasets/fineweb10B_sp1024/` and `./data/tokenizers/`.
 By default this downloads the full validation split plus 80 training shards (8B tokens). For a smaller local smoke subset, pass `--train-shards 1`, for example `python3 data/cached_challenge_fineweb.py --variant sp1024 --train-shards 1`.
 
-Then run a small MLX training job:
+Then run a small baseline training smoke on GPU:
 
 ```bash
-RUN_ID=mlx_smoke \
+RUN_ID=gpt_smoke \
 ITERATIONS=200 \
 TRAIN_BATCH_TOKENS=8192 \
 VAL_LOSS_EVERY=0 \
 VAL_BATCH_SIZE=8192 \
-python3 train_gpt_mlx.py
+python3 train_gpt.py
 ```
 
 Validation always runs on the full `fineweb_val_*` split, which is the fixed first-50k-document set. The smoke command above skips periodic validation and just prints the final `val_loss` and `val_bpb` once at the end.
@@ -201,7 +202,7 @@ Non-record submissions should be made in the same fashion as SOTA records, as de
 
 #### PRs on Core Code
 
-The `train_gpt.py` and `train_gpt_mlx.py` scripts are intended as good launching-off points for new participants, not SOTA configs. We'll accept PRs that tune, improve, or simplify these scripts without significantly increasing complexity, but the best models should stay in the `/records` folder.
+The `train_gpt.py` script and related trainer code paths are intended as good launching-off points for new participants, not SOTA configs. We'll accept PRs that tune, improve, or simplify these scripts without significantly increasing complexity, but the best models should stay in the `/records` folder.
 
 ## Support
 

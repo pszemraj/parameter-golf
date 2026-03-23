@@ -11,6 +11,7 @@ import argparse
 import json
 import os
 import shutil
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,8 @@ SP_BATCH_SIZE = max(1, int(os.environ.get("MATCHED_FINEWEB_SP_BATCH_SIZE", "1024
 
 @dataclass(frozen=True)
 class PureByteTokenizer:
+    """Minimal pure-byte tokenizer used for dataset export."""
+
     pad_id: int = 0
     bos_id: int = 1
     eos_id: int = 2
@@ -50,9 +53,18 @@ class PureByteTokenizer:
 
     @property
     def vocab_size(self) -> int:
+        """Return the vocabulary size including reserved special tokens.
+
+        :return int: Pure-byte vocabulary size.
+        """
         return self.byte_offset + self.byte_count
 
     def encode(self, text: str) -> np.ndarray:
+        """Encode UTF-8 text into byte-offset token ids.
+
+        :param str text: Input text to encode.
+        :return np.ndarray: Encoded token ids.
+        """
         data = text.encode("utf-8", errors="replace")
         return (
             np.frombuffer(data, dtype=np.uint8).astype(np.uint16, copy=False)
@@ -60,9 +72,19 @@ class PureByteTokenizer:
         )
 
     def encode_batch(self, texts: list[str]) -> list[np.ndarray]:
+        """Encode a batch of texts with the pure-byte tokenizer.
+
+        :param list[str] texts: Input texts to encode.
+        :return list[np.ndarray]: Encoded token arrays.
+        """
         return [self.encode(text) for text in texts]
 
     def save_json(self, path: str | Path) -> None:
+        """Write the tokenizer definition to a JSON file.
+
+        :param str | Path path: Output JSON path.
+        :return None: Writes the tokenizer config to disk.
+        """
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
@@ -76,14 +98,29 @@ class PureByteTokenizer:
 
 
 def default_pure_byte_tokenizer() -> PureByteTokenizer:
+    """Construct the default pure-byte tokenizer definition.
+
+    :return PureByteTokenizer: Default tokenizer instance.
+    """
     return PureByteTokenizer()
 
 
 def docs_sidecar_path(docs_jsonl: Path) -> Path:
+    """Return the expected sidecar path for a docs JSONL file.
+
+    :param Path docs_jsonl: Downloaded docs JSONL path.
+    :return Path: Sidecar manifest path.
+    """
     return docs_jsonl.with_name(f"{docs_jsonl.stem}.source_manifest.json")
 
 
 def maybe_load_docs_sidecar_meta(docs_jsonl: Path) -> dict[str, Any] | None:
+    """Load the optional docs sidecar metadata when it exists.
+
+    :param Path docs_jsonl: Downloaded docs JSONL path.
+    :raises ValueError: If the sidecar payload is not a JSON object.
+    :return dict[str, Any] | None: Parsed sidecar payload, if present.
+    """
     sidecar_path = docs_sidecar_path(docs_jsonl)
     if not sidecar_path.is_file():
         return None
@@ -96,6 +133,14 @@ def maybe_load_docs_sidecar_meta(docs_jsonl: Path) -> dict[str, Any] | None:
 def copy_from_hf_cache(
     *, repo_id: str, remote_root: str, filename: str, destination: Path
 ) -> bool:
+    """Copy one artifact from the Hugging Face cache into the output tree.
+
+    :param str repo_id: Hugging Face dataset repo id.
+    :param str remote_root: Optional subdirectory inside the dataset repo.
+    :param str filename: Artifact filename to fetch.
+    :param Path destination: Output path.
+    :return bool: Whether the artifact existed remotely.
+    """
     remote_path = Path(remote_root) / filename if remote_root else Path(filename)
     try:
         cached_path = Path(
@@ -122,18 +167,34 @@ def copy_from_hf_cache(
     return True
 
 
-def iter_docs(path: Path):
+def iter_docs(path: Path) -> Iterator[str]:
+    """Yield document texts from the downloaded JSONL file.
+
+    :param Path path: Docs JSONL path.
+    :return Iterator[str]: Document text iterator.
+    """
     with path.open("r", encoding="utf-8") as f:
         for line in f:
             yield json.loads(line)["text"]
 
 
 def count_docs(path: Path) -> int:
+    """Count the number of JSONL documents in the docs file.
+
+    :param Path path: Docs JSONL path.
+    :return int: Number of documents.
+    """
     with path.open("r", encoding="utf-8") as f:
         return sum(1 for _ in f)
 
 
-def batched_docs_jsonl(path: Path, batch_size: int):
+def batched_docs_jsonl(path: Path, batch_size: int) -> Iterator[list[str]]:
+    """Yield JSONL documents in fixed-size text batches.
+
+    :param Path path: Docs JSONL path.
+    :param int batch_size: Maximum batch size.
+    :return Iterator[list[str]]: Iterator of text batches.
+    """
     batch: list[str] = []
     for text in iter_docs(path):
         batch.append(text)
@@ -145,6 +206,13 @@ def batched_docs_jsonl(path: Path, batch_size: int):
 
 
 def write_datafile(path: Path, toks: Any) -> None:
+    """Write one shard in the repo's packed binary token format.
+
+    :param Path path: Output shard path.
+    :param Any toks: Token ids to serialize.
+    :raises ValueError: If token counts or ids exceed the format limits.
+    :return None: Writes the shard to disk.
+    """
     if len(toks) >= 2**31:
         raise ValueError("token count too large")
     header = np.zeros(256, dtype="<i4")
@@ -164,6 +232,12 @@ def write_datafile(path: Path, toks: Any) -> None:
 
 
 def relativize_manifest_paths(value: Any, root: Path) -> Any:
+    """Rewrite absolute manifest paths relative to the output root where possible.
+
+    :param Any value: Manifest subtree to rewrite.
+    :param Path root: Output root used for relativization.
+    :return Any: Relativized manifest subtree.
+    """
     if isinstance(value, dict):
         return {k: relativize_manifest_paths(v, root) for k, v in value.items()}
     if isinstance(value, list):
@@ -179,6 +253,12 @@ def relativize_manifest_paths(value: Any, root: Path) -> Any:
 
 
 def parse_reuse_sp_models(values: list[str]) -> dict[int, Path]:
+    """Parse `--reuse-sp-model` CLI entries into a vocab-to-path map.
+
+    :param list[str] values: CLI values formatted as `VOCAB=MODEL`.
+    :raises ValueError: If a vocab size is repeated.
+    :return dict[int, Path]: Reuse-model mapping by vocab size.
+    """
     reuse_models: dict[int, Path] = {}
     for value in values:
         vocab_size_str, model_path = value.split("=", 1)
@@ -190,6 +270,12 @@ def parse_reuse_sp_models(values: list[str]) -> dict[int, Path]:
 
 
 def load_specs(config_path: Path) -> list[dict[str, Any]]:
+    """Load tokenizer specs from the configured JSON file.
+
+    :param Path config_path: Tokenizer config JSON path.
+    :raises ValueError: If the config does not define tokenizer specs.
+    :return list[dict[str, Any]]: Normalized tokenizer spec objects.
+    """
     payload = json.loads(config_path.read_text(encoding="utf-8"))
     if isinstance(payload, dict):
         specs = payload.get("tokenizer_specs", payload.get("tokenizers"))
@@ -203,6 +289,12 @@ def load_specs(config_path: Path) -> list[dict[str, Any]]:
 
 
 def tokenizer_kind(spec: dict[str, Any]) -> str:
+    """Resolve the built-in tokenizer builder kind for one spec.
+
+    :param dict[str, Any] spec: Tokenizer spec payload.
+    :raises ValueError: If the spec does not map to a supported built-in builder.
+    :return str: Canonical tokenizer kind.
+    """
     kind = spec.get("kind")
     if kind in {"byte", "pure_byte"}:
         return "byte"
@@ -227,6 +319,12 @@ def tokenizer_kind(spec: dict[str, Any]) -> str:
 def write_tokenizer_config_export(
     output_root: Path, selected_specs: list[dict[str, Any]]
 ) -> Path:
+    """Write the selected tokenizer specs alongside the exported datasets.
+
+    :param Path output_root: Export root directory.
+    :param list[dict[str, Any]] selected_specs: Specs actually used for export.
+    :return Path: Written config path.
+    """
     path = output_root / "tokenizer_config.export.json"
     path.write_text(
         json.dumps({"tokenizers": selected_specs}, indent=2) + "\n", encoding="utf-8"
@@ -234,7 +332,15 @@ def write_tokenizer_config_export(
     return path
 
 
-def _iter_sentencepiece_text(docs_jsonl: Path, *, max_docs: int | None = None):
+def _iter_sentencepiece_text(
+    docs_jsonl: Path, *, max_docs: int | None = None
+) -> Iterator[str]:
+    """Yield normalized training text for SentencePiece.
+
+    :param Path docs_jsonl: Docs JSONL path.
+    :param int | None max_docs: Optional cap on yielded documents.
+    :return Iterator[str]: Normalized text iterator.
+    """
     with docs_jsonl.open("r", encoding="utf-8") as f:
         for i, line in enumerate(f):
             if max_docs is not None and i >= max_docs:
@@ -247,6 +353,13 @@ def _iter_sentencepiece_text(docs_jsonl: Path, *, max_docs: int | None = None):
 def build_pure_byte_tokenizer(
     *, spec: dict[str, Any], docs_jsonl: Path, tokenizers_dir: Path
 ) -> dict[str, Any]:
+    """Build and serialize the pure-byte tokenizer export.
+
+    :param dict[str, Any] spec: Tokenizer spec payload.
+    :param Path docs_jsonl: Downloaded docs JSONL path.
+    :param Path tokenizers_dir: Output tokenizer directory.
+    :return dict[str, Any]: Built tokenizer metadata plus encode callables.
+    """
     del docs_jsonl
     tok = default_pure_byte_tokenizer()
     path = tokenizers_dir / spec.get("filename", "fineweb_pure_byte_260.json")
@@ -267,6 +380,14 @@ def build_pure_byte_tokenizer(
 def build_sentencepiece_tokenizer(
     *, spec: dict[str, Any], docs_jsonl: Path, tokenizers_dir: Path
 ) -> dict[str, Any]:
+    """Build or reuse a SentencePiece tokenizer export.
+
+    :param dict[str, Any] spec: Tokenizer spec payload.
+    :param Path docs_jsonl: Downloaded docs JSONL path.
+    :param Path tokenizers_dir: Output tokenizer directory.
+    :raises RuntimeError: If SentencePiece is unavailable.
+    :return dict[str, Any]: Built tokenizer metadata plus encode callables.
+    """
     try:
         import sentencepiece as spm
     except ImportError as exc:
@@ -342,6 +463,17 @@ def export_shards(
     shard_size: int,
     docs_total: int,
 ) -> dict[str, int]:
+    """Tokenize docs and export validation plus training shards.
+
+    :param Path docs_jsonl: Downloaded docs JSONL path.
+    :param dict[str, Any] tok: Tokenizer metadata plus encode callables.
+    :param Path output_dir: Output dataset directory.
+    :param int num_val_docs: Number of docs reserved for validation.
+    :param int shard_size: Maximum tokens per shard.
+    :param int docs_total: Expected total document count.
+    :raises ValueError: If shard export invariants are violated.
+    :return dict[str, int]: Dataset export statistics.
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
     for pattern in ("fineweb_train_*.bin", "fineweb_val_*.bin"):
         for stale in output_dir.glob(pattern):
@@ -364,6 +496,10 @@ def export_shards(
     shards = {"val": 0, "train": 0}
 
     def flush() -> None:
+        """Write the current buffered shard for the active split.
+
+        :return None: Flushes buffered tokens to disk when present.
+        """
         nonlocal fill
         if fill == 0:
             return
@@ -444,6 +580,18 @@ def build_tokenizers(
     skip_byte: bool,
     reuse_sp_models: dict[int, Path],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Build all requested tokenizer exports for the docs corpus.
+
+    :param list[dict[str, Any]] specs: Raw tokenizer specs.
+    :param Path docs_jsonl: Downloaded docs JSONL path.
+    :param Path tokenizers_dir: Output tokenizer directory.
+    :param int | None tokenizer_train_docs: Optional tokenizer-training doc limit.
+    :param bool skip_byte: Whether byte tokenizers should be skipped.
+    :param dict[int, Path] reuse_sp_models: Reused SentencePiece models by vocab size.
+    :raises ValueError: If tokenizer names or dataset names collide.
+    :return tuple[list[dict[str, Any]], list[dict[str, Any]]]: Built tokenizers and
+        selected normalized specs.
+    """
     tokenizers: list[dict[str, Any]] = []
     selected_specs: list[dict[str, Any]] = []
     seen_names: set[str] = set()
@@ -517,6 +665,10 @@ def build_tokenizers(
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the CLI parser for docs download and tokenization export.
+
+    :return argparse.ArgumentParser: Configured argument parser.
+    """
     parser = argparse.ArgumentParser(
         description="Download docs_selected.jsonl from a Hugging Face dataset repo and tokenize it locally"
     )
@@ -569,6 +721,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    """Download docs, build tokenizers, export shards, and write a manifest.
+
+    :return None: Performs export side effects only.
+    """
     args = build_parser().parse_args()
     if args.chunk_tokens <= 0:
         raise ValueError(f"--chunk_tokens must be positive, got {args.chunk_tokens}")

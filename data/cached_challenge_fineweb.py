@@ -1,3 +1,5 @@
+"""Download matched FineWeb artifacts from the Hugging Face dataset mirror."""
+
 import argparse
 import json
 import os
@@ -14,6 +16,12 @@ TOKENIZERS_DIR = ROOT / "tokenizers"
 
 
 def dataset_dir_for_variant(name: str) -> str:
+    """Map a tokenizer variant name to its dataset directory.
+
+    :param str name: Requested variant such as `sp1024` or `byte260`.
+    :raises ValueError: If the variant is unsupported.
+    :return str: Dataset directory name under `data/datasets`.
+    """
     if name == "byte260":
         return "fineweb10B_byte260"
     if name.startswith("sp") and name[2:].isdigit():
@@ -24,6 +32,11 @@ def dataset_dir_for_variant(name: str) -> str:
 
 
 def local_path_for_remote(relative_path: str) -> Path:
+    """Resolve a remote artifact path into the local repo layout.
+
+    :param str relative_path: Artifact path inside the mirrored dataset repo.
+    :return Path: Local destination path under `data/`.
+    """
     remote_path = Path(relative_path)
     if REMOTE_ROOT_PREFIX and remote_path.parts[:1] == (REMOTE_ROOT_PREFIX,):
         remote_path = remote_path.relative_to(REMOTE_ROOT_PREFIX)
@@ -35,6 +48,11 @@ def local_path_for_remote(relative_path: str) -> Path:
 
 
 def get(relative_path: str) -> None:
+    """Download one mirrored artifact into the local repo layout.
+
+    :param str relative_path: Artifact path inside the mirrored dataset repo.
+    :return None: Materializes the file locally when needed.
+    """
     destination = local_path_for_remote(relative_path)
     if destination.exists():
         return
@@ -63,10 +81,20 @@ def get(relative_path: str) -> None:
 
 
 def manifest_path() -> Path:
+    """Return the expected local path for the dataset manifest.
+
+    :return Path: Local manifest path.
+    """
     return local_path_for_remote(f"{REMOTE_ROOT_PREFIX}/manifest.json")
 
 
 def load_manifest(*, skip_manifest_download: bool) -> dict:
+    """Load the dataset manifest, downloading it first when allowed.
+
+    :param bool skip_manifest_download: Whether missing manifests should raise instead.
+    :raises FileNotFoundError: If the manifest is absent and downloads are disabled.
+    :return dict: Parsed manifest payload.
+    """
     path = manifest_path()
     if not path.is_file():
         if skip_manifest_download:
@@ -78,6 +106,12 @@ def load_manifest(*, skip_manifest_download: bool) -> dict:
 
 
 def artifact_paths_for_tokenizer(tokenizer_entry: dict) -> list[str]:
+    """Collect downloadable artifact paths from a tokenizer manifest entry.
+
+    :param dict tokenizer_entry: Tokenizer entry from the dataset manifest.
+    :raises ValueError: If the entry contains no downloadable artifacts.
+    :return list[str]: Relative artifact paths to download.
+    """
     artifacts = []
     for key in ("model_path", "vocab_path", "path"):
         value = tokenizer_entry.get(key)
@@ -91,6 +125,10 @@ def artifact_paths_for_tokenizer(tokenizer_entry: dict) -> list[str]:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the CLI parser for matched FineWeb downloads.
+
+    :return argparse.ArgumentParser: Configured argument parser.
+    """
     parser = argparse.ArgumentParser(
         description="Download challenge FineWeb shards from Hugging Face"
     )
@@ -126,6 +164,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    """Download the requested tokenizer artifacts plus train and validation shards.
+
+    :return None: Performs download side effects only.
+    """
     args = build_parser().parse_args()
     dataset_dir = dataset_dir_for_variant(args.variant)
     train_shards = (

@@ -1,7 +1,7 @@
-"""
-The `train_gpt.py` and `train_gpt_mlx.py` scripts are intended as good launching-off points for new participants, not SOTA configs. We'll accept PRs that tune, improve, or simplify these scripts without significantly increasing complexity, but competitive submissions should stay in the `/records` folder.
+"""Reference CUDA baseline trainer for Parameter Golf participants.
 
-Hard stop: To keep readable for newcomers, let's make sure `train_gpt.py` and `train_gpt_mlx.py` never are longer than 1500 lines.
+`train_gpt.py` is meant as a readable starting point for local iteration, not a
+SOTA record script. Keep competitive experiments in `/records`.
 """
 
 from __future__ import annotations
@@ -38,7 +38,12 @@ ARTIFACT_SIZE_LIMIT_BYTES = 16_000_000
 
 
 def env_bool(name: str, default: bool) -> bool:
-    """Parse a boolean environment variable with a default fallback."""
+    """Parse a boolean environment variable with a default fallback.
+
+    :param str name: Environment variable name to read.
+    :param bool default: Value used when the variable is unset.
+    :return bool: Parsed boolean value.
+    """
     value = os.environ.get(name)
     if value is None:
         return default
@@ -46,13 +51,22 @@ def env_bool(name: str, default: bool) -> bool:
 
 
 def env_csv(name: str, default: str = "") -> list[str]:
-    """Split a comma-separated environment variable into trimmed non-empty items."""
+    """Split a comma-separated environment variable into trimmed non-empty items.
+
+    :param str name: Environment variable name to read.
+    :param str default: Fallback CSV string when unset.
+    :return list[str]: Trimmed non-empty CSV items.
+    """
     value = os.environ.get(name, default)
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
 def normalize_wandb_watch_mode(value: str) -> str:
-    """Validate the supported W&B watch modes used by the trainers."""
+    """Validate the supported W&B watch modes used by the trainers.
+
+    :param str value: Raw configured watch mode.
+    :return str: Canonical watch mode string.
+    """
     mode = value.strip().lower()
     if mode in {"off", "false", "0", ""}:
         return "off"
@@ -64,7 +78,11 @@ def normalize_wandb_watch_mode(value: str) -> str:
 
 
 def hyperparameter_config(args: "Hyperparameters") -> dict[str, Any]:
-    """Return the resolved class-backed hyperparameter config as a plain dict."""
+    """Return the resolved class-backed hyperparameter config as a plain dict.
+
+    :param Hyperparameters args: Resolved hyperparameter bundle.
+    :return dict[str, Any]: Serializable hyperparameter mapping.
+    """
     return {
         name: getattr(args, name)
         for name, value in Hyperparameters.__dict__.items()
@@ -83,6 +101,8 @@ def hyperparameter_config(args: "Hyperparameters") -> dict[str, Any]:
 
 
 class Hyperparameters:
+    """Environment-backed hyperparameters for the baseline PyTorch trainer."""
+
     # Data paths are shard globs produced by the existing preprocessing pipeline.
     data_path = os.environ.get("DATA_PATH", "./data/datasets/fineweb10B_sp1024")
     train_files = os.path.join(data_path, "fineweb_train_*.bin")
@@ -171,6 +191,13 @@ class Hyperparameters:
 def zeropower_via_newtonschulz5(
     G: Tensor, steps: int = 10, eps: float = 1e-7
 ) -> Tensor:
+    """Orthogonalize a matrix update with the Muon Newton-Schulz iteration.
+
+    :param Tensor G: Input gradient or update matrix.
+    :param int steps: Number of Newton-Schulz iterations.
+    :param float eps: Numerical-stability constant.
+    :return Tensor: Orthogonalized update matrix.
+    """
     # Orthogonalize a 2D update matrix with a fast Newton-Schulz iteration.
     # Muon uses this to normalize matrix-shaped gradients before applying them.
     a, b, c = (3.4445, -4.7750, 2.0315)
@@ -187,14 +214,25 @@ def zeropower_via_newtonschulz5(
 
 
 class Muon(torch.optim.Optimizer):
+    """Muon optimizer wrapper for matrix-valued parameters."""
+
     def __init__(
         self,
-        params,
+        params: list[Tensor],
         lr: float,
         momentum: float,
         backend_steps: int,
         nesterov: bool = True,
     ):
+        """Initialize the Muon optimizer state.
+
+        :param list[Tensor] params: Parameters updated by Muon.
+        :param float lr: Base learning rate.
+        :param float momentum: Momentum coefficient.
+        :param int backend_steps: Newton-Schulz iteration count.
+        :param bool nesterov: Whether to use Nesterov momentum.
+        :return None: Configures optimizer state.
+        """
         super().__init__(
             params,
             dict(
@@ -203,7 +241,12 @@ class Muon(torch.optim.Optimizer):
         )
 
     @torch.no_grad()
-    def step(self, closure=None):
+    def step(self, closure: Optional[Callable[[], Tensor]] = None) -> Optional[Tensor]:
+        """Apply one Muon optimization step.
+
+        :param Callable[[], Tensor] | None closure: Optional loss closure.
+        :return Tensor | None: Closure loss when provided.
+        """
         loss = None
         if closure is not None:
             with torch.enable_grad():
@@ -269,6 +312,14 @@ class Muon(torch.optim.Optimizer):
 def build_sentencepiece_luts(
     sp: spm.SentencePieceProcessor, vocab_size: int, device: torch.device
 ) -> tuple[Tensor, Tensor, Tensor]:
+    """Build lookup tables used for sentencepiece byte accounting.
+
+    :param spm.SentencePieceProcessor sp: Loaded sentencepiece tokenizer.
+    :param int vocab_size: Expected model vocabulary size.
+    :param torch.device device: Device for the lookup tables.
+    :return tuple[Tensor, Tensor, Tensor]: Base-byte, leading-space, and
+        boundary-token lookup tables.
+    """
     sp_vocab_size = int(sp.vocab_size())
     table_size = max(sp_vocab_size, vocab_size)
     base_bytes_np = np.zeros((table_size,), dtype=np.int16)
@@ -294,6 +345,12 @@ def build_sentencepiece_luts(
 
 
 def load_validation_tokens(pattern: str, seq_len: int) -> Tensor:
+    """Load and trim the full validation token stream for evaluation.
+
+    :param str pattern: Glob pattern matching validation shards.
+    :param int seq_len: Sequence length used for evaluation windows.
+    :return Tensor: Contiguous validation tokens trimmed to full windows.
+    """
     files = [Path(p) for p in sorted(glob.glob(pattern))]
     if not files:
         raise FileNotFoundError(f"No files found for pattern: {pattern}")
@@ -306,7 +363,13 @@ def load_validation_tokens(pattern: str, seq_len: int) -> Tensor:
 
 
 def make_eval_starts(num_tokens: int, seq_len: int, total_sequences: int) -> Tensor:
-    """Generate evenly spaced sampled-validation start offsets."""
+    """Generate evenly spaced sampled-validation start offsets.
+
+    :param int num_tokens: Number of validation tokens available.
+    :param int seq_len: Evaluation sequence length.
+    :param int total_sequences: Number of sampled windows to generate.
+    :return Tensor: Start offsets for sampled evaluation.
+    """
     max_start = num_tokens - seq_len - 1
     if max_start <= 0:
         raise ValueError(f"Validation tokens too short for seq_len={seq_len}")
@@ -318,7 +381,14 @@ def make_eval_starts(num_tokens: int, seq_len: int, total_sequences: int) -> Ten
 def resolve_eval_batch_plan(
     args: Hyperparameters, world_size: int, local_batch_size: int
 ) -> tuple[int, int, int]:
-    """Resolve sampled and full-eval batch sizing from the shared launch contract."""
+    """Resolve sampled and full-eval batch sizing from the shared launch contract.
+
+    :param Hyperparameters args: Resolved trainer hyperparameters.
+    :param int world_size: Distributed world size.
+    :param int local_batch_size: Train-time local batch size.
+    :return tuple[int, int, int]: Sampled-eval batch size, global eval token
+        budget, and full-eval local batch size.
+    """
     sampled_eval_batch_size = (
         args.val_batch_size if args.val_batch_size > 0 else local_batch_size
     )
@@ -355,7 +425,19 @@ def eval_sampled(
     has_leading_space_lut: Tensor,
     is_boundary_token_lut: Tensor,
 ) -> tuple[float, float]:
-    """Evaluate on a fixed set of sampled validation windows."""
+    """Evaluate on a fixed set of sampled validation windows.
+
+    :param nn.Module model: Model to evaluate.
+    :param torch.device device: Runtime device.
+    :param Tensor val_tokens: Validation token stream.
+    :param int seq_len: Evaluation sequence length.
+    :param int batch_size: Number of windows per batch.
+    :param int num_batches: Number of sampled batches.
+    :param Tensor base_bytes_lut: Token-to-byte-count lookup.
+    :param Tensor has_leading_space_lut: Leading-space lookup.
+    :param Tensor is_boundary_token_lut: Boundary-token lookup.
+    :return tuple[float, float]: Validation loss and tokenizer-agnostic BPB.
+    """
     total_sequences = max(1, batch_size * num_batches)
     starts = make_eval_starts(int(val_tokens.numel()), seq_len, total_sequences)
     offsets = torch.arange(seq_len + 1)
@@ -404,6 +486,20 @@ def eval_val(
     has_leading_space_lut: Tensor,
     is_boundary_token_lut: Tensor,
 ) -> tuple[float, float]:
+    """Evaluate over the full validation split, optionally partitioned by rank.
+
+    :param Hyperparameters args: Resolved trainer hyperparameters.
+    :param nn.Module model: Model to evaluate.
+    :param int rank: Current distributed rank.
+    :param int world_size: Distributed world size.
+    :param torch.device device: Runtime device.
+    :param int eval_batch_tokens: Global token budget per eval batch.
+    :param Tensor val_tokens: Validation token stream.
+    :param Tensor base_bytes_lut: Token-to-byte-count lookup.
+    :param Tensor has_leading_space_lut: Leading-space lookup.
+    :param Tensor is_boundary_token_lut: Boundary-token lookup.
+    :return tuple[float, float]: Validation loss and tokenizer-agnostic BPB.
+    """
     # Validation computes two metrics:
     # - val_loss: token cross-entropy (natural log)
     # - val_bpb: tokenizer-agnostic compression metric used by the challenge
@@ -490,12 +586,24 @@ INT8_CLIP_Q = INT8_CLIP_PERCENTILE / 100.0
 
 
 def tensor_nbytes(t: Tensor) -> int:
+    """Return the raw storage footprint of a tensor.
+
+    :param Tensor t: Tensor to measure.
+    :return int: Tensor storage size in bytes.
+    """
     return int(t.numel()) * int(t.element_size())
 
 
 def keep_float_tensor(
     name: str, t: Tensor, passthrough_orig_dtypes: dict[str, str]
 ) -> Tensor:
+    """Prepare a small float tensor for passthrough export storage.
+
+    :param str name: Tensor name in the state dict.
+    :param Tensor t: Tensor to preserve without quantization.
+    :param dict[str, str] passthrough_orig_dtypes: Map used to restore dtypes.
+    :return Tensor: Stored passthrough tensor.
+    """
     if any(pattern in name for pattern in INT8_KEEP_FLOAT_FP32_NAME_PATTERNS):
         return t.float().contiguous()
     if t.dtype in {torch.float32, torch.bfloat16}:
@@ -505,6 +613,11 @@ def keep_float_tensor(
 
 
 def quantize_float_tensor(t: Tensor) -> tuple[Tensor, Tensor]:
+    """Quantize a floating tensor to int8 with row-wise or scalar scales.
+
+    :param Tensor t: Floating tensor to quantize.
+    :return tuple[Tensor, Tensor]: Quantized tensor and associated scales.
+    """
     t32 = t.float()
     if t32.ndim == 2:
         # Matrices get one scale per row, which usually tracks output-channel
@@ -542,7 +655,15 @@ def quantize_float_tensor(t: Tensor) -> tuple[Tensor, Tensor]:
     return q, scale
 
 
-def quantize_state_dict_int8(state_dict: dict[str, Tensor]):
+def quantize_state_dict_int8(
+    state_dict: dict[str, Tensor],
+) -> tuple[dict[str, object], dict[str, int]]:
+    """Build the baseline int8 export payload and size statistics.
+
+    :param dict[str, Tensor] state_dict: State dict to quantize.
+    :return tuple[dict[str, object], dict[str, int]]: Quantized payload object
+        and export-size statistics.
+    """
     # Single supported clean-script export format:
     # - per-row int8 for 2D float tensors
     # - per-tensor int8 for other float tensors
@@ -610,6 +731,11 @@ def quantize_state_dict_int8(state_dict: dict[str, Tensor]):
 
 
 def dequantize_state_dict_int8(obj: dict[str, object]) -> dict[str, Tensor]:
+    """Reconstruct a state dict from the baseline int8 export payload.
+
+    :param dict[str, object] obj: Serialized int8 payload object.
+    :return dict[str, Tensor]: Reconstructed state dict.
+    """
     out: dict[str, Tensor] = {}
     qmeta = obj.get("qmeta", {})
     passthrough_orig_dtypes = obj.get("passthrough_orig_dtypes", {})
@@ -638,14 +764,22 @@ def dequantize_state_dict_int8(obj: dict[str, object]) -> dict[str, Tensor]:
 
 
 def serialized_zlib_nbytes(obj: object) -> int:
-    """Serialize an object with ``torch.save`` and return its zlib-compressed size."""
+    """Serialize an object with `torch.save` and return its zlib-compressed size.
+
+    :param object obj: Object to serialize and compress.
+    :return int: Compressed byte size.
+    """
     buf = io.BytesIO()
     torch.save(obj, buf)
     return len(zlib.compress(buf.getvalue(), level=9))
 
 
 def state_dict_tensor_nbytes(state_dict: dict[str, Tensor]) -> int:
-    """Sum the raw tensor storage bytes in a state dict."""
+    """Sum the raw tensor storage bytes in a state dict.
+
+    :param dict[str, Tensor] state_dict: State dict to measure.
+    :return int: Total tensor storage size in bytes.
+    """
     return sum(tensor_nbytes(t.detach()) for t in state_dict.values())
 
 
@@ -653,7 +787,13 @@ class WandbLogger:
     """Small wrapper around W&B init, runtime logging, summary writes, and watch."""
 
     def __init__(self, args: Hyperparameters, enabled: bool, config: dict[str, Any]):
-        """Initialize an optional W&B run for the current baseline trainer."""
+        """Initialize an optional W&B run for the current baseline trainer.
+
+        :param Hyperparameters args: Resolved trainer hyperparameters.
+        :param bool enabled: Whether W&B logging should be enabled.
+        :param dict[str, Any] config: Static config payload passed to W&B.
+        :return None: Configures optional W&B state.
+        """
         self.run = None
         self.watch_mode = "off"
         self.watch_log_freq = 0
@@ -686,7 +826,12 @@ class WandbLogger:
         self.run = wandb.init(**init_kwargs)
 
     def log(self, metrics: dict[str, Any], step: Optional[int] = None) -> None:
-        """Log runtime metrics to W&B when a run is active."""
+        """Log runtime metrics to W&B when a run is active.
+
+        :param dict[str, Any] metrics: Metrics to log.
+        :param int | None step: Optional explicit step index.
+        :return None: Emits metrics when a run is active.
+        """
         if self.run is None:
             return
         self.run.log(metrics, step=step)
@@ -699,7 +844,15 @@ class WandbLogger:
         log_fn: Optional[Callable[[str], None]] = None,
         use_hooks: bool = True,
     ) -> None:
-        """Enable optional W&B parameter or gradient watching for a model."""
+        """Enable optional W&B parameter or gradient watching for a model.
+
+        :param nn.Module model: Model to watch.
+        :param str mode: W&B watch mode.
+        :param int log_freq: Watch logging frequency.
+        :param Callable[[str], None] | None log_fn: Optional local logger.
+        :param bool use_hooks: Whether to use W&B hooks instead of manual histograms.
+        :return None: Configures watch behavior when active.
+        """
         if self.run is None or mode == "off":
             return
         self.watch_model = model
@@ -729,7 +882,11 @@ class WandbLogger:
             log_fn(f"wandb_watch mode={mode} log_freq={max(1, log_freq)} backend=hooks")
 
     def _histogram(self, tensor: Tensor) -> Optional["wandb.Histogram"]:
-        """Build a W&B histogram from a tensor without copying all values to Python."""
+        """Build a W&B histogram from a tensor without copying all values to Python.
+
+        :param Tensor tensor: Tensor to summarize.
+        :return wandb.Histogram | None: Histogram payload when representable.
+        """
         if self.run is None or wandb is None or tensor.numel() == 0:
             return None
         values = tensor.detach().float()
@@ -757,7 +914,12 @@ class WandbLogger:
     def maybe_log_watch(
         self, step: int, log_fn: Optional[Callable[[str], None]] = None
     ) -> None:
-        """Log manual parameter and gradient histograms on the configured cadence."""
+        """Log manual parameter and gradient histograms on the configured cadence.
+
+        :param int step: Current training step.
+        :param Callable[[str], None] | None log_fn: Optional local logger.
+        :return None: Emits watch histograms when due.
+        """
         if (
             self.run is None
             or self.watch_model is None
@@ -807,6 +969,12 @@ class WandbLogger:
 
 
 def load_data_shard(file: Path) -> Tensor:
+    """Load one binary token shard into a CPU tensor.
+
+    :param Path file: Shard path in the repo's packed binary format.
+    :raises ValueError: If the shard header, size, or token payload is invalid.
+    :return Tensor: Contiguous token ids stored as `torch.uint16`.
+    """
     header_bytes = 256 * np.dtype("<i4").itemsize
     token_bytes = np.dtype("<u2").itemsize
     header = np.fromfile(file, dtype="<i4", count=256)
@@ -826,9 +994,17 @@ def load_data_shard(file: Path) -> Tensor:
 
 
 class TokenStream:
+    """Read packed token shards sequentially and loop over them forever."""
+
     # Reads shards sequentially and wraps around forever. The training loop therefore
     # has deterministic, simple streaming behavior with no sampling or workers.
     def __init__(self, pattern: str):
+        """Create a cyclic token stream from shard glob matches.
+
+        :param str pattern: Glob pattern for `.bin` shard files.
+        :raises FileNotFoundError: If the pattern matches no shard files.
+        :return None: Initializes the shard cursor and first token buffer.
+        """
         self.files = [Path(p) for p in sorted(glob.glob(pattern))]
         if not self.files:
             raise FileNotFoundError(f"No files found for pattern: {pattern}")
@@ -837,11 +1013,20 @@ class TokenStream:
         self.pos = 0
 
     def _advance_file(self) -> None:
+        """Advance to the next shard, wrapping back to the start as needed.
+
+        :return None: Updates the active shard buffer in place.
+        """
         self.file_idx = (self.file_idx + 1) % len(self.files)
         self.tokens = load_data_shard(self.files[self.file_idx])
         self.pos = 0
 
     def take(self, n: int) -> Tensor:
+        """Consume the next `n` tokens from the cyclic shard stream.
+
+        :param int n: Number of sequential tokens to return.
+        :return Tensor: Flat tensor containing exactly `n` tokens.
+        """
         chunks: list[Tensor] = []
         remaining = n
         while remaining > 0:
@@ -857,9 +1042,19 @@ class TokenStream:
 
 
 class DistributedTokenLoader:
+    """Slice deterministic training batches for one distributed rank."""
+
     # Each call consumes a contiguous chunk from the shared token stream, then slices out
     # one disjoint span per rank. The extra "+1" token lets us build (x, y) by shifting.
     def __init__(self, pattern: str, rank: int, world_size: int, device: torch.device):
+        """Bind a rank-local loader to the shared token-stream contract.
+
+        :param str pattern: Glob pattern for packed training shards.
+        :param int rank: Global distributed rank for this process.
+        :param int world_size: Number of participating ranks.
+        :param torch.device device: CUDA device receiving returned batches.
+        :return None: Initializes the underlying token stream.
+        """
         self.rank = rank
         self.world_size = world_size
         self.device = device
@@ -868,6 +1063,13 @@ class DistributedTokenLoader:
     def next_batch(
         self, global_tokens: int, seq_len: int, grad_accum_steps: int
     ) -> tuple[Tensor, Tensor]:
+        """Build the next rank-local `(input_ids, target_ids)` batch.
+
+        :param int global_tokens: Logical batch token count across all ranks and micro-steps.
+        :param int seq_len: Sequence length for reshaping flat tokens.
+        :param int grad_accum_steps: Gradient accumulation steps sharing the logical batch.
+        :return tuple[Tensor, Tensor]: Rank-local input and shifted target tensors on CUDA.
+        """
         local_tokens = global_tokens // (self.world_size * grad_accum_steps)
         per_rank_span = local_tokens + 1
         chunk = self.stream.take(per_rank_span * self.world_size)
@@ -886,22 +1088,46 @@ class DistributedTokenLoader:
 
 
 class RMSNorm(nn.Module):
+    """Minimal RMSNorm wrapper around PyTorch's fused functional kernel."""
+
     def __init__(self, eps: float | None = None):
+        """Store the optional epsilon override for RMS normalization.
+
+        :param float | None eps: Explicit epsilon, or `None` for the default.
+        :return None: Initializes the module state.
+        """
         super().__init__()
         self.eps = eps
 
     def forward(self, x: Tensor) -> Tensor:
+        """Apply RMS normalization over the last dimension.
+
+        :param Tensor x: Input activations.
+        :return Tensor: RMS-normalized activations.
+        """
         return F.rms_norm(x, (x.size(-1),), eps=self.eps)
 
 
 class CastedLinear(nn.Linear):
+    """Linear layer that casts fp32 weights to the activation dtype at matmul time."""
+
     # Keep weights in fp32 for optimizer/state quality, cast at matmul time for bf16 compute.
     def forward(self, x: Tensor) -> Tensor:
+        """Project activations with weights cast to the input dtype.
+
+        :param Tensor x: Input activations.
+        :return Tensor: Linear projection result.
+        """
         bias = self.bias.to(x.dtype) if self.bias is not None else None
         return F.linear(x, self.weight.to(x.dtype), bias)
 
 
 def restore_low_dim_params_to_fp32(module: nn.Module) -> None:
+    """Force control and low-dimensional parameters back to fp32 storage.
+
+    :param nn.Module module: Model whose parameters should be normalized for optimizer quality.
+    :return None: Updates parameter storage in place.
+    """
     # Keep small/control parameters in fp32 even when the model body runs in bf16.
     with torch.no_grad():
         for name, param in module.named_parameters():
@@ -913,8 +1139,16 @@ def restore_low_dim_params_to_fp32(module: nn.Module) -> None:
 
 
 class Rotary(nn.Module):
+    """Cache RoPE cosine and sine tables for a head dimension."""
+
     # Caches cos/sin tables per sequence length on the current device.
     def __init__(self, dim: int, base: float = 10000.0):
+        """Initialize the inverse-frequency table for RoPE.
+
+        :param int dim: Even head dimension rotated by RoPE.
+        :param float base: RoPE frequency base.
+        :return None: Initializes cached table metadata.
+        """
         super().__init__()
         inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
@@ -925,6 +1159,13 @@ class Rotary(nn.Module):
     def forward(
         self, seq_len: int, device: torch.device, dtype: torch.dtype
     ) -> tuple[Tensor, Tensor]:
+        """Return cached RoPE cosine and sine tables for a sequence length.
+
+        :param int seq_len: Sequence length to cover.
+        :param torch.device device: Device where the tables must live.
+        :param torch.dtype dtype: Output dtype for the cached tables.
+        :return tuple[Tensor, Tensor]: Cosine and sine tables shaped for attention heads.
+        """
         if (
             self._cos_cached is None
             or self._sin_cached is None
@@ -940,12 +1181,21 @@ class Rotary(nn.Module):
 
 
 def apply_rotary_emb(x: Tensor, cos: Tensor, sin: Tensor) -> Tensor:
+    """Apply RoPE to a tensor whose last dimension is split into two halves.
+
+    :param Tensor x: Query or key tensor with even head dimension.
+    :param Tensor cos: Broadcastable cosine table.
+    :param Tensor sin: Broadcastable sine table.
+    :return Tensor: Rotated tensor.
+    """
     half = x.size(-1) // 2
     x1, x2 = x[..., :half], x[..., half:]
     return torch.cat((x1 * cos + x2 * sin, x1 * (-sin) + x2 * cos), dim=-1)
 
 
 class CausalSelfAttention(nn.Module):
+    """Grouped-query causal self-attention with RoPE and RMS-normalized q/k."""
+
     def __init__(
         self,
         dim: int,
@@ -954,6 +1204,16 @@ class CausalSelfAttention(nn.Module):
         rope_base: float,
         qk_gain_init: float,
     ):
+        """Build the attention projections and rotary cache.
+
+        :param int dim: Model width.
+        :param int num_heads: Number of query heads.
+        :param int num_kv_heads: Number of shared key/value heads.
+        :param float rope_base: RoPE frequency base.
+        :param float qk_gain_init: Initial learned gain applied to normalized queries.
+        :raises ValueError: If head geometry is incompatible with the chosen dimensions.
+        :return None: Initializes the attention module.
+        """
         super().__init__()
         if dim % num_heads != 0:
             raise ValueError("model_dim must be divisible by num_heads")
@@ -976,6 +1236,11 @@ class CausalSelfAttention(nn.Module):
         self.rotary = Rotary(self.head_dim, base=rope_base)
 
     def forward(self, x: Tensor) -> Tensor:
+        """Run causal self-attention over one activation block.
+
+        :param Tensor x: Input activations shaped `(batch, seq, dim)`.
+        :return Tensor: Attention output projected back to model width.
+        """
         bsz, seqlen, dim = x.shape
         q = (
             self.c_q(x)
@@ -1011,8 +1276,16 @@ class CausalSelfAttention(nn.Module):
 
 
 class MLP(nn.Module):
+    """ReLU-squared feed-forward block used by the baseline reference model."""
+
     # relu^2 MLP from the original modded-nanogpt setup
     def __init__(self, dim: int, mlp_mult: int):
+        """Create the two-layer ReLU-squared MLP.
+
+        :param int dim: Model width.
+        :param int mlp_mult: Expansion ratio for the hidden layer.
+        :return None: Initializes the feed-forward projections.
+        """
         super().__init__()
         hidden = mlp_mult * dim
         self.fc = CastedLinear(dim, hidden, bias=False)
@@ -1020,11 +1293,18 @@ class MLP(nn.Module):
         self.proj._zero_init = True
 
     def forward(self, x: Tensor) -> Tensor:
+        """Apply the ReLU-squared feed-forward projection.
+
+        :param Tensor x: Input activations.
+        :return Tensor: Feed-forward output.
+        """
         x = torch.relu(self.fc(x))
         return self.proj(x.square())
 
 
 class Block(nn.Module):
+    """Transformer block with pre-norm attention, ReLU-squared MLP, and residual mixing."""
+
     def __init__(
         self,
         dim: int,
@@ -1034,6 +1314,16 @@ class Block(nn.Module):
         rope_base: float,
         qk_gain_init: float,
     ):
+        """Initialize one baseline transformer block.
+
+        :param int dim: Model width.
+        :param int num_heads: Number of query heads.
+        :param int num_kv_heads: Number of grouped key/value heads.
+        :param int mlp_mult: MLP expansion ratio.
+        :param float rope_base: RoPE frequency base.
+        :param float qk_gain_init: Initial query gain.
+        :return None: Initializes norms, submodules, and residual controls.
+        """
         super().__init__()
         self.attn_norm = RMSNorm()
         self.mlp_norm = RMSNorm()
@@ -1048,6 +1338,12 @@ class Block(nn.Module):
         )
 
     def forward(self, x: Tensor, x0: Tensor) -> Tensor:
+        """Run one block update with learned residual mixing against the input stem.
+
+        :param Tensor x: Current hidden state.
+        :param Tensor x0: Stem activations reused by the residual mixer.
+        :return Tensor: Updated hidden state.
+        """
         mix = self.resid_mix.to(dtype=x.dtype)
         x = mix[0][None, None, :] * x + mix[1][None, None, :] * x0
         attn_out = self.attn(self.attn_norm(x))
@@ -1059,6 +1355,8 @@ class Block(nn.Module):
 
 
 class GPT(nn.Module):
+    """Baseline parameter-golf GPT with encoder/decoder-style skip reuse."""
+
     def __init__(
         self,
         vocab_size: int,
@@ -1073,6 +1371,22 @@ class GPT(nn.Module):
         rope_base: float,
         qk_gain_init: float,
     ):
+        """Construct the reference GPT model used by `train_gpt.py`.
+
+        :param int vocab_size: Tokenizer vocabulary size.
+        :param int num_layers: Total transformer block count.
+        :param int model_dim: Model width.
+        :param int num_heads: Number of query heads.
+        :param int num_kv_heads: Number of grouped key/value heads.
+        :param int mlp_mult: MLP expansion ratio.
+        :param bool tie_embeddings: Whether to reuse token embeddings for the LM head.
+        :param float tied_embed_init_std: Stddev for tied embedding initialization.
+        :param float logit_softcap: Tanh softcap applied before cross-entropy.
+        :param float rope_base: RoPE frequency base.
+        :param float qk_gain_init: Initial query gain.
+        :raises ValueError: If the logit softcap is non-positive.
+        :return None: Initializes the model and parameter shapes.
+        """
         super().__init__()
         if logit_softcap <= 0.0:
             raise ValueError(f"logit_softcap must be positive, got {logit_softcap}")
@@ -1108,6 +1422,10 @@ class GPT(nn.Module):
         self._init_weights()
 
     def _init_weights(self) -> None:
+        """Initialize tied embeddings and zero-init flagged projections.
+
+        :return None: Updates module parameters in place.
+        """
         if self.tie_embeddings:
             nn.init.normal_(self.tok_emb.weight, mean=0.0, std=self.tied_embed_init_std)
         for module in self.modules():
@@ -1115,6 +1433,13 @@ class GPT(nn.Module):
                 nn.init.zeros_(module.weight)
 
     def forward(self, input_ids: Tensor, target_ids: Tensor) -> Tensor:
+        """Compute mean token cross-entropy for one training batch.
+
+        :param Tensor input_ids: Input token ids shaped `(batch, seq)`.
+        :param Tensor target_ids: Shifted target token ids shaped `(batch, seq)`.
+        :raises RuntimeError: If untied-output mode has no LM head projection.
+        :return Tensor: Scalar mean cross-entropy loss.
+        """
         x = self.tok_emb(input_ids)
         x = F.rms_norm(x, (x.size(-1),))
         x0 = x
@@ -1151,6 +1476,10 @@ class GPT(nn.Module):
 
 
 def main() -> None:
+    """Train and evaluate the CUDA baseline reference model.
+
+    :return None: Runs training side effects, logging, and optional checkpoints.
+    """
     global zeropower_via_newtonschulz5
 
     code = Path(__file__).read_text(encoding="utf-8")
@@ -1228,6 +1557,12 @@ def main() -> None:
         print(logfile)
 
     def log0(msg: str, console: bool = True) -> None:
+        """Log one message from rank zero to stdout and the run log.
+
+        :param str msg: Message to emit.
+        :param bool console: Whether to also print to stdout, defaults to True.
+        :return None: Writes logging side effects only.
+        """
         if not master_process:
             return
         if console:
