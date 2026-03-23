@@ -448,9 +448,12 @@ honor that same resolved batch contract now:
 - `train_allama_reborn.py` now compiles before optional DDP wrapping instead of
   silently downgrading distributed runs to eager, so the multi-GPU ALlama path
   matches the intended 8xH100-style launch topology
-- both trainers exclude compile warmup and eval time from the ranked training
-  window, so `elapsed_s` and `tokens_per_s` stay useful for later speed audits
-  without changing the fixed-data ablation contract
+- `train_gpt.py` excludes compile warmup and eval time from its measured
+  training window, so its `elapsed_s` and `tokens_per_s` stay train-only
+  speed signals
+- `train_allama_reborn.py` excludes eval time but counts compile warmup in
+  `training_time_ms`, `elapsed_s`, and any explicit
+  `MAX_WALLCLOCK_SECONDS>0` cap, so capped runs do not get free compile time
 - ALlama now derives its default `EVAL_BATCH_TOKENS` from the eval microbatch
   (`sampled_eval_batch_size * EVAL_SEQ_LEN * WORLD_SIZE`) instead of the full
   optimizer-step token budget, so default full-eval memory matches the intended
