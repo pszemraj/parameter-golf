@@ -12,14 +12,26 @@ SDPA_BACKEND_VALUE="${SDPA_BACKEND:-auto}"
 export SDPA_BACKEND="${SDPA_BACKEND_VALUE}"
 export TORCH_BLAS_PREFER_CUBLASLT=1
 
-SWEEP_PROFILE="${SWEEP_PROFILE:-explore}"
+SWEEP_PROFILE="${SWEEP_PROFILE:-ablate}"
 
 case "${SWEEP_PROFILE}" in
+  ablate)
+    DEFAULT_TRAIN_BATCH_TOKENS=131072
+    DEFAULT_GRAD_ACCUM_STEPS=32
+    DEFAULT_MAX_STEPS=1500
+    DEFAULT_VAL_LOSS_EVERY=100
+    DEFAULT_MAX_WALLCLOCK_SECONDS=180
+    DEFAULT_RUN_BASELINE_BLOCK=1
+    DEFAULT_RUN_SHARE_BLOCK=1
+    DEFAULT_RUN_NORM_BLOCK=1
+    DEFAULT_RUN_SHORTCUT_BLOCK=1
+    ;;
   screen)
     DEFAULT_TRAIN_BATCH_TOKENS=262144
     DEFAULT_GRAD_ACCUM_STEPS=128
     DEFAULT_MAX_STEPS=750
     DEFAULT_VAL_LOSS_EVERY=250
+    DEFAULT_MAX_WALLCLOCK_SECONDS=0
     DEFAULT_RUN_BASELINE_BLOCK=1
     DEFAULT_RUN_SHARE_BLOCK=0
     DEFAULT_RUN_NORM_BLOCK=0
@@ -30,6 +42,7 @@ case "${SWEEP_PROFILE}" in
     DEFAULT_GRAD_ACCUM_STEPS=128
     DEFAULT_MAX_STEPS=750
     DEFAULT_VAL_LOSS_EVERY=250
+    DEFAULT_MAX_WALLCLOCK_SECONDS=0
     DEFAULT_RUN_BASELINE_BLOCK=1
     DEFAULT_RUN_SHARE_BLOCK=1
     DEFAULT_RUN_NORM_BLOCK=1
@@ -40,6 +53,7 @@ case "${SWEEP_PROFILE}" in
     DEFAULT_GRAD_ACCUM_STEPS=128
     DEFAULT_MAX_STEPS=2000
     DEFAULT_VAL_LOSS_EVERY=500
+    DEFAULT_MAX_WALLCLOCK_SECONDS=0
     DEFAULT_RUN_BASELINE_BLOCK=1
     DEFAULT_RUN_SHARE_BLOCK=1
     DEFAULT_RUN_NORM_BLOCK=1
@@ -47,7 +61,7 @@ case "${SWEEP_PROFILE}" in
     ;;
   *)
     echo "unknown SWEEP_PROFILE=${SWEEP_PROFILE}" >&2
-    echo "expected SWEEP_PROFILE=screen, explore, or full" >&2
+    echo "expected SWEEP_PROFILE=ablate, screen, explore, or full" >&2
     exit 1
     ;;
 esac
@@ -69,7 +83,8 @@ TOKENIZER_PATH_VALUE="${TOKENIZER_PATH:-./data/tokenizers/fineweb_1024_bpe.model
 DEVICE_VALUE="${DEVICE:-cuda}"
 DTYPE_VALUE="${DTYPE:-bf16}"
 NUM_EPOCHS_VALUE="${NUM_EPOCHS:-1}"
-MAX_WALLCLOCK_SECONDS_VALUE="${MAX_WALLCLOCK_SECONDS:-0}"
+MAX_WALLCLOCK_SECONDS_VALUE="${MAX_WALLCLOCK_SECONDS:-${DEFAULT_MAX_WALLCLOCK_SECONDS}}"
+COMPILE_WARMUP_STEPS_VALUE="${COMPILE_WARMUP_STEPS:-20}"
 CONTROL_TENSOR_NAME_PATTERNS_VALUE="${CONTROL_TENSOR_NAME_PATTERNS:-depth_gains}"
 RUN_ID_PREFIX="${RUN_ID_PREFIX:-sbcal_v2_}"
 
@@ -92,6 +107,7 @@ BASE_ENV=(
   MLP_MULTIPLE_OF="${MLP_MULTIPLE_OF_VALUE}"
   NUM_EPOCHS="${NUM_EPOCHS_VALUE}"
   MAX_WALLCLOCK_SECONDS="${MAX_WALLCLOCK_SECONDS_VALUE}"
+  COMPILE_WARMUP_STEPS="${COMPILE_WARMUP_STEPS_VALUE}"
   CONTROL_TENSOR_NAME_PATTERNS="${CONTROL_TENSOR_NAME_PATTERNS_VALUE}"
 )
 
@@ -142,7 +158,7 @@ if [[ -n "${ITERATIONS:-}" && -z "${MAX_STEPS:-}" ]]; then
   echo "note=ITERATIONS override is deprecated here; use MAX_STEPS instead"
 fi
 
-echo "sweep_profile=${SWEEP_PROFILE} run_id_prefix=${RUN_ID_PREFIX} compile=${RUN_COMPILE} force_rerun=${FORCE_RERUN} out_dir=${OUT_DIR_VALUE} data_path=${DATA_PATH_VALUE} tokenizer_path=${TOKENIZER_PATH_VALUE} device=${DEVICE_VALUE} dtype=${DTYPE_VALUE} eval_mode=${EVAL_MODE_VALUE} val_batch_size=${VAL_BATCH_SIZE_VALUE} val_batches=${VAL_BATCHES_VALUE} train_batch_tokens=${TRAIN_BATCH_TOKENS_VALUE} grad_accum_steps=${GRAD_ACCUM_STEPS_VALUE} local_batch_size=${LOCAL_BATCH_SIZE} max_steps=${MAX_STEPS_VALUE} val_loss_every=${VAL_LOSS_EVERY_VALUE} train_log_every=${TRAIN_LOG_EVERY_VALUE} num_epochs=${NUM_EPOCHS_VALUE} max_wallclock_seconds=${MAX_WALLCLOCK_SECONDS_VALUE} sdpa_backend=${SDPA_BACKEND_VALUE} mlp_multiple_of=${MLP_MULTIPLE_OF_VALUE} control_tensor_name_patterns=${CONTROL_TENSOR_NAME_PATTERNS_VALUE} run_gpt_baseline=${RUN_GPT_BASELINE} allama_runs_planned=${ALLAMA_RUNS} allama_runs_scheduled=${SCHEDULED_ALLAMA_RUNS} total_runs_planned=${TOTAL_RUNS} total_runs_scheduled=${SCHEDULED_TOTAL_RUNS}"
+echo "sweep_profile=${SWEEP_PROFILE} run_id_prefix=${RUN_ID_PREFIX} compile=${RUN_COMPILE} force_rerun=${FORCE_RERUN} out_dir=${OUT_DIR_VALUE} data_path=${DATA_PATH_VALUE} tokenizer_path=${TOKENIZER_PATH_VALUE} device=${DEVICE_VALUE} dtype=${DTYPE_VALUE} eval_mode=${EVAL_MODE_VALUE} val_batch_size=${VAL_BATCH_SIZE_VALUE} val_batches=${VAL_BATCHES_VALUE} train_batch_tokens=${TRAIN_BATCH_TOKENS_VALUE} grad_accum_steps=${GRAD_ACCUM_STEPS_VALUE} local_batch_size=${LOCAL_BATCH_SIZE} max_steps=${MAX_STEPS_VALUE} val_loss_every=${VAL_LOSS_EVERY_VALUE} train_log_every=${TRAIN_LOG_EVERY_VALUE} num_epochs=${NUM_EPOCHS_VALUE} max_wallclock_seconds=${MAX_WALLCLOCK_SECONDS_VALUE} compile_warmup_steps=${COMPILE_WARMUP_STEPS_VALUE} sdpa_backend=${SDPA_BACKEND_VALUE} mlp_multiple_of=${MLP_MULTIPLE_OF_VALUE} control_tensor_name_patterns=${CONTROL_TENSOR_NAME_PATTERNS_VALUE} run_gpt_baseline=${RUN_GPT_BASELINE} allama_runs_planned=${ALLAMA_RUNS} allama_runs_scheduled=${SCHEDULED_ALLAMA_RUNS} total_runs_planned=${TOTAL_RUNS} total_runs_scheduled=${SCHEDULED_TOTAL_RUNS}"
 echo "family_wide_ff15 model_dim=1024 embed_dim=128 num_layers=16 num_heads=16 num_kv_heads=2 num_shared_blocks=5 mlp_mult=1.5 raw_payload_bytes=35950734 predicted_artifact_bytes=15818966 predicted_headroom_bytes=181034"
 echo "family_shortfat_ff20 model_dim=896 embed_dim=896 num_layers=20 num_heads=14 num_kv_heads=2 num_shared_blocks=5 mlp_mult=2.0 raw_payload_bytes=34340378 predicted_artifact_bytes=15342304 predicted_headroom_bytes=657696"
 echo "family_balanced_ff25 model_dim=768 embed_dim=1792 num_layers=24 num_heads=12 num_kv_heads=4 num_shared_blocks=5 mlp_mult=2.5 raw_payload_bytes=34736590 predicted_artifact_bytes=15797101 predicted_headroom_bytes=202899"
@@ -191,7 +207,7 @@ run_gpt_reference () {
   local SAVE_PATH_FILE="${RUN_DIR}/model.pt"
   local EXPORT_INT8_PATH_FILE="${RUN_DIR}/model_int8.ptz"
   local RUN_SPEC_PATH="${RUN_DIR}/.run_spec"
-  local RUN_SPEC="family_set=sharedblock_nearcap_v2 kind=train_gpt_reference out_dir=${OUT_DIR_VALUE} data_path=${DATA_PATH_VALUE} tokenizer_path=${TOKENIZER_PATH_VALUE} train_seq_len=${TRAIN_SEQ_LEN_VALUE} eval_seq_len=${EVAL_SEQ_LEN_VALUE} train_batch_tokens=${TRAIN_BATCH_TOKENS_VALUE} max_steps=${MAX_STEPS_VALUE} val_loss_every=${VAL_LOSS_EVERY_VALUE} train_log_every=${TRAIN_LOG_EVERY_VALUE} eval_mode=${EVAL_MODE_VALUE} val_batch_size=${VAL_BATCH_SIZE_VALUE} val_batches=${VAL_BATCHES_VALUE} max_wallclock_seconds=${MAX_WALLCLOCK_SECONDS_VALUE} compile=1"
+  local RUN_SPEC="family_set=sharedblock_nearcap_v2 kind=train_gpt_reference out_dir=${OUT_DIR_VALUE} data_path=${DATA_PATH_VALUE} tokenizer_path=${TOKENIZER_PATH_VALUE} train_seq_len=${TRAIN_SEQ_LEN_VALUE} eval_seq_len=${EVAL_SEQ_LEN_VALUE} train_batch_tokens=${TRAIN_BATCH_TOKENS_VALUE} grad_accum_steps=${GRAD_ACCUM_STEPS_VALUE} max_steps=${MAX_STEPS_VALUE} val_loss_every=${VAL_LOSS_EVERY_VALUE} train_log_every=${TRAIN_LOG_EVERY_VALUE} eval_mode=${EVAL_MODE_VALUE} val_batch_size=${VAL_BATCH_SIZE_VALUE} val_batches=${VAL_BATCHES_VALUE} max_wallclock_seconds=${MAX_WALLCLOCK_SECONDS_VALUE} compile_warmup_steps=${COMPILE_WARMUP_STEPS_VALUE} compile=${RUN_COMPILE}"
 
   if [[ "${FORCE_RERUN}" != "1" ]]; then
     if run_is_complete "${RUN_DIR}" "${MAX_STEPS_VALUE}" "${MAX_WALLCLOCK_SECONDS_VALUE}" "${RUN_SPEC}" "model.pt" "model_int8.ptz"; then
@@ -212,6 +228,7 @@ run_gpt_reference () {
     TRAIN_SEQ_LEN="${TRAIN_SEQ_LEN_VALUE}" \
     EVAL_SEQ_LEN="${EVAL_SEQ_LEN_VALUE}" \
     TRAIN_BATCH_TOKENS="${TRAIN_BATCH_TOKENS_VALUE}" \
+    GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS_VALUE}" \
     ITERATIONS="${MAX_STEPS_VALUE}" \
     VAL_LOSS_EVERY="${VAL_LOSS_EVERY_VALUE}" \
     TRAIN_LOG_EVERY="${TRAIN_LOG_EVERY_VALUE}" \
@@ -219,6 +236,8 @@ run_gpt_reference () {
     VAL_BATCH_SIZE="${VAL_BATCH_SIZE_VALUE}" \
     VAL_BATCHES="${VAL_BATCHES_VALUE}" \
     MAX_WALLCLOCK_SECONDS="${MAX_WALLCLOCK_SECONDS_VALUE}" \
+    COMPILE_WARMUP_STEPS="${COMPILE_WARMUP_STEPS_VALUE}" \
+    COMPILE="${RUN_COMPILE}" \
     WANDB_RUN_NAME="${RUN_ID}" \
     WANDB_TAGS="${WANDB_TAGS},baseline,reference,train_gpt" \
     python train_gpt.py
@@ -344,7 +363,7 @@ run_one () {
   local SAVE_PATH_FILE="${RUN_DIR}/model.pt"
   local EXPORT_INT8_PATH_FILE="${RUN_DIR}/model_int8.pt"
   local RUN_SPEC_PATH="${RUN_DIR}/.run_spec"
-  local RUN_SPEC="family_set=sharedblock_nearcap_v2 out_dir=${OUT_DIR_VALUE} data_path=${DATA_PATH_VALUE} tokenizer_path=${TOKENIZER_PATH_VALUE} device=${DEVICE_VALUE} dtype=${DTYPE_VALUE} num_epochs=${NUM_EPOCHS_VALUE} max_wallclock_seconds=${MAX_WALLCLOCK_SECONDS_VALUE} family=${FAMILY} variant=${VARIANT} model_dim=${MODEL_DIM} embed_dim=${EMBED_DIM} num_layers=${NUM_LAYERS} num_heads=${NUM_HEADS} num_kv_heads=${NUM_KV_HEADS} num_shared_blocks=${NUM_SHARED_BLOCKS} mlp_mult=${MLP_MULT} mlp_multiple_of=${MLP_MULTIPLE_OF_VALUE} norm_layout=${NORM_LAYOUT} norm_kind=${NORM_KIND} share_pattern=${SHARE_PATTERN} use_x0_shortcut=${USE_X0_SHORTCUT} resid_mix_init=${RESID_MIX_INIT} train_seq_len=${TRAIN_SEQ_LEN_VALUE} eval_seq_len=${EVAL_SEQ_LEN_VALUE} train_batch_tokens=${TRAIN_BATCH_TOKENS_VALUE} grad_accum_steps=${GRAD_ACCUM_STEPS_VALUE} max_steps=${MAX_STEPS_VALUE} val_loss_every=${VAL_LOSS_EVERY_VALUE} train_log_every=${TRAIN_LOG_EVERY_VALUE} eval_mode=${EVAL_MODE_VALUE} val_batch_size=${VAL_BATCH_SIZE_VALUE} val_batches=${VAL_BATCHES_VALUE} sdpa_backend=${SDPA_BACKEND_VALUE} run_compile=${RUN_COMPILE} control_tensor_name_patterns=${CONTROL_TENSOR_NAME_PATTERNS_VALUE}"
+  local RUN_SPEC="family_set=sharedblock_nearcap_v2 out_dir=${OUT_DIR_VALUE} data_path=${DATA_PATH_VALUE} tokenizer_path=${TOKENIZER_PATH_VALUE} device=${DEVICE_VALUE} dtype=${DTYPE_VALUE} num_epochs=${NUM_EPOCHS_VALUE} max_wallclock_seconds=${MAX_WALLCLOCK_SECONDS_VALUE} family=${FAMILY} variant=${VARIANT} model_dim=${MODEL_DIM} embed_dim=${EMBED_DIM} num_layers=${NUM_LAYERS} num_heads=${NUM_HEADS} num_kv_heads=${NUM_KV_HEADS} num_shared_blocks=${NUM_SHARED_BLOCKS} mlp_mult=${MLP_MULT} mlp_multiple_of=${MLP_MULTIPLE_OF_VALUE} norm_layout=${NORM_LAYOUT} norm_kind=${NORM_KIND} share_pattern=${SHARE_PATTERN} use_x0_shortcut=${USE_X0_SHORTCUT} resid_mix_init=${RESID_MIX_INIT} train_seq_len=${TRAIN_SEQ_LEN_VALUE} eval_seq_len=${EVAL_SEQ_LEN_VALUE} train_batch_tokens=${TRAIN_BATCH_TOKENS_VALUE} grad_accum_steps=${GRAD_ACCUM_STEPS_VALUE} max_steps=${MAX_STEPS_VALUE} val_loss_every=${VAL_LOSS_EVERY_VALUE} train_log_every=${TRAIN_LOG_EVERY_VALUE} eval_mode=${EVAL_MODE_VALUE} val_batch_size=${VAL_BATCH_SIZE_VALUE} val_batches=${VAL_BATCHES_VALUE} compile_warmup_steps=${COMPILE_WARMUP_STEPS_VALUE} sdpa_backend=${SDPA_BACKEND_VALUE} run_compile=${RUN_COMPILE} control_tensor_name_patterns=${CONTROL_TENSOR_NAME_PATTERNS_VALUE}"
 
   case "${RUN_COMPILE}" in
     1)

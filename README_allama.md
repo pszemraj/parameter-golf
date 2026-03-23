@@ -310,13 +310,20 @@ I also checked trained saved size directly with 20-step one-GPU runs at the actu
 
 Those older 20-step values are now useful only as historical evidence that changing logical depth is the wrong way to fill budget. The current sweep families above replace them.
 
-The training helper `scripts/run_allama_ablations.sh` is intentionally training-only and now runs a `train_gpt.py` reference baseline first before any ALlama ablations. That reference run uses the same dataset path, sequence length, effective batch, step count, eval cadence, sampled eval mode, W&B project/group, and final artifact reporting fields as the ALlama sweep so the comparison is actually apples-to-apples:
+The training helper `scripts/run_allama_ablations.sh` is intentionally
+training-only and runs a `train_gpt.py` reference baseline before any ALlama
+ablations. That reference run now uses the same resolved dataset path,
+sequence length, effective batch, eval cadence, compile setting, and artifact
+reporting contract as the ALlama sweep, so the local comparison is actually
+apples-to-apples:
 
 ```bash
 bash scripts/run_allama_ablations.sh
 ```
 
-The `train_gpt.py` reference run is written under `runs_allama/sbcal_v2_gpt_baseline_reference/` by default and logs the same useful summary fields:
+The `train_gpt.py` reference run is written under
+`runs_allama/sbcal_v2_gpt_baseline_reference/` by default and logs the same
+useful summary fields:
 
 - `artifact_limit_bytes`
 - `artifact_headroom_bytes_final`
@@ -327,34 +334,43 @@ The `train_gpt.py` reference run is written under `runs_allama/sbcal_v2_gpt_base
 - `artifact/int8_payload_zlib_bytes_final`
 - `artifact_bytes_final`
 
-It now prints its own launch summary before starting, including planned vs scheduled run counts, batch settings, and local batch size.
-There are three intended modes:
+It prints its launch summary before starting, including planned vs scheduled
+run counts, the resolved batch settings, local batch size, compile mode, and
+wallclock cap.
 
-- `SWEEP_PROFILE=screen`: 5 planned runs total, `1` `train_gpt.py` reference plus `4` ALlama baseline-block runs
-- default `SWEEP_PROFILE=explore`: 29 planned runs total, `1` `train_gpt.py` reference plus `28` ALlama runs across all blocks
-- `SWEEP_PROFILE=full`: 29 planned runs total, `1` `train_gpt.py` reference plus `28` ALlama runs across all blocks
+There are now four intended sweep profiles:
+
+- default `SWEEP_PROFILE=ablate`: 29 planned runs total, `1` `train_gpt.py`
+  reference plus `28` ALlama runs across all blocks, using the 1x5090 local
+  proxy contract
+- `SWEEP_PROFILE=screen`: 5 planned runs total, `1` `train_gpt.py` reference
+  plus `4` ALlama baseline-block runs
+- `SWEEP_PROFILE=explore`: 29 planned runs total, `1` `train_gpt.py`
+  reference plus `28` ALlama runs across all blocks
+- `SWEEP_PROFILE=full`: 29 planned runs total, `1` `train_gpt.py` reference
+  plus `28` ALlama runs across all blocks
 
 It prefixes run IDs with `sbcal_v2_` by default so the cleaner `14/2` recalibrated sweep does not collide with the earlier rejected `15/5` shortfat directories.
 
-It skips already-completed run directories only when the artifacts exist and
-`train.log` shows the expected terminal step for the current `MAX_STEPS`, and
-`.run_spec` matches the resolved launch contract for the current run.
-That means a shorter `explore` run no longer falsely satisfies a later `full`
-run with the same `RUN_ID`. If a directory already exists but does not satisfy
-the current completion check, the script now stops instead of silently
-overwriting mixed logs and artifacts. Use `FORCE_RERUN=1` if you want to
-overwrite anyway.
+It skips already-completed run directories only when the artifacts exist,
+`train.log` shows the expected terminal step or intentional wallclock-capped
+stop for the current plan, and `.run_spec` matches the resolved launch
+contract for the current run. That means a shorter `ablate`, `screen`, or
+`explore` run no longer falsely satisfies a later `full` run with the same
+`RUN_ID`. If a directory already exists but does not satisfy the current
+completion check, the script stops instead of silently overwriting mixed logs
+and artifacts. Use `FORCE_RERUN=1` if you want to overwrite anyway.
 
 That `.run_spec` fingerprint now includes the launch settings that materially
 change behavior, including eval mode, validation batching, SDPA backend, MLP
 alignment, device/dtype, and the core batch/shape settings. So changing one of
 those knobs no longer aliases an old run as "complete".
 
-Completion checks also now respect intentional wallclock-capped runs. If
+Completion checks respect intentional wallclock-capped runs. If
 `MAX_WALLCLOCK_SECONDS` is part of the run spec, a matching
 `train_stop ... reason=max_wallclock_seconds=...` is accepted as completion for
-that capped plan, but it still does not alias an uncapped or longer plan with a
-different run spec.
+that capped plan, but it still does not alias an uncapped or longer plan with
+a different run spec.
 
 It also exports `TORCH_BLAS_PREFER_CUBLASLT=1` for 5090-friendly CUDA BLAS selection.
 The trainer now supports `SDPA_BACKEND=auto|flash|efficient|math|cudnn` for explicit SDPA backend experiments.
@@ -364,74 +380,74 @@ The sweep exports W&B watch knobs:
 - `WANDB_WATCH=all`
 - `WANDB_WATCH_LOG_FREQ=100`
 
-When `torch.compile` is active, both trainers now force the effective watch mode
-to a manual histogram backend instead of W&B module hooks. That keeps scalar
-logging intact and preserves parameter and gradient visibility at
-`WANDB_WATCH_LOG_FREQ` without injecting hook state into the compiled graph and
-triggering Dynamo recompile-limit failures. Eager runs still use normal
-`wandb.watch` hooks.
+When `torch.compile` is active, both trainers use a manual histogram backend
+instead of W&B module hooks. That keeps scalar logging intact and preserves
+parameter and gradient visibility at `WANDB_WATCH_LOG_FREQ` without injecting
+hook state into the compiled graph and triggering Dynamo recompile-limit
+failures. Eager runs still use normal `wandb.watch` hooks.
 
-Batch semantics matter here:
+The important batch rule is:
 
-- in [train_gpt.py](train_gpt.py), `TRAIN_BATCH_TOKENS=524288` is the effective optimizer-step batch, not the one-GPU microbatch
-- on `WORLD_SIZE=1`, that trainer also uses `grad_accum_steps=8`, so the per-microstep token count is `524288 / 8 = 65536`
-- the old allama `65536` setting came from that microstep number, not from `train_gpt.py`'s actual effective batch
-- the display-attached 5090 locally proved happier with `local_batch_size=2` than with `local_batch_size=4`; the old `524288/128` setting eventually hit a launch-timeout failure on `wide_ff15`
+- `local_batch_size = TRAIN_BATCH_TOKENS / (GRAD_ACCUM_STEPS * TRAIN_SEQ_LEN)`
 
-So the script now keeps the safer local microbatch, but uses a middle-ground no-arg default:
+The local model-selection profile is now the explicit 1x5090 proxy contract:
 
-- `TRAIN_BATCH_TOKENS=262144`
-- `GRAD_ACCUM_STEPS=128`
-- `local_batch_size=2`
-- default `SWEEP_PROFILE=explore`
-- default `MAX_STEPS=750`
-- default `VAL_LOSS_EVERY=250`
-
-The explicit short screen profile is:
-
-- `SWEEP_PROFILE=screen`
-- `MAX_STEPS=750`
-- `VAL_LOSS_EVERY=250`
-
-If you want the larger effective batch while keeping the same safe local microbatch, override both:
-
-```bash
-TRAIN_BATCH_TOKENS=524288 GRAD_ACCUM_STEPS=256 bash scripts/run_allama_ablations.sh
-```
-
-Current 5090 compile/VRAM check says the compile-safe accumulation setting is:
-
-- idle desktop load on this box was about `2.9 GiB`
-- `GRAD_ACCUM_STEPS=32` (`local_batch_size=16`) failed under `--compile` with `No valid triton configs`
-- `GRAD_ACCUM_STEPS=64` (`local_batch_size=8`) failed with the same Triton shared-memory limit
-- `GRAD_ACCUM_STEPS=128` (`local_batch_size=4`) succeeded under `--compile`
-- at that passing point, a 1-step smoke hit `max_memory_reserved=4.834 GiB` and `max_memory_allocated=4.776 GiB`
-
-The current aligned family set also passed serialized cold `--compile` 4-step smokes at those same batch settings, and the script now defaults to the smaller `262144/128` screen profile to avoid the later desktop-watchdog timeout that showed up in a longer real run.
-
-So the sweep defaults are:
-
-- `SWEEP_PROFILE=explore`
-- `TRAIN_BATCH_TOKENS=262144`
-- `GRAD_ACCUM_STEPS=128`
-- `local_batch_size=2`
-- `MAX_STEPS=750`
+- default `SWEEP_PROFILE=ablate`
+- `TRAIN_BATCH_TOKENS=131072`
+- `GRAD_ACCUM_STEPS=32`
+- `local_batch_size=4`
+- `MAX_STEPS=1500`
+- `MAX_WALLCLOCK_SECONDS=180`
+- `VAL_LOSS_EVERY=100`
 - `RUN_COMPILE=1`
-- `VAL_LOSS_EVERY=250`
 
-The explicit short screen pass is:
+That profile is meant to be representative of the eventual 8xH100 submission
+contract while still being materially cheaper on one 5090. Both trainers honor
+that same resolved batch contract now:
 
-- `SWEEP_PROFILE=screen`
-- `total_runs_planned=5`
-- `MAX_STEPS=750`
+- `train_gpt.py` no longer hardcodes `grad_accum_steps=8 // WORLD_SIZE` when
+  `GRAD_ACCUM_STEPS` is explicitly set
+- `RUN_COMPILE=0|1` now applies to both the GPT baseline and ALlama runs
+- both trainers exclude compile warmup and eval time from the ranked training
+  window, so `elapsed_s`, `tokens_per_s`, and `MAX_WALLCLOCK_SECONDS` reflect
+  train-only time rather than cold compile time
 
-And the opt-in long blocked sweep is:
+The older blocked-sweep profiles are still available unchanged as explicit
+alternatives:
 
-- `SWEEP_PROFILE=full`
-- `total_runs_planned=29`
-- `MAX_STEPS=2000`
+- `SWEEP_PROFILE=screen`: `TRAIN_BATCH_TOKENS=262144`,
+  `GRAD_ACCUM_STEPS=128`, `local_batch_size=2`, `MAX_STEPS=750`,
+  baseline block only
+- `SWEEP_PROFILE=explore`: `TRAIN_BATCH_TOKENS=262144`,
+  `GRAD_ACCUM_STEPS=128`, `local_batch_size=2`, `MAX_STEPS=750`
+- `SWEEP_PROFILE=full`: `TRAIN_BATCH_TOKENS=262144`,
+  `GRAD_ACCUM_STEPS=128`, `local_batch_size=2`, `MAX_STEPS=2000`
 
-That keeps the no-arg default in the “real blocked sweep, but not an overnight accident” regime while still leaving both the tiny screen pass and the full long run available explicitly.
+Current 5090 compile/VRAM checks for the aligned family set say:
+
+- `local_batch_size=16` failed under `--compile` with `No valid triton configs`
+- `local_batch_size=8` failed with the same Triton shared-memory limit
+- `local_batch_size=4` is the largest validated compile-safe local microbatch on
+  this box
+
+Compile remains the right default for the local proxy contract. On the current
+1x5090 `ablate` settings, 100-step end-to-end checks beat eager in both cases I
+measured:
+
+- GPT reference: compile `45.5s` vs eager `51.1s`, with train-only throughput
+  `426k tok/s` vs `289k tok/s`
+- `wide_ff15/share_chunk`: compile `148.7s` vs eager `155.8s`, with train-only
+  throughput `136.7k tok/s` vs `103.0k tok/s`
+
+Using those same measurements to estimate an uncapped 750-step local run gives:
+
+- GPT reference: compile about `245s` vs eager about `346s`
+- `wide_ff15/share_chunk`: compile about `772s` vs eager about `983s`
+
+So compile is already faster even when you count its real warmup cost, and it
+only gets better as the run length grows. The wallclock-capped `ablate` profile
+is still the correct local screening mode, though, because exact 750-step parity
+on one 5090 would be too expensive for early-round ablations.
 
 One backend knob is worth keeping available but not forcing by default:
 

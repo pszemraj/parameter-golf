@@ -110,10 +110,14 @@ class Hyperparameters:
     # Training length.
     iterations = int(os.environ.get("ITERATIONS", 20000))
     warmdown_iters = int(os.environ.get("WARMDOWN_ITERS", 1200))
-    warmup_steps = int(os.environ.get("WARMUP_STEPS", 20))
+    compile_warmup_steps = int(
+        os.environ.get("COMPILE_WARMUP_STEPS", os.environ.get("WARMUP_STEPS", 20))
+    )
     train_batch_tokens = int(os.environ.get("TRAIN_BATCH_TOKENS", 524_288))
+    grad_accum_steps = int(os.environ.get("GRAD_ACCUM_STEPS", 0))
     train_seq_len = int(os.environ.get("TRAIN_SEQ_LEN", 1024))
     max_wallclock_seconds = float(os.environ.get("MAX_WALLCLOCK_SECONDS", 600.0))
+    compile = env_bool("COMPILE", True)
     qk_gain_init = float(os.environ.get("QK_GAIN_INIT", 1.5))
 
     # Model shape.
@@ -1145,11 +1149,14 @@ def main() -> None:
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     if world_size <= 0:
         raise ValueError(f"WORLD_SIZE must be positive, got {world_size}")
-    if 8 % world_size != 0:
-        raise ValueError(
-            f"WORLD_SIZE={world_size} must divide 8 so grad_accum_steps stays integral"
-        )
-    grad_accum_steps = 8 // world_size
+    if args.grad_accum_steps > 0:
+        grad_accum_steps = args.grad_accum_steps
+    else:
+        if 8 % world_size != 0:
+            raise ValueError(
+                f"WORLD_SIZE={world_size} must divide 8 so grad_accum_steps stays integral"
+            )
+        grad_accum_steps = 8 // world_size
     grad_scale = 1.0 / grad_accum_steps
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required")
@@ -1348,8 +1355,8 @@ def main() -> None:
     local_batch_size = local_batch_tokens // args.train_seq_len
     log0(
         f"run_id={args.run_id} backend=parameter_golf device={device} dtype=torch.bfloat16 "
-        f"compile=1 baseline_reference=1 stored_params={n_params} functional_params={n_params} "
-        f"sharing_ratio=1.0000 eval_mode={args.eval_mode}"
+        f"compile={int(args.compile)} baseline_reference=1 stored_params={n_params} "
+        f"functional_params={n_params} sharing_ratio=1.0000 eval_mode={args.eval_mode}"
     )
     log0(
         f"train_plan iterations={args.iterations} max_wallclock_seconds={args.max_wallclock_seconds:.3f} "
@@ -1384,7 +1391,7 @@ def main() -> None:
     )
     log0(
         f"train_batch_tokens:{args.train_batch_tokens} train_seq_len:{args.train_seq_len} "
-        f"iterations:{args.iterations} warmup_steps:{args.warmup_steps} "
+        f"iterations:{args.iterations} compile_warmup_steps:{args.compile_warmup_steps} "
         f"max_wallclock_seconds:{args.max_wallclock_seconds:.3f}"
     )
     log0(f"seed:{args.seed}")
@@ -1423,10 +1430,14 @@ def main() -> None:
         mode=args.wandb_watch,
         log_freq=args.wandb_watch_log_freq,
         log_fn=log0,
-        use_hooks=False,
+        use_hooks=not args.compile,
     )
 
-    compiled_model = torch.compile(base_model, dynamic=False, fullgraph=True)
+    compiled_model = (
+        torch.compile(base_model, dynamic=False, fullgraph=True)
+        if args.compile
+        else base_model
+    )
     model: nn.Module = (
         DDP(compiled_model, device_ids=[local_rank], broadcast_buffers=False)
         if distributed
@@ -1500,7 +1511,7 @@ def main() -> None:
 
     # Warmup primes the compiled forward/backward/optimizer paths, then we restore the
     # initial weights/optimizer state so measured training starts from the true init.
-    if args.warmup_steps > 0:
+    if args.compile and args.compile_warmup_steps > 0:
         initial_model_state = {
             name: tensor.detach().cpu().clone()
             for name, tensor in base_model.state_dict().items()
@@ -1509,7 +1520,7 @@ def main() -> None:
             copy.deepcopy(opt.state_dict()) for opt in optimizers
         ]
         model.train()
-        for warmup_step in range(args.warmup_steps):
+        for warmup_step in range(args.compile_warmup_steps):
             zero_grad_all()
             for micro_step in range(grad_accum_steps):
                 if distributed:
@@ -1528,11 +1539,13 @@ def main() -> None:
                 opt.step()
             zero_grad_all()
             if (
-                args.warmup_steps <= 20
+                args.compile_warmup_steps <= 20
                 or (warmup_step + 1) % 10 == 0
-                or warmup_step + 1 == args.warmup_steps
+                or warmup_step + 1 == args.compile_warmup_steps
             ):
-                log0(f"warmup_step:{warmup_step + 1}/{args.warmup_steps}")
+                log0(
+                    f"compile_warmup_step:{warmup_step + 1}/{args.compile_warmup_steps}"
+                )
         base_model.load_state_dict(initial_model_state, strict=True)
         for opt, state in zip(optimizers, initial_optimizer_states, strict=True):
             opt.load_state_dict(state)

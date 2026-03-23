@@ -18,6 +18,7 @@ Key features in this version:
 from __future__ import annotations
 
 import argparse
+import copy
 import glob
 import gzip
 import io
@@ -200,6 +201,7 @@ class Hyperparameters:
     learning_rate: float
     min_lr: float
     warmup_steps: int
+    compile_warmup_steps: int
     weight_decay: float
     beta1: float
     beta2: float
@@ -316,6 +318,7 @@ class Hyperparameters:
             learning_rate=float(os.environ.get("LEARNING_RATE", "3e-4")),
             min_lr=float(os.environ.get("MIN_LR", "3e-5")),
             warmup_steps=int(os.environ.get("WARMUP_STEPS", "50")),
+            compile_warmup_steps=int(os.environ.get("COMPILE_WARMUP_STEPS", "20")),
             weight_decay=float(os.environ.get("WEIGHT_DECAY", "0.01")),
             beta1=float(os.environ.get("BETA1", "0.9")),
             beta2=float(os.environ.get("BETA2", "0.95")),
@@ -3104,7 +3107,8 @@ def main() -> None:
     log(
         f"train_static nominal_step_tokens={nominal_step_tokens} final_step_tokens={final_step_tokens} "
         f"variable_step_tokens={int(variable_step_tokens)} grad_accum_steps={args.grad_accum_steps} "
-        f"train_log_every={args.train_log_every} val_loss_every={args.val_loss_every}"
+        f"train_log_every={args.train_log_every} val_loss_every={args.val_loss_every} "
+        f"lr_warmup_steps={args.warmup_steps} compile_warmup_steps={args.compile_warmup_steps}"
     )
     log(
         f"x0_shortcut={args.use_x0_shortcut} resid_mix_init={args.resid_mix_init} "
@@ -3316,6 +3320,55 @@ def main() -> None:
         if distributed:
             dist.barrier()
 
+    def synchronize_device() -> None:
+        """Synchronize CUDA before timing train-only wallclock."""
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+
+    if compile_enabled and args.compile_warmup_steps > 0 and total_training_steps > 0:
+        initial_model_state = {
+            name: tensor.detach().cpu().clone()
+            for name, tensor in report_model.state_dict().items()
+        }
+        initial_optimizer_state = copy.deepcopy(optimizer.state_dict())
+        model.train()
+        for warmup_step in range(args.compile_warmup_steps):
+            micro_specs = epoch_steps[warmup_step % len(epoch_steps)]
+            optimizer.zero_grad(set_to_none=True)
+            step_local_token_count = int(
+                sum(spec.local_batch_size * spec.seq_len for spec in micro_specs)
+            )
+            for micro_step, spec in enumerate(micro_specs):
+                x, y = train_loader.next_batch(
+                    local_batch_size=spec.local_batch_size, seq_len=spec.seq_len
+                )
+                is_last_micro = micro_step == len(micro_specs) - 1
+                sync_context = (
+                    model.no_sync if distributed and not is_last_micro else nullcontext
+                )
+                with sync_context():
+                    with autocast_context(device_type, amp_dtype, use_autocast):
+                        loss_sum = model(x, y, loss_reduction="sum")
+                        loss = loss_sum / float(max(1, step_local_token_count))
+                    loss.backward()
+            if args.grad_clip_norm > 0.0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip_norm)
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+            if (
+                args.compile_warmup_steps <= 20
+                or (warmup_step + 1) % 10 == 0
+                or warmup_step + 1 == args.compile_warmup_steps
+            ):
+                log(
+                    f"compile_warmup_step:{warmup_step + 1}/{args.compile_warmup_steps}"
+                )
+        report_model.load_state_dict(initial_model_state, strict=True)
+        optimizer.load_state_dict(initial_optimizer_state)
+        optimizer.zero_grad(set_to_none=True)
+        train_loader.reset()
+        synchronize_device()
+
     if args.eval_only:
         run_eval(step=0)
         if master_process:
@@ -3327,26 +3380,36 @@ def main() -> None:
             dist.destroy_process_group()
         return
 
-    start_time = time.time()
+    training_time_ms = 0.0
+    stop_after_step: Optional[int] = None
+    synchronize_device()
+    t0 = time.perf_counter()
     completed_steps = 0
     processed_train_tokens = 0
     last_eval_step = -1
     stop_reason = "end_of_data"
 
+    if args.val_loss_every > 0:
+        run_eval(step=0)
+        last_eval_step = 0
+        synchronize_device()
+        t0 = time.perf_counter()
+
     for epoch in range(1, args.num_epochs + 1):
         train_loader.reset()
         for epoch_step_idx, micro_specs in enumerate(epoch_steps, start=1):
-            if args.max_steps > 0 and completed_steps >= args.max_steps:
-                stop_reason = f"max_steps={args.max_steps}"
+            if completed_steps >= total_training_steps:
+                stop_reason = (
+                    f"max_steps={args.max_steps}"
+                    if args.max_steps > 0
+                    else "end_of_data"
+                )
                 break
-            if (
-                args.max_wallclock_seconds > 0.0
-                and (time.time() - start_time) >= args.max_wallclock_seconds
-            ):
+            if stop_after_step is not None and completed_steps >= stop_after_step:
                 stop_reason = f"max_wallclock_seconds={args.max_wallclock_seconds}"
                 break
 
-            completed_steps += 1
+            current_step = completed_steps + 1
             model.train()
             optimizer.zero_grad(set_to_none=True)
             step_loss_sum = 0.0
@@ -3358,7 +3421,7 @@ def main() -> None:
                 sum(spec.local_batch_size * spec.seq_len for spec in micro_specs)
             )
 
-            lr = get_lr(completed_steps - 1, total_training_steps, args)
+            lr = get_lr(completed_steps, total_training_steps, args)
             for group in optimizer.param_groups:
                 group["lr"] = lr
 
@@ -3384,7 +3447,7 @@ def main() -> None:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip_norm)
             optimizer.step()
             if master_process:
-                wandb_logger.maybe_log_watch(completed_steps, log_fn=log)
+                wandb_logger.maybe_log_watch(current_step, log_fn=log)
             processed_train_tokens += step_global_token_count
 
             stats = torch.tensor(
@@ -3395,7 +3458,11 @@ def main() -> None:
             if distributed:
                 dist.all_reduce(stats, op=dist.ReduceOp.SUM)
             train_loss = float(stats[0].item() / max(1.0, stats[1].item()))
-            elapsed = time.time() - start_time
+            completed_steps = current_step
+            approx_training_time_ms = training_time_ms + 1000.0 * (
+                time.perf_counter() - t0
+            )
+            elapsed = approx_training_time_ms / 1000.0
             toks_per_sec = float(processed_train_tokens) / max(elapsed, 1e-6)
             if progress_bar is not None:
                 progress_bar.update(1)
@@ -3410,6 +3477,7 @@ def main() -> None:
                 completed_steps == 1
                 or completed_steps % args.train_log_every == 0
                 or completed_steps == total_training_steps
+                or stop_after_step is not None
             )
             if master_process and should_log:
                 log(
@@ -3427,13 +3495,33 @@ def main() -> None:
                     step=completed_steps,
                 )
 
+            reached_cap = (
+                args.max_wallclock_seconds > 0.0
+                and approx_training_time_ms >= 1000.0 * args.max_wallclock_seconds
+            )
+            if distributed and args.max_wallclock_seconds > 0.0:
+                reached_cap_tensor = torch.tensor(int(reached_cap), device=device)
+                dist.all_reduce(reached_cap_tensor, op=dist.ReduceOp.MAX)
+                reached_cap = bool(reached_cap_tensor.item())
+            if stop_after_step is None and reached_cap:
+                stop_after_step = completed_steps
+
             should_eval = args.val_loss_every > 0 and (
                 completed_steps % args.val_loss_every == 0
                 or completed_steps == total_training_steps
+                or stop_after_step == completed_steps
             )
             if should_eval:
+                synchronize_device()
+                training_time_ms += 1000.0 * (time.perf_counter() - t0)
                 run_eval(completed_steps)
                 last_eval_step = completed_steps
+                synchronize_device()
+                t0 = time.perf_counter()
+
+            if stop_after_step is not None and completed_steps >= stop_after_step:
+                stop_reason = f"max_wallclock_seconds={args.max_wallclock_seconds}"
+                break
 
         if stop_reason != "end_of_data":
             break
