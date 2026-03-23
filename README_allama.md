@@ -355,16 +355,28 @@ It prefixes run IDs with `sbcal_v2_` by default so the cleaner `14/2` recalibrat
 It skips already-completed run directories only when the artifacts exist,
 `train.log` shows the expected terminal step or intentional wallclock-capped
 stop for the current plan, and `.run_spec` matches the resolved launch
-contract for the current run. That means a shorter `ablate`, `screen`, or
-`explore` run no longer falsely satisfies a later `full` run with the same
-`RUN_ID`. If a directory already exists but does not satisfy the current
-completion check, the script stops instead of silently overwriting mixed logs
-and artifacts. Use `FORCE_RERUN=1` if you want to overwrite anyway.
+contract for the current run. For the GPT reference, completion is stricter
+than `train_stop`: the log must also contain `size_final` and
+`final_int8_zlib_roundtrip_exact`, so a run that dies after training but before
+final post-quantization validation does not get reused as "complete". That
+means a shorter `ablate`, `screen`, or `explore` run no longer falsely
+satisfies a later `full` run with the same `RUN_ID`. If a directory already
+exists but does not satisfy the current completion check, the script stops
+instead of silently overwriting mixed logs and artifacts. Use `FORCE_RERUN=1`
+if you want to overwrite anyway.
 
 That `.run_spec` fingerprint now includes the launch settings that materially
-change behavior, including eval mode, validation batching, SDPA backend, MLP
-alignment, device/dtype, and the core batch/shape settings. So changing one of
-those knobs no longer aliases an old run as "complete".
+change behavior, including eval mode, validation batching, explicit
+`EVAL_BATCH_TOKENS`, tokenizer/vocab identity, SDPA backend, MLP alignment,
+device/dtype, and the core batch/shape settings. So changing one of those
+knobs no longer aliases an old run as "complete".
+
+The wrapper now sanitizes trainer-affecting env vars before launch and then
+re-applies the resolved sweep contract explicitly. That closes the experiment
+protocol against inherited shell state: an exported trainer override such as
+`EVAL_BATCH_TOKENS`, `TOKENIZER_PATH`, or a GPT-only Muon hyperparameter can no
+longer silently alter a run without also appearing in the sweep summary and
+`.run_spec`.
 
 Completion checks respect intentional wallclock-capped runs. If
 `MAX_WALLCLOCK_SECONDS` is part of the run spec, a matching
@@ -379,6 +391,10 @@ The sweep exports W&B watch knobs:
 
 - `WANDB_WATCH=all`
 - `WANDB_WATCH_LOG_FREQ=100`
+
+Those watch settings are part of the printed launch summary and `.run_spec`, so
+changing them does not silently reuse a run directory from a different
+observability contract.
 
 When `torch.compile` is active, both trainers use a manual histogram backend
 instead of W&B module hooks. That keeps scalar logging intact and preserves
