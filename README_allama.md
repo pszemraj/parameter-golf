@@ -335,8 +335,8 @@ useful summary fields:
 - `artifact_bytes_final`
 
 It prints its launch summary before starting, including planned vs scheduled
-run counts, the resolved batch settings, local batch size, compile mode, and
-wallclock cap.
+run counts, the resolved batch settings, local batch size, compile mode,
+planned train-token budget, and wallclock cap.
 
 There are now four intended sweep profiles:
 
@@ -390,27 +390,31 @@ The important batch rule is:
 
 - `local_batch_size = TRAIN_BATCH_TOKENS / (GRAD_ACCUM_STEPS * TRAIN_SEQ_LEN)`
 
-The local model-selection profile is now the explicit 1x5090 proxy contract:
+The local model-selection profile is now the explicit 1x5090 fixed-data proxy
+contract:
 
 - default `SWEEP_PROFILE=ablate`
 - `TRAIN_BATCH_TOKENS=131072`
 - `GRAD_ACCUM_STEPS=32`
 - `local_batch_size=4`
 - `MAX_STEPS=1500`
-- `MAX_WALLCLOCK_SECONDS=180`
+- `planned_train_tokens=196608000`
+- `MAX_WALLCLOCK_SECONDS=0`
 - `VAL_LOSS_EVERY=100`
 - `RUN_COMPILE=1`
 
 That profile is meant to be representative of the eventual 8xH100 submission
-contract while still being materially cheaper on one 5090. Both trainers honor
-that same resolved batch contract now:
+contract while still being materially cheaper on one 5090, and it is intended
+for model-quality comparisons first, not speed screening. Baseline and ALlama
+should both consume the same token budget under this profile. Both trainers
+honor that same resolved batch contract now:
 
 - `train_gpt.py` no longer hardcodes `grad_accum_steps=8 // WORLD_SIZE` when
   `GRAD_ACCUM_STEPS` is explicitly set
 - `RUN_COMPILE=0|1` now applies to both the GPT baseline and ALlama runs
 - both trainers exclude compile warmup and eval time from the ranked training
-  window, so `elapsed_s`, `tokens_per_s`, and `MAX_WALLCLOCK_SECONDS` reflect
-  train-only time rather than cold compile time
+  window, so `elapsed_s` and `tokens_per_s` stay useful for later speed audits
+  without changing the fixed-data ablation contract
 - ALlama now derives its default `EVAL_BATCH_TOKENS` from the eval microbatch
   (`sampled_eval_batch_size * EVAL_SEQ_LEN * WORLD_SIZE`) instead of the full
   optimizer-step token budget, so default full-eval memory matches the intended
@@ -451,9 +455,9 @@ Using those same measurements to estimate an uncapped 750-step local run gives:
 - `wide_ff15/share_chunk`: compile about `772s` vs eager about `983s`
 
 So compile is already faster even when you count its real warmup cost, and it
-only gets better as the run length grows. The wallclock-capped `ablate` profile
-is still the correct local screening mode, though, because exact 750-step parity
-on one 5090 would be too expensive for early-round ablations.
+only gets better as the run length grows. That speed question is now separated
+from the default `ablate` protocol: `ablate` is fixed-data by default, and any
+wallclock-capped screening should be treated as a different experiment mode.
 
 One backend knob is worth keeping available but not forcing by default:
 
