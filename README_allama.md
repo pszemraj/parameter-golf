@@ -243,7 +243,7 @@ Two things matter here:
 - that drift is not caused by checkpoint junk; the payload/checkpoint metadata is tiny, and the growth comes from model entropy
 - the default export should not waste bytes on float passthrough tensors that do not justify it; keeping `resid_mix_logits` float was too expensive for these near-cap runs, so the default control pattern is now just `depth_gains`
 
-Representative drift on an old near-cap anchor using repeated short runs:
+Representative drift on an old near-cap anchor using the older max-abs exporter:
 
 - step 0: `artifact_bytes=15,498,554`
 - step 50: `artifact_bytes=22,148,785`
@@ -257,48 +257,29 @@ What changed was compression, not file structure:
 - checkpoint config overhead was only about `1.7 KB` compressed
 - payload metadata overhead was tiny; the large delta was the quantized tensors becoming less compressible
 
-Across 50-step runs, the trained payload landed very close to a fixed fraction of the raw payload bytes:
+That old behavior was not just a training effect. The exporter itself was wasteful compared with the baseline `train_gpt.py` policy. Auditing the same finished ALlama checkpoints against the baseline-style clipped quantizer showed a huge gap:
 
-- `wide_ff15` old anchor: `0.9355`
-- `shortfat_ff20` old anchor: `0.9373`
-- `balanced_ff25` old anchor: `0.9380`
-- `tall_ff30` old anchor: `0.9365`
-- `wide_ff15` resized anchor: `0.9395`
-- `balanced_ff25` resized-but-too-large anchor (`896/224/24`): `0.9426`
-- `tall_ff30` resized anchor: `0.9412`
+- old allama exporter on `wide_ff15_baseline`: `15,961,356`
+- baseline-style clipped exporter on the same checkpoint: `7,379,594`
+- old allama exporter on `balanced_ff25_baseline`: `16,023,736`
+- baseline-style clipped exporter on the same checkpoint: `7,651,896`
 
-So the practical sizing proxy is:
+The meaningful conclusion is:
 
-```text
-artifact_proxy_bytes ~= code_bytes + 0.945 * int8_payload_bytes_init
-```
+- the older allama export policy was leaving massive artifact budget on the table
+- the corrected exporter now uses clipped int8 quantization instead of the old max-abs scheme
+- any size proxy or family search derived from the old exporter is invalid now
 
-Use `0.945` instead of the tighter `~0.937` mean because the smaller near-cap models came in slightly worse.
-Then validate any near-cap finalist with a real short run and actual `size_final`.
+So the old `0.945 * int8_payload_bytes_init` proxy should be considered obsolete.
+Fresh size calibration is required under the corrected exporter before running a real blocked sweep again.
 
 ### Phase 3: serious ablations
 
-These are the actual first ablations I would run once the family has been made final-size-aware instead of init-size-aware.
-With the current export policy (`CONTROL_TENSOR_NAME_PATTERNS=depth_gains`), three completed 750-step baselines re-export under the 16 MB cap as-is:
+Do not trust the current blocked family set after the exporter fix.
+Those anchors were sized under the older export policy and now land around `7.4-7.7 MB` final, which is nowhere near acceptable for a serious Parameter Golf sweep.
+Accordingly, `scripts/run_allama_ablations.sh` now fails closed unless you explicitly set `ALLOW_STALE_FAMILY_SET=1`.
 
-- `wide_ff15`: `15,961,356`
-- `shortfat_ff20`: `15,981,514`
-- `tall_ff30`: `15,986,074`
-
-The old `balanced_ff25` (`EMBED_DIM=1792`) still landed slightly over at `16,023,736`, so the blocked sweep now trims only that family to `EMBED_DIM=1728`.
-Using the observed 750-step compression ratio from that run, the `EMBED_DIM=1728` variant is expected to land around `15.87 MB`, leaving about `132 KB` of headroom.
-The current blocked sweep uses four aligned anchors:
-
-- `wide_ff15`: `MODEL_DIM=1024`, `EMBED_DIM=256`, `NUM_LAYERS=16`, `NUM_HEADS=8`, `NUM_KV_HEADS=4`, `NUM_SHARED_BLOCKS=2`, `MLP_MULT=1.5`, `MLP_MULTIPLE_OF=128`, `artifact_proxy_bytes=15896523`
-- `shortfat_ff20`: `MODEL_DIM=896`, `EMBED_DIM=1152`, `NUM_LAYERS=20`, `NUM_HEADS=14`, `NUM_KV_HEADS=2`, `NUM_SHARED_BLOCKS=2`, `MLP_MULT=2.0`, `MLP_MULTIPLE_OF=128`, `artifact_proxy_bytes=15935714`
-- `balanced_ff25`: `MODEL_DIM=768`, `EMBED_DIM=1728`, `NUM_LAYERS=24`, `NUM_HEADS=12`, `NUM_KV_HEADS=4`, `NUM_SHARED_BLOCKS=2`, `MLP_MULT=2.5`, `MLP_MULTIPLE_OF=128`
-- `tall_ff30`: `MODEL_DIM=768`, `EMBED_DIM=1088`, `NUM_LAYERS=32`, `NUM_HEADS=12`, `NUM_KV_HEADS=4`, `NUM_SHARED_BLOCKS=2`, `MLP_MULT=3.0`, `MLP_MULTIPLE_OF=128`, `artifact_proxy_bytes=15986759`
-
-Why these and not the earlier near-cap anchors:
-
-- the old anchors were all shape-sloppy for the GPU: head dims `66`, `60`, `54`, and `52`
-- the new anchors keep the important matmul shapes on `64`/`128` boundaries, with head dims `128`, `64`, `64`, and `64`
-- they still span FF ratios `1.5`, `2.0`, `2.5`, and `3.0`, but they now do it with near-cap final-size-aware proxies instead of init-only artifact guesses
+The correct next step is a fresh family-size calibration under the corrected exporter, then a new blocked sweep built on those recalibrated anchors.
 
 Cold `--compile` 4-step speed audit on the 5090, using the same sweep batch settings, favored the aligned family set across the board:
 

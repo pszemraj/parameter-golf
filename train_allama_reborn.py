@@ -2437,6 +2437,8 @@ BF16_STORE_DTYPE = torch.bfloat16
 FLOAT32_CONTROL_STORE_DTYPE = torch.float32
 INT8_PER_ROW_SCALE_DTYPE = torch.bfloat16
 ARTIFACT_SIZE_LIMIT_BYTES = 16_000_000
+INT8_CLIP_PERCENTILE = 99.99984
+INT8_CLIP_Q = INT8_CLIP_PERCENTILE / 100.0
 
 
 def quantize_float_tensor(t: Tensor) -> tuple[Tensor, Tensor]:
@@ -2446,18 +2448,36 @@ def quantize_float_tensor(t: Tensor) -> tuple[Tensor, Tensor]:
     :return tuple[Tensor, Tensor]: Quantized tensor and scale tensor.
     """
     t32 = t.float().contiguous()
-    if t32.ndim >= 2:
-        flat = t32.view(t32.shape[0], -1)
-        scale = flat.abs().amax(dim=1).clamp_min(1.0 / 127.0) / 127.0
-        q = torch.clamp(torch.round(flat / scale[:, None]), -127, 127).to(torch.int8)
-        return q.view_as(t32).contiguous(), scale.to(
-            INT8_PER_ROW_SCALE_DTYPE
-        ).contiguous()
-    scale = torch.tensor(
-        max(float(t32.abs().max().item()), 1.0 / 127.0) / 127.0,
-        dtype=torch.float32,
+    if t32.ndim == 2:
+        clip_abs = (
+            torch.quantile(t32.abs(), INT8_CLIP_Q, dim=1)
+            if t32.numel()
+            else torch.empty((t32.shape[0],), dtype=torch.float32)
+        )
+        clipped = torch.maximum(
+            torch.minimum(t32, clip_abs[:, None]), -clip_abs[:, None]
+        )
+        scale = (clip_abs / 127.0).clamp_min(1.0 / 127.0)
+        q = (
+            torch.clamp(torch.round(clipped / scale[:, None]), -127, 127)
+            .to(torch.int8)
+            .contiguous()
+        )
+        return q, scale.to(INT8_PER_ROW_SCALE_DTYPE).contiguous()
+
+    clip_abs = (
+        float(torch.quantile(t32.abs().flatten(), INT8_CLIP_Q).item())
+        if t32.numel()
+        else 0.0
     )
-    q = torch.clamp(torch.round(t32 / scale), -127, 127).to(torch.int8).contiguous()
+    scale = torch.tensor(clip_abs / 127.0 if clip_abs > 0 else 1.0, dtype=torch.float32)
+    q = (
+        torch.clamp(
+            torch.round(torch.clamp(t32, -clip_abs, clip_abs) / scale), -127, 127
+        )
+        .to(torch.int8)
+        .contiguous()
+    )
     return q, scale.to(INT8_PER_ROW_SCALE_DTYPE)
 
 

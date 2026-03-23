@@ -11,6 +11,13 @@ export WANDB_WATCH_LOG_FREQ="${WANDB_WATCH_LOG_FREQ:-100}"
 export SDPA_BACKEND="${SDPA_BACKEND:-auto}"
 export TORCH_BLAS_PREFER_CUBLASLT=1
 
+if [[ "${ALLOW_STALE_FAMILY_SET:-0}" != "1" ]]; then
+  echo "ERROR current allama family anchors are stale under the clipped exporter policy." >&2
+  echo "ERROR finished baselines now re-export around 7.4-7.7 MB, so this sweep would waste budget and compute." >&2
+  echo "ERROR recalibrate family sizes first, or set ALLOW_STALE_FAMILY_SET=1 only if you intentionally want stale undersized runs." >&2
+  exit 1
+fi
+
 SWEEP_PROFILE="${SWEEP_PROFILE:-explore}"
 
 case "${SWEEP_PROFILE}" in
@@ -314,12 +321,9 @@ run_variant_block() {
   done
 }
 
-# Current near-cap family set:
-# - uses only `depth_gains` as float passthrough control for artifact export
-# - keeps the aligned `64`/`128`-friendly attention shapes
-# - leaves wide / shortfat / tall unchanged from the aligned sweep
-# - trims only `balanced_ff25` to `EMBED_DIM=1728` because the older 1792
-#   variant remained slightly over the final 16,000,000-byte cap
+# This family set is intentionally blocked by the stale-family guard above.
+# After switching to the clipped exporter, these anchors are no longer near-cap
+# and must be recalibrated before this script should be used for real sweeps.
 # Cold compile speed audit on the 5090 favored these aligned shapes over the old
 # 1056/960/864/832 anchors while the Inductor online-softmax warning persisted.
 
