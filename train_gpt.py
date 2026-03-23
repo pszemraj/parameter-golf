@@ -99,9 +99,7 @@ class Hyperparameters:
     eval_seq_len = int(
         os.environ.get("EVAL_SEQ_LEN", os.environ.get("TRAIN_SEQ_LEN", 1024))
     )
-    eval_batch_tokens = int(
-        os.environ.get("EVAL_BATCH_TOKENS", os.environ.get("VAL_BATCH_SIZE", 524_288))
-    )
+    eval_batch_tokens = int(os.environ.get("EVAL_BATCH_TOKENS", "0"))
     val_batch_size = int(os.environ.get("VAL_BATCH_SIZE", 8))
     val_batches = int(os.environ.get("VAL_BATCHES", 8))
     val_loss_every = int(os.environ.get("VAL_LOSS_EVERY", 1000))
@@ -317,32 +315,58 @@ def make_eval_starts(num_tokens: int, seq_len: int, total_sequences: int) -> Ten
     return torch.linspace(0, max_start, steps=total_sequences).long()
 
 
+def resolve_eval_batch_plan(
+    args: Hyperparameters, world_size: int, local_batch_size: int
+) -> tuple[int, int, int]:
+    """Resolve sampled and full-eval batch sizing from the shared launch contract."""
+    sampled_eval_batch_size = (
+        args.val_batch_size if args.val_batch_size > 0 else local_batch_size
+    )
+    if sampled_eval_batch_size <= 0:
+        raise ValueError(
+            "VAL_BATCH_SIZE must be positive or the train microbatch must resolve to at least one sequence; "
+            f"got VAL_BATCH_SIZE={args.val_batch_size}, local_batch_size={local_batch_size}"
+        )
+    eval_batch_tokens = (
+        args.eval_batch_tokens
+        if args.eval_batch_tokens > 0
+        else sampled_eval_batch_size * args.eval_seq_len * world_size
+    )
+    local_batch_tokens = eval_batch_tokens // world_size
+    if local_batch_tokens < args.eval_seq_len:
+        raise ValueError(
+            "EVAL_BATCH_TOKENS must provide at least one sequence per rank; "
+            f"got EVAL_BATCH_TOKENS={eval_batch_tokens}, WORLD_SIZE={world_size}, "
+            f"EVAL_SEQ_LEN={args.eval_seq_len}"
+        )
+    full_eval_local_batch_size = local_batch_tokens // args.eval_seq_len
+    return sampled_eval_batch_size, eval_batch_tokens, full_eval_local_batch_size
+
+
 @torch.no_grad()
 def eval_sampled(
-    args: Hyperparameters,
     model: nn.Module,
     device: torch.device,
     val_tokens: Tensor,
+    seq_len: int,
+    batch_size: int,
+    num_batches: int,
     base_bytes_lut: Tensor,
     has_leading_space_lut: Tensor,
     is_boundary_token_lut: Tensor,
 ) -> tuple[float, float]:
     """Evaluate on a fixed set of sampled validation windows."""
-    total_sequences = max(1, args.val_batch_size * args.val_batches)
-    starts = make_eval_starts(
-        int(val_tokens.numel()), args.eval_seq_len, total_sequences
-    )
-    offsets = torch.arange(args.eval_seq_len + 1)
+    total_sequences = max(1, batch_size * num_batches)
+    starts = make_eval_starts(int(val_tokens.numel()), seq_len, total_sequences)
+    offsets = torch.arange(seq_len + 1)
     val_loss_sum = 0.0
     val_token_count = 0
     val_byte_count = 0.0
 
     model.eval()
     with torch.no_grad():
-        for batch_idx in range(args.val_batches):
-            batch_starts = starts[
-                batch_idx * args.val_batch_size : (batch_idx + 1) * args.val_batch_size
-            ]
+        for batch_idx in range(num_batches):
+            batch_starts = starts[batch_idx * batch_size : (batch_idx + 1) * batch_size]
             if batch_starts.numel() == 0:
                 break
             windows = val_tokens[batch_starts[:, None] + offsets[None, :]]
@@ -374,7 +398,7 @@ def eval_val(
     rank: int,
     world_size: int,
     device: torch.device,
-    grad_accum_steps: int,
+    eval_batch_tokens: int,
     val_tokens: Tensor,
     base_bytes_lut: Tensor,
     has_leading_space_lut: Tensor,
@@ -383,12 +407,12 @@ def eval_val(
     # Validation computes two metrics:
     # - val_loss: token cross-entropy (natural log)
     # - val_bpb: tokenizer-agnostic compression metric used by the challenge
-    local_batch_tokens = args.eval_batch_tokens // (world_size * grad_accum_steps)
+    local_batch_tokens = eval_batch_tokens // world_size
     if local_batch_tokens < args.eval_seq_len:
         raise ValueError(
             "EVAL_BATCH_TOKENS must provide at least one sequence per rank; "
-            f"got EVAL_BATCH_TOKENS={args.eval_batch_tokens}, WORLD_SIZE={world_size}, "
-            f"GRAD_ACCUM_STEPS={grad_accum_steps}, EVAL_SEQ_LEN={args.eval_seq_len}"
+            f"got EVAL_BATCH_TOKENS={eval_batch_tokens}, WORLD_SIZE={world_size}, "
+            f"EVAL_SEQ_LEN={args.eval_seq_len}"
         )
     local_batch_seqs = local_batch_tokens // args.eval_seq_len
     total_seqs = (val_tokens.numel() - 1) // args.eval_seq_len
@@ -1353,6 +1377,9 @@ def main() -> None:
     n_params = sum(p.numel() for p in base_model.parameters())
     local_batch_tokens = args.train_batch_tokens // (world_size * grad_accum_steps)
     local_batch_size = local_batch_tokens // args.train_seq_len
+    sampled_eval_batch_size, eval_batch_tokens, full_eval_local_batch_size = (
+        resolve_eval_batch_plan(args, world_size, local_batch_size)
+    )
     log0(
         f"run_id={args.run_id} backend=parameter_golf device={device} dtype=torch.bfloat16 "
         f"compile={int(args.compile)} baseline_reference=1 stored_params={n_params} "
@@ -1367,6 +1394,21 @@ def main() -> None:
         f"train_static nominal_step_tokens={args.train_batch_tokens} final_step_tokens={args.train_batch_tokens} "
         f"variable_step_tokens=0 train_log_every={args.train_log_every} val_loss_every={args.val_loss_every}"
     )
+    log0(
+        f"eval_plan train_local_batch_size={local_batch_size} sampled_eval_batch_size={sampled_eval_batch_size} "
+        f"eval_batch_tokens={eval_batch_tokens} full_eval_local_batch_size={full_eval_local_batch_size}"
+    )
+    if (
+        sampled_eval_batch_size > local_batch_size
+        or full_eval_local_batch_size > local_batch_size
+    ):
+        log0(
+            "eval_memory_note "
+            f"sampled_eval_batch_size={sampled_eval_batch_size} "
+            f"full_eval_local_batch_size={full_eval_local_batch_size} "
+            f"train_local_batch_size={local_batch_size} "
+            "note=eval_batch_is_larger_than_train_microbatch"
+        )
     log0(
         f"model_init stored_params={n_params} stored_trainable_params={n_params} "
         f"functional_params={n_params} functional_trainable_params={n_params} "
@@ -1398,6 +1440,7 @@ def main() -> None:
 
     wandb_config = hyperparameter_config(args) | {
         "backend": "parameter_golf",
+        "compile_enabled": bool(args.compile),
         "resolved_eval_mode": args.eval_mode,
         "train_nominal_step_tokens": args.train_batch_tokens,
         "train_final_step_tokens": args.train_batch_tokens,
@@ -1419,6 +1462,9 @@ def main() -> None:
         "head_lr_base": float(args.head_lr if base_model.lm_head is not None else 0.0),
         "matrix_lr_base": float(args.matrix_lr),
         "scalar_lr_base": float(args.scalar_lr),
+        "sampled_eval_batch_size": int(sampled_eval_batch_size),
+        "resolved_eval_batch_tokens": int(eval_batch_tokens),
+        "full_eval_local_batch_size": int(full_eval_local_batch_size),
     }
     wandb_logger = WandbLogger(
         args,
@@ -1438,6 +1484,7 @@ def main() -> None:
         if args.compile
         else base_model
     )
+    eval_model = compiled_model
     model: nn.Module = (
         DDP(compiled_model, device_ids=[local_rank], broadcast_buffers=False)
         if distributed
@@ -1480,22 +1527,24 @@ def main() -> None:
     def run_eval(step: int, training_time_ms: float) -> tuple[float, float]:
         if args.eval_mode == "sampled":
             val_loss, val_bpb = eval_sampled(
-                args,
-                base_model,
+                eval_model,
                 device,
                 val_tokens,
-                base_bytes_lut,
-                has_leading_space_lut,
-                is_boundary_token_lut,
+                seq_len=args.eval_seq_len,
+                batch_size=sampled_eval_batch_size,
+                num_batches=args.val_batches,
+                base_bytes_lut=base_bytes_lut,
+                has_leading_space_lut=has_leading_space_lut,
+                is_boundary_token_lut=is_boundary_token_lut,
             )
         else:
             val_loss, val_bpb = eval_val(
                 args,
-                model,
+                eval_model,
                 rank,
                 world_size,
                 device,
-                grad_accum_steps,
+                eval_batch_tokens,
                 val_tokens,
                 base_bytes_lut,
                 has_leading_space_lut,
@@ -1770,22 +1819,24 @@ def main() -> None:
     t_qeval = time.perf_counter()
     if args.eval_mode == "sampled":
         q_val_loss, q_val_bpb = eval_sampled(
-            args,
-            base_model,
+            eval_model,
             device,
             val_tokens,
-            base_bytes_lut,
-            has_leading_space_lut,
-            is_boundary_token_lut,
+            seq_len=args.eval_seq_len,
+            batch_size=sampled_eval_batch_size,
+            num_batches=args.val_batches,
+            base_bytes_lut=base_bytes_lut,
+            has_leading_space_lut=has_leading_space_lut,
+            is_boundary_token_lut=is_boundary_token_lut,
         )
     else:
         q_val_loss, q_val_bpb = eval_val(
             args,
-            model,
+            eval_model,
             rank,
             world_size,
             device,
-            grad_accum_steps,
+            eval_batch_tokens,
             val_tokens,
             base_bytes_lut,
             has_leading_space_lut,

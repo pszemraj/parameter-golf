@@ -144,7 +144,7 @@ def parse_cli_overrides(argv: Sequence[str]) -> CliOverrides:
         "--compile",
         dest="compile_model",
         action="store_true",
-        help="Enable torch.compile() for single-process runs.",
+        help="Enable torch.compile() before optional DDP wrapping.",
     )
     compile_group.add_argument(
         "--no-compile",
@@ -3002,17 +3002,17 @@ def main() -> None:
     if args.compile_model:
         if not hasattr(torch, "compile"):
             log("note=torch.compile requested but unavailable in this PyTorch build")
-        elif distributed:
-            log(
-                "note=torch.compile requested but skipped because distributed training is enabled"
-            )
         else:
             model_no_ddp = torch.compile(model_no_ddp)  # type: ignore[assignment]
             compile_enabled = True
 
     if distributed:
         ddp_device_ids = [device.index] if device.type == "cuda" else None
-        model: nn.Module = DDP(model_no_ddp, device_ids=ddp_device_ids)
+        model: nn.Module = DDP(
+            model_no_ddp,
+            device_ids=ddp_device_ids,
+            broadcast_buffers=False,
+        )
     else:
         model = model_no_ddp
 
@@ -3153,7 +3153,11 @@ def main() -> None:
 
     wandb_config = asdict(args) | {
         "backend": backend,
+        "compile_enabled": bool(compile_enabled),
         "resolved_eval_mode": eval_mode,
+        "sampled_eval_batch_size": int(sampled_eval_batch_size),
+        "resolved_eval_batch_tokens": int(eval_batch_tokens),
+        "full_eval_local_batch_size": int(full_eval_local_batch_size),
         "sdpa_flash_available": bool(sdpa_status.get("flash_available", False)),
         "sdpa_flash_enabled": bool(sdpa_status.get("flash_enabled", False)),
         "sdpa_math_enabled": bool(sdpa_status.get("math_enabled", False)),
@@ -3285,7 +3289,7 @@ def main() -> None:
             dist.barrier()
         if eval_mode == "full":
             val_loss, val_bpb = evaluate_full(
-                report_model,
+                model_no_ddp,
                 val_tokens=val_tokens,
                 seq_len=args.eval_seq_len,
                 eval_batch_tokens=eval_batch_tokens,
@@ -3315,7 +3319,7 @@ def main() -> None:
 
         if master_process:
             val_loss, val_bpb = evaluate_sampled(
-                report_model if distributed else model_no_ddp,
+                model_no_ddp,
                 val_tokens=val_tokens,
                 seq_len=args.eval_seq_len,
                 batch_size=sampled_eval_batch_size,

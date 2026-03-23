@@ -411,7 +411,14 @@ honor that same resolved batch contract now:
 
 - `train_gpt.py` no longer hardcodes `grad_accum_steps=8 // WORLD_SIZE` when
   `GRAD_ACCUM_STEPS` is explicitly set
+- `train_gpt.py` and `train_allama_reborn.py` now resolve full-eval batch size
+  from the same global token-budget contract:
+  `EVAL_BATCH_TOKENS` when explicitly set, otherwise
+  `sampled_eval_batch_size * EVAL_SEQ_LEN * WORLD_SIZE`
 - `RUN_COMPILE=0|1` now applies to both the GPT baseline and ALlama runs
+- `train_allama_reborn.py` now compiles before optional DDP wrapping instead of
+  silently downgrading distributed runs to eager, so the multi-GPU ALlama path
+  matches the intended 8xH100-style launch topology
 - both trainers exclude compile warmup and eval time from the ranked training
   window, so `elapsed_s` and `tokens_per_s` stay useful for later speed audits
   without changing the fixed-data ablation contract
@@ -419,6 +426,10 @@ honor that same resolved batch contract now:
   (`sampled_eval_batch_size * EVAL_SEQ_LEN * WORLD_SIZE`) instead of the full
   optimizer-step token budget, so default full-eval memory matches the intended
   microbatch contract rather than secretly jumping to a much larger batch
+- GPT full eval no longer divides `EVAL_BATCH_TOKENS` by
+  `GRAD_ACCUM_STEPS`, so switching the aligned sweep contract from sampled eval
+  to full eval uses a sensible per-rank validation batch instead of collapsing
+  to an invalid token budget
 - the trainer startup log now prints `eval_plan ...` and the final log prints
   peak CUDA allocated/reserved memory so hidden phase spikes are easier to spot
 
