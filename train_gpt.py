@@ -1498,14 +1498,29 @@ def main() -> None:
     train_loader = DistributedTokenLoader(args.train_files, rank, world_size, device)
 
     def zero_grad_all() -> None:
+        """Clear gradients for every optimizer group with `set_to_none=True`.
+
+        :return None: Resets optimizer gradients in place.
+        """
         for opt in optimizers:
             opt.zero_grad(set_to_none=True)
 
     max_wallclock_ms = (
         1000.0 * args.max_wallclock_seconds if args.max_wallclock_seconds > 0 else None
     )
+    training_time_ms = 0.0
+    cap_training_time_ms = 0.0
+    stop_after_step: int | None = None
+    torch.cuda.synchronize()
+    t0 = time.perf_counter()
 
     def lr_mul(step: int, elapsed_ms: float) -> float:
+        """Compute the scalar LR multiplier for iteration- or time-based warmdown.
+
+        :param int step: Current optimizer step.
+        :param float elapsed_ms: Elapsed time basis in milliseconds for warmdown scheduling.
+        :return float: Learning-rate multiplier in `[0, 1]`.
+        """
         if args.warmdown_iters <= 0:
             return 1.0
         if max_wallclock_ms is None:
@@ -1525,6 +1540,12 @@ def main() -> None:
         )
 
     def run_eval(step: int, training_time_ms: float) -> tuple[float, float]:
+        """Run the configured validation path and emit logs/W&B metrics.
+
+        :param int step: Training step associated with the evaluation.
+        :param float training_time_ms: Accumulated measured training time in milliseconds.
+        :return tuple[float, float]: Validation loss and validation bits-per-byte.
+        """
         if args.eval_mode == "sampled":
             val_loss, val_bpb = eval_sampled(
                 eval_model,
@@ -1604,15 +1625,22 @@ def main() -> None:
         train_loader = DistributedTokenLoader(
             args.train_files, rank, world_size, device
         )
+        torch.cuda.synchronize()
+        warmup_elapsed_ms = 1000.0 * (time.perf_counter() - t0)
+        if max_wallclock_ms is not None:
+            cap_training_time_ms += warmup_elapsed_ms
+            reached_cap = cap_training_time_ms >= max_wallclock_ms
+            if distributed:
+                reached_cap_tensor = torch.tensor(int(reached_cap), device=device)
+                dist.all_reduce(reached_cap_tensor, op=dist.ReduceOp.MAX)
+                reached_cap = bool(reached_cap_tensor.item())
+            if reached_cap:
+                stop_after_step = 0
+        t0 = time.perf_counter()
 
     # -----------------------------
     # MAIN TRAINING LOOP
     # -----------------------------
-
-    training_time_ms = 0.0
-    stop_after_step: int | None = None
-    torch.cuda.synchronize()
-    t0 = time.perf_counter()
 
     step = 0
     while True:
@@ -1625,7 +1653,10 @@ def main() -> None:
         )
         if should_validate:
             torch.cuda.synchronize()
-            training_time_ms += 1000.0 * (time.perf_counter() - t0)
+            segment_elapsed_ms = 1000.0 * (time.perf_counter() - t0)
+            training_time_ms += segment_elapsed_ms
+            if max_wallclock_ms is not None:
+                cap_training_time_ms += segment_elapsed_ms
             run_eval(step, training_time_ms)
             torch.cuda.synchronize()
             t0 = time.perf_counter()
@@ -1634,12 +1665,16 @@ def main() -> None:
             if stop_after_step is not None and step < args.iterations:
                 log0(
                     f"stopping_early: wallclock_cap train_time:{training_time_ms:.0f}ms "
-                    f"step:{step}/{args.iterations}"
+                    f"cap_time:{cap_training_time_ms:.0f}ms step:{step}/{args.iterations}"
                 )
             break
 
-        elapsed_ms = training_time_ms + 1000.0 * (time.perf_counter() - t0)
-        scale = lr_mul(step, elapsed_ms)
+        segment_elapsed_ms = 1000.0 * (time.perf_counter() - t0)
+        train_elapsed_ms = training_time_ms + segment_elapsed_ms
+        cap_elapsed_ms = cap_training_time_ms + segment_elapsed_ms
+        scale = lr_mul(
+            step, cap_elapsed_ms if max_wallclock_ms is not None else train_elapsed_ms
+        )
         zero_grad_all()
         train_loss = torch.zeros((), device=device)
         for micro_step in range(grad_accum_steps):
@@ -1677,7 +1712,9 @@ def main() -> None:
         zero_grad_all()
 
         step += 1
-        approx_training_time_ms = training_time_ms + 1000.0 * (time.perf_counter() - t0)
+        segment_elapsed_ms = 1000.0 * (time.perf_counter() - t0)
+        approx_training_time_ms = training_time_ms + segment_elapsed_ms
+        approx_cap_time_ms = cap_training_time_ms + segment_elapsed_ms
         processed_tokens = step * args.train_batch_tokens
         elapsed_s = approx_training_time_ms / 1000.0
         tokens_per_s = processed_tokens / max(elapsed_s, 1e-9)
@@ -1706,7 +1743,7 @@ def main() -> None:
 
         # Needed to sync whether we've reached the wallclock cap.
         reached_cap = (
-            max_wallclock_ms is not None and approx_training_time_ms >= max_wallclock_ms
+            max_wallclock_ms is not None and approx_cap_time_ms >= max_wallclock_ms
         )
         if distributed and max_wallclock_ms is not None:
             reached_cap_tensor = torch.tensor(int(reached_cap), device=device)

@@ -3373,7 +3373,13 @@ def main() -> None:
         if device.type == "cuda":
             torch.cuda.synchronize(device)
 
+    max_wallclock_ms = (
+        1000.0 * args.max_wallclock_seconds
+        if args.max_wallclock_seconds > 0.0
+        else None
+    )
     training_time_ms = 0.0
+    cap_training_time_ms = 0.0
     stop_after_step: Optional[int] = None
     synchronize_device()
     t0 = time.perf_counter()
@@ -3426,12 +3432,16 @@ def main() -> None:
         optimizer.zero_grad(set_to_none=True)
         train_loader.reset()
         synchronize_device()
-        training_time_ms += 1000.0 * (time.perf_counter() - t0)
-        if (
-            args.max_wallclock_seconds > 0.0
-            and training_time_ms >= 1000.0 * args.max_wallclock_seconds
-        ):
-            stop_after_step = 0
+        warmup_elapsed_ms = 1000.0 * (time.perf_counter() - t0)
+        if max_wallclock_ms is not None:
+            cap_training_time_ms += warmup_elapsed_ms
+            reached_cap = cap_training_time_ms >= max_wallclock_ms
+            if distributed:
+                reached_cap_tensor = torch.tensor(int(reached_cap), device=device)
+                dist.all_reduce(reached_cap_tensor, op=dist.ReduceOp.MAX)
+                reached_cap = bool(reached_cap_tensor.item())
+            if reached_cap:
+                stop_after_step = 0
         t0 = time.perf_counter()
 
     if args.eval_only:
@@ -3520,9 +3530,9 @@ def main() -> None:
                 dist.all_reduce(stats, op=dist.ReduceOp.SUM)
             train_loss = float(stats[0].item() / max(1.0, stats[1].item()))
             completed_steps = current_step
-            approx_training_time_ms = training_time_ms + 1000.0 * (
-                time.perf_counter() - t0
-            )
+            segment_elapsed_ms = 1000.0 * (time.perf_counter() - t0)
+            approx_training_time_ms = training_time_ms + segment_elapsed_ms
+            approx_cap_time_ms = cap_training_time_ms + segment_elapsed_ms
             elapsed = approx_training_time_ms / 1000.0
             toks_per_sec = float(processed_train_tokens) / max(elapsed, 1e-6)
             if progress_bar is not None:
@@ -3557,10 +3567,9 @@ def main() -> None:
                 )
 
             reached_cap = (
-                args.max_wallclock_seconds > 0.0
-                and approx_training_time_ms >= 1000.0 * args.max_wallclock_seconds
+                max_wallclock_ms is not None and approx_cap_time_ms >= max_wallclock_ms
             )
-            if distributed and args.max_wallclock_seconds > 0.0:
+            if distributed and max_wallclock_ms is not None:
                 reached_cap_tensor = torch.tensor(int(reached_cap), device=device)
                 dist.all_reduce(reached_cap_tensor, op=dist.ReduceOp.MAX)
                 reached_cap = bool(reached_cap_tensor.item())
@@ -3574,7 +3583,10 @@ def main() -> None:
             )
             if should_eval:
                 synchronize_device()
-                training_time_ms += 1000.0 * (time.perf_counter() - t0)
+                segment_elapsed_ms = 1000.0 * (time.perf_counter() - t0)
+                training_time_ms += segment_elapsed_ms
+                if max_wallclock_ms is not None:
+                    cap_training_time_ms += segment_elapsed_ms
                 run_eval(completed_steps)
                 last_eval_step = completed_steps
                 synchronize_device()
