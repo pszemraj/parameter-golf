@@ -306,18 +306,29 @@ Two are technically a hair below `15,000,000`, so I tried the closest layer-upsi
 
 So the current family set stays as-is. The important conclusion is that the remaining gap is not from a lazy search; the nearest layer-based upsizes are mostly bad speed trades for tiny checked-size gains. If we want another improvement pass, the next search should focus on same-depth alternatives, not just adding layers.
 
-The training helper `scripts/run_allama_ablations.sh` is intentionally training-only and uses blocked ablations over those final-size-aware anchors:
+The training helper `scripts/run_allama_ablations.sh` is intentionally training-only and now runs a `train_gpt.py` reference baseline first before any ALlama ablations. That reference run uses the same dataset path, sequence length, effective batch, step count, eval cadence, sampled eval mode, W&B project/group, and final artifact reporting fields as the ALlama sweep so the comparison is actually apples-to-apples:
 
 ```bash
 bash scripts/run_allama_ablations.sh
 ```
 
-It now prints its own launch summary before starting, including `total_runs`, batch settings, and local batch size.
+The `train_gpt.py` reference run is written under `runs_allama/gpt_baseline_reference/` and logs the same useful summary fields:
+
+- `artifact_limit_bytes`
+- `artifact_headroom_bytes_final`
+- `artifact_over_limit_final`
+- `artifact_status_final`
+- `artifact_warning_final`
+- `artifact/code_bytes_final`
+- `artifact/int8_payload_zlib_bytes_final`
+- `artifact_bytes_final`
+
+It now prints its own launch summary before starting, including planned vs scheduled run counts, batch settings, and local batch size.
 There are three intended modes:
 
-- `SWEEP_PROFILE=screen`: 4 runs total, baseline block only
-- default `SWEEP_PROFILE=explore`: 28 runs total, all blocks enabled, reduced step count
-- `SWEEP_PROFILE=full`: 28 runs total, all blocks enabled, long run
+- `SWEEP_PROFILE=screen`: 5 planned runs total, `1` `train_gpt.py` reference plus `4` ALlama baseline-block runs
+- default `SWEEP_PROFILE=explore`: 29 planned runs total, `1` `train_gpt.py` reference plus `28` ALlama runs across all blocks
+- `SWEEP_PROFILE=full`: 29 planned runs total, `1` `train_gpt.py` reference plus `28` ALlama runs across all blocks
 
 It skips already-completed run directories only when the artifacts exist and
 `train.log` shows the expected terminal step for the current `MAX_STEPS`.
@@ -326,6 +337,8 @@ run with the same `RUN_ID`. If a directory already exists but does not satisfy
 the current completion check, the script now stops instead of silently
 overwriting mixed logs and artifacts. Use `FORCE_RERUN=1` if you want to
 overwrite anyway.
+
+Because the current ALlama family anchors are still blocked as stale under the corrected clipped-exporter policy, the script currently schedules only the `train_gpt.py` reference run unless you explicitly set `ALLOW_STALE_FAMILY_SET=1`. That stale-family guard applies only to the ALlama runs, not to the baseline reference run.
 
 It also exports `TORCH_BLAS_PREFER_CUBLASLT=1` for 5090-friendly CUDA BLAS selection.
 The trainer now supports `SDPA_BACKEND=auto|flash|efficient|math|cudnn` for explicit SDPA backend experiments.
@@ -386,13 +399,13 @@ So the sweep defaults are:
 The explicit short screen pass is:
 
 - `SWEEP_PROFILE=screen`
-- `total_runs=4`
+- `total_runs_planned=5`
 - `MAX_STEPS=750`
 
 And the opt-in long blocked sweep is:
 
 - `SWEEP_PROFILE=full`
-- `total_runs=28`
+- `total_runs_planned=29`
 - `MAX_STEPS=2000`
 
 That keeps the no-arg default in the “real blocked sweep, but not an overnight accident” regime while still leaving both the tiny screen pass and the full long run available explicitly.

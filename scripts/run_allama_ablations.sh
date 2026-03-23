@@ -11,13 +11,6 @@ export WANDB_WATCH_LOG_FREQ="${WANDB_WATCH_LOG_FREQ:-100}"
 export SDPA_BACKEND="${SDPA_BACKEND:-auto}"
 export TORCH_BLAS_PREFER_CUBLASLT=1
 
-if [[ "${ALLOW_STALE_FAMILY_SET:-0}" != "1" ]]; then
-  echo "ERROR current allama family anchors are stale under the clipped exporter policy." >&2
-  echo "ERROR finished baselines now re-export around 7.4-7.7 MB, so this sweep would waste budget and compute." >&2
-  echo "ERROR recalibrate family sizes first, or set ALLOW_STALE_FAMILY_SET=1 only if you intentionally want stale undersized runs." >&2
-  exit 1
-fi
-
 SWEEP_PROFILE="${SWEEP_PROFILE:-explore}"
 
 case "${SWEEP_PROFILE}" in
@@ -97,8 +90,18 @@ RUN_BASELINE_BLOCK="${RUN_BASELINE_BLOCK:-${DEFAULT_RUN_BASELINE_BLOCK}}"
 RUN_SHARE_BLOCK="${RUN_SHARE_BLOCK:-${DEFAULT_RUN_SHARE_BLOCK}}"
 RUN_NORM_BLOCK="${RUN_NORM_BLOCK:-${DEFAULT_RUN_NORM_BLOCK}}"
 RUN_SHORTCUT_BLOCK="${RUN_SHORTCUT_BLOCK:-${DEFAULT_RUN_SHORTCUT_BLOCK}}"
+RUN_GPT_BASELINE="${RUN_GPT_BASELINE:-1}"
 RUN_COMPILE="${RUN_COMPILE:-1}"
 FORCE_RERUN="${FORCE_RERUN:-0}"
+
+case "${RUN_GPT_BASELINE}" in
+  0|1)
+    ;;
+  *)
+    echo "expected RUN_GPT_BASELINE=0 or 1, got ${RUN_GPT_BASELINE}" >&2
+    exit 1
+    ;;
+esac
 
 VARIANT_COUNT=0
 if [[ "${RUN_BASELINE_BLOCK}" == "1" ]]; then
@@ -113,24 +116,36 @@ fi
 if [[ "${RUN_SHORTCUT_BLOCK}" == "1" ]]; then
   ((VARIANT_COUNT += 2))
 fi
-TOTAL_RUNS=$(( VARIANT_COUNT * ${#FAMILIES[@]} ))
+ALLAMA_RUNS=$(( VARIANT_COUNT * ${#FAMILIES[@]} ))
+TOTAL_RUNS=$(( ALLAMA_RUNS + RUN_GPT_BASELINE ))
 LOCAL_BATCH_SIZE=$(( TRAIN_BATCH_TOKENS_VALUE / (GRAD_ACCUM_STEPS_VALUE * TRAIN_SEQ_LEN_VALUE) ))
+ALLAMA_STALE_BLOCKED=0
+if [[ "${ALLOW_STALE_FAMILY_SET:-0}" != "1" && "${ALLAMA_RUNS}" -gt 0 ]]; then
+  ALLAMA_STALE_BLOCKED=1
+fi
+SCHEDULED_ALLAMA_RUNS="${ALLAMA_RUNS}"
+if [[ "${ALLAMA_STALE_BLOCKED}" == "1" ]]; then
+  SCHEDULED_ALLAMA_RUNS=0
+fi
+SCHEDULED_TOTAL_RUNS=$(( SCHEDULED_ALLAMA_RUNS + RUN_GPT_BASELINE ))
 
 if [[ -n "${ITERATIONS:-}" && -z "${MAX_STEPS:-}" ]]; then
   echo "note=ITERATIONS override is deprecated here; use MAX_STEPS instead"
 fi
 
-echo "sweep_profile=${SWEEP_PROFILE} compile=${RUN_COMPILE} force_rerun=${FORCE_RERUN} train_batch_tokens=${TRAIN_BATCH_TOKENS_VALUE} grad_accum_steps=${GRAD_ACCUM_STEPS_VALUE} local_batch_size=${LOCAL_BATCH_SIZE} max_steps=${MAX_STEPS_VALUE} val_loss_every=${VAL_LOSS_EVERY_VALUE} control_tensor_name_patterns=${CONTROL_TENSOR_NAME_PATTERNS_VALUE} total_runs=${TOTAL_RUNS}"
+echo "sweep_profile=${SWEEP_PROFILE} compile=${RUN_COMPILE} force_rerun=${FORCE_RERUN} train_batch_tokens=${TRAIN_BATCH_TOKENS_VALUE} grad_accum_steps=${GRAD_ACCUM_STEPS_VALUE} local_batch_size=${LOCAL_BATCH_SIZE} max_steps=${MAX_STEPS_VALUE} val_loss_every=${VAL_LOSS_EVERY_VALUE} control_tensor_name_patterns=${CONTROL_TENSOR_NAME_PATTERNS_VALUE} run_gpt_baseline=${RUN_GPT_BASELINE} allama_runs_planned=${ALLAMA_RUNS} allama_runs_scheduled=${SCHEDULED_ALLAMA_RUNS} total_runs_planned=${TOTAL_RUNS} total_runs_scheduled=${SCHEDULED_TOTAL_RUNS} stale_allama_guard=${ALLAMA_STALE_BLOCKED}"
 
 run_is_complete () {
   local RUN_DIR="$1"
   local EXPECTED_MAX_STEPS="$2"
   local EXPECTED_RUN_SPEC="$3"
+  shift 3
   local LOG_PATH="${RUN_DIR}/train.log"
   local RUN_SPEC_PATH="${RUN_DIR}/.run_spec"
 
-  [[ -f "${RUN_DIR}/model.pt" ]] || return 1
-  [[ -f "${RUN_DIR}/model_int8.pt" ]] || return 1
+  for ARTIFACT_REL in "$@"; do
+    [[ -f "${RUN_DIR}/${ARTIFACT_REL}" ]] || return 1
+  done
   [[ -f "${LOG_PATH}" ]] || return 1
   [[ -f "${RUN_SPEC_PATH}" ]] || return 1
 
@@ -138,13 +153,61 @@ run_is_complete () {
     return 1
   fi
 
-  if ! rg -q "train_stop step=${EXPECTED_MAX_STEPS} reason=max_steps=${EXPECTED_MAX_STEPS}|step=${EXPECTED_MAX_STEPS}/${EXPECTED_MAX_STEPS}" "${LOG_PATH}"; then
+  if ! rg -q "train_stop step=${EXPECTED_MAX_STEPS} reason=|step=${EXPECTED_MAX_STEPS}/${EXPECTED_MAX_STEPS}" "${LOG_PATH}"; then
     return 1
   fi
 
   if [[ ! -f "${RUN_DIR}/.complete" ]]; then
     touch "${RUN_DIR}/.complete"
   fi
+}
+
+run_gpt_reference () {
+  local RUN_ID="gpt_baseline_reference"
+  local RUN_DIR="./runs_allama/${RUN_ID}"
+  local SAVE_PATH_FILE="${RUN_DIR}/model.pt"
+  local EXPORT_INT8_PATH_FILE="${RUN_DIR}/model_int8.ptz"
+  local RUN_SPEC_PATH="${RUN_DIR}/.run_spec"
+  local RUN_SPEC="kind=train_gpt_reference train_seq_len=${TRAIN_SEQ_LEN_VALUE} eval_seq_len=${EVAL_SEQ_LEN_VALUE} train_batch_tokens=${TRAIN_BATCH_TOKENS_VALUE} max_steps=${MAX_STEPS_VALUE} val_loss_every=${VAL_LOSS_EVERY_VALUE} train_log_every=25 eval_mode=sampled val_batch_size=8 val_batches=8 max_wallclock_seconds=0"
+
+  if [[ "${FORCE_RERUN}" != "1" ]]; then
+    if run_is_complete "${RUN_DIR}" "${MAX_STEPS_VALUE}" "${RUN_SPEC}" "model.pt" "model_int8.ptz"; then
+      echo "skip_existing run_id=${RUN_ID} max_steps=${MAX_STEPS_VALUE} checkpoint=${SAVE_PATH_FILE} int8=${EXPORT_INT8_PATH_FILE}"
+      return 0
+    fi
+    if [[ -e "${RUN_DIR}" ]]; then
+      echo "existing_run_conflict run_id=${RUN_ID} max_steps=${MAX_STEPS_VALUE} note=directory_exists_but_does_not_match_current_completion_check use_FORCE_RERUN=1_to_overwrite" >&2
+      return 1
+    fi
+  fi
+
+  env \
+    OUT_DIR=./runs_allama \
+    DATA_PATH=./data/datasets/fineweb10B_sp1024 \
+    TOKENIZER_PATH=./data/tokenizers/fineweb_1024_bpe.model \
+    RUN_ID="${RUN_ID}" \
+    TRAIN_SEQ_LEN="${TRAIN_SEQ_LEN_VALUE}" \
+    EVAL_SEQ_LEN="${EVAL_SEQ_LEN_VALUE}" \
+    TRAIN_BATCH_TOKENS="${TRAIN_BATCH_TOKENS_VALUE}" \
+    ITERATIONS="${MAX_STEPS_VALUE}" \
+    VAL_LOSS_EVERY="${VAL_LOSS_EVERY_VALUE}" \
+    TRAIN_LOG_EVERY=25 \
+    EVAL_MODE=sampled \
+    VAL_BATCH_SIZE=8 \
+    VAL_BATCHES=8 \
+    MAX_WALLCLOCK_SECONDS=0 \
+    WANDB_RUN_NAME="${RUN_ID}" \
+    WANDB_TAGS="${WANDB_TAGS},baseline,reference,train_gpt" \
+    python train_gpt.py
+
+  printf '%s\n' "${RUN_SPEC}" > "${RUN_SPEC_PATH}"
+
+  if run_is_complete "${RUN_DIR}" "${MAX_STEPS_VALUE}" "${RUN_SPEC}" "model.pt" "model_int8.ptz"; then
+    return 0
+  fi
+
+  echo "run_failed_completion_check run_id=${RUN_ID} max_steps=${MAX_STEPS_VALUE}" >&2
+  return 1
 }
 
 run_one () {
@@ -276,7 +339,7 @@ run_one () {
   esac
 
   if [[ "${FORCE_RERUN}" != "1" ]]; then
-    if run_is_complete "${RUN_DIR}" "${MAX_STEPS_VALUE}" "${RUN_SPEC}"; then
+    if run_is_complete "${RUN_DIR}" "${MAX_STEPS_VALUE}" "${RUN_SPEC}" "model.pt" "model_int8.pt"; then
       echo "skip_existing run_id=${RUN_ID} max_steps=${MAX_STEPS_VALUE} checkpoint=${SAVE_PATH_FILE} int8=${EXPORT_INT8_PATH_FILE}"
       return 0
     fi
@@ -306,7 +369,7 @@ run_one () {
 
   printf '%s\n' "${RUN_SPEC}" > "${RUN_SPEC_PATH}"
 
-  if run_is_complete "${RUN_DIR}" "${MAX_STEPS_VALUE}" "${RUN_SPEC}"; then
+  if run_is_complete "${RUN_DIR}" "${MAX_STEPS_VALUE}" "${RUN_SPEC}" "model.pt" "model_int8.pt"; then
     return 0
   fi
 
@@ -326,6 +389,17 @@ run_variant_block() {
 # and must be recalibrated before this script should be used for real sweeps.
 # Cold compile speed audit on the 5090 favored these aligned shapes over the old
 # 1056/960/864/832 anchors while the Inductor online-softmax warning persisted.
+
+if [[ "${RUN_GPT_BASELINE}" == "1" ]]; then
+  run_gpt_reference
+fi
+
+if [[ "${ALLAMA_STALE_BLOCKED}" == "1" ]]; then
+  echo "ERROR current allama family anchors are stale under the clipped exporter policy." >&2
+  echo "ERROR finished baselines now re-export around 7.4-7.7 MB, so these allama runs would waste budget and compute." >&2
+  echo "ERROR recalibrate family sizes first, or set ALLOW_STALE_FAMILY_SET=1 only if you intentionally want stale undersized runs." >&2
+  exit 1
+fi
 
 if [[ "${RUN_BASELINE_BLOCK}" == "1" ]]; then
   run_variant_block baseline

@@ -9,6 +9,7 @@ from __future__ import annotations
 import copy
 import glob
 import io
+import json
 import math
 import os
 import random
@@ -18,6 +19,7 @@ import time
 import uuid
 import zlib
 from pathlib import Path
+from typing import Any, Callable, Optional
 
 import numpy as np
 import sentencepiece as spm
@@ -26,6 +28,49 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from torch import Tensor, nn
 from torch.nn.parallel import DistributedDataParallel as DDP
+
+try:
+    import wandb
+except ImportError:
+    wandb = None
+
+ARTIFACT_SIZE_LIMIT_BYTES = 16_000_000
+
+
+def env_bool(name: str, default: bool) -> bool:
+    """Parse a boolean environment variable with a default fallback."""
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def env_csv(name: str, default: str = "") -> list[str]:
+    """Split a comma-separated environment variable into trimmed non-empty items."""
+    value = os.environ.get(name, default)
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def normalize_wandb_watch_mode(value: str) -> str:
+    """Validate the supported W&B watch modes used by the trainers."""
+    mode = value.strip().lower()
+    if mode in {"off", "false", "0", ""}:
+        return "off"
+    if mode in {"gradients", "parameters", "all"}:
+        return mode
+    raise ValueError(
+        f"Unsupported WANDB_WATCH={value!r}; expected off, gradients, parameters, or all."
+    )
+
+
+def hyperparameter_config(args: "Hyperparameters") -> dict[str, Any]:
+    """Return the resolved class-backed hyperparameter config as a plain dict."""
+    return {
+        name: getattr(args, name)
+        for name, value in Hyperparameters.__dict__.items()
+        if not name.startswith("_") and not callable(value)
+    }
+
 
 # -----------------------------
 # HYPERPARAMETERS
@@ -46,10 +91,19 @@ class Hyperparameters:
         "TOKENIZER_PATH", "./data/tokenizers/fineweb_1024_bpe.model"
     )
     run_id = os.environ.get("RUN_ID", str(uuid.uuid4()))
+    out_dir = os.environ.get("OUT_DIR", "")
     seed = int(os.environ.get("SEED", 1337))
 
     # Validation cadence and batch size. Validation always uses the full fineweb_val split.
-    val_batch_size = int(os.environ.get("VAL_BATCH_SIZE", 524_288))
+    eval_mode = os.environ.get("EVAL_MODE", "full").strip().lower()
+    eval_seq_len = int(
+        os.environ.get("EVAL_SEQ_LEN", os.environ.get("TRAIN_SEQ_LEN", 1024))
+    )
+    eval_batch_tokens = int(
+        os.environ.get("EVAL_BATCH_TOKENS", os.environ.get("VAL_BATCH_SIZE", 524_288))
+    )
+    val_batch_size = int(os.environ.get("VAL_BATCH_SIZE", 8))
+    val_batches = int(os.environ.get("VAL_BATCHES", 8))
     val_loss_every = int(os.environ.get("VAL_LOSS_EVERY", 1000))
     train_log_every = int(os.environ.get("TRAIN_LOG_EVERY", 200))
 
@@ -90,6 +144,18 @@ class Hyperparameters:
     beta2 = float(os.environ.get("BETA2", 0.95))
     adam_eps = float(os.environ.get("ADAM_EPS", 1e-8))
     grad_clip_norm = float(os.environ.get("GRAD_CLIP_NORM", 0.0))
+
+    # W&B
+    wandb_enable = env_bool("WANDB", False) or bool(os.environ.get("WANDB_PROJECT", ""))
+    wandb_project = os.environ.get("WANDB_PROJECT", "param-golf-ablations")
+    wandb_entity = os.environ.get("WANDB_ENTITY", "")
+    wandb_group = os.environ.get("WANDB_GROUP", "")
+    wandb_run_name = os.environ.get("WANDB_RUN_NAME", "")
+    wandb_tags = env_csv("WANDB_TAGS", "")
+    wandb_notes = os.environ.get("WANDB_NOTES", "")
+    wandb_mode = os.environ.get("WANDB_MODE", "")
+    wandb_watch = normalize_wandb_watch_mode(os.environ.get("WANDB_WATCH", "off"))
+    wandb_watch_log_freq = int(os.environ.get("WANDB_WATCH_LOG_FREQ", 100))
 
 
 # -----------------------------
@@ -237,6 +303,67 @@ def load_validation_tokens(pattern: str, seq_len: int) -> Tensor:
     return tokens[: usable + 1]
 
 
+def make_eval_starts(num_tokens: int, seq_len: int, total_sequences: int) -> Tensor:
+    """Generate evenly spaced sampled-validation start offsets."""
+    max_start = num_tokens - seq_len - 1
+    if max_start <= 0:
+        raise ValueError(f"Validation tokens too short for seq_len={seq_len}")
+    if total_sequences <= 1:
+        return torch.tensor([0], dtype=torch.long)
+    return torch.linspace(0, max_start, steps=total_sequences).long()
+
+
+@torch.no_grad()
+def eval_sampled(
+    args: Hyperparameters,
+    model: nn.Module,
+    device: torch.device,
+    val_tokens: Tensor,
+    base_bytes_lut: Tensor,
+    has_leading_space_lut: Tensor,
+    is_boundary_token_lut: Tensor,
+) -> tuple[float, float]:
+    """Evaluate on a fixed set of sampled validation windows."""
+    total_sequences = max(1, args.val_batch_size * args.val_batches)
+    starts = make_eval_starts(
+        int(val_tokens.numel()), args.eval_seq_len, total_sequences
+    )
+    offsets = torch.arange(args.eval_seq_len + 1)
+    val_loss_sum = 0.0
+    val_token_count = 0
+    val_byte_count = 0.0
+
+    model.eval()
+    with torch.no_grad():
+        for batch_idx in range(args.val_batches):
+            batch_starts = starts[
+                batch_idx * args.val_batch_size : (batch_idx + 1) * args.val_batch_size
+            ]
+            if batch_starts.numel() == 0:
+                break
+            windows = val_tokens[batch_starts[:, None] + offsets[None, :]]
+            x = windows[:, :-1].long().to(device=device, non_blocking=True)
+            y = windows[:, 1:].long().to(device=device, non_blocking=True)
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
+                batch_loss = model(x, y).detach()
+            batch_token_count = int(y.numel())
+            val_loss_sum += float(batch_loss.item()) * batch_token_count
+            val_token_count += batch_token_count
+            prev_ids = x.reshape(-1)
+            tgt_ids = y.reshape(-1)
+            token_bytes = base_bytes_lut[tgt_ids].to(dtype=torch.int16)
+            token_bytes += (
+                has_leading_space_lut[tgt_ids] & ~is_boundary_token_lut[prev_ids]
+            ).to(dtype=torch.int16)
+            val_byte_count += float(token_bytes.to(torch.float64).sum().item())
+
+    avg_loss = val_loss_sum / float(max(1, val_token_count))
+    bits_per_token = avg_loss / math.log(2.0)
+    tokens_per_byte = float(val_token_count) / val_byte_count
+    model.train()
+    return float(avg_loss), float(bits_per_token * tokens_per_byte)
+
+
 def eval_val(
     args: Hyperparameters,
     model: nn.Module,
@@ -252,15 +379,15 @@ def eval_val(
     # Validation computes two metrics:
     # - val_loss: token cross-entropy (natural log)
     # - val_bpb: tokenizer-agnostic compression metric used by the challenge
-    local_batch_tokens = args.val_batch_size // (world_size * grad_accum_steps)
-    if local_batch_tokens < args.train_seq_len:
+    local_batch_tokens = args.eval_batch_tokens // (world_size * grad_accum_steps)
+    if local_batch_tokens < args.eval_seq_len:
         raise ValueError(
-            "VAL_BATCH_SIZE must provide at least one sequence per rank; "
-            f"got VAL_BATCH_SIZE={args.val_batch_size}, WORLD_SIZE={world_size}, "
-            f"GRAD_ACCUM_STEPS={grad_accum_steps}, TRAIN_SEQ_LEN={args.train_seq_len}"
+            "EVAL_BATCH_TOKENS must provide at least one sequence per rank; "
+            f"got EVAL_BATCH_TOKENS={args.eval_batch_tokens}, WORLD_SIZE={world_size}, "
+            f"GRAD_ACCUM_STEPS={grad_accum_steps}, EVAL_SEQ_LEN={args.eval_seq_len}"
         )
-    local_batch_seqs = local_batch_tokens // args.train_seq_len
-    total_seqs = (val_tokens.numel() - 1) // args.train_seq_len
+    local_batch_seqs = local_batch_tokens // args.eval_seq_len
+    total_seqs = (val_tokens.numel() - 1) // args.eval_seq_len
     seq_start = (total_seqs * rank) // world_size
     seq_end = (total_seqs * (rank + 1)) // world_size
     val_loss_sum = torch.zeros((), device=device, dtype=torch.float64)
@@ -268,16 +395,16 @@ def eval_val(
     val_byte_count = torch.zeros((), device=device, dtype=torch.float64)
 
     model.eval()
-    with torch.inference_mode():
+    with torch.no_grad():
         for batch_seq_start in range(seq_start, seq_end, local_batch_seqs):
             batch_seq_end = min(batch_seq_start + local_batch_seqs, seq_end)
-            raw_start = batch_seq_start * args.train_seq_len
-            raw_end = batch_seq_end * args.train_seq_len + 1
+            raw_start = batch_seq_start * args.eval_seq_len
+            raw_end = batch_seq_end * args.eval_seq_len + 1
             local = val_tokens[raw_start:raw_end].to(
                 device=device, dtype=torch.int64, non_blocking=True
             )
-            x = local[:-1].reshape(-1, args.train_seq_len)
-            y = local[1:].reshape(-1, args.train_seq_len)
+            x = local[:-1].reshape(-1, args.eval_seq_len)
+            y = local[1:].reshape(-1, args.eval_seq_len)
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
                 batch_loss = model(x, y).detach()
             batch_token_count = float(y.numel())
@@ -480,6 +607,89 @@ def dequantize_state_dict_int8(obj: dict[str, object]) -> dict[str, Tensor]:
             out_t = out_t.to(dtype=getattr(torch, orig_dtype)).contiguous()
         out[name] = out_t
     return out
+
+
+def serialized_zlib_nbytes(obj: object) -> int:
+    """Serialize an object with ``torch.save`` and return its zlib-compressed size."""
+    buf = io.BytesIO()
+    torch.save(obj, buf)
+    return len(zlib.compress(buf.getvalue(), level=9))
+
+
+def state_dict_tensor_nbytes(state_dict: dict[str, Tensor]) -> int:
+    """Sum the raw tensor storage bytes in a state dict."""
+    return sum(tensor_nbytes(t.detach()) for t in state_dict.values())
+
+
+class WandbLogger:
+    """Small wrapper around W&B init, runtime logging, summary writes, and watch."""
+
+    def __init__(self, args: Hyperparameters, enabled: bool, config: dict[str, Any]):
+        """Initialize an optional W&B run for the current baseline trainer."""
+        self.run = None
+        if not enabled:
+            return
+        if wandb is None:
+            print(
+                "W&B requested but wandb is not installed. Continuing without W&B.",
+                flush=True,
+            )
+            return
+        init_kwargs: dict[str, Any] = {
+            "project": args.wandb_project,
+            "config": config,
+            "name": args.wandb_run_name or args.run_id,
+        }
+        if args.wandb_entity:
+            init_kwargs["entity"] = args.wandb_entity
+        if args.wandb_group:
+            init_kwargs["group"] = args.wandb_group
+        if args.wandb_tags:
+            init_kwargs["tags"] = list(args.wandb_tags)
+        if args.wandb_notes:
+            init_kwargs["notes"] = args.wandb_notes
+        if args.wandb_mode:
+            init_kwargs["mode"] = args.wandb_mode
+        self.run = wandb.init(**init_kwargs)
+
+    def log(self, metrics: dict[str, Any], step: Optional[int] = None) -> None:
+        """Log runtime metrics to W&B when a run is active."""
+        if self.run is None:
+            return
+        self.run.log(metrics, step=step)
+
+    def watch(
+        self,
+        model: nn.Module,
+        mode: str,
+        log_freq: int,
+        log_fn: Optional[Callable[[str], None]] = None,
+    ) -> None:
+        """Enable optional W&B parameter or gradient watching for a model."""
+        if self.run is None or mode == "off":
+            return
+        try:
+            self.run.watch(model, log=mode, log_freq=max(1, log_freq))
+        except Exception as exc:
+            if log_fn is not None:
+                log_fn(
+                    f"wandb_watch_warning mode={mode} log_freq={log_freq} error={exc}"
+                )
+            return
+        if log_fn is not None:
+            log_fn(f"wandb_watch mode={mode} log_freq={max(1, log_freq)}")
+
+    def update_summary(self, values: dict[str, Any]) -> None:
+        """Write final scalar values directly to the W&B run summary."""
+        if self.run is None:
+            return
+        for key, value in values.items():
+            self.run.summary[key] = value
+
+    def finish(self) -> None:
+        """Finish the active W&B run if one exists."""
+        if self.run is not None:
+            wandb.finish()
 
 
 # -----------------------------
@@ -836,6 +1046,10 @@ def main() -> None:
 
     code = Path(__file__).read_text(encoding="utf-8")
     args = Hyperparameters()
+    if args.eval_mode not in {"full", "sampled"}:
+        raise ValueError(f"Unknown EVAL_MODE={args.eval_mode}")
+    if args.eval_mode == "sampled" and int(os.environ.get("WORLD_SIZE", "1")) > 1:
+        raise ValueError("EVAL_MODE=sampled is only supported for single-process runs")
     zeropower_via_newtonschulz5 = torch.compile(zeropower_via_newtonschulz5)
 
     # -----------------------------
@@ -862,10 +1076,19 @@ def main() -> None:
         dist.init_process_group(backend="nccl", device_id=device)
         dist.barrier()
     master_process = rank == 0
+    run_dir = Path(args.out_dir) / args.run_id if args.out_dir else None
 
     # Fast math knobs
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
+    if hasattr(torch.backends, "fp32_precision"):
+        torch.backends.fp32_precision = "tf32"
+    if hasattr(torch.backends.cuda.matmul, "fp32_precision"):
+        torch.backends.cuda.matmul.fp32_precision = "tf32"
+    if (
+        hasattr(torch.backends, "cudnn")
+        and hasattr(torch.backends.cudnn, "conv")
+        and hasattr(torch.backends.cudnn.conv, "fp32_precision")
+    ):
+        torch.backends.cudnn.conv.fp32_precision = "tf32"
     from torch.backends.cuda import (
         enable_cudnn_sdp,
         enable_flash_sdp,
@@ -880,15 +1103,21 @@ def main() -> None:
 
     logfile = None
     if master_process:
-        os.makedirs("logs", exist_ok=True)
-        logfile = f"logs/{args.run_id}.txt"
+        if run_dir is not None:
+            run_dir.mkdir(parents=True, exist_ok=True)
+            with open(run_dir / "config.json", "w", encoding="utf-8") as f:
+                json.dump(hyperparameter_config(args), f, indent=2)
+            logfile = str(run_dir / "train.log")
+        else:
+            os.makedirs("logs", exist_ok=True)
+            logfile = f"logs/{args.run_id}.txt"
         print(logfile)
 
     def log0(msg: str, console: bool = True) -> None:
         if not master_process:
             return
         if console:
-            print(msg)
+            print(msg, flush=True)
         if logfile is not None:
             with open(logfile, "a", encoding="utf-8") as f:
                 print(msg, file=f)
@@ -929,7 +1158,7 @@ def main() -> None:
         )
     dataset_dir = Path(args.data_path).resolve()
     actual_train_files = len(list(dataset_dir.glob("fineweb_train_*.bin")))
-    val_tokens = load_validation_tokens(args.val_files, args.train_seq_len)
+    val_tokens = load_validation_tokens(args.val_files, args.eval_seq_len)
     base_bytes_lut, has_leading_space_lut, is_boundary_token_lut = (
         build_sentencepiece_luts(sp, args.vocab_size, device)
     )
@@ -964,12 +1193,11 @@ def main() -> None:
         if isinstance(module, CastedLinear):
             module.float()
     restore_low_dim_params_to_fp32(base_model)
-    compiled_model = torch.compile(base_model, dynamic=False, fullgraph=True)
-    model: nn.Module = (
-        DDP(compiled_model, device_ids=[local_rank], broadcast_buffers=False)
-        if distributed
-        else compiled_model
-    )
+    init_state_dict = base_model.state_dict()
+    init_quant_obj, init_quant_stats = quantize_state_dict_int8(init_state_dict)
+    code_bytes = len(code.encode("utf-8"))
+    stored_parameter_bytes = state_dict_tensor_nbytes(init_state_dict)
+    init_quant_zlib_bytes = serialized_zlib_nbytes(init_quant_obj)
 
     # Optimizer split:
     # - token embedding (Adam) uses EMBED_LR
@@ -1033,7 +1261,34 @@ def main() -> None:
         optimizers.insert(1, optimizer_head)
 
     n_params = sum(p.numel() for p in base_model.parameters())
-    log0(f"model_params:{n_params}")
+    local_batch_tokens = args.train_batch_tokens // (world_size * grad_accum_steps)
+    local_batch_size = local_batch_tokens // args.train_seq_len
+    log0(
+        f"run_id={args.run_id} backend=parameter_golf device={device} dtype=torch.bfloat16 "
+        f"compile=1 baseline_reference=1 stored_params={n_params} functional_params={n_params} "
+        f"sharing_ratio=1.0000 eval_mode={args.eval_mode}"
+    )
+    log0(
+        f"train_plan iterations={args.iterations} max_wallclock_seconds={args.max_wallclock_seconds:.3f} "
+        f"train_batch_tokens={args.train_batch_tokens} train_seq_len={args.train_seq_len} "
+        f"grad_accum_steps={grad_accum_steps} local_batch_size={local_batch_size}"
+    )
+    log0(
+        f"train_static nominal_step_tokens={args.train_batch_tokens} final_step_tokens={args.train_batch_tokens} "
+        f"variable_step_tokens=0 train_log_every={args.train_log_every} val_loss_every={args.val_loss_every}"
+    )
+    log0(
+        f"model_init stored_params={n_params} stored_trainable_params={n_params} "
+        f"functional_params={n_params} functional_trainable_params={n_params} "
+        f"sharing_ratio=1.0000 shared_block_stored_params=0 "
+        f"shared_block_functional_params=0 nonshared_stored_params={n_params}"
+    )
+    log0(
+        f"size_init stored_parameter_bytes={stored_parameter_bytes} code_bytes={code_bytes} "
+        f"int8_payload_bytes={init_quant_stats['int8_payload_bytes']} "
+        f"int8_payload_zlib_bytes={init_quant_zlib_bytes} "
+        f"artifact_bytes={code_bytes + init_quant_zlib_bytes}"
+    )
     log0(f"world_size:{world_size} grad_accum_steps:{grad_accum_steps}")
     log0("sdp_backends:cudnn=False flash=True mem_efficient=False math=False")
     log0(
@@ -1050,6 +1305,49 @@ def main() -> None:
         f"max_wallclock_seconds:{args.max_wallclock_seconds:.3f}"
     )
     log0(f"seed:{args.seed}")
+
+    wandb_config = hyperparameter_config(args) | {
+        "backend": "parameter_golf",
+        "resolved_eval_mode": args.eval_mode,
+        "train_nominal_step_tokens": args.train_batch_tokens,
+        "train_final_step_tokens": args.train_batch_tokens,
+        "train_variable_step_tokens": False,
+        "model_stored_params": int(n_params),
+        "model_stored_trainable_params": int(n_params),
+        "model_functional_params": int(n_params),
+        "model_functional_trainable_params": int(n_params),
+        "model_shared_block_stored_params": 0,
+        "model_shared_block_functional_params": 0,
+        "model_nonshared_stored_params": int(n_params),
+        "sharing_ratio": 1.0,
+        "model_stored_parameter_bytes_init": int(stored_parameter_bytes),
+        "int8_payload_bytes_init": int(init_quant_stats["int8_payload_bytes"]),
+        "model_code_bytes": int(code_bytes),
+        "baseline_reference": True,
+        "reference_script": "train_gpt.py",
+        "embed_lr_base": float(token_lr),
+        "head_lr_base": float(args.head_lr if base_model.lm_head is not None else 0.0),
+        "matrix_lr_base": float(args.matrix_lr),
+        "scalar_lr_base": float(args.scalar_lr),
+    }
+    wandb_logger = WandbLogger(
+        args,
+        enabled=master_process and args.wandb_enable,
+        config=wandb_config,
+    )
+    wandb_logger.watch(
+        base_model,
+        mode=args.wandb_watch,
+        log_freq=args.wandb_watch_log_freq,
+        log_fn=log0,
+    )
+
+    compiled_model = torch.compile(base_model, dynamic=False, fullgraph=True)
+    model: nn.Module = (
+        DDP(compiled_model, device_ids=[local_rank], broadcast_buffers=False)
+        if distributed
+        else compiled_model
+    )
 
     # -----------------------------
     # DATA LOADER & MODEL WARMUP
@@ -1083,6 +1381,38 @@ def main() -> None:
             if remaining_ms <= warmdown_ms
             else 1.0
         )
+
+    def run_eval(step: int, training_time_ms: float) -> tuple[float, float]:
+        if args.eval_mode == "sampled":
+            val_loss, val_bpb = eval_sampled(
+                args,
+                base_model,
+                device,
+                val_tokens,
+                base_bytes_lut,
+                has_leading_space_lut,
+                is_boundary_token_lut,
+            )
+        else:
+            val_loss, val_bpb = eval_val(
+                args,
+                model,
+                rank,
+                world_size,
+                device,
+                grad_accum_steps,
+                val_tokens,
+                base_bytes_lut,
+                has_leading_space_lut,
+                is_boundary_token_lut,
+            )
+        log0(
+            f"eval step={step} eval_mode={args.eval_mode} val_loss={val_loss:.6f} "
+            f"val_bpb={val_bpb:.6f} train_time={training_time_ms:.0f}ms "
+            f"step_avg={training_time_ms / max(step, 1):.2f}ms"
+        )
+        wandb_logger.log({"eval/loss": val_loss, "eval/bpb": val_bpb}, step=step)
+        return val_loss, val_bpb
 
     # Warmup primes the compiled forward/backward/optimizer paths, then we restore the
     # initial weights/optimizer state so measured training starts from the true init.
@@ -1150,22 +1480,7 @@ def main() -> None:
         if should_validate:
             torch.cuda.synchronize()
             training_time_ms += 1000.0 * (time.perf_counter() - t0)
-            val_loss, val_bpb = eval_val(
-                args,
-                model,
-                rank,
-                world_size,
-                device,
-                grad_accum_steps,
-                val_tokens,
-                base_bytes_lut,
-                has_leading_space_lut,
-                is_boundary_token_lut,
-            )
-            log0(
-                f"step:{step}/{args.iterations} val_loss:{val_loss:.4f} val_bpb:{val_bpb:.4f} "
-                f"train_time:{training_time_ms:.0f}ms step_avg:{training_time_ms / max(step, 1):.2f}ms"
-            )
+            run_eval(step, training_time_ms)
             torch.cuda.synchronize()
             t0 = time.perf_counter()
 
@@ -1216,6 +1531,10 @@ def main() -> None:
 
         step += 1
         approx_training_time_ms = training_time_ms + 1000.0 * (time.perf_counter() - t0)
+        processed_tokens = step * args.train_batch_tokens
+        elapsed_s = approx_training_time_ms / 1000.0
+        tokens_per_s = processed_tokens / max(elapsed_s, 1e-9)
+        matrix_lr = args.matrix_lr * scale
         should_log_train = args.train_log_every > 0 and (
             step <= 10
             or step % args.train_log_every == 0
@@ -1223,8 +1542,19 @@ def main() -> None:
         )
         if should_log_train:
             log0(
-                f"step:{step}/{args.iterations} train_loss:{train_loss.item():.4f} "
-                f"train_time:{approx_training_time_ms:.0f}ms step_avg:{approx_training_time_ms / step:.2f}ms"
+                f"step={step}/{args.iterations} lr={matrix_lr:.6g} lr_scale={scale:.6g} "
+                f"train_loss={train_loss.item():.6f} processed_tokens={processed_tokens} "
+                f"elapsed_s={elapsed_s:.2f} tokens_per_s={tokens_per_s:.2f}"
+            )
+            wandb_logger.log(
+                {
+                    "train/loss": float(train_loss.item()),
+                    "train/lr": float(matrix_lr),
+                    "train/lr_scale": float(scale),
+                    "train/processed_tokens": int(processed_tokens),
+                    "train/tokens_per_s": float(tokens_per_s),
+                },
+                step=step,
             )
 
         # Needed to sync whether we've reached the wallclock cap.
@@ -1238,6 +1568,12 @@ def main() -> None:
         if stop_after_step is None and reached_cap:
             stop_after_step = step
 
+    stop_reason = (
+        f"max_wallclock_seconds={args.max_wallclock_seconds}"
+        if stop_after_step is not None and step < args.iterations
+        else f"iterations={args.iterations}"
+    )
+    log0(f"train_stop step={step} reason={stop_reason}")
     log0(
         f"peak memory allocated: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB "
         f"reserved: {torch.cuda.max_memory_reserved() // 1024 // 1024} MiB"
@@ -1249,10 +1585,15 @@ def main() -> None:
     # Save the raw state (useful for debugging/loading in PyTorch directly), then always produce
     # the compressed int8+zlib artifact and validate the round-tripped weights.
 
+    model_path = run_dir / "model.pt" if run_dir is not None else Path("final_model.pt")
+    quant_path = (
+        run_dir / "model_int8.ptz"
+        if run_dir is not None
+        else Path("final_model.int8.ptz")
+    )
     if master_process:
-        torch.save(base_model.state_dict(), "final_model.pt")
-        model_bytes = os.path.getsize("final_model.pt")
-        code_bytes = len(code.encode("utf-8"))
+        torch.save(base_model.state_dict(), model_path)
+        model_bytes = model_path.stat().st_size
         log0(f"Serialized model: {model_bytes} bytes")
         log0(f"Code size: {code_bytes} bytes")
         log0(f"Total submission size: {model_bytes + code_bytes} bytes")
@@ -1264,10 +1605,9 @@ def main() -> None:
     quant_blob = zlib.compress(quant_raw, level=9)
     quant_raw_bytes = len(quant_raw)
     if master_process:
-        with open("final_model.int8.ptz", "wb") as f:
+        with open(quant_path, "wb") as f:
             f.write(quant_blob)
-        quant_file_bytes = os.path.getsize("final_model.int8.ptz")
-        code_bytes = len(code.encode("utf-8"))
+        quant_file_bytes = quant_path.stat().st_size
         ratio = quant_stats["baseline_tensor_bytes"] / max(
             quant_stats["int8_payload_bytes"], 1
         )
@@ -1276,10 +1616,53 @@ def main() -> None:
             f"(payload:{quant_stats['int8_payload_bytes']} raw_torch:{quant_raw_bytes} payload_ratio:{ratio:.2f}x)"
         )
         log0(f"Total submission size int8+zlib: {quant_file_bytes + code_bytes} bytes")
+        artifact_bytes_final = quant_file_bytes + code_bytes
+        artifact_headroom_bytes_final = ARTIFACT_SIZE_LIMIT_BYTES - artifact_bytes_final
+        artifact_over_limit_final = int(
+            artifact_bytes_final > ARTIFACT_SIZE_LIMIT_BYTES
+        )
+        log0(
+            f"model_final stored_params={n_params} stored_trainable_params={n_params} "
+            f"functional_params={n_params} functional_trainable_params={n_params} "
+            f"sharing_ratio=1.0000 shared_block_stored_params=0 "
+            f"shared_block_functional_params=0 nonshared_stored_params={n_params}"
+        )
+        log0(
+            f"size_final stored_parameter_bytes={stored_parameter_bytes} code_bytes={code_bytes} "
+            f"int8_payload_bytes={quant_stats['int8_payload_bytes']} "
+            f"int8_payload_zlib_bytes={quant_file_bytes} artifact_bytes={artifact_bytes_final} "
+            f"saved_checkpoint_bytes={model_bytes} saved_int8_payload_bytes={quant_file_bytes}"
+        )
+        if artifact_over_limit_final:
+            log0(
+                "\x1b[1;31m"
+                f"ARTIFACT_OVER_LIMIT artifact_bytes_final={artifact_bytes_final} "
+                f"limit_bytes={ARTIFACT_SIZE_LIMIT_BYTES} "
+                f"over_by_bytes={-artifact_headroom_bytes_final}"
+                "\x1b[0m"
+            )
+        wandb_logger.update_summary(
+            {
+                "artifact_limit_bytes": ARTIFACT_SIZE_LIMIT_BYTES,
+                "artifact_headroom_bytes_final": artifact_headroom_bytes_final,
+                "artifact_over_limit_final": artifact_over_limit_final,
+                "artifact_status_final": (
+                    "OVER_LIMIT" if artifact_over_limit_final else "UNDER_LIMIT"
+                ),
+                "artifact/code_bytes_final": int(code_bytes),
+                "artifact/int8_payload_zlib_bytes_final": int(quant_file_bytes),
+                "artifact_bytes_final": int(artifact_bytes_final),
+                "artifact_warning_final": (
+                    f"OVER_LIMIT_BY_{-artifact_headroom_bytes_final}_BYTES"
+                    if artifact_over_limit_final
+                    else ""
+                ),
+            }
+        )
 
     if distributed:
         dist.barrier()
-    with open("final_model.int8.ptz", "rb") as f:
+    with open(quant_path, "rb") as f:
         quant_blob_disk = f.read()
     quant_state = torch.load(
         io.BytesIO(zlib.decompress(quant_blob_disk)), map_location="cpu"
@@ -1287,18 +1670,29 @@ def main() -> None:
     base_model.load_state_dict(dequantize_state_dict_int8(quant_state), strict=True)
     torch.cuda.synchronize()
     t_qeval = time.perf_counter()
-    q_val_loss, q_val_bpb = eval_val(
-        args,
-        model,
-        rank,
-        world_size,
-        device,
-        grad_accum_steps,
-        val_tokens,
-        base_bytes_lut,
-        has_leading_space_lut,
-        is_boundary_token_lut,
-    )
+    if args.eval_mode == "sampled":
+        q_val_loss, q_val_bpb = eval_sampled(
+            args,
+            base_model,
+            device,
+            val_tokens,
+            base_bytes_lut,
+            has_leading_space_lut,
+            is_boundary_token_lut,
+        )
+    else:
+        q_val_loss, q_val_bpb = eval_val(
+            args,
+            model,
+            rank,
+            world_size,
+            device,
+            grad_accum_steps,
+            val_tokens,
+            base_bytes_lut,
+            has_leading_space_lut,
+            is_boundary_token_lut,
+        )
     torch.cuda.synchronize()
     log0(
         f"final_int8_zlib_roundtrip val_loss:{q_val_loss:.4f} val_bpb:{q_val_bpb:.4f} "
@@ -1307,6 +1701,7 @@ def main() -> None:
     log0(
         f"final_int8_zlib_roundtrip_exact val_loss:{q_val_loss:.8f} val_bpb:{q_val_bpb:.8f}"
     )
+    wandb_logger.finish()
 
     if distributed:
         dist.destroy_process_group()
