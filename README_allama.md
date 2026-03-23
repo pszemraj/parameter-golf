@@ -45,7 +45,7 @@ NUM_EPOCHS=1
 That means the default behavior is:
 - one full pass over all downloaded train shards
 - validation every `VAL_LOSS_EVERY` steps
-- no arbitrary `ITERATIONS` cap
+- no arbitrary `MAX_STEPS` cap
 
 `MAX_STEPS` still exists, but only as a debug cap.
 
@@ -318,9 +318,13 @@ There are three intended modes:
 - default `SWEEP_PROFILE=explore`: 28 runs total, all blocks enabled, reduced step count
 - `SWEEP_PROFILE=full`: 28 runs total, all blocks enabled, long run
 
-It also skips already-completed run directories by default when both
-`runs_allama/<run_id>/model.pt` and `runs_allama/<run_id>/model_int8.pt`
-exist. Use `FORCE_RERUN=1` if you want to rerun them anyway.
+It skips already-completed run directories only when the artifacts exist and
+`train.log` shows the expected terminal step for the current `MAX_STEPS`.
+That means a shorter `explore` run no longer falsely satisfies a later `full`
+run with the same `RUN_ID`. If a directory already exists but does not satisfy
+the current completion check, the script now stops instead of silently
+overwriting mixed logs and artifacts. Use `FORCE_RERUN=1` if you want to
+overwrite anyway.
 
 It also exports `TORCH_BLAS_PREFER_CUBLASLT=1` for 5090-friendly CUDA BLAS selection.
 The trainer now supports `SDPA_BACKEND=auto|flash|efficient|math|cudnn` for explicit SDPA backend experiments.
@@ -343,13 +347,13 @@ So the script now keeps the safer local microbatch, but uses a middle-ground no-
 - `GRAD_ACCUM_STEPS=128`
 - `local_batch_size=2`
 - default `SWEEP_PROFILE=explore`
-- default `ITERATIONS=750`
+- default `MAX_STEPS=750`
 - default `VAL_LOSS_EVERY=250`
 
 The explicit short screen profile is:
 
 - `SWEEP_PROFILE=screen`
-- `ITERATIONS=750`
+- `MAX_STEPS=750`
 - `VAL_LOSS_EVERY=250`
 
 If you want the larger effective batch while keeping the same safe local microbatch, override both:
@@ -374,7 +378,7 @@ So the sweep defaults are:
 - `TRAIN_BATCH_TOKENS=262144`
 - `GRAD_ACCUM_STEPS=128`
 - `local_batch_size=2`
-- `ITERATIONS=750`
+- `MAX_STEPS=750`
 - `RUN_COMPILE=1`
 - `VAL_LOSS_EVERY=250`
 
@@ -382,13 +386,13 @@ The explicit short screen pass is:
 
 - `SWEEP_PROFILE=screen`
 - `total_runs=4`
-- `ITERATIONS=750`
+- `MAX_STEPS=750`
 
 And the opt-in long blocked sweep is:
 
 - `SWEEP_PROFILE=full`
 - `total_runs=28`
-- `ITERATIONS=2000`
+- `MAX_STEPS=2000`
 
 That keeps the no-arg default in the “real blocked sweep, but not an overnight accident” regime while still leaving both the tiny screen pass and the full long run available explicitly.
 

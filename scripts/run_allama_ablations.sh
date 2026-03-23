@@ -17,7 +17,7 @@ case "${SWEEP_PROFILE}" in
   screen)
     DEFAULT_TRAIN_BATCH_TOKENS=262144
     DEFAULT_GRAD_ACCUM_STEPS=128
-    DEFAULT_ITERATIONS=750
+    DEFAULT_MAX_STEPS=750
     DEFAULT_VAL_LOSS_EVERY=250
     DEFAULT_RUN_BASELINE_BLOCK=1
     DEFAULT_RUN_SHARE_BLOCK=0
@@ -27,7 +27,7 @@ case "${SWEEP_PROFILE}" in
   explore)
     DEFAULT_TRAIN_BATCH_TOKENS=262144
     DEFAULT_GRAD_ACCUM_STEPS=128
-    DEFAULT_ITERATIONS=750
+    DEFAULT_MAX_STEPS=750
     DEFAULT_VAL_LOSS_EVERY=250
     DEFAULT_RUN_BASELINE_BLOCK=1
     DEFAULT_RUN_SHARE_BLOCK=1
@@ -37,7 +37,7 @@ case "${SWEEP_PROFILE}" in
   full)
     DEFAULT_TRAIN_BATCH_TOKENS=262144
     DEFAULT_GRAD_ACCUM_STEPS=128
-    DEFAULT_ITERATIONS=2000
+    DEFAULT_MAX_STEPS=2000
     DEFAULT_VAL_LOSS_EVERY=500
     DEFAULT_RUN_BASELINE_BLOCK=1
     DEFAULT_RUN_SHARE_BLOCK=1
@@ -55,7 +55,7 @@ TRAIN_SEQ_LEN_VALUE="${TRAIN_SEQ_LEN:-1024}"
 EVAL_SEQ_LEN_VALUE="${EVAL_SEQ_LEN:-1024}"
 TRAIN_BATCH_TOKENS_VALUE="${TRAIN_BATCH_TOKENS:-${DEFAULT_TRAIN_BATCH_TOKENS}}"
 GRAD_ACCUM_STEPS_VALUE="${GRAD_ACCUM_STEPS:-${DEFAULT_GRAD_ACCUM_STEPS}}"
-ITERATIONS_VALUE="${ITERATIONS:-${DEFAULT_ITERATIONS}}"
+MAX_STEPS_VALUE="${MAX_STEPS:-${ITERATIONS:-${DEFAULT_MAX_STEPS}}}"
 VAL_LOSS_EVERY_VALUE="${VAL_LOSS_EVERY:-${DEFAULT_VAL_LOSS_EVERY}}"
 
 BASE_ENV=(
@@ -68,7 +68,7 @@ BASE_ENV=(
   EVAL_SEQ_LEN="${EVAL_SEQ_LEN_VALUE}"
   TRAIN_BATCH_TOKENS="${TRAIN_BATCH_TOKENS_VALUE}"
   GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS_VALUE}"
-  ITERATIONS="${ITERATIONS_VALUE}"
+  MAX_STEPS="${MAX_STEPS_VALUE}"
   VAL_LOSS_EVERY="${VAL_LOSS_EVERY_VALUE}"
   TRAIN_LOG_EVERY=25
   EVAL_MODE=sampled
@@ -107,7 +107,29 @@ fi
 TOTAL_RUNS=$(( VARIANT_COUNT * ${#FAMILIES[@]} ))
 LOCAL_BATCH_SIZE=$(( TRAIN_BATCH_TOKENS_VALUE / (GRAD_ACCUM_STEPS_VALUE * TRAIN_SEQ_LEN_VALUE) ))
 
-echo "sweep_profile=${SWEEP_PROFILE} compile=${RUN_COMPILE} force_rerun=${FORCE_RERUN} train_batch_tokens=${TRAIN_BATCH_TOKENS_VALUE} grad_accum_steps=${GRAD_ACCUM_STEPS_VALUE} local_batch_size=${LOCAL_BATCH_SIZE} iterations=${ITERATIONS_VALUE} val_loss_every=${VAL_LOSS_EVERY_VALUE} total_runs=${TOTAL_RUNS}"
+if [[ -n "${ITERATIONS:-}" && -z "${MAX_STEPS:-}" ]]; then
+  echo "note=ITERATIONS override is deprecated here; use MAX_STEPS instead"
+fi
+
+echo "sweep_profile=${SWEEP_PROFILE} compile=${RUN_COMPILE} force_rerun=${FORCE_RERUN} train_batch_tokens=${TRAIN_BATCH_TOKENS_VALUE} grad_accum_steps=${GRAD_ACCUM_STEPS_VALUE} local_batch_size=${LOCAL_BATCH_SIZE} max_steps=${MAX_STEPS_VALUE} val_loss_every=${VAL_LOSS_EVERY_VALUE} total_runs=${TOTAL_RUNS}"
+
+run_is_complete () {
+  local RUN_DIR="$1"
+  local EXPECTED_MAX_STEPS="$2"
+  local LOG_PATH="${RUN_DIR}/train.log"
+
+  [[ -f "${RUN_DIR}/model.pt" ]] || return 1
+  [[ -f "${RUN_DIR}/model_int8.pt" ]] || return 1
+  [[ -f "${LOG_PATH}" ]] || return 1
+
+  if ! rg -q "train_stop step=${EXPECTED_MAX_STEPS} reason=max_steps=${EXPECTED_MAX_STEPS}|step=${EXPECTED_MAX_STEPS}/${EXPECTED_MAX_STEPS}" "${LOG_PATH}"; then
+    return 1
+  fi
+
+  if [[ ! -f "${RUN_DIR}/.complete" ]]; then
+    touch "${RUN_DIR}/.complete"
+  fi
+}
 
 run_one () {
   local RUN_ID="$1"
@@ -219,13 +241,29 @@ run_one () {
   local RUN_DIR="./runs_allama/${RUN_ID}"
   local SAVE_PATH_FILE="${RUN_DIR}/model.pt"
   local EXPORT_INT8_PATH_FILE="${RUN_DIR}/model_int8.pt"
-  if [[ "${RUN_COMPILE}" == "1" ]]; then
-    PYTHON_FLAGS+=(--compile)
-  fi
 
-  if [[ "${FORCE_RERUN}" != "1" && -f "${SAVE_PATH_FILE}" && -f "${EXPORT_INT8_PATH_FILE}" ]]; then
-    echo "skip_existing run_id=${RUN_ID} checkpoint=${SAVE_PATH_FILE} int8=${EXPORT_INT8_PATH_FILE}"
-    return 0
+  case "${RUN_COMPILE}" in
+    1)
+      PYTHON_FLAGS+=(--compile)
+      ;;
+    0)
+      PYTHON_FLAGS+=(--no-compile)
+      ;;
+    *)
+      echo "expected RUN_COMPILE=0 or 1, got ${RUN_COMPILE}" >&2
+      return 1
+      ;;
+  esac
+
+  if [[ "${FORCE_RERUN}" != "1" ]]; then
+    if run_is_complete "${RUN_DIR}" "${MAX_STEPS_VALUE}"; then
+      echo "skip_existing run_id=${RUN_ID} max_steps=${MAX_STEPS_VALUE} checkpoint=${SAVE_PATH_FILE} int8=${EXPORT_INT8_PATH_FILE}"
+      return 0
+    fi
+    if [[ -e "${RUN_DIR}" ]]; then
+      echo "existing_run_conflict run_id=${RUN_ID} max_steps=${MAX_STEPS_VALUE} note=directory_exists_but_does_not_match_current_completion_check use_FORCE_RERUN=1_to_overwrite" >&2
+      return 1
+    fi
   fi
 
   env "${BASE_ENV[@]}" \
@@ -246,9 +284,12 @@ run_one () {
     EXPORT_INT8_PATH="${EXPORT_INT8_PATH_FILE}" \
     python train_allama_reborn.py "${PYTHON_FLAGS[@]}"
 
-  if [[ -f "${SAVE_PATH_FILE}" && -f "${EXPORT_INT8_PATH_FILE}" ]]; then
-    touch "${RUN_DIR}/.complete"
+  if run_is_complete "${RUN_DIR}" "${MAX_STEPS_VALUE}"; then
+    return 0
   fi
+
+  echo "run_failed_completion_check run_id=${RUN_ID} max_steps=${MAX_STEPS_VALUE}" >&2
+  return 1
 }
 
 run_variant_block() {
