@@ -343,7 +343,7 @@ So the script now keeps the safer local microbatch, but uses a middle-ground no-
 - `GRAD_ACCUM_STEPS=128`
 - `local_batch_size=2`
 - default `SWEEP_PROFILE=explore`
-- default `ITERATIONS=500`
+- default `ITERATIONS=750`
 - default `VAL_LOSS_EVERY=250`
 
 The explicit short screen profile is:
@@ -374,7 +374,7 @@ So the sweep defaults are:
 - `TRAIN_BATCH_TOKENS=262144`
 - `GRAD_ACCUM_STEPS=128`
 - `local_batch_size=2`
-- `ITERATIONS=500`
+- `ITERATIONS=750`
 - `RUN_COMPILE=1`
 - `VAL_LOSS_EVERY=250`
 
