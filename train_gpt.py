@@ -627,6 +627,11 @@ class WandbLogger:
     def __init__(self, args: Hyperparameters, enabled: bool, config: dict[str, Any]):
         """Initialize an optional W&B run for the current baseline trainer."""
         self.run = None
+        self.watch_mode = "off"
+        self.watch_log_freq = 0
+        self.watch_model: Optional[nn.Module] = None
+        self.watch_backend = "off"
+        self.last_watch_step: Optional[int] = None
         if not enabled:
             return
         if wandb is None:
@@ -664,20 +669,96 @@ class WandbLogger:
         mode: str,
         log_freq: int,
         log_fn: Optional[Callable[[str], None]] = None,
+        use_hooks: bool = True,
     ) -> None:
         """Enable optional W&B parameter or gradient watching for a model."""
         if self.run is None or mode == "off":
             return
+        self.watch_model = model
+        self.watch_mode = mode
+        self.watch_log_freq = max(1, log_freq)
+        self.last_watch_step = None
+        self.watch_backend = "manual_histogram"
+        if not use_hooks:
+            if log_fn is not None:
+                log_fn(
+                    f"wandb_watch mode={mode} log_freq={self.watch_log_freq} backend=manual_histogram"
+                )
+            return
         try:
             self.run.watch(model, log=mode, log_freq=max(1, log_freq))
+            self.watch_backend = "hooks"
         except Exception as exc:
             if log_fn is not None:
                 log_fn(
-                    f"wandb_watch_warning mode={mode} log_freq={log_freq} error={exc}"
+                    f"wandb_watch_warning mode={mode} log_freq={log_freq} backend=hooks error={exc}"
+                )
+                log_fn(
+                    f"wandb_watch mode={mode} log_freq={self.watch_log_freq} backend=manual_histogram"
                 )
             return
         if log_fn is not None:
-            log_fn(f"wandb_watch mode={mode} log_freq={max(1, log_freq)}")
+            log_fn(f"wandb_watch mode={mode} log_freq={max(1, log_freq)} backend=hooks")
+
+    def _histogram(self, tensor: Tensor) -> Optional["wandb.Histogram"]:
+        """Build a W&B histogram from a tensor without copying all values to Python."""
+        if self.run is None or wandb is None or tensor.numel() == 0:
+            return None
+        values = tensor.detach().float()
+        min_val = float(values.min().item())
+        max_val = float(values.max().item())
+        if not math.isfinite(min_val) or not math.isfinite(max_val):
+            return None
+        if min_val == max_val:
+            delta = 1.0 if min_val == 0.0 else abs(min_val) * 1e-6
+            return wandb.Histogram(
+                np_histogram=(
+                    np.array([int(values.numel())], dtype=np.int64),
+                    np.array([min_val - delta, max_val + delta], dtype=np.float64),
+                )
+            )
+        hist = (
+            torch.histc(values, bins=64, min=min_val, max=max_val)
+            .to(dtype=torch.int64)
+            .cpu()
+            .numpy()
+        )
+        edges = np.linspace(min_val, max_val, num=65, dtype=np.float64)
+        return wandb.Histogram(np_histogram=(hist, edges))
+
+    def maybe_log_watch(
+        self, step: int, log_fn: Optional[Callable[[str], None]] = None
+    ) -> None:
+        """Log manual parameter and gradient histograms on the configured cadence."""
+        if (
+            self.run is None
+            or self.watch_model is None
+            or self.watch_mode == "off"
+            or self.watch_backend != "manual_histogram"
+            or step <= 0
+            or step == self.last_watch_step
+            or step % max(self.watch_log_freq, 1) != 0
+        ):
+            return
+        metrics: dict[str, Any] = {}
+        for name, param in self.watch_model.named_parameters():
+            safe_name = name.replace(".", "/")
+            if self.watch_mode in {"parameters", "all"}:
+                param_hist = self._histogram(param)
+                if param_hist is not None:
+                    metrics[f"watch/parameters/{safe_name}"] = param_hist
+            if self.watch_mode in {"gradients", "all"} and param.grad is not None:
+                grad_hist = self._histogram(param.grad)
+                if grad_hist is not None:
+                    metrics[f"watch/gradients/{safe_name}"] = grad_hist
+        if not metrics:
+            return
+        self.run.log(metrics, step=step)
+        self.last_watch_step = step
+        if log_fn is not None:
+            log_fn(
+                f"wandb_watch_log step={step} histograms={len(metrics)} backend=manual_histogram"
+            )
 
     def update_summary(self, values: dict[str, Any]) -> None:
         """Write final scalar values directly to the W&B run summary."""
@@ -1337,19 +1418,12 @@ def main() -> None:
         enabled=master_process and args.wandb_enable,
         config=wandb_config,
     )
-    wandb_watch_mode = args.wandb_watch
-    if wandb_watch_mode != "off":
-        log0(
-            "wandb_watch_disabled "
-            f"requested={wandb_watch_mode} "
-            "reason=torch_compile_fullgraph_incompatible"
-        )
-        wandb_watch_mode = "off"
     wandb_logger.watch(
         base_model,
-        mode=wandb_watch_mode,
+        mode=args.wandb_watch,
         log_freq=args.wandb_watch_log_freq,
         log_fn=log0,
+        use_hooks=False,
     )
 
     compiled_model = torch.compile(base_model, dynamic=False, fullgraph=True)
@@ -1537,6 +1611,7 @@ def main() -> None:
             torch.nn.utils.clip_grad_norm_(base_model.parameters(), args.grad_clip_norm)
         for opt in optimizers:
             opt.step()
+        wandb_logger.maybe_log_watch(step=step + 1, log_fn=log0)
         zero_grad_all()
 
         step += 1

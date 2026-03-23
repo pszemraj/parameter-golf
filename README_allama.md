@@ -365,10 +365,11 @@ The sweep exports W&B watch knobs:
 - `WANDB_WATCH_LOG_FREQ=100`
 
 When `torch.compile` is active, both trainers now force the effective watch mode
-to `off` and log `wandb_watch_disabled ... reason=torch_compile_*_incompatible`.
-That keeps W&B metric logging enabled, but avoids Dynamo recompile-limit failures
-from W&B module hooks. So those watch defaults only actually apply on eager
-diagnostic runs such as `RUN_COMPILE=0`.
+to a manual histogram backend instead of W&B module hooks. That keeps scalar
+logging intact and preserves parameter and gradient visibility at
+`WANDB_WATCH_LOG_FREQ` without injecting hook state into the compiled graph and
+triggering Dynamo recompile-limit failures. Eager runs still use normal
+`wandb.watch` hooks.
 
 Batch semantics matter here:
 
