@@ -3091,6 +3091,24 @@ def main() -> None:
                 f"artifact/{name}": int(value)
                 for name, value in saved_artifact_bytes.items()
             }
+            final_artifact_summary |= {
+                "artifact/code_bytes_final": int(final_report["code_bytes"]),
+                "artifact/checkpoint_bytes_final": int(
+                    final_report["checkpoint_bytes"]
+                ),
+                "artifact/checkpoint_zlib_bytes_final": int(
+                    final_report["checkpoint_zlib_bytes"]
+                ),
+                "artifact/int8_payload_bytes_final": int(
+                    final_report["int8_payload_bytes"]
+                ),
+                "artifact/int8_payload_zlib_bytes_final": int(
+                    final_report["int8_payload_zlib_bytes"]
+                ),
+                "artifact_bytes_final": int(final_report["artifact_bytes"]),
+                "artifact_mbytes_final": float(final_report["artifact_bytes"])
+                / 1_000_000.0,
+            }
             if final_artifact_summary:
                 wandb_logger.update_summary(final_artifact_summary)
 

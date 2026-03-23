@@ -112,6 +112,15 @@ Per run, the config includes the model identity and size fields you actually wan
 
 These are intentionally recorded in W&B config rather than `wandb.log()` history, because they are derived static values, not training metrics.
 
+For trained runs, W&B summary also records the final artifact breakdown:
+
+- `artifact/code_bytes_final`
+- `artifact/checkpoint_bytes_final`
+- `artifact/checkpoint_zlib_bytes_final`
+- `artifact/int8_payload_bytes_final`
+- `artifact/int8_payload_zlib_bytes_final`
+- `artifact_bytes_final`
+
 The metrics stream includes only actual run-time signals that can move during the run:
 
 - `train/*`
