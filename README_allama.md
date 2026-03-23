@@ -350,6 +350,12 @@ change behavior, including eval mode, validation batching, SDPA backend, MLP
 alignment, device/dtype, and the core batch/shape settings. So changing one of
 those knobs no longer aliases an old run as "complete".
 
+Completion checks also now respect intentional wallclock-capped runs. If
+`MAX_WALLCLOCK_SECONDS` is part of the run spec, a matching
+`train_stop ... reason=max_wallclock_seconds=...` is accepted as completion for
+that capped plan, but it still does not alias an uncapped or longer plan with a
+different run spec.
+
 It also exports `TORCH_BLAS_PREFER_CUBLASLT=1` for 5090-friendly CUDA BLAS selection.
 The trainer now supports `SDPA_BACKEND=auto|flash|efficient|math|cudnn` for explicit SDPA backend experiments.
 

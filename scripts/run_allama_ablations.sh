@@ -151,8 +151,9 @@ echo "family_tall_ff30 model_dim=768 embed_dim=960 num_layers=32 num_heads=12 nu
 run_is_complete () {
   local RUN_DIR="$1"
   local EXPECTED_MAX_STEPS="$2"
-  local EXPECTED_RUN_SPEC="$3"
-  shift 3
+  local EXPECTED_MAX_WALLCLOCK_SECONDS="$3"
+  local EXPECTED_RUN_SPEC="$4"
+  shift 4
   local LOG_PATH="${RUN_DIR}/train.log"
   local RUN_SPEC_PATH="${RUN_DIR}/.run_spec"
 
@@ -167,7 +168,16 @@ run_is_complete () {
   fi
 
   if ! rg -q "train_stop step=${EXPECTED_MAX_STEPS} reason=|step=${EXPECTED_MAX_STEPS}/${EXPECTED_MAX_STEPS}" "${LOG_PATH}"; then
-    return 1
+    if [[ "${EXPECTED_MAX_WALLCLOCK_SECONDS}" == "0" ]]; then
+      return 1
+    fi
+    local WALLCLOCK_REASON_PATTERN="${EXPECTED_MAX_WALLCLOCK_SECONDS//./\\.}"
+    if [[ "${EXPECTED_MAX_WALLCLOCK_SECONDS}" != *.* ]]; then
+      WALLCLOCK_REASON_PATTERN="${WALLCLOCK_REASON_PATTERN}(\\.0+)?"
+    fi
+    if ! rg -q "train_stop step=[0-9]+ reason=max_wallclock_seconds=${WALLCLOCK_REASON_PATTERN}" "${LOG_PATH}"; then
+      return 1
+    fi
   fi
 
   if [[ ! -f "${RUN_DIR}/.complete" ]]; then
@@ -184,7 +194,7 @@ run_gpt_reference () {
   local RUN_SPEC="family_set=sharedblock_nearcap_v2 kind=train_gpt_reference out_dir=${OUT_DIR_VALUE} data_path=${DATA_PATH_VALUE} tokenizer_path=${TOKENIZER_PATH_VALUE} train_seq_len=${TRAIN_SEQ_LEN_VALUE} eval_seq_len=${EVAL_SEQ_LEN_VALUE} train_batch_tokens=${TRAIN_BATCH_TOKENS_VALUE} max_steps=${MAX_STEPS_VALUE} val_loss_every=${VAL_LOSS_EVERY_VALUE} train_log_every=${TRAIN_LOG_EVERY_VALUE} eval_mode=${EVAL_MODE_VALUE} val_batch_size=${VAL_BATCH_SIZE_VALUE} val_batches=${VAL_BATCHES_VALUE} max_wallclock_seconds=${MAX_WALLCLOCK_SECONDS_VALUE} compile=1"
 
   if [[ "${FORCE_RERUN}" != "1" ]]; then
-    if run_is_complete "${RUN_DIR}" "${MAX_STEPS_VALUE}" "${RUN_SPEC}" "model.pt" "model_int8.ptz"; then
+    if run_is_complete "${RUN_DIR}" "${MAX_STEPS_VALUE}" "${MAX_WALLCLOCK_SECONDS_VALUE}" "${RUN_SPEC}" "model.pt" "model_int8.ptz"; then
       echo "skip_existing run_id=${RUN_ID} max_steps=${MAX_STEPS_VALUE} checkpoint=${SAVE_PATH_FILE} int8=${EXPORT_INT8_PATH_FILE}"
       return 0
     fi
@@ -215,7 +225,7 @@ run_gpt_reference () {
 
   printf '%s\n' "${RUN_SPEC}" > "${RUN_SPEC_PATH}"
 
-  if run_is_complete "${RUN_DIR}" "${MAX_STEPS_VALUE}" "${RUN_SPEC}" "model.pt" "model_int8.ptz"; then
+  if run_is_complete "${RUN_DIR}" "${MAX_STEPS_VALUE}" "${MAX_WALLCLOCK_SECONDS_VALUE}" "${RUN_SPEC}" "model.pt" "model_int8.ptz"; then
     return 0
   fi
 
@@ -350,7 +360,7 @@ run_one () {
   esac
 
   if [[ "${FORCE_RERUN}" != "1" ]]; then
-    if run_is_complete "${RUN_DIR}" "${MAX_STEPS_VALUE}" "${RUN_SPEC}" "model.pt" "model_int8.pt"; then
+    if run_is_complete "${RUN_DIR}" "${MAX_STEPS_VALUE}" "${MAX_WALLCLOCK_SECONDS_VALUE}" "${RUN_SPEC}" "model.pt" "model_int8.pt"; then
       echo "skip_existing run_id=${RUN_ID} max_steps=${MAX_STEPS_VALUE} checkpoint=${SAVE_PATH_FILE} int8=${EXPORT_INT8_PATH_FILE}"
       return 0
     fi
@@ -380,7 +390,7 @@ run_one () {
 
   printf '%s\n' "${RUN_SPEC}" > "${RUN_SPEC_PATH}"
 
-  if run_is_complete "${RUN_DIR}" "${MAX_STEPS_VALUE}" "${RUN_SPEC}" "model.pt" "model_int8.pt"; then
+  if run_is_complete "${RUN_DIR}" "${MAX_STEPS_VALUE}" "${MAX_WALLCLOCK_SECONDS_VALUE}" "${RUN_SPEC}" "model.pt" "model_int8.pt"; then
     return 0
   fi
 
