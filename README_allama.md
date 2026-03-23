@@ -269,17 +269,26 @@ The meaningful conclusion is:
 - the older allama export policy was leaving massive artifact budget on the table
 - the corrected exporter now uses clipped int8 quantization instead of the old max-abs scheme
 - any size proxy or family search derived from the old exporter is invalid now
-
-So the old `0.945 * int8_payload_bytes_init` proxy should be considered obsolete.
-Fresh size calibration is required under the corrected exporter before running a real blocked sweep again.
+- the old `0.945 * int8_payload_bytes_init` proxy is obsolete
+- the useful proxy under the corrected exporter is the architecture-fixed raw payload size, because the raw int8 payload bytes do not depend on trained values and the 750-step corrected re-exports landed in a fairly tight `final_zlib / raw_payload` band of about `0.431-0.451`
 
 ### Phase 3: serious ablations
 
-Do not trust the current blocked family set after the exporter fix.
-Those anchors were sized under the older export policy and now land around `7.4-7.7 MB` final, which is nowhere near acceptable for a serious Parameter Golf sweep.
-Accordingly, `scripts/run_allama_ablations.sh` now fails closed unless you explicitly set `ALLOW_STALE_FAMILY_SET=1`.
+Fresh family-size calibration under the corrected exporter is now done.
+The blocked sweep now uses near-cap families that keep `head_dim=64` and spend size budget primarily through `NUM_SHARED_BLOCKS`, because that grows stored capacity far more than logical `NUM_LAYERS` while leaving per-step FLOPs mostly unchanged.
 
-The correct next step is a fresh family-size calibration under the corrected exporter, then a new blocked sweep built on those recalibrated anchors.
+Default calibrated family anchors:
+
+- `wide_ff15`: `MODEL_DIM=1024`, `EMBED_DIM=128`, `NUM_LAYERS=16`, `NUM_HEADS=16`, `NUM_KV_HEADS=2`, `NUM_SHARED_BLOCKS=5`, `MLP_MULT=1.5`, `raw_payload_bytes=35,950,734`, `predicted_artifact_bytes=15,818,966`, headroom `181,034`
+- `shortfat_ff20`: `MODEL_DIM=896`, `EMBED_DIM=896`, `NUM_LAYERS=20`, `NUM_HEADS=14`, `NUM_KV_HEADS=2`, `NUM_SHARED_BLOCKS=5`, `MLP_MULT=2.0`, `raw_payload_bytes=34,340,378`, `predicted_artifact_bytes=15,342,304`, headroom `657,696`
+- `balanced_ff25`: `MODEL_DIM=768`, `EMBED_DIM=1792`, `NUM_LAYERS=24`, `NUM_HEADS=12`, `NUM_KV_HEADS=4`, `NUM_SHARED_BLOCKS=5`, `MLP_MULT=2.5`, `raw_payload_bytes=34,736,590`, `predicted_artifact_bytes=15,797,101`, headroom `202,899`
+- `tall_ff30`: `MODEL_DIM=768`, `EMBED_DIM=960`, `NUM_LAYERS=32`, `NUM_HEADS=12`, `NUM_KV_HEADS=2`, `NUM_SHARED_BLOCKS=5`, `MLP_MULT=3.0`, `raw_payload_bytes=36,063,118`, `predicted_artifact_bytes=15,842,554`, headroom `157,446`
+
+Calibration notes:
+
+- `NUM_SHARED_BLOCKS` is now the primary size lever, not `NUM_LAYERS`
+- `shortfat_ff20` now uses the cleaner `896/14q/2kv` shape instead of the earlier `960/15q/5kv` compromise; this leaves more size headroom, but it stays aligned with the AGENTS guidance and preserves `head_dim=64`
+- the older 20-step checked-size table and the stale-family guard are obsolete after this recalibration
 
 Cold `--compile` 4-step speed audit on the 5090, using the same sweep batch settings, favored the aligned family set across the board:
 
@@ -297,14 +306,7 @@ I also checked trained saved size directly with 20-step one-GPU runs at the actu
 - `balanced_ff25`: `15,236,675`
 - `tall_ff30`: `15,115,258`
 
-Two are technically a hair below `15,000,000`, so I tried the closest layer-upsized aligned variants:
-
-- `wide_ff15 16 -> 24 layers`: `15,000,694`, but eager `tok/s` fell from `100,020` to `67,150`
-- `shortfat_ff20 20 -> 24 layers`: `15,002,280`, but eager `tok/s` fell from `88,626` to `74,254`
-- `balanced_ff25 24 -> 28 layers`: `15,239,693`, but eager `tok/s` fell from `77,062` to `66,440`
-- `tall_ff30 32 -> 34 layers`: `15,123,069`, but eager `tok/s` fell from `55,245` to `52,097`
-
-So the current family set stays as-is. The important conclusion is that the remaining gap is not from a lazy search; the nearest layer-based upsizes are mostly bad speed trades for tiny checked-size gains. If we want another improvement pass, the next search should focus on same-depth alternatives, not just adding layers.
+Those older 20-step values are now useful only as historical evidence that changing logical depth is the wrong way to fill budget. The current sweep families above replace them.
 
 The training helper `scripts/run_allama_ablations.sh` is intentionally training-only and now runs a `train_gpt.py` reference baseline first before any ALlama ablations. That reference run uses the same dataset path, sequence length, effective batch, step count, eval cadence, sampled eval mode, W&B project/group, and final artifact reporting fields as the ALlama sweep so the comparison is actually apples-to-apples:
 
@@ -312,7 +314,7 @@ The training helper `scripts/run_allama_ablations.sh` is intentionally training-
 bash scripts/run_allama_ablations.sh
 ```
 
-The `train_gpt.py` reference run is written under `runs_allama/gpt_baseline_reference/` and logs the same useful summary fields:
+The `train_gpt.py` reference run is written under `runs_allama/sbcal_v2_gpt_baseline_reference/` by default and logs the same useful summary fields:
 
 - `artifact_limit_bytes`
 - `artifact_headroom_bytes_final`
@@ -330,6 +332,8 @@ There are three intended modes:
 - default `SWEEP_PROFILE=explore`: 29 planned runs total, `1` `train_gpt.py` reference plus `28` ALlama runs across all blocks
 - `SWEEP_PROFILE=full`: 29 planned runs total, `1` `train_gpt.py` reference plus `28` ALlama runs across all blocks
 
+It prefixes run IDs with `sbcal_v2_` by default so the cleaner `14/2` recalibrated sweep does not collide with the earlier rejected `15/5` shortfat directories.
+
 It skips already-completed run directories only when the artifacts exist and
 `train.log` shows the expected terminal step for the current `MAX_STEPS`.
 That means a shorter `explore` run no longer falsely satisfies a later `full`
@@ -337,8 +341,6 @@ run with the same `RUN_ID`. If a directory already exists but does not satisfy
 the current completion check, the script now stops instead of silently
 overwriting mixed logs and artifacts. Use `FORCE_RERUN=1` if you want to
 overwrite anyway.
-
-Because the current ALlama family anchors are still blocked as stale under the corrected clipped-exporter policy, the script currently schedules only the `train_gpt.py` reference run unless you explicitly set `ALLOW_STALE_FAMILY_SET=1`. That stale-family guard applies only to the ALlama runs, not to the baseline reference run.
 
 It also exports `TORCH_BLAS_PREFER_CUBLASLT=1` for 5090-friendly CUDA BLAS selection.
 The trainer now supports `SDPA_BACKEND=auto|flash|efficient|math|cudnn` for explicit SDPA backend experiments.

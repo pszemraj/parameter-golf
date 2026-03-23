@@ -4,8 +4,8 @@ set -euo pipefail
 
 export WANDB=1
 export WANDB_PROJECT=param-golf-ablations
-export WANDB_GROUP="${WANDB_GROUP:-allama-aligned-blocked-ablations}"
-export WANDB_TAGS="${WANDB_TAGS:-5090,allama,nearcap,finalsize,behavior,blocked,aligned}"
+export WANDB_GROUP="${WANDB_GROUP:-allama-sharedblock-nearcap-v2}"
+export WANDB_TAGS="${WANDB_TAGS:-5090,allama,nearcap,finalsize,behavior,blocked,aligned,sharedblocks,clipped_exporter}"
 export WANDB_WATCH="${WANDB_WATCH:-all}"
 export WANDB_WATCH_LOG_FREQ="${WANDB_WATCH_LOG_FREQ:-100}"
 export SDPA_BACKEND="${SDPA_BACKEND:-auto}"
@@ -58,6 +58,7 @@ GRAD_ACCUM_STEPS_VALUE="${GRAD_ACCUM_STEPS:-${DEFAULT_GRAD_ACCUM_STEPS}}"
 MAX_STEPS_VALUE="${MAX_STEPS:-${ITERATIONS:-${DEFAULT_MAX_STEPS}}}"
 VAL_LOSS_EVERY_VALUE="${VAL_LOSS_EVERY:-${DEFAULT_VAL_LOSS_EVERY}}"
 CONTROL_TENSOR_NAME_PATTERNS_VALUE="${CONTROL_TENSOR_NAME_PATTERNS:-depth_gains}"
+RUN_ID_PREFIX="${RUN_ID_PREFIX:-sbcal_v2_}"
 
 BASE_ENV=(
   OUT_DIR=./runs_allama
@@ -119,21 +120,18 @@ fi
 ALLAMA_RUNS=$(( VARIANT_COUNT * ${#FAMILIES[@]} ))
 TOTAL_RUNS=$(( ALLAMA_RUNS + RUN_GPT_BASELINE ))
 LOCAL_BATCH_SIZE=$(( TRAIN_BATCH_TOKENS_VALUE / (GRAD_ACCUM_STEPS_VALUE * TRAIN_SEQ_LEN_VALUE) ))
-ALLAMA_STALE_BLOCKED=0
-if [[ "${ALLOW_STALE_FAMILY_SET:-0}" != "1" && "${ALLAMA_RUNS}" -gt 0 ]]; then
-  ALLAMA_STALE_BLOCKED=1
-fi
 SCHEDULED_ALLAMA_RUNS="${ALLAMA_RUNS}"
-if [[ "${ALLAMA_STALE_BLOCKED}" == "1" ]]; then
-  SCHEDULED_ALLAMA_RUNS=0
-fi
 SCHEDULED_TOTAL_RUNS=$(( SCHEDULED_ALLAMA_RUNS + RUN_GPT_BASELINE ))
 
 if [[ -n "${ITERATIONS:-}" && -z "${MAX_STEPS:-}" ]]; then
   echo "note=ITERATIONS override is deprecated here; use MAX_STEPS instead"
 fi
 
-echo "sweep_profile=${SWEEP_PROFILE} compile=${RUN_COMPILE} force_rerun=${FORCE_RERUN} train_batch_tokens=${TRAIN_BATCH_TOKENS_VALUE} grad_accum_steps=${GRAD_ACCUM_STEPS_VALUE} local_batch_size=${LOCAL_BATCH_SIZE} max_steps=${MAX_STEPS_VALUE} val_loss_every=${VAL_LOSS_EVERY_VALUE} control_tensor_name_patterns=${CONTROL_TENSOR_NAME_PATTERNS_VALUE} run_gpt_baseline=${RUN_GPT_BASELINE} allama_runs_planned=${ALLAMA_RUNS} allama_runs_scheduled=${SCHEDULED_ALLAMA_RUNS} total_runs_planned=${TOTAL_RUNS} total_runs_scheduled=${SCHEDULED_TOTAL_RUNS} stale_allama_guard=${ALLAMA_STALE_BLOCKED}"
+echo "sweep_profile=${SWEEP_PROFILE} run_id_prefix=${RUN_ID_PREFIX} compile=${RUN_COMPILE} force_rerun=${FORCE_RERUN} train_batch_tokens=${TRAIN_BATCH_TOKENS_VALUE} grad_accum_steps=${GRAD_ACCUM_STEPS_VALUE} local_batch_size=${LOCAL_BATCH_SIZE} max_steps=${MAX_STEPS_VALUE} val_loss_every=${VAL_LOSS_EVERY_VALUE} control_tensor_name_patterns=${CONTROL_TENSOR_NAME_PATTERNS_VALUE} run_gpt_baseline=${RUN_GPT_BASELINE} allama_runs_planned=${ALLAMA_RUNS} allama_runs_scheduled=${SCHEDULED_ALLAMA_RUNS} total_runs_planned=${TOTAL_RUNS} total_runs_scheduled=${SCHEDULED_TOTAL_RUNS}"
+echo "family_wide_ff15 model_dim=1024 embed_dim=128 num_layers=16 num_heads=16 num_kv_heads=2 num_shared_blocks=5 mlp_mult=1.5 raw_payload_bytes=35950734 predicted_artifact_bytes=15818966 predicted_headroom_bytes=181034"
+echo "family_shortfat_ff20 model_dim=896 embed_dim=896 num_layers=20 num_heads=14 num_kv_heads=2 num_shared_blocks=5 mlp_mult=2.0 raw_payload_bytes=34340378 predicted_artifact_bytes=15342304 predicted_headroom_bytes=657696"
+echo "family_balanced_ff25 model_dim=768 embed_dim=1792 num_layers=24 num_heads=12 num_kv_heads=4 num_shared_blocks=5 mlp_mult=2.5 raw_payload_bytes=34736590 predicted_artifact_bytes=15797101 predicted_headroom_bytes=202899"
+echo "family_tall_ff30 model_dim=768 embed_dim=960 num_layers=32 num_heads=12 num_kv_heads=2 num_shared_blocks=5 mlp_mult=3.0 raw_payload_bytes=36063118 predicted_artifact_bytes=15842554 predicted_headroom_bytes=157446"
 
 run_is_complete () {
   local RUN_DIR="$1"
@@ -163,12 +161,12 @@ run_is_complete () {
 }
 
 run_gpt_reference () {
-  local RUN_ID="gpt_baseline_reference"
+  local RUN_ID="${RUN_ID_PREFIX}gpt_baseline_reference"
   local RUN_DIR="./runs_allama/${RUN_ID}"
   local SAVE_PATH_FILE="${RUN_DIR}/model.pt"
   local EXPORT_INT8_PATH_FILE="${RUN_DIR}/model_int8.ptz"
   local RUN_SPEC_PATH="${RUN_DIR}/.run_spec"
-  local RUN_SPEC="kind=train_gpt_reference train_seq_len=${TRAIN_SEQ_LEN_VALUE} eval_seq_len=${EVAL_SEQ_LEN_VALUE} train_batch_tokens=${TRAIN_BATCH_TOKENS_VALUE} max_steps=${MAX_STEPS_VALUE} val_loss_every=${VAL_LOSS_EVERY_VALUE} train_log_every=25 eval_mode=sampled val_batch_size=8 val_batches=8 max_wallclock_seconds=0"
+  local RUN_SPEC="family_set=sharedblock_nearcap_v2 kind=train_gpt_reference train_seq_len=${TRAIN_SEQ_LEN_VALUE} eval_seq_len=${EVAL_SEQ_LEN_VALUE} train_batch_tokens=${TRAIN_BATCH_TOKENS_VALUE} max_steps=${MAX_STEPS_VALUE} val_loss_every=${VAL_LOSS_EVERY_VALUE} train_log_every=25 eval_mode=sampled val_batch_size=8 val_batches=8 max_wallclock_seconds=0"
 
   if [[ "${FORCE_RERUN}" != "1" ]]; then
     if run_is_complete "${RUN_DIR}" "${MAX_STEPS_VALUE}" "${RUN_SPEC}" "model.pt" "model_int8.ptz"; then
@@ -220,38 +218,38 @@ run_one () {
   case "$FAMILY" in
     wide_ff15)
       MODEL_DIM=1024
-      EMBED_DIM=256
+      EMBED_DIM=128
       NUM_LAYERS=16
-      NUM_HEADS=8
-      NUM_KV_HEADS=4
-      NUM_SHARED_BLOCKS=2
+      NUM_HEADS=16
+      NUM_KV_HEADS=2
+      NUM_SHARED_BLOCKS=5
       MLP_MULT=1.5
       ;;
     shortfat_ff20)
       MODEL_DIM=896
-      EMBED_DIM=1152
+      EMBED_DIM=896
       NUM_LAYERS=20
       NUM_HEADS=14
       NUM_KV_HEADS=2
-      NUM_SHARED_BLOCKS=2
+      NUM_SHARED_BLOCKS=5
       MLP_MULT=2.0
       ;;
     balanced_ff25)
       MODEL_DIM=768
-      EMBED_DIM=1728
+      EMBED_DIM=1792
       NUM_LAYERS=24
       NUM_HEADS=12
       NUM_KV_HEADS=4
-      NUM_SHARED_BLOCKS=2
+      NUM_SHARED_BLOCKS=5
       MLP_MULT=2.5
       ;;
     tall_ff30)
       MODEL_DIM=768
-      EMBED_DIM=1088
+      EMBED_DIM=960
       NUM_LAYERS=32
       NUM_HEADS=12
-      NUM_KV_HEADS=4
-      NUM_SHARED_BLOCKS=2
+      NUM_KV_HEADS=2
+      NUM_SHARED_BLOCKS=5
       MLP_MULT=3.0
       ;;
     *)
@@ -316,14 +314,12 @@ run_one () {
       ;;
   esac
 
-  RUN_SPEC="family=${FAMILY} variant=${VARIANT} model_dim=${MODEL_DIM} embed_dim=${EMBED_DIM} num_layers=${NUM_LAYERS} num_heads=${NUM_HEADS} num_kv_heads=${NUM_KV_HEADS} num_shared_blocks=${NUM_SHARED_BLOCKS} mlp_mult=${MLP_MULT} norm_layout=${NORM_LAYOUT} norm_kind=${NORM_KIND} share_pattern=${SHARE_PATTERN} use_x0_shortcut=${USE_X0_SHORTCUT} resid_mix_init=${RESID_MIX_INIT} train_seq_len=${TRAIN_SEQ_LEN_VALUE} eval_seq_len=${EVAL_SEQ_LEN_VALUE} train_batch_tokens=${TRAIN_BATCH_TOKENS_VALUE} grad_accum_steps=${GRAD_ACCUM_STEPS_VALUE} max_steps=${MAX_STEPS_VALUE} val_loss_every=${VAL_LOSS_EVERY_VALUE} run_compile=${RUN_COMPILE} control_tensor_name_patterns=${CONTROL_TENSOR_NAME_PATTERNS_VALUE}"
-
   local PYTHON_FLAGS=()
   local RUN_DIR="./runs_allama/${RUN_ID}"
   local SAVE_PATH_FILE="${RUN_DIR}/model.pt"
   local EXPORT_INT8_PATH_FILE="${RUN_DIR}/model_int8.pt"
   local RUN_SPEC_PATH="${RUN_DIR}/.run_spec"
-  local RUN_SPEC
+  local RUN_SPEC="family_set=sharedblock_nearcap_v2 family=${FAMILY} variant=${VARIANT} model_dim=${MODEL_DIM} embed_dim=${EMBED_DIM} num_layers=${NUM_LAYERS} num_heads=${NUM_HEADS} num_kv_heads=${NUM_KV_HEADS} num_shared_blocks=${NUM_SHARED_BLOCKS} mlp_mult=${MLP_MULT} norm_layout=${NORM_LAYOUT} norm_kind=${NORM_KIND} share_pattern=${SHARE_PATTERN} use_x0_shortcut=${USE_X0_SHORTCUT} resid_mix_init=${RESID_MIX_INIT} train_seq_len=${TRAIN_SEQ_LEN_VALUE} eval_seq_len=${EVAL_SEQ_LEN_VALUE} train_batch_tokens=${TRAIN_BATCH_TOKENS_VALUE} grad_accum_steps=${GRAD_ACCUM_STEPS_VALUE} max_steps=${MAX_STEPS_VALUE} val_loss_every=${VAL_LOSS_EVERY_VALUE} run_compile=${RUN_COMPILE} control_tensor_name_patterns=${CONTROL_TENSOR_NAME_PATTERNS_VALUE}"
 
   case "${RUN_COMPILE}" in
     1)
@@ -380,25 +376,16 @@ run_one () {
 run_variant_block() {
   local VARIANT="$1"
   for FAMILY in "${FAMILIES[@]}"; do
-    run_one "${FAMILY}_${VARIANT}" "${FAMILY}" "${VARIANT}"
+    run_one "${RUN_ID_PREFIX}${FAMILY}_${VARIANT}" "${FAMILY}" "${VARIANT}"
   done
 }
 
-# This family set is intentionally blocked by the stale-family guard above.
-# After switching to the clipped exporter, these anchors are no longer near-cap
-# and must be recalibrated before this script should be used for real sweeps.
-# Cold compile speed audit on the 5090 favored these aligned shapes over the old
-# 1056/960/864/832 anchors while the Inductor online-softmax warning persisted.
+# These anchors were re-calibrated under the corrected clipped exporter. They keep
+# head_dim=64 and spend size budget primarily via NUM_SHARED_BLOCKS, because
+# logical NUM_LAYERS changes runtime much more than final artifact size.
 
 if [[ "${RUN_GPT_BASELINE}" == "1" ]]; then
   run_gpt_reference
-fi
-
-if [[ "${ALLAMA_STALE_BLOCKED}" == "1" ]]; then
-  echo "ERROR current allama family anchors are stale under the clipped exporter policy." >&2
-  echo "ERROR finished baselines now re-export around 7.4-7.7 MB, so these allama runs would waste budget and compute." >&2
-  echo "ERROR recalibrate family sizes first, or set ALLOW_STALE_FAMILY_SET=1 only if you intentionally want stale undersized runs." >&2
-  exit 1
 fi
 
 if [[ "${RUN_BASELINE_BLOCK}" == "1" ]]; then
