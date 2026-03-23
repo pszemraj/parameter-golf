@@ -353,10 +353,16 @@ those knobs no longer aliases an old run as "complete".
 It also exports `TORCH_BLAS_PREFER_CUBLASLT=1` for 5090-friendly CUDA BLAS selection.
 The trainer now supports `SDPA_BACKEND=auto|flash|efficient|math|cudnn` for explicit SDPA backend experiments.
 
-For short diagnostic runs it also enables W&B parameter/gradient watching by default:
+The sweep exports W&B watch knobs:
 
 - `WANDB_WATCH=all`
 - `WANDB_WATCH_LOG_FREQ=100`
+
+When `torch.compile` is active, both trainers now force the effective watch mode
+to `off` and log `wandb_watch_disabled ... reason=torch_compile_*_incompatible`.
+That keeps W&B metric logging enabled, but avoids Dynamo recompile-limit failures
+from W&B module hooks. So those watch defaults only actually apply on eager
+diagnostic runs such as `RUN_COMPILE=0`.
 
 Batch semantics matter here:
 

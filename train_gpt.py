@@ -1337,9 +1337,17 @@ def main() -> None:
         enabled=master_process and args.wandb_enable,
         config=wandb_config,
     )
+    wandb_watch_mode = args.wandb_watch
+    if wandb_watch_mode != "off":
+        log0(
+            "wandb_watch_disabled "
+            f"requested={wandb_watch_mode} "
+            "reason=torch_compile_fullgraph_incompatible"
+        )
+        wandb_watch_mode = "off"
     wandb_logger.watch(
         base_model,
-        mode=args.wandb_watch,
+        mode=wandb_watch_mode,
         log_freq=args.wandb_watch_log_freq,
         log_fn=log0,
     )
