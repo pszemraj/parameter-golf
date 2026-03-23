@@ -1050,7 +1050,9 @@ def main() -> None:
         raise ValueError(f"Unknown EVAL_MODE={args.eval_mode}")
     if args.eval_mode == "sampled" and int(os.environ.get("WORLD_SIZE", "1")) > 1:
         raise ValueError("EVAL_MODE=sampled is only supported for single-process runs")
-    zeropower_via_newtonschulz5 = torch.compile(zeropower_via_newtonschulz5)
+    # Muon applies this helper across several distinct matrix shapes. Compiling it
+    # trips Dynamo's recompile limit on longer baseline-reference runs, so keep
+    # the optimizer backend eager and only compile the main model.
 
     # -----------------------------
     # DISTRIBUTED + CUDA SETUP
