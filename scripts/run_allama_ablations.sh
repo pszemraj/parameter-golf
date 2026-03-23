@@ -57,6 +57,7 @@ TRAIN_BATCH_TOKENS_VALUE="${TRAIN_BATCH_TOKENS:-${DEFAULT_TRAIN_BATCH_TOKENS}}"
 GRAD_ACCUM_STEPS_VALUE="${GRAD_ACCUM_STEPS:-${DEFAULT_GRAD_ACCUM_STEPS}}"
 MAX_STEPS_VALUE="${MAX_STEPS:-${ITERATIONS:-${DEFAULT_MAX_STEPS}}}"
 VAL_LOSS_EVERY_VALUE="${VAL_LOSS_EVERY:-${DEFAULT_VAL_LOSS_EVERY}}"
+CONTROL_TENSOR_NAME_PATTERNS_VALUE="${CONTROL_TENSOR_NAME_PATTERNS:-depth_gains}"
 
 BASE_ENV=(
   OUT_DIR=./runs_allama
@@ -75,6 +76,7 @@ BASE_ENV=(
   VAL_BATCH_SIZE=8
   VAL_BATCHES=8
   MLP_MULTIPLE_OF=128
+  CONTROL_TENSOR_NAME_PATTERNS="${CONTROL_TENSOR_NAME_PATTERNS_VALUE}"
 )
 
 FAMILIES=(
@@ -111,16 +113,23 @@ if [[ -n "${ITERATIONS:-}" && -z "${MAX_STEPS:-}" ]]; then
   echo "note=ITERATIONS override is deprecated here; use MAX_STEPS instead"
 fi
 
-echo "sweep_profile=${SWEEP_PROFILE} compile=${RUN_COMPILE} force_rerun=${FORCE_RERUN} train_batch_tokens=${TRAIN_BATCH_TOKENS_VALUE} grad_accum_steps=${GRAD_ACCUM_STEPS_VALUE} local_batch_size=${LOCAL_BATCH_SIZE} max_steps=${MAX_STEPS_VALUE} val_loss_every=${VAL_LOSS_EVERY_VALUE} total_runs=${TOTAL_RUNS}"
+echo "sweep_profile=${SWEEP_PROFILE} compile=${RUN_COMPILE} force_rerun=${FORCE_RERUN} train_batch_tokens=${TRAIN_BATCH_TOKENS_VALUE} grad_accum_steps=${GRAD_ACCUM_STEPS_VALUE} local_batch_size=${LOCAL_BATCH_SIZE} max_steps=${MAX_STEPS_VALUE} val_loss_every=${VAL_LOSS_EVERY_VALUE} control_tensor_name_patterns=${CONTROL_TENSOR_NAME_PATTERNS_VALUE} total_runs=${TOTAL_RUNS}"
 
 run_is_complete () {
   local RUN_DIR="$1"
   local EXPECTED_MAX_STEPS="$2"
+  local EXPECTED_RUN_SPEC="$3"
   local LOG_PATH="${RUN_DIR}/train.log"
+  local RUN_SPEC_PATH="${RUN_DIR}/.run_spec"
 
   [[ -f "${RUN_DIR}/model.pt" ]] || return 1
   [[ -f "${RUN_DIR}/model_int8.pt" ]] || return 1
   [[ -f "${LOG_PATH}" ]] || return 1
+  [[ -f "${RUN_SPEC_PATH}" ]] || return 1
+
+  if [[ "$(<"${RUN_SPEC_PATH}")" != "${EXPECTED_RUN_SPEC}" ]]; then
+    return 1
+  fi
 
   if ! rg -q "train_stop step=${EXPECTED_MAX_STEPS} reason=max_steps=${EXPECTED_MAX_STEPS}|step=${EXPECTED_MAX_STEPS}/${EXPECTED_MAX_STEPS}" "${LOG_PATH}"; then
     return 1
@@ -159,7 +168,7 @@ run_one () {
       ;;
     balanced_ff25)
       MODEL_DIM=768
-      EMBED_DIM=1792
+      EMBED_DIM=1728
       NUM_LAYERS=24
       NUM_HEADS=12
       NUM_KV_HEADS=4
@@ -237,10 +246,14 @@ run_one () {
       ;;
   esac
 
+  RUN_SPEC="family=${FAMILY} variant=${VARIANT} model_dim=${MODEL_DIM} embed_dim=${EMBED_DIM} num_layers=${NUM_LAYERS} num_heads=${NUM_HEADS} num_kv_heads=${NUM_KV_HEADS} num_shared_blocks=${NUM_SHARED_BLOCKS} mlp_mult=${MLP_MULT} norm_layout=${NORM_LAYOUT} norm_kind=${NORM_KIND} share_pattern=${SHARE_PATTERN} use_x0_shortcut=${USE_X0_SHORTCUT} resid_mix_init=${RESID_MIX_INIT} train_seq_len=${TRAIN_SEQ_LEN_VALUE} eval_seq_len=${EVAL_SEQ_LEN_VALUE} train_batch_tokens=${TRAIN_BATCH_TOKENS_VALUE} grad_accum_steps=${GRAD_ACCUM_STEPS_VALUE} max_steps=${MAX_STEPS_VALUE} val_loss_every=${VAL_LOSS_EVERY_VALUE} run_compile=${RUN_COMPILE} control_tensor_name_patterns=${CONTROL_TENSOR_NAME_PATTERNS_VALUE}"
+
   local PYTHON_FLAGS=()
   local RUN_DIR="./runs_allama/${RUN_ID}"
   local SAVE_PATH_FILE="${RUN_DIR}/model.pt"
   local EXPORT_INT8_PATH_FILE="${RUN_DIR}/model_int8.pt"
+  local RUN_SPEC_PATH="${RUN_DIR}/.run_spec"
+  local RUN_SPEC
 
   case "${RUN_COMPILE}" in
     1)
@@ -256,7 +269,7 @@ run_one () {
   esac
 
   if [[ "${FORCE_RERUN}" != "1" ]]; then
-    if run_is_complete "${RUN_DIR}" "${MAX_STEPS_VALUE}"; then
+    if run_is_complete "${RUN_DIR}" "${MAX_STEPS_VALUE}" "${RUN_SPEC}"; then
       echo "skip_existing run_id=${RUN_ID} max_steps=${MAX_STEPS_VALUE} checkpoint=${SAVE_PATH_FILE} int8=${EXPORT_INT8_PATH_FILE}"
       return 0
     fi
@@ -284,7 +297,9 @@ run_one () {
     EXPORT_INT8_PATH="${EXPORT_INT8_PATH_FILE}" \
     python train_allama_reborn.py "${PYTHON_FLAGS[@]}"
 
-  if run_is_complete "${RUN_DIR}" "${MAX_STEPS_VALUE}"; then
+  printf '%s\n' "${RUN_SPEC}" > "${RUN_SPEC_PATH}"
+
+  if run_is_complete "${RUN_DIR}" "${MAX_STEPS_VALUE}" "${RUN_SPEC}"; then
     return 0
   fi
 
@@ -299,24 +314,12 @@ run_variant_block() {
   done
 }
 
-# Final-size-aware aligned anchors selected from short-horizon sizing checks.
-# Safe proxy: code_bytes + 0.945 * int8_payload_bytes_init
-# All families use MLP_MULTIPLE_OF=128 and 64/128-friendly dimensions.
-# - wide_ff15     1024/256/16  h8/kv4  hd128 hidden1536 qkv2048 -> proxy945 = 15,896,523
-# - shortfat_ff20  896/1152/20 h14/kv2 hd64  hidden1792 qkv1152 -> proxy945 = 15,935,714
-# - balanced_ff25  768/1792/24 h12/kv4 hd64  hidden1920 qkv1280 -> proxy945 = 15,969,643
-# - tall_ff30      768/1088/32 h12/kv4 hd64  hidden2304 qkv1280 -> proxy945 = 15,986,759
-# 20-step checked-size sanity at the actual sweep batch:
-# - wide_ff15     -> 14,959,072 bytes
-# - shortfat_ff20 -> 14,990,094 bytes
-# - balanced_ff25 -> 15,236,675 bytes
-# - tall_ff30     -> 15,115,258 bytes
-# Closest layer-upsized aligned variants were rejected because they added very
-# little checked size for a real speed hit:
-# - wide 16->24:   +41,622 bytes, about -33% eager tok/s
-# - shortfat 20->24: +12,186 bytes, about -16% eager tok/s
-# - balanced 24->28: +3,018 bytes, about -14% eager tok/s
-# - tall 32->34:   +7,811 bytes, about -6% eager tok/s
+# Current near-cap family set:
+# - uses only `depth_gains` as float passthrough control for artifact export
+# - keeps the aligned `64`/`128`-friendly attention shapes
+# - leaves wide / shortfat / tall unchanged from the aligned sweep
+# - trims only `balanced_ff25` to `EMBED_DIM=1728` because the older 1792
+#   variant remained slightly over the final 16,000,000-byte cap
 # Cold compile speed audit on the 5090 favored these aligned shapes over the old
 # 1056/960/864/832 anchors while the Inductor online-softmax warning persisted.
 

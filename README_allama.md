@@ -105,21 +105,23 @@ Per run, the config includes the model identity and size fields you actually wan
 - `model_functional_trainable_params`
 - `sharing_ratio`
 - `model_stored_parameter_bytes_init`
-- `model_checkpoint_bytes_init`
-- `model_checkpoint_zlib_bytes_init`
-- `model_int8_payload_zlib_bytes_init`
-- `model_artifact_bytes_init`
+- `int8_payload_bytes_init`
+- `model_code_bytes`
 
 These are intentionally recorded in W&B config rather than `wandb.log()` history, because they are derived static values, not training metrics.
 
-For trained runs, W&B summary also records the final artifact breakdown:
+For trained runs, W&B summary records only the final artifact fields that matter for the rule:
 
+- `artifact_limit_bytes`
+- `artifact_headroom_bytes_final`
+- `artifact_over_limit_final`
+- `artifact_status_final`
+- `artifact_warning_final`
 - `artifact/code_bytes_final`
-- `artifact/checkpoint_bytes_final`
-- `artifact/checkpoint_zlib_bytes_final`
-- `artifact/int8_payload_bytes_final`
 - `artifact/int8_payload_zlib_bytes_final`
 - `artifact_bytes_final`
+
+Do not use saved file size fields such as `artifact/saved_int8_payload_bytes` to judge challenge compliance. The cap check is `artifact_bytes_final`.
 
 The metrics stream includes only actual run-time signals that can move during the run:
 
@@ -239,6 +241,7 @@ Two things matter here:
 
 - `size_final` drifts upward quickly during training because the int8 payload becomes much less compressible
 - that drift is not caused by checkpoint junk; the payload/checkpoint metadata is tiny, and the growth comes from model entropy
+- the default export should not waste bytes on float passthrough tensors that do not justify it; keeping `resid_mix_logits` float was too expensive for these near-cap runs, so the default control pattern is now just `depth_gains`
 
 Representative drift on an old near-cap anchor using repeated short runs:
 
@@ -276,11 +279,19 @@ Then validate any near-cap finalist with a real short run and actual `size_final
 ### Phase 3: serious ablations
 
 These are the actual first ablations I would run once the family has been made final-size-aware instead of init-size-aware.
+With the current export policy (`CONTROL_TENSOR_NAME_PATTERNS=depth_gains`), three completed 750-step baselines re-export under the 16 MB cap as-is:
+
+- `wide_ff15`: `15,961,356`
+- `shortfat_ff20`: `15,981,514`
+- `tall_ff30`: `15,986,074`
+
+The old `balanced_ff25` (`EMBED_DIM=1792`) still landed slightly over at `16,023,736`, so the blocked sweep now trims only that family to `EMBED_DIM=1728`.
+Using the observed 750-step compression ratio from that run, the `EMBED_DIM=1728` variant is expected to land around `15.87 MB`, leaving about `132 KB` of headroom.
 The current blocked sweep uses four aligned anchors:
 
 - `wide_ff15`: `MODEL_DIM=1024`, `EMBED_DIM=256`, `NUM_LAYERS=16`, `NUM_HEADS=8`, `NUM_KV_HEADS=4`, `NUM_SHARED_BLOCKS=2`, `MLP_MULT=1.5`, `MLP_MULTIPLE_OF=128`, `artifact_proxy_bytes=15896523`
 - `shortfat_ff20`: `MODEL_DIM=896`, `EMBED_DIM=1152`, `NUM_LAYERS=20`, `NUM_HEADS=14`, `NUM_KV_HEADS=2`, `NUM_SHARED_BLOCKS=2`, `MLP_MULT=2.0`, `MLP_MULTIPLE_OF=128`, `artifact_proxy_bytes=15935714`
-- `balanced_ff25`: `MODEL_DIM=768`, `EMBED_DIM=1792`, `NUM_LAYERS=24`, `NUM_HEADS=12`, `NUM_KV_HEADS=4`, `NUM_SHARED_BLOCKS=2`, `MLP_MULT=2.5`, `MLP_MULTIPLE_OF=128`, `artifact_proxy_bytes=15969643`
+- `balanced_ff25`: `MODEL_DIM=768`, `EMBED_DIM=1728`, `NUM_LAYERS=24`, `NUM_HEADS=12`, `NUM_KV_HEADS=4`, `NUM_SHARED_BLOCKS=2`, `MLP_MULT=2.5`, `MLP_MULTIPLE_OF=128`
 - `tall_ff30`: `MODEL_DIM=768`, `EMBED_DIM=1088`, `NUM_LAYERS=32`, `NUM_HEADS=12`, `NUM_KV_HEADS=4`, `NUM_SHARED_BLOCKS=2`, `MLP_MULT=3.0`, `MLP_MULTIPLE_OF=128`, `artifact_proxy_bytes=15986759`
 
 Why these and not the earlier near-cap anchors:

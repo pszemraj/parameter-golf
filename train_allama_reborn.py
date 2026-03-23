@@ -354,7 +354,7 @@ class Hyperparameters:
             control_tensor_name_patterns=tuple(
                 env_csv(
                     "CONTROL_TENSOR_NAME_PATTERNS",
-                    "depth_gains,resid_mix_logits",
+                    "depth_gains",
                 )
             ),
             wandb_enable=wandb_enable,
@@ -2436,6 +2436,7 @@ def evaluate_full(
 BF16_STORE_DTYPE = torch.bfloat16
 FLOAT32_CONTROL_STORE_DTYPE = torch.float32
 INT8_PER_ROW_SCALE_DTYPE = torch.bfloat16
+ARTIFACT_SIZE_LIMIT_BYTES = 16_000_000
 
 
 def quantize_float_tensor(t: Tensor) -> tuple[Tensor, Tensor]:
@@ -3015,29 +3016,8 @@ def main() -> None:
             "model_stored_parameter_bytes_init": int(
                 footprint_report["stored_parameter_bytes"]
             ),
-            "model_state_dict_bytes_init": int(footprint_report["state_dict_bytes"]),
-            "model_checkpoint_bytes_init": int(footprint_report["checkpoint_bytes"]),
-            "model_checkpoint_zlib_bytes_init": int(
-                footprint_report["checkpoint_zlib_bytes"]
-            ),
             "int8_payload_bytes_init": int(footprint_report["int8_payload_bytes"]),
-            "model_int8_payload_zlib_bytes_init": int(
-                footprint_report["int8_payload_zlib_bytes"]
-            ),
             "model_code_bytes": int(footprint_report["code_bytes"]),
-            "model_artifact_bytes_init": int(footprint_report["artifact_bytes"]),
-            "int8_payload_quantized_numel": int(
-                footprint_report["int8_payload_quantized_numel"]
-            ),
-            "int8_payload_scale_numel": int(
-                footprint_report["int8_payload_scale_numel"]
-            ),
-            "int8_payload_passthrough_numel": int(
-                footprint_report["int8_payload_passthrough_numel"]
-            ),
-            "int8_payload_total_tensor_numel": int(
-                footprint_report["int8_payload_total_tensor_numel"]
-            ),
         }
 
     wandb_logger = WandbLogger(
@@ -3087,27 +3067,39 @@ def main() -> None:
                     "size_final", final_report, include_saved_bytes=True
                 )
             )
+            artifact_bytes_final = int(final_report["artifact_bytes"])
+            artifact_headroom_bytes_final = (
+                ARTIFACT_SIZE_LIMIT_BYTES - artifact_bytes_final
+            )
+            artifact_over_limit_final = int(
+                artifact_bytes_final > ARTIFACT_SIZE_LIMIT_BYTES
+            )
+            if artifact_over_limit_final:
+                warning = (
+                    "\x1b[1;31m"
+                    f"ARTIFACT_OVER_LIMIT artifact_bytes_final={artifact_bytes_final} "
+                    f"limit_bytes={ARTIFACT_SIZE_LIMIT_BYTES} "
+                    f"over_by_bytes={-artifact_headroom_bytes_final}"
+                    "\x1b[0m"
+                )
+                log(warning)
             final_artifact_summary = {
-                f"artifact/{name}": int(value)
-                for name, value in saved_artifact_bytes.items()
-            }
-            final_artifact_summary |= {
+                "artifact_limit_bytes": ARTIFACT_SIZE_LIMIT_BYTES,
+                "artifact_headroom_bytes_final": artifact_headroom_bytes_final,
+                "artifact_over_limit_final": artifact_over_limit_final,
+                "artifact_status_final": (
+                    "OVER_LIMIT" if artifact_over_limit_final else "UNDER_LIMIT"
+                ),
                 "artifact/code_bytes_final": int(final_report["code_bytes"]),
-                "artifact/checkpoint_bytes_final": int(
-                    final_report["checkpoint_bytes"]
-                ),
-                "artifact/checkpoint_zlib_bytes_final": int(
-                    final_report["checkpoint_zlib_bytes"]
-                ),
-                "artifact/int8_payload_bytes_final": int(
-                    final_report["int8_payload_bytes"]
-                ),
                 "artifact/int8_payload_zlib_bytes_final": int(
                     final_report["int8_payload_zlib_bytes"]
                 ),
-                "artifact_bytes_final": int(final_report["artifact_bytes"]),
-                "artifact_mbytes_final": float(final_report["artifact_bytes"])
-                / 1_000_000.0,
+                "artifact_bytes_final": artifact_bytes_final,
+                "artifact_warning_final": (
+                    f"OVER_LIMIT_BY_{-artifact_headroom_bytes_final}_BYTES"
+                    if artifact_over_limit_final
+                    else ""
+                ),
             }
             if final_artifact_summary:
                 wandb_logger.update_summary(final_artifact_summary)
