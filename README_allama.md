@@ -394,10 +394,10 @@ The local model-selection profile is now the explicit 1x5090 fixed-data proxy
 contract:
 
 - default `SWEEP_PROFILE=ablate`
-- `TRAIN_BATCH_TOKENS=131072`
-- `GRAD_ACCUM_STEPS=32`
+- `TRAIN_BATCH_TOKENS=262144`
+- `GRAD_ACCUM_STEPS=64`
 - `local_batch_size=4`
-- `MAX_STEPS=1500`
+- `MAX_STEPS=750`
 - `planned_train_tokens=196608000`
 - `MAX_WALLCLOCK_SECONDS=0`
 - `VAL_LOSS_EVERY=100`
@@ -440,24 +440,12 @@ Current 5090 compile/VRAM checks for the aligned family set say:
 - `local_batch_size=4` is the largest validated compile-safe local microbatch on
   this box
 
-Compile remains the right default for the local proxy contract. On the current
-1x5090 `ablate` settings, 100-step end-to-end checks beat eager in both cases I
-measured:
-
-- GPT reference: compile `45.5s` vs eager `51.1s`, with train-only throughput
-  `426k tok/s` vs `289k tok/s`
-- `wide_ff15/share_chunk`: compile `148.7s` vs eager `155.8s`, with train-only
-  throughput `136.7k tok/s` vs `103.0k tok/s`
-
-Using those same measurements to estimate an uncapped 750-step local run gives:
-
-- GPT reference: compile about `245s` vs eager about `346s`
-- `wide_ff15/share_chunk`: compile about `772s` vs eager about `983s`
-
-So compile is already faster even when you count its real warmup cost, and it
-only gets better as the run length grows. That speed question is now separated
-from the default `ablate` protocol: `ablate` is fixed-data by default, and any
-wallclock-capped screening should be treated as a different experiment mode.
+Compile remains the right default for the local proxy contract. Earlier
+`local_batch_size=4` checks showed compile beating eager for both the GPT
+reference and a representative ALlama run, but those wallclock numbers depend
+on the exact batch contract. Keep that as a separate speed audit. The default
+`ablate` protocol is fixed-data first, and any wallclock-capped screening should
+be treated as a different experiment mode.
 
 One backend knob is worth keeping available but not forcing by default:
 
