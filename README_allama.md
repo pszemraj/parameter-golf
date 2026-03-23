@@ -9,6 +9,7 @@ This version is the one meant for actual local ablations on a 5090:
 - one global RoPE cache
 - GQA via `enable_gqa=True` when the local PyTorch SDPA path supports it
 - epoch-driven training over **all available** downloaded train shards by default
+- fail-fast BPB setup for Parameter Golf: no silent `val_bpb=disabled` fallback if `sentencepiece`, `TOKENIZER_PATH`, or `VOCAB_SIZE` is wrong
 - sampled or full validation, both wired into the same trainer
 - W&B logging of the metrics that actually matter for shared models:
   - `stored_params`
@@ -43,11 +44,12 @@ NUM_EPOCHS=1
 ```
 
 That means the default behavior is:
-- one full pass over all downloaded train shards
+- one full pass over all downloaded train shards, except for a tiny end-of-epoch tail smaller than `TRAIN_SEQ_LEN * WORLD_SIZE` that is dropped to keep fixed-length microbatches
 - validation every `VAL_LOSS_EVERY` steps
 - no arbitrary `MAX_STEPS` cap
 
 `MAX_STEPS` still exists, but only as a debug cap.
+The startup log prints both `dropped_target_tokens_per_epoch` and a `train_tail_drop ... reason=fixed_train_seq_len` line when that tail-drop path is active.
 
 ## Working directory
 
@@ -335,12 +337,18 @@ There are three intended modes:
 It prefixes run IDs with `sbcal_v2_` by default so the cleaner `14/2` recalibrated sweep does not collide with the earlier rejected `15/5` shortfat directories.
 
 It skips already-completed run directories only when the artifacts exist and
-`train.log` shows the expected terminal step for the current `MAX_STEPS`.
+`train.log` shows the expected terminal step for the current `MAX_STEPS`, and
+`.run_spec` matches the resolved launch contract for the current run.
 That means a shorter `explore` run no longer falsely satisfies a later `full`
 run with the same `RUN_ID`. If a directory already exists but does not satisfy
 the current completion check, the script now stops instead of silently
 overwriting mixed logs and artifacts. Use `FORCE_RERUN=1` if you want to
 overwrite anyway.
+
+That `.run_spec` fingerprint now includes the launch settings that materially
+change behavior, including eval mode, validation batching, SDPA backend, MLP
+alignment, device/dtype, and the core batch/shape settings. So changing one of
+those knobs no longer aliases an old run as "complete".
 
 It also exports `TORCH_BLAS_PREFER_CUBLASLT=1` for 5090-friendly CUDA BLAS selection.
 The trainer now supports `SDPA_BACKEND=auto|flash|efficient|math|cudnn` for explicit SDPA backend experiments.

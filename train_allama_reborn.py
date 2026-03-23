@@ -838,22 +838,36 @@ def setup_bpb_metric(
     """
     if backend == "enwik8":
         return BpbMetric(kind="bytes")
-    if (
-        backend == "parameter_golf"
-        and spm is not None
-        and Path(args.tokenizer_path).exists()
-    ):
-        sp = spm.SentencePieceProcessor(model_file=args.tokenizer_path)
-        base_bytes_lut, has_leading_space_lut, is_boundary_token_lut = (
-            build_sentencepiece_luts(sp, vocab_size, device)
+    if backend != "parameter_golf":
+        return BpbMetric(kind="none")
+    if spm is None:
+        raise RuntimeError(
+            "sentencepiece is required for Parameter Golf BPB evaluation but is not installed."
         )
-        return BpbMetric(
-            kind="sentencepiece",
-            base_bytes_lut=base_bytes_lut,
-            has_leading_space_lut=has_leading_space_lut,
-            is_boundary_token_lut=is_boundary_token_lut,
+    tokenizer_path = Path(args.tokenizer_path)
+    if not tokenizer_path.is_file():
+        raise FileNotFoundError(
+            f"Missing SentencePiece tokenizer required for Parameter Golf BPB evaluation: {tokenizer_path}"
         )
-    return BpbMetric(kind="none")
+    if tokenizer_path.suffix != ".model":
+        raise ValueError(
+            f"TOKENIZER_PATH must point to a SentencePiece .model file: {tokenizer_path}"
+        )
+    sp = spm.SentencePieceProcessor(model_file=str(tokenizer_path))
+    sp_vocab_size = int(sp.vocab_size())
+    if vocab_size != sp_vocab_size:
+        raise ValueError(
+            f"VOCAB_SIZE={vocab_size} does not match tokenizer vocab_size={sp_vocab_size}"
+        )
+    base_bytes_lut, has_leading_space_lut, is_boundary_token_lut = (
+        build_sentencepiece_luts(sp, vocab_size, device)
+    )
+    return BpbMetric(
+        kind="sentencepiece",
+        base_bytes_lut=base_bytes_lut,
+        has_leading_space_lut=has_leading_space_lut,
+        is_boundary_token_lut=is_boundary_token_lut,
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -2125,7 +2139,7 @@ def plan_epoch_steps(
     max_seq_len: int,
     world_size: int,
 ) -> tuple[list[list[MicroBatchSpec]], dict[str, int]]:
-    """Split one epoch into variable microbatch plans that exhaust usable tokens.
+    """Split one epoch into fixed-sequence microbatch plans.
 
     :param int total_tokens: Total source tokens available for the epoch.
     :param int train_batch_tokens: Target global tokens per optimizer step.
@@ -2135,42 +2149,60 @@ def plan_epoch_steps(
     :return tuple[list[list[MicroBatchSpec]], dict[str, int]]: Planned step specs and
         epoch-level accounting info.
     """
+    if max_local_batch_size <= 0:
+        raise ValueError(
+            f"max_local_batch_size must be positive, got {max_local_batch_size}"
+        )
+    if max_seq_len <= 0:
+        raise ValueError(f"max_seq_len must be positive, got {max_seq_len}")
+    if world_size <= 0:
+        raise ValueError(f"world_size must be positive, got {world_size}")
+    tokens_per_sequence = max_seq_len * world_size
+    if train_batch_tokens % tokens_per_sequence != 0:
+        raise ValueError(
+            f"TRAIN_BATCH_TOKENS={train_batch_tokens} must be divisible by "
+            f"TRAIN_SEQ_LEN*WORLD_SIZE={tokens_per_sequence}"
+        )
+
     total_target_tokens = max(0, total_tokens - 1)
-    effective_target_tokens = total_target_tokens - (
-        total_target_tokens % max(1, world_size)
+    effective_target_tokens = total_target_tokens - (total_target_tokens % world_size)
+    usable_target_tokens = effective_target_tokens - (
+        effective_target_tokens % tokens_per_sequence
     )
-    max_micro_global_tokens = max_local_batch_size * max_seq_len * world_size
-    if effective_target_tokens <= 0:
+    max_micro_global_tokens = max_local_batch_size * tokens_per_sequence
+    if usable_target_tokens <= 0:
         return [], {
             "total_tokens": total_tokens,
             "total_target_tokens": total_target_tokens,
-            "usable_target_tokens": effective_target_tokens,
+            "usable_target_tokens": 0,
             "planned_target_tokens": 0,
             "dropped_target_tokens": total_target_tokens,
             "steps_per_epoch": 0,
             "microbatches_per_epoch": 0,
         }
     steps: list[list[MicroBatchSpec]] = []
-    remaining_targets = effective_target_tokens
+    remaining_targets = usable_target_tokens
     planned_target_tokens = 0
     microbatch_count = 0
     while remaining_targets > 0:
         step_budget = min(train_batch_tokens, remaining_targets)
         step_specs: list[MicroBatchSpec] = []
         while step_budget > 0 and remaining_targets > 0:
-            allowed = min(step_budget, remaining_targets, max_micro_global_tokens)
-            spec = pick_microbatch_spec(
-                max_global_target_tokens=allowed,
-                max_local_batch_size=max_local_batch_size,
-                max_seq_len=max_seq_len,
-                world_size=world_size,
-            )
-            if spec is None:
+            global_target_tokens = min(step_budget, max_micro_global_tokens)
+            local_batch_size = global_target_tokens // tokens_per_sequence
+            if local_batch_size <= 0:
                 break
-            step_specs.append(spec)
-            step_budget -= spec.global_target_tokens
-            remaining_targets -= spec.global_target_tokens
-            planned_target_tokens += spec.global_target_tokens
+            global_target_tokens = local_batch_size * tokens_per_sequence
+            step_specs.append(
+                MicroBatchSpec(
+                    local_batch_size=local_batch_size,
+                    seq_len=max_seq_len,
+                    global_target_tokens=global_target_tokens,
+                )
+            )
+            step_budget -= global_target_tokens
+            remaining_targets -= global_target_tokens
+            planned_target_tokens += global_target_tokens
             microbatch_count += 1
         if not step_specs:
             break
@@ -2974,6 +3006,11 @@ def main() -> None:
         f"planned_target_tokens_per_epoch={epoch_plan_info['planned_target_tokens']} "
         f"dropped_target_tokens_per_epoch={epoch_plan_info['dropped_target_tokens']}"
     )
+    if epoch_plan_info["dropped_target_tokens"] > 0:
+        log(
+            f"train_tail_drop dropped_target_tokens_per_epoch={epoch_plan_info['dropped_target_tokens']} "
+            f"reason=fixed_train_seq_len"
+        )
     log(
         f"train_static nominal_step_tokens={nominal_step_tokens} final_step_tokens={final_step_tokens} "
         f"variable_step_tokens={int(variable_step_tokens)} grad_accum_steps={args.grad_accum_steps} "
@@ -3011,6 +3048,9 @@ def main() -> None:
         "sdpa_cudnn_enabled": bool(sdpa_status.get("cudnn_enabled", False)),
         "layer_map": report_model.layer_to_block_map(),
         "steps_per_epoch": epoch_plan_info["steps_per_epoch"],
+        "usable_target_tokens_per_epoch": epoch_plan_info["usable_target_tokens"],
+        "planned_target_tokens_per_epoch": epoch_plan_info["planned_target_tokens"],
+        "dropped_target_tokens_per_epoch": epoch_plan_info["dropped_target_tokens"],
         "planned_total_steps": planned_total_steps,
         "total_training_steps": total_training_steps,
         "train_nominal_step_tokens": nominal_step_tokens,

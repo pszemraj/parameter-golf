@@ -8,7 +8,8 @@ export WANDB_GROUP="${WANDB_GROUP:-allama-sharedblock-nearcap-v2}"
 export WANDB_TAGS="${WANDB_TAGS:-5090,allama,nearcap,finalsize,behavior,blocked,aligned,sharedblocks,clipped_exporter}"
 export WANDB_WATCH="${WANDB_WATCH:-all}"
 export WANDB_WATCH_LOG_FREQ="${WANDB_WATCH_LOG_FREQ:-100}"
-export SDPA_BACKEND="${SDPA_BACKEND:-auto}"
+SDPA_BACKEND_VALUE="${SDPA_BACKEND:-auto}"
+export SDPA_BACKEND="${SDPA_BACKEND_VALUE}"
 export TORCH_BLAS_PREFER_CUBLASLT=1
 
 SWEEP_PROFILE="${SWEEP_PROFILE:-explore}"
@@ -57,26 +58,40 @@ TRAIN_BATCH_TOKENS_VALUE="${TRAIN_BATCH_TOKENS:-${DEFAULT_TRAIN_BATCH_TOKENS}}"
 GRAD_ACCUM_STEPS_VALUE="${GRAD_ACCUM_STEPS:-${DEFAULT_GRAD_ACCUM_STEPS}}"
 MAX_STEPS_VALUE="${MAX_STEPS:-${ITERATIONS:-${DEFAULT_MAX_STEPS}}}"
 VAL_LOSS_EVERY_VALUE="${VAL_LOSS_EVERY:-${DEFAULT_VAL_LOSS_EVERY}}"
+TRAIN_LOG_EVERY_VALUE="${TRAIN_LOG_EVERY:-25}"
+EVAL_MODE_VALUE="${EVAL_MODE:-sampled}"
+VAL_BATCH_SIZE_VALUE="${VAL_BATCH_SIZE:-8}"
+VAL_BATCHES_VALUE="${VAL_BATCHES:-8}"
+MLP_MULTIPLE_OF_VALUE="${MLP_MULTIPLE_OF:-128}"
+OUT_DIR_VALUE="${OUT_DIR:-./runs_allama}"
+DATA_PATH_VALUE="${DATA_PATH:-./data/datasets/fineweb10B_sp1024}"
+TOKENIZER_PATH_VALUE="${TOKENIZER_PATH:-./data/tokenizers/fineweb_1024_bpe.model}"
+DEVICE_VALUE="${DEVICE:-cuda}"
+DTYPE_VALUE="${DTYPE:-bf16}"
+NUM_EPOCHS_VALUE="${NUM_EPOCHS:-1}"
+MAX_WALLCLOCK_SECONDS_VALUE="${MAX_WALLCLOCK_SECONDS:-0}"
 CONTROL_TENSOR_NAME_PATTERNS_VALUE="${CONTROL_TENSOR_NAME_PATTERNS:-depth_gains}"
 RUN_ID_PREFIX="${RUN_ID_PREFIX:-sbcal_v2_}"
 
 BASE_ENV=(
-  OUT_DIR=./runs_allama
-  DATA_PATH=./data/datasets/fineweb10B_sp1024
-  TOKENIZER_PATH=./data/tokenizers/fineweb_1024_bpe.model
-  DEVICE=cuda
-  DTYPE=bf16
+  OUT_DIR="${OUT_DIR_VALUE}"
+  DATA_PATH="${DATA_PATH_VALUE}"
+  TOKENIZER_PATH="${TOKENIZER_PATH_VALUE}"
+  DEVICE="${DEVICE_VALUE}"
+  DTYPE="${DTYPE_VALUE}"
   TRAIN_SEQ_LEN="${TRAIN_SEQ_LEN_VALUE}"
   EVAL_SEQ_LEN="${EVAL_SEQ_LEN_VALUE}"
   TRAIN_BATCH_TOKENS="${TRAIN_BATCH_TOKENS_VALUE}"
   GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS_VALUE}"
   MAX_STEPS="${MAX_STEPS_VALUE}"
   VAL_LOSS_EVERY="${VAL_LOSS_EVERY_VALUE}"
-  TRAIN_LOG_EVERY=25
-  EVAL_MODE=sampled
-  VAL_BATCH_SIZE=8
-  VAL_BATCHES=8
-  MLP_MULTIPLE_OF=128
+  TRAIN_LOG_EVERY="${TRAIN_LOG_EVERY_VALUE}"
+  EVAL_MODE="${EVAL_MODE_VALUE}"
+  VAL_BATCH_SIZE="${VAL_BATCH_SIZE_VALUE}"
+  VAL_BATCHES="${VAL_BATCHES_VALUE}"
+  MLP_MULTIPLE_OF="${MLP_MULTIPLE_OF_VALUE}"
+  NUM_EPOCHS="${NUM_EPOCHS_VALUE}"
+  MAX_WALLCLOCK_SECONDS="${MAX_WALLCLOCK_SECONDS_VALUE}"
   CONTROL_TENSOR_NAME_PATTERNS="${CONTROL_TENSOR_NAME_PATTERNS_VALUE}"
 )
 
@@ -127,7 +142,7 @@ if [[ -n "${ITERATIONS:-}" && -z "${MAX_STEPS:-}" ]]; then
   echo "note=ITERATIONS override is deprecated here; use MAX_STEPS instead"
 fi
 
-echo "sweep_profile=${SWEEP_PROFILE} run_id_prefix=${RUN_ID_PREFIX} compile=${RUN_COMPILE} force_rerun=${FORCE_RERUN} train_batch_tokens=${TRAIN_BATCH_TOKENS_VALUE} grad_accum_steps=${GRAD_ACCUM_STEPS_VALUE} local_batch_size=${LOCAL_BATCH_SIZE} max_steps=${MAX_STEPS_VALUE} val_loss_every=${VAL_LOSS_EVERY_VALUE} control_tensor_name_patterns=${CONTROL_TENSOR_NAME_PATTERNS_VALUE} run_gpt_baseline=${RUN_GPT_BASELINE} allama_runs_planned=${ALLAMA_RUNS} allama_runs_scheduled=${SCHEDULED_ALLAMA_RUNS} total_runs_planned=${TOTAL_RUNS} total_runs_scheduled=${SCHEDULED_TOTAL_RUNS}"
+echo "sweep_profile=${SWEEP_PROFILE} run_id_prefix=${RUN_ID_PREFIX} compile=${RUN_COMPILE} force_rerun=${FORCE_RERUN} out_dir=${OUT_DIR_VALUE} data_path=${DATA_PATH_VALUE} tokenizer_path=${TOKENIZER_PATH_VALUE} device=${DEVICE_VALUE} dtype=${DTYPE_VALUE} eval_mode=${EVAL_MODE_VALUE} val_batch_size=${VAL_BATCH_SIZE_VALUE} val_batches=${VAL_BATCHES_VALUE} train_batch_tokens=${TRAIN_BATCH_TOKENS_VALUE} grad_accum_steps=${GRAD_ACCUM_STEPS_VALUE} local_batch_size=${LOCAL_BATCH_SIZE} max_steps=${MAX_STEPS_VALUE} val_loss_every=${VAL_LOSS_EVERY_VALUE} train_log_every=${TRAIN_LOG_EVERY_VALUE} num_epochs=${NUM_EPOCHS_VALUE} max_wallclock_seconds=${MAX_WALLCLOCK_SECONDS_VALUE} sdpa_backend=${SDPA_BACKEND_VALUE} mlp_multiple_of=${MLP_MULTIPLE_OF_VALUE} control_tensor_name_patterns=${CONTROL_TENSOR_NAME_PATTERNS_VALUE} run_gpt_baseline=${RUN_GPT_BASELINE} allama_runs_planned=${ALLAMA_RUNS} allama_runs_scheduled=${SCHEDULED_ALLAMA_RUNS} total_runs_planned=${TOTAL_RUNS} total_runs_scheduled=${SCHEDULED_TOTAL_RUNS}"
 echo "family_wide_ff15 model_dim=1024 embed_dim=128 num_layers=16 num_heads=16 num_kv_heads=2 num_shared_blocks=5 mlp_mult=1.5 raw_payload_bytes=35950734 predicted_artifact_bytes=15818966 predicted_headroom_bytes=181034"
 echo "family_shortfat_ff20 model_dim=896 embed_dim=896 num_layers=20 num_heads=14 num_kv_heads=2 num_shared_blocks=5 mlp_mult=2.0 raw_payload_bytes=34340378 predicted_artifact_bytes=15342304 predicted_headroom_bytes=657696"
 echo "family_balanced_ff25 model_dim=768 embed_dim=1792 num_layers=24 num_heads=12 num_kv_heads=4 num_shared_blocks=5 mlp_mult=2.5 raw_payload_bytes=34736590 predicted_artifact_bytes=15797101 predicted_headroom_bytes=202899"
@@ -162,11 +177,11 @@ run_is_complete () {
 
 run_gpt_reference () {
   local RUN_ID="${RUN_ID_PREFIX}gpt_baseline_reference"
-  local RUN_DIR="./runs_allama/${RUN_ID}"
+  local RUN_DIR="${OUT_DIR_VALUE}/${RUN_ID}"
   local SAVE_PATH_FILE="${RUN_DIR}/model.pt"
   local EXPORT_INT8_PATH_FILE="${RUN_DIR}/model_int8.ptz"
   local RUN_SPEC_PATH="${RUN_DIR}/.run_spec"
-  local RUN_SPEC="family_set=sharedblock_nearcap_v2 kind=train_gpt_reference train_seq_len=${TRAIN_SEQ_LEN_VALUE} eval_seq_len=${EVAL_SEQ_LEN_VALUE} train_batch_tokens=${TRAIN_BATCH_TOKENS_VALUE} max_steps=${MAX_STEPS_VALUE} val_loss_every=${VAL_LOSS_EVERY_VALUE} train_log_every=25 eval_mode=sampled val_batch_size=8 val_batches=8 max_wallclock_seconds=0"
+  local RUN_SPEC="family_set=sharedblock_nearcap_v2 kind=train_gpt_reference out_dir=${OUT_DIR_VALUE} data_path=${DATA_PATH_VALUE} tokenizer_path=${TOKENIZER_PATH_VALUE} train_seq_len=${TRAIN_SEQ_LEN_VALUE} eval_seq_len=${EVAL_SEQ_LEN_VALUE} train_batch_tokens=${TRAIN_BATCH_TOKENS_VALUE} max_steps=${MAX_STEPS_VALUE} val_loss_every=${VAL_LOSS_EVERY_VALUE} train_log_every=${TRAIN_LOG_EVERY_VALUE} eval_mode=${EVAL_MODE_VALUE} val_batch_size=${VAL_BATCH_SIZE_VALUE} val_batches=${VAL_BATCHES_VALUE} max_wallclock_seconds=${MAX_WALLCLOCK_SECONDS_VALUE} compile=1"
 
   if [[ "${FORCE_RERUN}" != "1" ]]; then
     if run_is_complete "${RUN_DIR}" "${MAX_STEPS_VALUE}" "${RUN_SPEC}" "model.pt" "model_int8.ptz"; then
@@ -180,20 +195,20 @@ run_gpt_reference () {
   fi
 
   env \
-    OUT_DIR=./runs_allama \
-    DATA_PATH=./data/datasets/fineweb10B_sp1024 \
-    TOKENIZER_PATH=./data/tokenizers/fineweb_1024_bpe.model \
+    OUT_DIR="${OUT_DIR_VALUE}" \
+    DATA_PATH="${DATA_PATH_VALUE}" \
+    TOKENIZER_PATH="${TOKENIZER_PATH_VALUE}" \
     RUN_ID="${RUN_ID}" \
     TRAIN_SEQ_LEN="${TRAIN_SEQ_LEN_VALUE}" \
     EVAL_SEQ_LEN="${EVAL_SEQ_LEN_VALUE}" \
     TRAIN_BATCH_TOKENS="${TRAIN_BATCH_TOKENS_VALUE}" \
     ITERATIONS="${MAX_STEPS_VALUE}" \
     VAL_LOSS_EVERY="${VAL_LOSS_EVERY_VALUE}" \
-    TRAIN_LOG_EVERY=25 \
-    EVAL_MODE=sampled \
-    VAL_BATCH_SIZE=8 \
-    VAL_BATCHES=8 \
-    MAX_WALLCLOCK_SECONDS=0 \
+    TRAIN_LOG_EVERY="${TRAIN_LOG_EVERY_VALUE}" \
+    EVAL_MODE="${EVAL_MODE_VALUE}" \
+    VAL_BATCH_SIZE="${VAL_BATCH_SIZE_VALUE}" \
+    VAL_BATCHES="${VAL_BATCHES_VALUE}" \
+    MAX_WALLCLOCK_SECONDS="${MAX_WALLCLOCK_SECONDS_VALUE}" \
     WANDB_RUN_NAME="${RUN_ID}" \
     WANDB_TAGS="${WANDB_TAGS},baseline,reference,train_gpt" \
     python train_gpt.py
@@ -315,11 +330,11 @@ run_one () {
   esac
 
   local PYTHON_FLAGS=()
-  local RUN_DIR="./runs_allama/${RUN_ID}"
+  local RUN_DIR="${OUT_DIR_VALUE}/${RUN_ID}"
   local SAVE_PATH_FILE="${RUN_DIR}/model.pt"
   local EXPORT_INT8_PATH_FILE="${RUN_DIR}/model_int8.pt"
   local RUN_SPEC_PATH="${RUN_DIR}/.run_spec"
-  local RUN_SPEC="family_set=sharedblock_nearcap_v2 family=${FAMILY} variant=${VARIANT} model_dim=${MODEL_DIM} embed_dim=${EMBED_DIM} num_layers=${NUM_LAYERS} num_heads=${NUM_HEADS} num_kv_heads=${NUM_KV_HEADS} num_shared_blocks=${NUM_SHARED_BLOCKS} mlp_mult=${MLP_MULT} norm_layout=${NORM_LAYOUT} norm_kind=${NORM_KIND} share_pattern=${SHARE_PATTERN} use_x0_shortcut=${USE_X0_SHORTCUT} resid_mix_init=${RESID_MIX_INIT} train_seq_len=${TRAIN_SEQ_LEN_VALUE} eval_seq_len=${EVAL_SEQ_LEN_VALUE} train_batch_tokens=${TRAIN_BATCH_TOKENS_VALUE} grad_accum_steps=${GRAD_ACCUM_STEPS_VALUE} max_steps=${MAX_STEPS_VALUE} val_loss_every=${VAL_LOSS_EVERY_VALUE} run_compile=${RUN_COMPILE} control_tensor_name_patterns=${CONTROL_TENSOR_NAME_PATTERNS_VALUE}"
+  local RUN_SPEC="family_set=sharedblock_nearcap_v2 out_dir=${OUT_DIR_VALUE} data_path=${DATA_PATH_VALUE} tokenizer_path=${TOKENIZER_PATH_VALUE} device=${DEVICE_VALUE} dtype=${DTYPE_VALUE} num_epochs=${NUM_EPOCHS_VALUE} max_wallclock_seconds=${MAX_WALLCLOCK_SECONDS_VALUE} family=${FAMILY} variant=${VARIANT} model_dim=${MODEL_DIM} embed_dim=${EMBED_DIM} num_layers=${NUM_LAYERS} num_heads=${NUM_HEADS} num_kv_heads=${NUM_KV_HEADS} num_shared_blocks=${NUM_SHARED_BLOCKS} mlp_mult=${MLP_MULT} mlp_multiple_of=${MLP_MULTIPLE_OF_VALUE} norm_layout=${NORM_LAYOUT} norm_kind=${NORM_KIND} share_pattern=${SHARE_PATTERN} use_x0_shortcut=${USE_X0_SHORTCUT} resid_mix_init=${RESID_MIX_INIT} train_seq_len=${TRAIN_SEQ_LEN_VALUE} eval_seq_len=${EVAL_SEQ_LEN_VALUE} train_batch_tokens=${TRAIN_BATCH_TOKENS_VALUE} grad_accum_steps=${GRAD_ACCUM_STEPS_VALUE} max_steps=${MAX_STEPS_VALUE} val_loss_every=${VAL_LOSS_EVERY_VALUE} train_log_every=${TRAIN_LOG_EVERY_VALUE} eval_mode=${EVAL_MODE_VALUE} val_batch_size=${VAL_BATCH_SIZE_VALUE} val_batches=${VAL_BATCHES_VALUE} sdpa_backend=${SDPA_BACKEND_VALUE} run_compile=${RUN_COMPILE} control_tensor_name_patterns=${CONTROL_TENSOR_NAME_PATTERNS_VALUE}"
 
   case "${RUN_COMPILE}" in
     1)
