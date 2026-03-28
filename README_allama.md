@@ -224,17 +224,22 @@ probe_one () {
     python train_allama.py
 }
 
-probe_one probe_m1024_l24_s1 1024 256 24 16 4 2.5 1 chunk
-probe_one probe_m1024_l24_s2 1024 256 24 16 4 2.5 2 cycle
-probe_one probe_m1152_l24_s1 1152 288 24 18 6 2.5 1 chunk
-probe_one probe_m1152_l24_s2 1152 288 24 18 6 2.5 2 cycle
+probe_one probe_wide_s4_ff1125 1024 128 16 16 2 1.125 4 cycle
+probe_one probe_shortfat_s5_ff1125 896 896 20 14 2 1.125 5 cycle
+probe_one probe_balanced_s4_ff175 768 1792 24 12 4 1.75 4 cycle
+probe_one probe_tall_s4_ff2125 768 1024 32 12 2 2.125 4 cycle
+
+# obvious near-cap challengers that looked too aggressive in raw-payload search
+probe_one probe_shortfat_s4_ff1625 896 896 20 14 2 1.625 4 cycle
+probe_one probe_balanced_s4_ff1875 768 1792 24 12 4 1.875 4 cycle
+probe_one probe_tall_s4_ff225 768 1024 32 12 2 2.25 4 cycle
 ```
 
 Interpretation:
 - use these only to bracket rough architecture families; `size_init ... artifact_bytes=...` is not reliable enough to pick final training runs by itself
 - if init size is far below budget, go bigger; if it is wildly above budget, trim width or `MLP_MULT`
 - once a family is in the right ballpark, switch to short training-based sizing rather than trusting init compression
-- with the current coarse probe results, `probe_m1024_l24_s2` was a sensible first budget-closing starting point at about 14.5MB init, while the one-shared-block variants were undersized and `probe_m1152_l24_s2` overshot the cap
+- the current useful probes are the actual near-cap family anchors plus their obvious one-notch challengers, not the old generic `m1024_l24` / `m1152_l24` shapes
 - do not assume the best near-cap family is balanced by default; wide, short-fat, tall, and higher-unique-block variants can all fit under the cap with different `MLP_MULT` choices
 - ignore tiny `val_loss` / `val_bpb` differences in this phase because `EVAL_ONLY=1` makes these runs size probes, not learned-model comparisons
 
@@ -279,43 +284,30 @@ The meaningful conclusion is:
 - the corrected exporter now uses clipped int8 quantization instead of the old max-abs scheme
 - any size proxy or family search derived from the old exporter is invalid now
 - the old `0.945 * int8_payload_bytes_init` proxy is obsolete
-- the useful proxy under the corrected exporter is the architecture-fixed raw payload size, because the raw int8 payload bytes do not depend on trained values and the 750-step corrected re-exports landed in a fairly tight `final_zlib / raw_payload` band of about `0.431-0.451`
+- the useful proxy under the corrected exporter is the architecture-fixed raw payload size, because the raw int8 payload bytes do not depend on trained values
+- on the current trainer/model, two full 750-step anchors landed at a much higher `final_zlib / raw_payload` band than the old README assumed:
+  - `shortfat_ff20_baseline`: `22,283,930 / 34,521,333 = 0.6455`
+  - `wide_ff15_baseline`: `22,878,654 / 36,116,777 = 0.6335`
+- with `code_bytes=157,752`, that puts the useful safe raw-payload target around `24.5M-25.0M`, not the older `34M-36M` band
 
 ### Phase 3: serious ablations
 
-Fresh family-size calibration under the corrected exporter is now done.
-The blocked sweep now uses near-cap families that keep `head_dim=64` and spend size budget primarily through `NUM_SHARED_BLOCKS`, because that grows stored capacity far more than logical `NUM_LAYERS` while leaving per-step FLOPs mostly unchanged.
+Fresh family-size calibration under the current exporter is now done.
+The blocked sweep now uses near-cap families that keep `head_dim=64` and spend size budget through CUDA-friendly hidden sizes and, only where it actually helps, extra shared blocks. A broader search showed that `wide s8`, `balanced s6/s8`, and `tall s8` all overshoot badly even after lowering `MLP_MULT`; the only higher-block upgrade that stayed useful was `shortfat s5`.
 
 Default calibrated family anchors:
 
-- `wide_ff15`: `MODEL_DIM=1024`, `EMBED_DIM=128`, `NUM_LAYERS=16`, `NUM_HEADS=16`, `NUM_KV_HEADS=2`, `NUM_SHARED_BLOCKS=5`, `MLP_MULT=1.5`, `raw_payload_bytes=35,950,734`, `predicted_artifact_bytes=15,818,966`, headroom `181,034`
-- `shortfat_ff20`: `MODEL_DIM=896`, `EMBED_DIM=896`, `NUM_LAYERS=20`, `NUM_HEADS=14`, `NUM_KV_HEADS=2`, `NUM_SHARED_BLOCKS=5`, `MLP_MULT=2.0`, `raw_payload_bytes=34,340,378`, `predicted_artifact_bytes=15,342,304`, headroom `657,696`
-- `balanced_ff25`: `MODEL_DIM=768`, `EMBED_DIM=1792`, `NUM_LAYERS=24`, `NUM_HEADS=12`, `NUM_KV_HEADS=4`, `NUM_SHARED_BLOCKS=5`, `MLP_MULT=2.5`, `raw_payload_bytes=34,736,590`, `predicted_artifact_bytes=15,797,101`, headroom `202,899`
-- `tall_ff30`: `MODEL_DIM=768`, `EMBED_DIM=960`, `NUM_LAYERS=32`, `NUM_HEADS=12`, `NUM_KV_HEADS=2`, `NUM_SHARED_BLOCKS=5`, `MLP_MULT=3.0`, `raw_payload_bytes=36,063,118`, `predicted_artifact_bytes=15,842,554`, headroom `157,446`
+- `wide_s4_ff1125`: `MODEL_DIM=1024`, `EMBED_DIM=128`, `NUM_LAYERS=16`, `NUM_HEADS=16`, `NUM_KV_HEADS=2`, `NUM_SHARED_BLOCKS=4`, `MLP_MULT=1.125`, `raw_payload_bytes=24,290,119`, `predicted_artifact_bytes=15,690,982`, headroom `309,018`
+- `shortfat_s5_ff1125`: `MODEL_DIM=896`, `EMBED_DIM=896`, `NUM_LAYERS=20`, `NUM_HEADS=14`, `NUM_KV_HEADS=2`, `NUM_SHARED_BLOCKS=5`, `MLP_MULT=1.125`, `raw_payload_bytes=24,184,053`, `predicted_artifact_bytes=15,623,154`, headroom `376,846`
+- `balanced_s4_ff175`: `MODEL_DIM=768`, `EMBED_DIM=1792`, `NUM_LAYERS=24`, `NUM_HEADS=12`, `NUM_KV_HEADS=4`, `NUM_SHARED_BLOCKS=4`, `MLP_MULT=1.75`, `raw_payload_bytes=24,176,327`, `predicted_artifact_bytes=15,618,213`, headroom `381,787`
+- `tall_s4_ff2125`: `MODEL_DIM=768`, `EMBED_DIM=1024`, `NUM_LAYERS=32`, `NUM_HEADS=12`, `NUM_KV_HEADS=2`, `NUM_SHARED_BLOCKS=4`, `MLP_MULT=2.125`, `raw_payload_bytes=23,857,735`, `predicted_artifact_bytes=15,414,478`, headroom `585,522`
 
 Calibration notes:
 
-- `NUM_SHARED_BLOCKS` is now the primary size lever, not `NUM_LAYERS`
-- `shortfat_ff20` now uses the cleaner `896/14q/2kv` shape instead of the earlier `960/15q/5kv` compromise; this leaves more size headroom, but it stays aligned with the AGENTS guidance and preserves `head_dim=64`
-- the older 20-step checked-size table and the stale-family guard are obsolete after this recalibration
-
-Cold `--compile` 4-step speed audit on the 5090, using the same sweep batch settings, favored the aligned family set across the board:
-
-- `wide_ff15`: `25704.60 -> 35657.95` avg `tok/s`, `119427.79 -> 131400.50` last-step `tok/s`
-- `shortfat_ff20`: `27425.31 -> 29549.36` avg `tok/s`, `105703.23 -> 118886.17` last-step `tok/s`
-- `balanced_ff25`: `23216.30 -> 24842.72` avg `tok/s`, `90864.47 -> 105067.74` last-step `tok/s`
-- `tall_ff30`: `16913.22 -> 18408.88` avg `tok/s`, `67216.41 -> 75220.66` last-step `tok/s`
-
-The Inductor `Online softmax is disabled on the fly since Inductor decides to split the reduction` warning still appeared on every old and new family in that audit, so the shape cleanup improved speed but did not eliminate the warning.
-
-I also checked trained saved size directly with 20-step one-GPU runs at the actual sweep batch settings. The current anchors are not lazily undersized:
-
-- `wide_ff15`: `14,959,072`
-- `shortfat_ff20`: `14,990,094`
-- `balanced_ff25`: `15,236,675`
-- `tall_ff30`: `15,115,258`
-
-Those older 20-step values are now useful only as historical evidence that changing logical depth is the wrong way to fill budget. The current sweep families above replace them.
+- all four anchors preserve `head_dim=64` and `MLP_MULTIPLE_OF=128`
+- `shortfat_s5_ff1125` is the only higher-block upgrade that actually beat its `s4` counterpart on raw-payload targeting
+- the obvious one-notch challengers now are `shortfat_s4_ff1625`, `balanced_s4_ff1875`, and `tall_s4_ff225`; those are useful probe points, but they are not the default sweep families because they already project above the safe band
+- the older v2 family table and the stale-family guard are obsolete after this recalibration
 
 The training helper `scripts/run_allama_ablations.sh` is intentionally
 training-only and runs a `train_gpt.py` reference baseline before any ALlama
@@ -329,7 +321,7 @@ bash scripts/run_allama_ablations.sh
 ```
 
 The `train_gpt.py` reference run is written under
-`runs_allama/sbcal_v2_gpt_baseline_reference/` by default and logs the same
+`runs_allama/sbcal_v3_gpt_baseline_reference/` by default and logs the same
 useful summary fields:
 
 - `artifact_limit_bytes`
@@ -362,7 +354,7 @@ There are now four intended sweep profiles:
 - `SWEEP_PROFILE=full`: 29 planned runs total, `1` `train_gpt.py` reference
   plus `28` ALlama runs across all blocks
 
-It prefixes run IDs with `sbcal_v2_` by default so the cleaner `14/2` recalibrated sweep does not collide with the earlier rejected `15/5` shortfat directories.
+It prefixes run IDs with `sbcal_v3_` by default so the current near-cap family set does not collide with the older rejected calibration passes.
 
 It skips already-completed run directories only when the artifacts exist,
 `train.log` shows the expected terminal step or intentional wallclock-capped
@@ -489,7 +481,7 @@ be treated as a different experiment mode.
 
 One backend knob is worth keeping available but not forcing by default:
 
-- cold-cache 1-step compile smoke on `balanced_ff25` at `TRAIN_BATCH_TOKENS=524288`, `GRAD_ACCUM_STEPS=128` showed no meaningful gain from forcing flash
+- cold-cache 1-step compile smoke on a previous balanced near-cap family at `TRAIN_BATCH_TOKENS=524288`, `GRAD_ACCUM_STEPS=128` showed no meaningful gain from forcing flash
 - isolated-cache result:
 - `SDPA_BACKEND=auto`: `elapsed_s=74.18`, `tokens_per_s=7068`
 - `SDPA_BACKEND=flash`: `elapsed_s=74.14`, `tokens_per_s=7071`

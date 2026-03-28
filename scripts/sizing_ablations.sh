@@ -1,9 +1,11 @@
-set -e
+#!/usr/bin/env bash
+set -euo pipefail
 
 export WANDB=1
 export WANDB_PROJECT=param-golf-ablations
-export WANDB_GROUP=allama-size-probes
-export WANDB_TAGS=5090,allama,size-probe
+export WANDB_GROUP="${WANDB_GROUP:-allama-size-probes-v3}"
+export WANDB_TAGS="${WANDB_TAGS:-5090,allama,size-probe,nearcap,v3}"
+export TORCH_BLAS_PREFER_CUBLASLT=1
 
 BASE_ENV=(
   OUT_DIR=./runs_allama
@@ -20,8 +22,11 @@ BASE_ENV=(
   EVAL_MODE=sampled
   VAL_BATCH_SIZE=8
   VAL_BATCHES=8
+  MLP_MULTIPLE_OF=128
   USE_X0_SHORTCUT=1
   X0_GATE_INIT=-6.0
+  NORM_LAYOUT=postnorm
+  NORM_KIND=rmsnorm
 )
 
 probe_one () {
@@ -36,21 +41,25 @@ probe_one () {
   local SHARE_PATTERN="$9"
 
   env "${BASE_ENV[@]}" \
-    RUN_ID="$RUN_ID" \
-    MODEL_DIM="$MODEL_DIM" \
-    EMBED_DIM="$EMBED_DIM" \
-    NUM_LAYERS="$NUM_LAYERS" \
-    NUM_HEADS="$NUM_HEADS" \
-    NUM_KV_HEADS="$NUM_KV_HEADS" \
-    MLP_MULT="$MLP_MULT" \
-    NUM_SHARED_BLOCKS="$NUM_SHARED_BLOCKS" \
-    SHARE_PATTERN="$SHARE_PATTERN" \
-    NORM_LAYOUT=postnorm \
-    NORM_KIND=rmsnorm \
+    RUN_ID="${RUN_ID}" \
+    MODEL_DIM="${MODEL_DIM}" \
+    EMBED_DIM="${EMBED_DIM}" \
+    NUM_LAYERS="${NUM_LAYERS}" \
+    NUM_HEADS="${NUM_HEADS}" \
+    NUM_KV_HEADS="${NUM_KV_HEADS}" \
+    MLP_MULT="${MLP_MULT}" \
+    NUM_SHARED_BLOCKS="${NUM_SHARED_BLOCKS}" \
+    SHARE_PATTERN="${SHARE_PATTERN}" \
     python train_allama.py
 }
 
-probe_one probe_m1024_l24_s1 1024 256 24 16 4 2.5 1 chunk
-probe_one probe_m1024_l24_s2 1024 256 24 16 4 2.5 2 cycle
-probe_one probe_m1152_l24_s1 1152 288 24 18 6 2.5 1 chunk
-probe_one probe_m1152_l24_s2 1152 288 24 18 6 2.5 2 cycle
+# current sweep anchors
+probe_one probe_wide_s4_ff1125 1024 128 16 16 2 1.125 4 cycle
+probe_one probe_shortfat_s5_ff1125 896 896 20 14 2 1.125 5 cycle
+probe_one probe_balanced_s4_ff175 768 1792 24 12 4 1.75 4 cycle
+probe_one probe_tall_s4_ff2125 768 1024 32 12 2 2.125 4 cycle
+
+# immediate over-cap challengers
+probe_one probe_shortfat_s4_ff1625 896 896 20 14 2 1.625 4 cycle
+probe_one probe_balanced_s4_ff1875 768 1792 24 12 4 1.875 4 cycle
+probe_one probe_tall_s4_ff225 768 1024 32 12 2 2.25 4 cycle
