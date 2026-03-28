@@ -224,15 +224,16 @@ probe_one () {
     python train_allama.py
 }
 
-probe_one probe_wide_s4_ff1125 1024 128 16 16 2 1.125 4 cycle
-probe_one probe_shortfat_s5_ff1125 896 896 20 14 2 1.125 5 cycle
-probe_one probe_balanced_s4_ff175 768 1792 24 12 4 1.75 4 cycle
-probe_one probe_tall_s4_ff2125 768 1024 32 12 2 2.125 4 cycle
+probe_one probe_wide_s4_e384_ff10 1024 384 16 16 2 1.0 4 cycle
+probe_one probe_shortfat_s4_ff15 896 896 20 14 2 1.5 4 cycle
+probe_one probe_balanced_s4_e1472_ff175 768 1472 24 12 4 1.75 4 cycle
+probe_one probe_tall_s4_e832_ff2125 768 832 32 12 2 2.125 4 cycle
 
-# obvious near-cap challengers that looked too aggressive in raw-payload search
-probe_one probe_shortfat_s4_ff1625 896 896 20 14 2 1.625 4 cycle
-probe_one probe_balanced_s4_ff1875 768 1792 24 12 4 1.875 4 cycle
-probe_one probe_tall_s4_ff225 768 1024 32 12 2 2.25 4 cycle
+# obvious near-cap challengers that now bracket the calibrated anchors
+probe_one probe_wide_s4_e448_ff10 1024 448 16 16 2 1.0 4 cycle
+probe_one probe_shortfat_s5_ff1125 896 896 20 14 2 1.125 5 cycle
+probe_one probe_balanced_s4_e1536_ff175 768 1536 24 12 4 1.75 4 cycle
+probe_one probe_tall_s4_e896_ff2125 768 896 32 12 2 2.125 4 cycle
 ```
 
 Interpretation:
@@ -285,29 +286,33 @@ The meaningful conclusion is:
 - any size proxy or family search derived from the old exporter is invalid now
 - the old `0.945 * int8_payload_bytes_init` proxy is obsolete
 - the useful proxy under the corrected exporter is the architecture-fixed raw payload size, because the raw int8 payload bytes do not depend on trained values
-- on the current trainer/model, two full 750-step anchors landed at a much higher `final_zlib / raw_payload` band than the old README assumed:
-  - `shortfat_ff20_baseline`: `22,283,930 / 34,521,333 = 0.6455`
-  - `wide_ff15_baseline`: `22,878,654 / 36,116,777 = 0.6335`
-- with `code_bytes=157,752`, that puts the useful safe raw-payload target around `24.5M-25.0M`, not the older `34M-36M` band
+- on the current trainer/model, the completed 750-step runs so far have landed at a much higher `final_zlib / raw_payload` band than the old README assumed:
+- `wide_ff15_baseline`: `22,878,654 / 36,116,777 = 0.6335`
+- `shortfat_ff20_baseline`: `22,283,930 / 34,521,333 = 0.6455`
+- `shortfat_s5_ff1125_baseline`: `15,892,707 / 24,184,053 = 0.6572`
+- `balanced_s4_ff175_baseline`: `16,284,392 / 24,176,327 = 0.6736`
+- with `code_bytes=157,752`, the useful conservative raw-payload target on the current trainer is about `23.35M-23.55M`; that is the band used for the new family table below
 
 ### Phase 3: serious ablations
 
 Fresh family-size calibration under the current exporter is now done.
-The blocked sweep now uses near-cap families that keep `head_dim=64` and spend size budget through CUDA-friendly hidden sizes and, only where it actually helps, extra shared blocks. A broader search showed that `wide s8`, `balanced s6/s8`, and `tall s8` all overshoot badly even after lowering `MLP_MULT`; the only higher-block upgrade that stayed useful was `shortfat s5`.
+The blocked sweep now uses near-cap families that keep `head_dim=64` and spend size budget through CUDA-friendly hidden sizes first, then embed width only where it actually helps, and only then extra shared blocks. A broader search showed that `wide s8`, `balanced s6/s8`, and `tall s8` all overshoot badly even after lowering `MLP_MULT`; the only short-fat higher-block upgrade that stayed interesting was `shortfat s5`, but its best current form still landed slightly over cap on a real 750-step run.
 
 Default calibrated family anchors:
 
-- `wide_s4_ff1125`: `MODEL_DIM=1024`, `EMBED_DIM=128`, `NUM_LAYERS=16`, `NUM_HEADS=16`, `NUM_KV_HEADS=2`, `NUM_SHARED_BLOCKS=4`, `MLP_MULT=1.125`, `raw_payload_bytes=24,290,119`, `predicted_artifact_bytes=15,690,982`, headroom `309,018`
-- `shortfat_s5_ff1125`: `MODEL_DIM=896`, `EMBED_DIM=896`, `NUM_LAYERS=20`, `NUM_HEADS=14`, `NUM_KV_HEADS=2`, `NUM_SHARED_BLOCKS=5`, `MLP_MULT=1.125`, `raw_payload_bytes=24,184,053`, `predicted_artifact_bytes=15,623,154`, headroom `376,846`
-- `balanced_s4_ff175`: `MODEL_DIM=768`, `EMBED_DIM=1792`, `NUM_LAYERS=24`, `NUM_HEADS=12`, `NUM_KV_HEADS=4`, `NUM_SHARED_BLOCKS=4`, `MLP_MULT=1.75`, `raw_payload_bytes=24,176,327`, `predicted_artifact_bytes=15,618,213`, headroom `381,787`
-- `tall_s4_ff2125`: `MODEL_DIM=768`, `EMBED_DIM=1024`, `NUM_LAYERS=32`, `NUM_HEADS=12`, `NUM_KV_HEADS=2`, `NUM_SHARED_BLOCKS=4`, `MLP_MULT=2.125`, `raw_payload_bytes=23,857,735`, `predicted_artifact_bytes=15,414,478`, headroom `585,522`
+- `wide_s4_e384_ff10`: `MODEL_DIM=1024`, `EMBED_DIM=384`, `NUM_LAYERS=16`, `NUM_HEADS=16`, `NUM_KV_HEADS=2`, `NUM_SHARED_BLOCKS=4`, `MLP_MULT=1.0`, `raw_payload_bytes=23,502,151`, conservative `predicted_artifact_bytes=15,987,999`, headroom `12,001`
+- `shortfat_s4_ff15`: `MODEL_DIM=896`, `EMBED_DIM=896`, `NUM_LAYERS=20`, `NUM_HEADS=14`, `NUM_KV_HEADS=2`, `NUM_SHARED_BLOCKS=4`, `MLP_MULT=1.5`, `raw_payload_bytes=23,711,251`, conservative `predicted_artifact_bytes=16,128,842`, headroom `-128,842`; this is the one intentionally aggressive anchor because the short-fat family has also shown a lower observed ratio (`0.6572`) that would project this shape back under cap
+- `balanced_s4_e1472_ff175`: `MODEL_DIM=768`, `EMBED_DIM=1472`, `NUM_LAYERS=24`, `NUM_HEADS=12`, `NUM_KV_HEADS=4`, `NUM_SHARED_BLOCKS=4`, `MLP_MULT=1.75`, `raw_payload_bytes=23,356,487`, conservative `predicted_artifact_bytes=15,889,885`, headroom `110,115`
+- `tall_s4_e832_ff2125`: `MODEL_DIM=768`, `EMBED_DIM=832`, `NUM_LAYERS=32`, `NUM_HEADS=12`, `NUM_KV_HEADS=2`, `NUM_SHARED_BLOCKS=4`, `MLP_MULT=2.125`, `raw_payload_bytes=23,365,831`, conservative `predicted_artifact_bytes=15,896,178`, headroom `103,822`
 
 Calibration notes:
 
 - all four anchors preserve `head_dim=64` and `MLP_MULTIPLE_OF=128`
-- `shortfat_s5_ff1125` is the only higher-block upgrade that actually beat its `s4` counterpart on raw-payload targeting
-- the obvious one-notch challengers now are `shortfat_s4_ff1625`, `balanced_s4_ff1875`, and `tall_s4_ff225`; those are useful probe points, but they are not the default sweep families because they already project above the safe band
-- the older v2 family table and the stale-family guard are obsolete after this recalibration
+- `wide` was underusing size at `EMBED_DIM=128` once the current compression band was measured, so the new anchor spends those bytes through embed width while keeping the `hidden=1024` bucket
+- `balanced` and `tall` both work better as "keep the fatter hidden bucket, trim embed width" families than as "drop `MLP_MULT` and keep oversized embeds" families
+- `shortfat_s5_ff1125` remains the main over-cap challenger, but the default short-fat anchor now trims raw payload by dropping back to `s4` while keeping the stronger `hidden=1408` bucket
+- the obvious one-notch challengers now are `wide_s4_e448_ff10`, `shortfat_s5_ff1125`, `balanced_s4_e1536_ff175`, and `tall_s4_e896_ff2125`
+- the older v3 family table is obsolete after this recalibration
 
 The training helper `scripts/run_allama_ablations.sh` is intentionally
 training-only and runs a `train_gpt.py` reference baseline before any ALlama
@@ -321,7 +326,7 @@ bash scripts/run_allama_ablations.sh
 ```
 
 The `train_gpt.py` reference run is written under
-`runs_allama/sbcal_v3_gpt_baseline_reference/` by default and logs the same
+`runs_allama/sbcal_v4_gpt_baseline_reference/` by default and logs the same
 useful summary fields:
 
 - `artifact_limit_bytes`
@@ -354,7 +359,7 @@ There are now four intended sweep profiles:
 - `SWEEP_PROFILE=full`: 29 planned runs total, `1` `train_gpt.py` reference
   plus `28` ALlama runs across all blocks
 
-It prefixes run IDs with `sbcal_v3_` by default so the current near-cap family set does not collide with the older rejected calibration passes.
+It prefixes run IDs with `sbcal_v4_` by default so the current near-cap family set does not collide with the older rejected calibration passes.
 
 It skips already-completed run directories only when the artifacts exist,
 `train.log` shows the expected terminal step or intentional wallclock-capped

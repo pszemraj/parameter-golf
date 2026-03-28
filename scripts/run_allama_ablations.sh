@@ -4,7 +4,7 @@ set -euo pipefail
 
 export WANDB=1
 export WANDB_PROJECT=param-golf-ablations
-export WANDB_GROUP="${WANDB_GROUP:-allama-sharedblock-nearcap-v3}"
+export WANDB_GROUP="${WANDB_GROUP:-allama-sharedblock-nearcap-v4}"
 export WANDB_TAGS="${WANDB_TAGS:-5090,allama,nearcap,finalsize,behavior,blocked,aligned,sharedblocks,clipped_exporter}"
 export WANDB_WATCH="${WANDB_WATCH:-all}"
 export WANDB_WATCH_LOG_FREQ="${WANDB_WATCH_LOG_FREQ:-100}"
@@ -88,7 +88,7 @@ NUM_EPOCHS_VALUE="${NUM_EPOCHS:-1}"
 MAX_WALLCLOCK_SECONDS_VALUE="${MAX_WALLCLOCK_SECONDS:-${DEFAULT_MAX_WALLCLOCK_SECONDS}}"
 COMPILE_WARMUP_STEPS_VALUE="${COMPILE_WARMUP_STEPS:-20}"
 CONTROL_TENSOR_NAME_PATTERNS_VALUE="${CONTROL_TENSOR_NAME_PATTERNS:-attn_scale,mlp_scale,q_gain,x0_gate,norm}"
-RUN_ID_PREFIX="${RUN_ID_PREFIX:-sbcal_v3_}"
+RUN_ID_PREFIX="${RUN_ID_PREFIX:-sbcal_v4_}"
 
 BASE_ENV=(
   OUT_DIR="${OUT_DIR_VALUE}"
@@ -208,10 +208,10 @@ for TRAINER_ENV_KEY in "${TRAINER_ENV_TO_CLEAR[@]}"; do
 done
 
 FAMILIES=(
-  wide_s4_ff1125
-  shortfat_s5_ff1125
-  balanced_s4_ff175
-  tall_s4_ff2125
+  wide_s4_e384_ff10
+  shortfat_s4_ff15
+  balanced_s4_e1472_ff175
+  tall_s4_e832_ff2125
 )
 
 RUN_BASELINE_BLOCK="${RUN_BASELINE_BLOCK:-${DEFAULT_RUN_BASELINE_BLOCK}}"
@@ -256,10 +256,10 @@ if [[ -n "${ITERATIONS:-}" && -z "${MAX_STEPS:-}" ]]; then
 fi
 
 echo "sweep_profile=${SWEEP_PROFILE} run_id_prefix=${RUN_ID_PREFIX} compile=${RUN_COMPILE} force_rerun=${FORCE_RERUN} out_dir=${OUT_DIR_VALUE} data_path=${DATA_PATH_VALUE} tokenizer_path=${TOKENIZER_PATH_VALUE} vocab_size=${VOCAB_SIZE_VALUE} device=${DEVICE_VALUE} dtype=${DTYPE_VALUE} eval_mode=${EVAL_MODE_VALUE} val_batch_size=${VAL_BATCH_SIZE_VALUE} val_batches=${VAL_BATCHES_VALUE} eval_batch_tokens=${EVAL_BATCH_TOKENS_VALUE} train_batch_tokens=${TRAIN_BATCH_TOKENS_VALUE} grad_accum_steps=${GRAD_ACCUM_STEPS_VALUE} local_batch_size=${LOCAL_BATCH_SIZE} max_steps=${MAX_STEPS_VALUE} planned_train_tokens=${PLANNED_TRAIN_TOKENS} val_loss_every=${VAL_LOSS_EVERY_VALUE} train_log_every=${TRAIN_LOG_EVERY_VALUE} num_epochs=${NUM_EPOCHS_VALUE} max_wallclock_seconds=${MAX_WALLCLOCK_SECONDS_VALUE} compile_warmup_steps=${COMPILE_WARMUP_STEPS_VALUE} sdpa_backend=${SDPA_BACKEND_VALUE} mlp_multiple_of=${MLP_MULTIPLE_OF_VALUE} control_tensor_name_patterns=${CONTROL_TENSOR_NAME_PATTERNS_VALUE} wandb_watch=${WANDB_WATCH} wandb_watch_log_freq=${WANDB_WATCH_LOG_FREQ} trainer_env_sanitized=1 run_gpt_baseline=${RUN_GPT_BASELINE} allama_runs_planned=${ALLAMA_RUNS} allama_runs_scheduled=${SCHEDULED_ALLAMA_RUNS} total_runs_planned=${TOTAL_RUNS} total_runs_scheduled=${SCHEDULED_TOTAL_RUNS}"
-echo "family_wide_s4_ff1125 model_dim=1024 embed_dim=128 num_layers=16 num_heads=16 num_kv_heads=2 num_shared_blocks=4 mlp_mult=1.125 raw_payload_bytes=24290119 predicted_artifact_bytes=15690982 predicted_headroom_bytes=309018"
-echo "family_shortfat_s5_ff1125 model_dim=896 embed_dim=896 num_layers=20 num_heads=14 num_kv_heads=2 num_shared_blocks=5 mlp_mult=1.125 raw_payload_bytes=24184053 predicted_artifact_bytes=15623154 predicted_headroom_bytes=376846"
-echo "family_balanced_s4_ff175 model_dim=768 embed_dim=1792 num_layers=24 num_heads=12 num_kv_heads=4 num_shared_blocks=4 mlp_mult=1.75 raw_payload_bytes=24176327 predicted_artifact_bytes=15618213 predicted_headroom_bytes=381787"
-echo "family_tall_s4_ff2125 model_dim=768 embed_dim=1024 num_layers=32 num_heads=12 num_kv_heads=2 num_shared_blocks=4 mlp_mult=2.125 raw_payload_bytes=23857735 predicted_artifact_bytes=15414478 predicted_headroom_bytes=585522"
+echo "family_wide_s4_e384_ff10 model_dim=1024 embed_dim=384 num_layers=16 num_heads=16 num_kv_heads=2 num_shared_blocks=4 mlp_mult=1.0 raw_payload_bytes=23502151 predicted_artifact_bytes_conservative=15987999 predicted_headroom_bytes_conservative=12001"
+echo "family_shortfat_s4_ff15 model_dim=896 embed_dim=896 num_layers=20 num_heads=14 num_kv_heads=2 num_shared_blocks=4 mlp_mult=1.5 raw_payload_bytes=23711251 predicted_artifact_bytes_conservative=16128842 predicted_headroom_bytes_conservative=-128842"
+echo "family_balanced_s4_e1472_ff175 model_dim=768 embed_dim=1472 num_layers=24 num_heads=12 num_kv_heads=4 num_shared_blocks=4 mlp_mult=1.75 raw_payload_bytes=23356487 predicted_artifact_bytes_conservative=15889885 predicted_headroom_bytes_conservative=110115"
+echo "family_tall_s4_e832_ff2125 model_dim=768 embed_dim=832 num_layers=32 num_heads=12 num_kv_heads=2 num_shared_blocks=4 mlp_mult=2.125 raw_payload_bytes=23365831 predicted_artifact_bytes_conservative=15896178 predicted_headroom_bytes_conservative=103822"
 
 run_is_complete () {
   local RUN_DIR="$1"
@@ -313,7 +313,7 @@ run_gpt_reference () {
   local SAVE_PATH_FILE="${RUN_DIR}/model.pt"
   local EXPORT_INT8_PATH_FILE="${RUN_DIR}/model_int8.ptz"
   local RUN_SPEC_PATH="${RUN_DIR}/.run_spec"
-  local RUN_SPEC="family_set=sharedblock_nearcap_v3 kind=train_gpt_reference out_dir=${OUT_DIR_VALUE} data_path=${DATA_PATH_VALUE} tokenizer_path=${TOKENIZER_PATH_VALUE} vocab_size=${VOCAB_SIZE_VALUE} train_seq_len=${TRAIN_SEQ_LEN_VALUE} eval_seq_len=${EVAL_SEQ_LEN_VALUE} train_batch_tokens=${TRAIN_BATCH_TOKENS_VALUE} grad_accum_steps=${GRAD_ACCUM_STEPS_VALUE} max_steps=${MAX_STEPS_VALUE} val_loss_every=${VAL_LOSS_EVERY_VALUE} train_log_every=${TRAIN_LOG_EVERY_VALUE} eval_mode=${EVAL_MODE_VALUE} val_batch_size=${VAL_BATCH_SIZE_VALUE} val_batches=${VAL_BATCHES_VALUE} eval_batch_tokens=${EVAL_BATCH_TOKENS_VALUE} max_wallclock_seconds=${MAX_WALLCLOCK_SECONDS_VALUE} compile_warmup_steps=${COMPILE_WARMUP_STEPS_VALUE} compile=${RUN_COMPILE} wandb_watch=${WANDB_WATCH} wandb_watch_log_freq=${WANDB_WATCH_LOG_FREQ}"
+  local RUN_SPEC="family_set=sharedblock_nearcap_v4 kind=train_gpt_reference out_dir=${OUT_DIR_VALUE} data_path=${DATA_PATH_VALUE} tokenizer_path=${TOKENIZER_PATH_VALUE} vocab_size=${VOCAB_SIZE_VALUE} train_seq_len=${TRAIN_SEQ_LEN_VALUE} eval_seq_len=${EVAL_SEQ_LEN_VALUE} train_batch_tokens=${TRAIN_BATCH_TOKENS_VALUE} grad_accum_steps=${GRAD_ACCUM_STEPS_VALUE} max_steps=${MAX_STEPS_VALUE} val_loss_every=${VAL_LOSS_EVERY_VALUE} train_log_every=${TRAIN_LOG_EVERY_VALUE} eval_mode=${EVAL_MODE_VALUE} val_batch_size=${VAL_BATCH_SIZE_VALUE} val_batches=${VAL_BATCHES_VALUE} eval_batch_tokens=${EVAL_BATCH_TOKENS_VALUE} max_wallclock_seconds=${MAX_WALLCLOCK_SECONDS_VALUE} compile_warmup_steps=${COMPILE_WARMUP_STEPS_VALUE} compile=${RUN_COMPILE} wandb_watch=${WANDB_WATCH} wandb_watch_log_freq=${WANDB_WATCH_LOG_FREQ}"
 
   if [[ "${FORCE_RERUN}" != "1" ]]; then
     if run_is_complete "${RUN_DIR}" "${MAX_STEPS_VALUE}" "${MAX_WALLCLOCK_SECONDS_VALUE}" "${RUN_SPEC}" "size_final " "final_int8_zlib_roundtrip_exact " "model.pt" "model_int8.ptz"; then
@@ -368,36 +368,36 @@ run_one () {
   local NORM_LAYOUT NORM_KIND SHARE_PATTERN USE_X0_SHORTCUT X0_GATE_INIT
 
   case "$FAMILY" in
-    wide_s4_ff1125)
+    wide_s4_e384_ff10)
       MODEL_DIM=1024
-      EMBED_DIM=128
+      EMBED_DIM=384
       NUM_LAYERS=16
       NUM_HEADS=16
       NUM_KV_HEADS=2
       NUM_SHARED_BLOCKS=4
-      MLP_MULT=1.125
+      MLP_MULT=1.0
       ;;
-    shortfat_s5_ff1125)
+    shortfat_s4_ff15)
       MODEL_DIM=896
       EMBED_DIM=896
       NUM_LAYERS=20
       NUM_HEADS=14
       NUM_KV_HEADS=2
-      NUM_SHARED_BLOCKS=5
-      MLP_MULT=1.125
+      NUM_SHARED_BLOCKS=4
+      MLP_MULT=1.5
       ;;
-    balanced_s4_ff175)
+    balanced_s4_e1472_ff175)
       MODEL_DIM=768
-      EMBED_DIM=1792
+      EMBED_DIM=1472
       NUM_LAYERS=24
       NUM_HEADS=12
       NUM_KV_HEADS=4
       NUM_SHARED_BLOCKS=4
       MLP_MULT=1.75
       ;;
-    tall_s4_ff2125)
+    tall_s4_e832_ff2125)
       MODEL_DIM=768
-      EMBED_DIM=1024
+      EMBED_DIM=832
       NUM_LAYERS=32
       NUM_HEADS=12
       NUM_KV_HEADS=2
@@ -471,7 +471,7 @@ run_one () {
   local SAVE_PATH_FILE="${RUN_DIR}/model.pt"
   local EXPORT_INT8_PATH_FILE="${RUN_DIR}/model_int8.pt"
   local RUN_SPEC_PATH="${RUN_DIR}/.run_spec"
-  local RUN_SPEC="family_set=sharedblock_nearcap_v3 out_dir=${OUT_DIR_VALUE} data_path=${DATA_PATH_VALUE} tokenizer_path=${TOKENIZER_PATH_VALUE} vocab_size=${VOCAB_SIZE_VALUE} device=${DEVICE_VALUE} dtype=${DTYPE_VALUE} num_epochs=${NUM_EPOCHS_VALUE} max_wallclock_seconds=${MAX_WALLCLOCK_SECONDS_VALUE} family=${FAMILY} variant=${VARIANT} model_dim=${MODEL_DIM} embed_dim=${EMBED_DIM} num_layers=${NUM_LAYERS} num_heads=${NUM_HEADS} num_kv_heads=${NUM_KV_HEADS} num_shared_blocks=${NUM_SHARED_BLOCKS} mlp_mult=${MLP_MULT} mlp_multiple_of=${MLP_MULTIPLE_OF_VALUE} norm_layout=${NORM_LAYOUT} norm_kind=${NORM_KIND} share_pattern=${SHARE_PATTERN} use_x0_shortcut=${USE_X0_SHORTCUT} x0_gate_init=${X0_GATE_INIT} train_seq_len=${TRAIN_SEQ_LEN_VALUE} eval_seq_len=${EVAL_SEQ_LEN_VALUE} train_batch_tokens=${TRAIN_BATCH_TOKENS_VALUE} grad_accum_steps=${GRAD_ACCUM_STEPS_VALUE} max_steps=${MAX_STEPS_VALUE} val_loss_every=${VAL_LOSS_EVERY_VALUE} train_log_every=${TRAIN_LOG_EVERY_VALUE} eval_mode=${EVAL_MODE_VALUE} val_batch_size=${VAL_BATCH_SIZE_VALUE} val_batches=${VAL_BATCHES_VALUE} eval_batch_tokens=${EVAL_BATCH_TOKENS_VALUE} compile_warmup_steps=${COMPILE_WARMUP_STEPS_VALUE} sdpa_backend=${SDPA_BACKEND_VALUE} run_compile=${RUN_COMPILE} control_tensor_name_patterns=${CONTROL_TENSOR_NAME_PATTERNS_VALUE} wandb_watch=${WANDB_WATCH} wandb_watch_log_freq=${WANDB_WATCH_LOG_FREQ}"
+  local RUN_SPEC="family_set=sharedblock_nearcap_v4 out_dir=${OUT_DIR_VALUE} data_path=${DATA_PATH_VALUE} tokenizer_path=${TOKENIZER_PATH_VALUE} vocab_size=${VOCAB_SIZE_VALUE} device=${DEVICE_VALUE} dtype=${DTYPE_VALUE} num_epochs=${NUM_EPOCHS_VALUE} max_wallclock_seconds=${MAX_WALLCLOCK_SECONDS_VALUE} family=${FAMILY} variant=${VARIANT} model_dim=${MODEL_DIM} embed_dim=${EMBED_DIM} num_layers=${NUM_LAYERS} num_heads=${NUM_HEADS} num_kv_heads=${NUM_KV_HEADS} num_shared_blocks=${NUM_SHARED_BLOCKS} mlp_mult=${MLP_MULT} mlp_multiple_of=${MLP_MULTIPLE_OF_VALUE} norm_layout=${NORM_LAYOUT} norm_kind=${NORM_KIND} share_pattern=${SHARE_PATTERN} use_x0_shortcut=${USE_X0_SHORTCUT} x0_gate_init=${X0_GATE_INIT} train_seq_len=${TRAIN_SEQ_LEN_VALUE} eval_seq_len=${EVAL_SEQ_LEN_VALUE} train_batch_tokens=${TRAIN_BATCH_TOKENS_VALUE} grad_accum_steps=${GRAD_ACCUM_STEPS_VALUE} max_steps=${MAX_STEPS_VALUE} val_loss_every=${VAL_LOSS_EVERY_VALUE} train_log_every=${TRAIN_LOG_EVERY_VALUE} eval_mode=${EVAL_MODE_VALUE} val_batch_size=${VAL_BATCH_SIZE_VALUE} val_batches=${VAL_BATCHES_VALUE} eval_batch_tokens=${EVAL_BATCH_TOKENS_VALUE} compile_warmup_steps=${COMPILE_WARMUP_STEPS_VALUE} sdpa_backend=${SDPA_BACKEND_VALUE} run_compile=${RUN_COMPILE} control_tensor_name_patterns=${CONTROL_TENSOR_NAME_PATTERNS_VALUE} wandb_watch=${WANDB_WATCH} wandb_watch_log_freq=${WANDB_WATCH_LOG_FREQ}"
 
   case "${RUN_COMPILE}" in
     1)
