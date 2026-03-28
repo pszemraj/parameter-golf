@@ -513,7 +513,7 @@ run_one () {
     X0_GATE_INIT="$X0_GATE_INIT" \
     SAVE_PATH="${SAVE_PATH_FILE}" \
     EXPORT_INT8_PATH="${EXPORT_INT8_PATH_FILE}" \
-    python train_allama_reborn.py "${PYTHON_FLAGS[@]}"
+    python train_allama.py "${PYTHON_FLAGS[@]}"
 
   printf '%s\n' "${RUN_SPEC}" > "${RUN_SPEC_PATH}"
 

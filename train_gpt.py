@@ -34,9 +34,6 @@ try:
 except ImportError:
     wandb = None
 
-import wandb_compile_safe_watch as wandb_compile_safe_watch_module
-from wandb_compile_safe_watch import patch_wandb_watch_for_torch_compile
-
 ARTIFACT_SIZE_LIMIT_BYTES = 16_000_000
 
 
@@ -866,7 +863,6 @@ class WandbLogger:
         log_freq: int,
         log_fn: Optional[Callable[[str], None]] = None,
         use_hooks: bool = True,
-        compiled: bool = False,
     ) -> None:
         """Enable optional W&B parameter or gradient watching for a model.
 
@@ -875,7 +871,6 @@ class WandbLogger:
         :param int log_freq: Watch logging frequency.
         :param Callable[[str], None] | None log_fn: Optional local logger.
         :param bool use_hooks: Whether to use W&B hooks instead of manual histograms.
-        :param bool compiled: Whether the training graph is compiled.
         :return None: Configures watch behavior when active.
         """
         if self.run is None or mode == "off":
@@ -892,23 +887,17 @@ class WandbLogger:
                 )
             return
         try:
-            if compiled:
-                patch_wandb_watch_for_torch_compile(log_fn=log_fn)
             self.run.watch(model, log=mode, log_freq=max(1, log_freq))
-            self.watch_backend = "hooks_compile_safe" if compiled else "hooks"
+            self.watch_backend = "hooks"
         except Exception as exc:
             self.watch_backend = "off"
             if log_fn is not None:
-                backend = "hooks_compile_safe" if compiled else "hooks"
                 log_fn(
-                    f"wandb_watch_warning mode={mode} log_freq={log_freq} backend={backend} error={exc}"
+                    f"wandb_watch_warning mode={mode} log_freq={log_freq} backend=hooks error={exc}"
                 )
             return
         if log_fn is not None:
-            backend = "hooks_compile_safe" if compiled else "hooks"
-            log_fn(
-                f"wandb_watch mode={mode} log_freq={max(1, log_freq)} backend={backend}"
-            )
+            log_fn(f"wandb_watch mode={mode} log_freq={max(1, log_freq)} backend=hooks")
 
     def _histogram(self, tensor: Tensor) -> Optional["wandb.Histogram"]:
         """Build a W&B histogram from a tensor without copying all values to Python.
@@ -1512,10 +1501,7 @@ def main() -> None:
     global zeropower_via_newtonschulz5
 
     code = Path(__file__).read_text(encoding="utf-8")
-    submission_code_paths = [
-        Path(__file__).resolve(),
-        Path(wandb_compile_safe_watch_module.__file__).resolve(),
-    ]
+    submission_code_paths = [Path(__file__).resolve()]
     args = Hyperparameters()
     if args.eval_mode not in {"full", "sampled"}:
         raise ValueError(f"Unknown EVAL_MODE={args.eval_mode}")
@@ -1824,7 +1810,7 @@ def main() -> None:
         "model_stored_parameter_bytes_init": int(stored_parameter_bytes),
         "int8_payload_bytes_init": int(init_quant_stats["int8_payload_bytes"]),
         "model_code_bytes": int(code_bytes),
-        "compile_fullgraph": bool(args.wandb_watch == "off"),
+        "compile_fullgraph": bool(args.compile),
         "baseline_reference": True,
         "reference_script": "train_gpt.py",
         "embed_lr_base": float(token_lr),
@@ -1845,11 +1831,10 @@ def main() -> None:
         mode=args.wandb_watch,
         log_freq=args.wandb_watch_log_freq,
         log_fn=log0,
-        use_hooks=True,
-        compiled=args.compile,
+        use_hooks=not args.compile,
     )
 
-    compile_fullgraph = args.wandb_watch == "off"
+    compile_fullgraph = bool(args.compile)
     compiled_model = (
         torch.compile(base_model, dynamic=False, fullgraph=compile_fullgraph)
         if args.compile

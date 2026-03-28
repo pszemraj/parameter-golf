@@ -1,5 +1,5 @@
 """
-ALlama Reborn: a decoder-only ALBERT-style trainer for OpenAI Parameter Golf.
+ALlama: a decoder-only ALBERT-style trainer for OpenAI Parameter Golf.
 
 Key features in this version:
 - configurable cross-layer sharing (ALL, SOME, untied-ish)
@@ -56,15 +56,13 @@ try:
 except Exception:  # pragma: no cover
     tqdm = None
 
-import allama_v4_integration as allama_v4_integration_module
-import allama_v4_shared_model as allama_v4_shared_model_module
-import wandb_compile_safe_watch as wandb_compile_safe_watch_module
-from allama_v4_integration import (
+import allama_shared as allama_shared_module
+from allama_shared import (
     build_hyper_shared_model_from_args,
     build_hyper_shared_optimizers_from_args,
     compile_model_for_train,
+    sdpa_enable_gqa_available,
 )
-from wandb_compile_safe_watch import patch_wandb_watch_for_torch_compile
 
 
 # -----------------------------------------------------------------------------
@@ -910,7 +908,7 @@ def setup_bpb_metric(
 # SHARED MODEL
 # -----------------------------------------------------------------------------
 
-# The runtime model implementation lives in `allama_v4_shared_model.py`.
+# The runtime model implementation lives in `allama_shared.py`.
 # Keep this trainer focused on configuration, data, logging, and orchestration.
 
 # -----------------------------------------------------------------------------
@@ -2094,7 +2092,6 @@ class WandbLogger:
         log_freq: int,
         log_fn: Optional[Callable[[str], None]] = None,
         use_hooks: bool = True,
-        compiled: bool = False,
     ) -> None:
         """Enable optional W&B parameter or gradient watching for a model.
 
@@ -2103,7 +2100,6 @@ class WandbLogger:
         :param int log_freq: Watch logging frequency.
         :param Optional[Callable[[str], None]] log_fn: Optional local logger for status.
         :param bool use_hooks: Whether to use W&B module hooks instead of manual histograms.
-        :param bool compiled: Whether the training graph is compiled.
         """
         if self.run is None or mode == "off":
             return
@@ -2119,23 +2115,17 @@ class WandbLogger:
                 )
             return
         try:
-            if compiled:
-                patch_wandb_watch_for_torch_compile(log_fn=log_fn)
             self.run.watch(model, log=mode, log_freq=max(1, log_freq))
-            self.watch_backend = "hooks_compile_safe" if compiled else "hooks"
+            self.watch_backend = "hooks"
         except Exception as exc:
             self.watch_backend = "off"
             if log_fn is not None:
-                backend = "hooks_compile_safe" if compiled else "hooks"
                 log_fn(
-                    f"wandb_watch_warning mode={mode} log_freq={log_freq} backend={backend} error={exc}"
+                    f"wandb_watch_warning mode={mode} log_freq={log_freq} backend=hooks error={exc}"
                 )
             return
         if log_fn is not None:
-            backend = "hooks_compile_safe" if compiled else "hooks"
-            log_fn(
-                f"wandb_watch mode={mode} log_freq={max(1, log_freq)} backend={backend}"
-            )
+            log_fn(f"wandb_watch mode={mode} log_freq={max(1, log_freq)} backend=hooks")
 
     def _histogram(self, tensor: Tensor) -> Optional["wandb.Histogram"]:
         """Build a W&B histogram from a tensor without materializing all values on CPU.
@@ -2367,9 +2357,7 @@ def main() -> None:
 
     submission_code_paths = [
         Path(__file__).resolve(),
-        Path(allama_v4_shared_model_module.__file__).resolve(),
-        Path(allama_v4_integration_module.__file__).resolve(),
-        Path(wandb_compile_safe_watch_module.__file__).resolve(),
+        Path(allama_shared_module.__file__).resolve(),
     ]
 
     report_model = build_hyper_shared_model_from_args(
@@ -2410,7 +2398,7 @@ def main() -> None:
     maybe_load_model_weights(report_model, args, log)
 
     compile_enabled = False
-    compile_fullgraph = args.wandb_watch == "off"
+    compile_fullgraph = bool(args.compile_model)
     if args.compile_model:
         if not hasattr(torch, "compile"):
             log("note=torch.compile requested but unavailable in this PyTorch build")
@@ -2556,8 +2544,7 @@ def main() -> None:
     log(
         f"x0_shortcut={args.use_x0_shortcut} x0_gate_init={args.x0_gate_init} "
         f"q_gain_init={args.q_gain_init} simple_layer_modulation=1 "
-        "global_rotary=1 "
-        f"enable_gqa_probe={int(allama_v4_shared_model_module.sdpa_enable_gqa_available())}"
+        f"global_rotary=1 enable_gqa_probe={int(sdpa_enable_gqa_available())}"
     )
     log(format_model_count_report("model_init", param_report))
     if metric.kind == "none":
@@ -2648,8 +2635,7 @@ def main() -> None:
         mode=args.wandb_watch,
         log_freq=args.wandb_watch_log_freq,
         log_fn=log,
-        use_hooks=True,
-        compiled=compile_enabled,
+        use_hooks=not compile_enabled,
     )
 
     if (

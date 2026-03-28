@@ -21,7 +21,7 @@ BASE_ENV=(
   VAL_BATCH_SIZE=8
   VAL_BATCHES=8
   USE_X0_SHORTCUT=1
-  RESID_MIX_INIT=0.1
+  X0_GATE_INIT=-6.0
 )
 
 probe_one () {
@@ -46,8 +46,8 @@ probe_one () {
     NUM_SHARED_BLOCKS="$NUM_SHARED_BLOCKS" \
     SHARE_PATTERN="$SHARE_PATTERN" \
     NORM_LAYOUT=postnorm \
-    NORM_KIND=layernorm \
-    python train_allama_reborn.py
+    NORM_KIND=rmsnorm \
+    python train_allama.py
 }
 
 probe_one probe_m1024_l24_s1 1024 256 24 16 4 2.5 1 chunk

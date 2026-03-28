@@ -60,7 +60,7 @@ ambiguous number.
 
 ## Working directory
 
-Work inside a local clone or fork of `openai/parameter-golf` and place `train_allama_reborn.py` in the repo root.
+Work inside a local clone or fork of `openai/parameter-golf` and place `train_allama.py` in the repo root.
 
 You are using the repo mainly for:
 - `data/cached_challenge_fineweb.py`
@@ -221,7 +221,7 @@ probe_one () {
     SHARE_PATTERN="$SHARE_PATTERN" \
     NORM_LAYOUT=postnorm \
     NORM_KIND=rmsnorm \
-    python train_allama_reborn.py
+    python train_allama.py
 }
 
 probe_one probe_m1024_l24_s1 1024 256 24 16 4 2.5 1 chunk
@@ -409,11 +409,10 @@ Those watch settings are part of the printed launch summary and `.run_spec`, so
 changing them does not silently reuse a run directory from a different
 observability contract.
 
-When `torch.compile` is active, both trainers keep `wandb.watch(...)` enabled
-through a compile-safe hook patch. The W&B callbacks are forced to stay eager,
-which preserves parameter and gradient visibility at `WANDB_WATCH_LOG_FREQ`
-without pulling the hook bodies into the compiled graph. Eager runs still use
-normal `wandb.watch` hooks.
+When `torch.compile` is active, both trainers fall back to manual histogram
+logging for `WANDB_WATCH` instead of using W&B module hooks. Eager runs still
+use normal `wandb.watch(...)` hooks, while compiled runs keep observability out
+of the compiled graph on purpose.
 
 The important batch rule is:
 
@@ -440,12 +439,12 @@ honor that same resolved batch contract now:
 
 - `train_gpt.py` no longer hardcodes `grad_accum_steps=8 // WORLD_SIZE` when
   `GRAD_ACCUM_STEPS` is explicitly set
-- `train_gpt.py` and `train_allama_reborn.py` now resolve full-eval batch size
+- `train_gpt.py` and `train_allama.py` now resolve full-eval batch size
   from the same global token-budget contract:
   `EVAL_BATCH_TOKENS` when explicitly set, otherwise
   `sampled_eval_batch_size * EVAL_SEQ_LEN * WORLD_SIZE`
 - `RUN_COMPILE=0|1` now applies to both the GPT baseline and ALlama runs
-- `train_allama_reborn.py` now compiles before optional DDP wrapping instead of
+- `train_allama.py` now compiles before optional DDP wrapping instead of
   silently downgrading distributed runs to eager, so the multi-GPU ALlama path
   matches the intended 8xH100-style launch topology
 - both trainers exclude compile warmup and eval time from their logged
@@ -568,7 +567,7 @@ WANDB=1 \
 WANDB_PROJECT=param-golf-ablations \
 WANDB_GROUP=allama-sanity \
 WANDB_TAGS=5090,allama,sanity \
-python train_allama_reborn.py
+python train_allama.py
 ```
 
 ## Notes
