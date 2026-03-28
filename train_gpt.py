@@ -34,6 +34,9 @@ try:
 except ImportError:
     wandb = None
 
+import wandb_compile_safe_watch as wandb_compile_safe_watch_module
+from wandb_compile_safe_watch import patch_wandb_watch_for_torch_compile
+
 ARTIFACT_SIZE_LIMIT_BYTES = 16_000_000
 
 
@@ -240,6 +243,30 @@ class Muon(torch.optim.Optimizer):
             ),
         )
 
+    def _updates_buffer(self, group: dict[str, Any], params: list[Tensor]) -> Tensor:
+        """Reuse one flat bfloat16 update buffer per parameter group.
+
+        :param dict[str, Any] group: Optimizer parameter group metadata.
+        :param list[Tensor] params: Parameters assigned to the group.
+        :return Tensor: Reusable flat update buffer for the group.
+        """
+        total_params = sum(int(p.numel()) for p in params)
+        device = params[0].device
+        updates_flat = group.get("_updates_flat")
+        if (
+            updates_flat is None
+            or not isinstance(updates_flat, Tensor)
+            or updates_flat.numel() != total_params
+            or updates_flat.device != device
+        ):
+            updates_flat = torch.zeros(
+                total_params, device=device, dtype=torch.bfloat16
+            )
+            group["_updates_flat"] = updates_flat
+        else:
+            updates_flat.zero_()
+        return updates_flat
+
     @torch.no_grad()
     def step(self, closure: Optional[Callable[[], Tensor]] = None) -> Optional[Tensor]:
         """Apply one Muon optimization step.
@@ -264,11 +291,7 @@ class Muon(torch.optim.Optimizer):
             momentum = group["momentum"]
             backend_steps = group["backend_steps"]
             nesterov = group["nesterov"]
-
-            total_params = sum(int(p.numel()) for p in params)
-            updates_flat = torch.zeros(
-                total_params, device=params[0].device, dtype=torch.bfloat16
-            )
+            updates_flat = self._updates_buffer(group, params)
 
             curr = 0
             for i, p in enumerate(params):
@@ -843,6 +866,7 @@ class WandbLogger:
         log_freq: int,
         log_fn: Optional[Callable[[str], None]] = None,
         use_hooks: bool = True,
+        compiled: bool = False,
     ) -> None:
         """Enable optional W&B parameter or gradient watching for a model.
 
@@ -851,6 +875,7 @@ class WandbLogger:
         :param int log_freq: Watch logging frequency.
         :param Callable[[str], None] | None log_fn: Optional local logger.
         :param bool use_hooks: Whether to use W&B hooks instead of manual histograms.
+        :param bool compiled: Whether the training graph is compiled.
         :return None: Configures watch behavior when active.
         """
         if self.run is None or mode == "off":
@@ -867,19 +892,23 @@ class WandbLogger:
                 )
             return
         try:
+            if compiled:
+                patch_wandb_watch_for_torch_compile(log_fn=log_fn)
             self.run.watch(model, log=mode, log_freq=max(1, log_freq))
-            self.watch_backend = "hooks"
+            self.watch_backend = "hooks_compile_safe" if compiled else "hooks"
         except Exception as exc:
+            self.watch_backend = "off"
             if log_fn is not None:
+                backend = "hooks_compile_safe" if compiled else "hooks"
                 log_fn(
-                    f"wandb_watch_warning mode={mode} log_freq={log_freq} backend=hooks error={exc}"
-                )
-                log_fn(
-                    f"wandb_watch mode={mode} log_freq={self.watch_log_freq} backend=manual_histogram"
+                    f"wandb_watch_warning mode={mode} log_freq={log_freq} backend={backend} error={exc}"
                 )
             return
         if log_fn is not None:
-            log_fn(f"wandb_watch mode={mode} log_freq={max(1, log_freq)} backend=hooks")
+            backend = "hooks_compile_safe" if compiled else "hooks"
+            log_fn(
+                f"wandb_watch mode={mode} log_freq={max(1, log_freq)} backend={backend}"
+            )
 
     def _histogram(self, tensor: Tensor) -> Optional["wandb.Histogram"]:
         """Build a W&B histogram from a tensor without copying all values to Python.
@@ -1483,6 +1512,10 @@ def main() -> None:
     global zeropower_via_newtonschulz5
 
     code = Path(__file__).read_text(encoding="utf-8")
+    submission_code_paths = [
+        Path(__file__).resolve(),
+        Path(wandb_compile_safe_watch_module.__file__).resolve(),
+    ]
     args = Hyperparameters()
     if args.eval_mode not in {"full", "sampled"}:
         raise ValueError(f"Unknown EVAL_MODE={args.eval_mode}")
@@ -1644,7 +1677,7 @@ def main() -> None:
     restore_low_dim_params_to_fp32(base_model)
     init_state_dict = base_model.state_dict()
     init_quant_obj, init_quant_stats = quantize_state_dict_int8(init_state_dict)
-    code_bytes = len(code.encode("utf-8"))
+    code_bytes = int(sum(path.stat().st_size for path in submission_code_paths))
     stored_parameter_bytes = state_dict_tensor_nbytes(init_state_dict)
     init_quant_zlib_bytes = serialized_zlib_nbytes(init_quant_obj)
 
@@ -1791,6 +1824,7 @@ def main() -> None:
         "model_stored_parameter_bytes_init": int(stored_parameter_bytes),
         "int8_payload_bytes_init": int(init_quant_stats["int8_payload_bytes"]),
         "model_code_bytes": int(code_bytes),
+        "compile_fullgraph": bool(args.wandb_watch == "off"),
         "baseline_reference": True,
         "reference_script": "train_gpt.py",
         "embed_lr_base": float(token_lr),
@@ -1811,11 +1845,13 @@ def main() -> None:
         mode=args.wandb_watch,
         log_freq=args.wandb_watch_log_freq,
         log_fn=log0,
-        use_hooks=not args.compile,
+        use_hooks=True,
+        compiled=args.compile,
     )
 
+    compile_fullgraph = args.wandb_watch == "off"
     compiled_model = (
-        torch.compile(base_model, dynamic=False, fullgraph=True)
+        torch.compile(base_model, dynamic=False, fullgraph=compile_fullgraph)
         if args.compile
         else base_model
     )

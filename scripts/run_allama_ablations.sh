@@ -87,7 +87,7 @@ DTYPE_VALUE="${DTYPE:-bf16}"
 NUM_EPOCHS_VALUE="${NUM_EPOCHS:-1}"
 MAX_WALLCLOCK_SECONDS_VALUE="${MAX_WALLCLOCK_SECONDS:-${DEFAULT_MAX_WALLCLOCK_SECONDS}}"
 COMPILE_WARMUP_STEPS_VALUE="${COMPILE_WARMUP_STEPS:-20}"
-CONTROL_TENSOR_NAME_PATTERNS_VALUE="${CONTROL_TENSOR_NAME_PATTERNS:-depth_gains}"
+CONTROL_TENSOR_NAME_PATTERNS_VALUE="${CONTROL_TENSOR_NAME_PATTERNS:-attn_scale,mlp_scale,q_gain,x0_gate,norm}"
 RUN_ID_PREFIX="${RUN_ID_PREFIX:-sbcal_v2_}"
 
 BASE_ENV=(
@@ -182,6 +182,7 @@ TRAINER_ENV_TO_CLEAR=(
   TIED_EMBED_INIT_STD
   TIED_EMBED_LR
   TIE_EMBEDDINGS
+  X0_GATE_INIT
   TOKENIZER_PATH
   TRAIN_BATCH_TOKENS
   TRAIN_FILES
@@ -364,7 +365,7 @@ run_one () {
   local FAMILY="$2"
   local VARIANT="$3"
   local MODEL_DIM EMBED_DIM NUM_LAYERS NUM_HEADS NUM_KV_HEADS NUM_SHARED_BLOCKS MLP_MULT
-  local NORM_LAYOUT NORM_KIND SHARE_PATTERN USE_X0_SHORTCUT RESID_MIX_INIT
+  local NORM_LAYOUT NORM_KIND SHARE_PATTERN USE_X0_SHORTCUT X0_GATE_INIT
 
   case "$FAMILY" in
     wide_ff15)
@@ -412,52 +413,52 @@ run_one () {
   case "$VARIANT" in
     baseline)
       NORM_LAYOUT=postnorm
-      NORM_KIND=layernorm
+      NORM_KIND=rmsnorm
       SHARE_PATTERN=cycle
       USE_X0_SHORTCUT=1
-      RESID_MIX_INIT=0.10
+      X0_GATE_INIT=-6.0
       ;;
     share_chunk)
       NORM_LAYOUT=postnorm
-      NORM_KIND=layernorm
+      NORM_KIND=rmsnorm
       SHARE_PATTERN=chunk
       USE_X0_SHORTCUT=1
-      RESID_MIX_INIT=0.10
+      X0_GATE_INIT=-6.0
       ;;
     share_repeat2)
       NORM_LAYOUT=postnorm
-      NORM_KIND=layernorm
+      NORM_KIND=rmsnorm
       SHARE_PATTERN=repeat_2
       USE_X0_SHORTCUT=1
-      RESID_MIX_INIT=0.10
+      X0_GATE_INIT=-6.0
       ;;
-    norm_prenorm_ln)
+    norm_prenorm_rms)
       NORM_LAYOUT=prenorm
-      NORM_KIND=layernorm
+      NORM_KIND=rmsnorm
       SHARE_PATTERN=cycle
       USE_X0_SHORTCUT=1
-      RESID_MIX_INIT=0.10
+      X0_GATE_INIT=-6.0
       ;;
     norm_post_rms)
       NORM_LAYOUT=postnorm
       NORM_KIND=rmsnorm
       SHARE_PATTERN=cycle
       USE_X0_SHORTCUT=1
-      RESID_MIX_INIT=0.10
+      X0_GATE_INIT=-6.0
       ;;
-    shortcut_mix005)
+    shortcut_gate005)
       NORM_LAYOUT=postnorm
-      NORM_KIND=layernorm
+      NORM_KIND=rmsnorm
       SHARE_PATTERN=cycle
       USE_X0_SHORTCUT=1
-      RESID_MIX_INIT=0.05
+      X0_GATE_INIT=-2.9444389792
       ;;
     shortcut_no_x0)
       NORM_LAYOUT=postnorm
-      NORM_KIND=layernorm
+      NORM_KIND=rmsnorm
       SHARE_PATTERN=cycle
       USE_X0_SHORTCUT=0
-      RESID_MIX_INIT=0.00
+      X0_GATE_INIT=-6.0
       ;;
     *)
       echo "unknown VARIANT=$VARIANT" >&2
@@ -470,7 +471,7 @@ run_one () {
   local SAVE_PATH_FILE="${RUN_DIR}/model.pt"
   local EXPORT_INT8_PATH_FILE="${RUN_DIR}/model_int8.pt"
   local RUN_SPEC_PATH="${RUN_DIR}/.run_spec"
-  local RUN_SPEC="family_set=sharedblock_nearcap_v2 out_dir=${OUT_DIR_VALUE} data_path=${DATA_PATH_VALUE} tokenizer_path=${TOKENIZER_PATH_VALUE} vocab_size=${VOCAB_SIZE_VALUE} device=${DEVICE_VALUE} dtype=${DTYPE_VALUE} num_epochs=${NUM_EPOCHS_VALUE} max_wallclock_seconds=${MAX_WALLCLOCK_SECONDS_VALUE} family=${FAMILY} variant=${VARIANT} model_dim=${MODEL_DIM} embed_dim=${EMBED_DIM} num_layers=${NUM_LAYERS} num_heads=${NUM_HEADS} num_kv_heads=${NUM_KV_HEADS} num_shared_blocks=${NUM_SHARED_BLOCKS} mlp_mult=${MLP_MULT} mlp_multiple_of=${MLP_MULTIPLE_OF_VALUE} norm_layout=${NORM_LAYOUT} norm_kind=${NORM_KIND} share_pattern=${SHARE_PATTERN} use_x0_shortcut=${USE_X0_SHORTCUT} resid_mix_init=${RESID_MIX_INIT} train_seq_len=${TRAIN_SEQ_LEN_VALUE} eval_seq_len=${EVAL_SEQ_LEN_VALUE} train_batch_tokens=${TRAIN_BATCH_TOKENS_VALUE} grad_accum_steps=${GRAD_ACCUM_STEPS_VALUE} max_steps=${MAX_STEPS_VALUE} val_loss_every=${VAL_LOSS_EVERY_VALUE} train_log_every=${TRAIN_LOG_EVERY_VALUE} eval_mode=${EVAL_MODE_VALUE} val_batch_size=${VAL_BATCH_SIZE_VALUE} val_batches=${VAL_BATCHES_VALUE} eval_batch_tokens=${EVAL_BATCH_TOKENS_VALUE} compile_warmup_steps=${COMPILE_WARMUP_STEPS_VALUE} sdpa_backend=${SDPA_BACKEND_VALUE} run_compile=${RUN_COMPILE} control_tensor_name_patterns=${CONTROL_TENSOR_NAME_PATTERNS_VALUE} wandb_watch=${WANDB_WATCH} wandb_watch_log_freq=${WANDB_WATCH_LOG_FREQ}"
+  local RUN_SPEC="family_set=sharedblock_nearcap_v2 out_dir=${OUT_DIR_VALUE} data_path=${DATA_PATH_VALUE} tokenizer_path=${TOKENIZER_PATH_VALUE} vocab_size=${VOCAB_SIZE_VALUE} device=${DEVICE_VALUE} dtype=${DTYPE_VALUE} num_epochs=${NUM_EPOCHS_VALUE} max_wallclock_seconds=${MAX_WALLCLOCK_SECONDS_VALUE} family=${FAMILY} variant=${VARIANT} model_dim=${MODEL_DIM} embed_dim=${EMBED_DIM} num_layers=${NUM_LAYERS} num_heads=${NUM_HEADS} num_kv_heads=${NUM_KV_HEADS} num_shared_blocks=${NUM_SHARED_BLOCKS} mlp_mult=${MLP_MULT} mlp_multiple_of=${MLP_MULTIPLE_OF_VALUE} norm_layout=${NORM_LAYOUT} norm_kind=${NORM_KIND} share_pattern=${SHARE_PATTERN} use_x0_shortcut=${USE_X0_SHORTCUT} x0_gate_init=${X0_GATE_INIT} train_seq_len=${TRAIN_SEQ_LEN_VALUE} eval_seq_len=${EVAL_SEQ_LEN_VALUE} train_batch_tokens=${TRAIN_BATCH_TOKENS_VALUE} grad_accum_steps=${GRAD_ACCUM_STEPS_VALUE} max_steps=${MAX_STEPS_VALUE} val_loss_every=${VAL_LOSS_EVERY_VALUE} train_log_every=${TRAIN_LOG_EVERY_VALUE} eval_mode=${EVAL_MODE_VALUE} val_batch_size=${VAL_BATCH_SIZE_VALUE} val_batches=${VAL_BATCHES_VALUE} eval_batch_tokens=${EVAL_BATCH_TOKENS_VALUE} compile_warmup_steps=${COMPILE_WARMUP_STEPS_VALUE} sdpa_backend=${SDPA_BACKEND_VALUE} run_compile=${RUN_COMPILE} control_tensor_name_patterns=${CONTROL_TENSOR_NAME_PATTERNS_VALUE} wandb_watch=${WANDB_WATCH} wandb_watch_log_freq=${WANDB_WATCH_LOG_FREQ}"
 
   case "${RUN_COMPILE}" in
     1)
@@ -509,7 +510,7 @@ run_one () {
     NORM_KIND="$NORM_KIND" \
     SHARE_PATTERN="$SHARE_PATTERN" \
     USE_X0_SHORTCUT="$USE_X0_SHORTCUT" \
-    RESID_MIX_INIT="$RESID_MIX_INIT" \
+    X0_GATE_INIT="$X0_GATE_INIT" \
     SAVE_PATH="${SAVE_PATH_FILE}" \
     EXPORT_INT8_PATH="${EXPORT_INT8_PATH_FILE}" \
     python train_allama_reborn.py "${PYTHON_FLAGS[@]}"
@@ -549,11 +550,11 @@ if [[ "${RUN_SHARE_BLOCK}" == "1" ]]; then
 fi
 
 if [[ "${RUN_NORM_BLOCK}" == "1" ]]; then
-  run_variant_block norm_prenorm_ln
+  run_variant_block norm_prenorm_rms
   run_variant_block norm_post_rms
 fi
 
 if [[ "${RUN_SHORTCUT_BLOCK}" == "1" ]]; then
-  run_variant_block shortcut_mix005
+  run_variant_block shortcut_gate005
   run_variant_block shortcut_no_x0
 fi

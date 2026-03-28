@@ -195,7 +195,7 @@ BASE_ENV=(
   VAL_BATCH_SIZE=8
   VAL_BATCHES=8
   USE_X0_SHORTCUT=1
-  RESID_MIX_INIT=0.1
+  X0_GATE_INIT=-6.0
 )
 
 probe_one () {
@@ -220,7 +220,7 @@ probe_one () {
     NUM_SHARED_BLOCKS="$NUM_SHARED_BLOCKS" \
     SHARE_PATTERN="$SHARE_PATTERN" \
     NORM_LAYOUT=postnorm \
-    NORM_KIND=layernorm \
+    NORM_KIND=rmsnorm \
     python train_allama_reborn.py
 }
 
@@ -250,7 +250,7 @@ Two things matter here:
 
 - `size_final` drifts upward quickly during training because the int8 payload becomes much less compressible
 - that drift is not caused by checkpoint junk; the payload/checkpoint metadata is tiny, and the growth comes from model entropy
-- the default export should not waste bytes on float passthrough tensors that do not justify it; keeping `resid_mix_logits` float was too expensive for these near-cap runs, so the default control pattern is now just `depth_gains`
+- the default export should not waste bytes on float passthrough tensors that do not justify it; the v4 shared path keeps only the low-dimensional control tensors in fp32 by default: `attn_scale,mlp_scale,q_gain,x0_gate,norm`
 
 Representative drift on an old near-cap anchor using the older max-abs exporter:
 
@@ -409,11 +409,11 @@ Those watch settings are part of the printed launch summary and `.run_spec`, so
 changing them does not silently reuse a run directory from a different
 observability contract.
 
-When `torch.compile` is active, both trainers use a manual histogram backend
-instead of W&B module hooks. That keeps scalar logging intact and preserves
-parameter and gradient visibility at `WANDB_WATCH_LOG_FREQ` without injecting
-hook state into the compiled graph and triggering Dynamo recompile-limit
-failures. Eager runs still use normal `wandb.watch` hooks.
+When `torch.compile` is active, both trainers keep `wandb.watch(...)` enabled
+through a compile-safe hook patch. The W&B callbacks are forced to stay eager,
+which preserves parameter and gradient visibility at `WANDB_WATCH_LOG_FREQ`
+without pulling the hook bodies into the compiled graph. Eager runs still use
+normal `wandb.watch` hooks.
 
 The important batch rule is:
 
@@ -503,8 +503,8 @@ It is structured as:
 
 - baseline block: all four families at the same canonical settings
 - share-pattern block: `chunk` and `repeat_2`, applied to the same four families
-- norm block: `prenorm+layernorm` and `postnorm+rmsnorm`, applied to the same four families
-- shortcut block: `resid_mix_init=0.05` and `no_x0`, applied to the same four families
+- norm block: `prenorm+rmsnorm` and `postnorm+rmsnorm`, applied to the same four families
+- shortcut block: `x0_gate_init=sigmoid^-1(0.05)` and `no_x0`, applied to the same four families
 
 That means family comparisons and factor comparisons are not confounded by silently changing the family set underneath them.
 

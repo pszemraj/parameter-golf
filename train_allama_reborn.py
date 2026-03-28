@@ -9,7 +9,7 @@ Key features in this version:
 - ALBERT-style x0 / resid_mix shortcut at virtual depth
 - GQA via SDPA enable_gqa=True when supported by the local PyTorch
 - full fixed-validation scanning for Parameter Golf, plus sampled proxy eval
-- optional q_delta / v_delta hooks and per-token loss return path for TTT-style eval work
+- per-token loss return path for TTT-style eval work
 - optional W&B logging directly from the trainer
 - checkpoint save/load plus compact int8 payload export/load for local iteration
 - concise size/parameter reporting for W&B and logs
@@ -38,7 +38,6 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, 
 import numpy as np
 import torch
 import torch.distributed as dist
-import torch.nn.functional as F
 from torch import Tensor, nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 
@@ -56,6 +55,16 @@ try:
     from tqdm.auto import tqdm
 except Exception:  # pragma: no cover
     tqdm = None
+
+import allama_v4_integration as allama_v4_integration_module
+import allama_v4_shared_model as allama_v4_shared_model_module
+import wandb_compile_safe_watch as wandb_compile_safe_watch_module
+from allama_v4_integration import (
+    build_hyper_shared_model_from_args,
+    build_hyper_shared_optimizers_from_args,
+    compile_model_for_train,
+)
+from wandb_compile_safe_watch import patch_wandb_watch_for_torch_compile
 
 
 # -----------------------------------------------------------------------------
@@ -206,6 +215,13 @@ class Hyperparameters:
     beta1: float
     beta2: float
     adam_eps: float
+    embed_lr: float
+    tied_embed_lr: float
+    head_lr: float
+    matrix_lr: float
+    scalar_lr: float
+    muon_momentum: float
+    muon_backend_steps: int
     grad_clip_norm: float
     max_wallclock_seconds: float
     sdpa_backend: str
@@ -224,17 +240,19 @@ class Hyperparameters:
     norm_layout: str
     norm_eps: float
     tie_embeddings: bool
+    tied_embed_init_std: float
     rope_base: float
     qk_norm: bool
+    q_gain_init: float
+    x0_gate_init: float
+    cast_linears: bool
     zero_init_residual: bool
-    layer_scale_init: float
     attn_dropout: float
     resid_dropout: float
     use_bias: bool
     logit_softcap: float
     use_final_norm: bool
     use_x0_shortcut: bool
-    resid_mix_init: float
 
     # Reporting / artifact estimation
     report_artifact: bool
@@ -315,14 +333,25 @@ class Hyperparameters:
             val_batches=int(os.environ.get("VAL_BATCHES", "8")),
             val_loss_every=int(os.environ.get("VAL_LOSS_EVERY", "500")),
             train_log_every=int(os.environ.get("TRAIN_LOG_EVERY", "25")),
-            learning_rate=float(os.environ.get("LEARNING_RATE", "3e-4")),
-            min_lr=float(os.environ.get("MIN_LR", "3e-5")),
+            learning_rate=float(
+                os.environ.get("LEARNING_RATE", os.environ.get("MATRIX_LR", "0.02"))
+            ),
+            min_lr=float(os.environ.get("MIN_LR", "0.002")),
             warmup_steps=int(os.environ.get("WARMUP_STEPS", "50")),
             compile_warmup_steps=int(os.environ.get("COMPILE_WARMUP_STEPS", "20")),
             weight_decay=float(os.environ.get("WEIGHT_DECAY", "0.01")),
             beta1=float(os.environ.get("BETA1", "0.9")),
             beta2=float(os.environ.get("BETA2", "0.95")),
             adam_eps=float(os.environ.get("ADAM_EPS", "1e-8")),
+            embed_lr=float(os.environ.get("EMBED_LR", "0.03")),
+            tied_embed_lr=float(
+                os.environ.get("TIED_EMBED_LR", os.environ.get("EMBED_LR", "0.03"))
+            ),
+            head_lr=float(os.environ.get("HEAD_LR", "0.01")),
+            matrix_lr=float(os.environ.get("MATRIX_LR", "0.02")),
+            scalar_lr=float(os.environ.get("SCALAR_LR", "0.04")),
+            muon_momentum=float(os.environ.get("MUON_MOMENTUM", "0.95")),
+            muon_backend_steps=int(os.environ.get("MUON_BACKEND_STEPS", "5")),
             grad_clip_norm=float(os.environ.get("GRAD_CLIP_NORM", "1.0")),
             max_wallclock_seconds=float(os.environ.get("MAX_WALLCLOCK_SECONDS", "0.0")),
             sdpa_backend=normalize_sdpa_backend(os.environ.get("SDPA_BACKEND", "auto")),
@@ -335,21 +364,25 @@ class Hyperparameters:
             num_kv_heads=int(os.environ.get("NUM_KV_HEADS", "4")),
             mlp_mult=float(os.environ.get("MLP_MULT", "2.5")),
             mlp_multiple_of=int(os.environ.get("MLP_MULTIPLE_OF", "32")),
-            norm_kind=os.environ.get("NORM_KIND", "layernorm"),
-            norm_layout=os.environ.get("NORM_LAYOUT", "postnorm"),
+            norm_kind=os.environ.get("NORM_KIND", "rmsnorm"),
+            norm_layout=os.environ.get("NORM_LAYOUT", "prenorm"),
             norm_eps=float(os.environ.get("NORM_EPS", "1e-5")),
             tie_embeddings=env_bool("TIE_EMBEDDINGS", True),
+            tied_embed_init_std=float(os.environ.get("TIED_EMBED_INIT_STD", "0.005")),
             rope_base=float(os.environ.get("ROPE_BASE", "10000.0")),
             qk_norm=env_bool("QK_NORM", True),
+            q_gain_init=float(
+                os.environ.get("Q_GAIN_INIT", os.environ.get("QK_GAIN_INIT", "1.5"))
+            ),
+            x0_gate_init=float(os.environ.get("X0_GATE_INIT", "-6.0")),
+            cast_linears=env_bool("CAST_LINEARS", True),
             zero_init_residual=env_bool("ZERO_INIT_RESIDUAL", True),
-            layer_scale_init=float(os.environ.get("LAYER_SCALE_INIT", "1.0")),
             attn_dropout=float(os.environ.get("ATTN_DROPOUT", "0.0")),
             resid_dropout=float(os.environ.get("RESID_DROPOUT", "0.0")),
             use_bias=env_bool("USE_BIAS", False),
             logit_softcap=float(os.environ.get("LOGIT_SOFTCAP", "30.0")),
             use_final_norm=env_bool("USE_FINAL_NORM", True),
             use_x0_shortcut=env_bool("USE_X0_SHORTCUT", True),
-            resid_mix_init=float(os.environ.get("RESID_MIX_INIT", "0.1")),
             report_artifact=env_bool("REPORT_ARTIFACT", True),
             quant_keep_float_numel=int(
                 os.environ.get("QUANT_KEEP_FLOAT_NUMEL", "4096")
@@ -357,7 +390,7 @@ class Hyperparameters:
             control_tensor_name_patterns=tuple(
                 env_csv(
                     "CONTROL_TENSOR_NAME_PATTERNS",
-                    "depth_gains",
+                    "attn_scale,mlp_scale,q_gain,x0_gate,norm",
                 )
             ),
             wandb_enable=wandb_enable,
@@ -874,701 +907,11 @@ def setup_bpb_metric(
 
 
 # -----------------------------------------------------------------------------
-# MODEL UTILITIES
+# SHARED MODEL
 # -----------------------------------------------------------------------------
 
-
-class RMSNorm(nn.Module):
-    """Root-mean-square normalization with a learned per-channel scale."""
-
-    def __init__(self, dim: int, eps: float = 1e-5):
-        """Initialize the RMSNorm scale parameter and epsilon.
-
-        :param int dim: Hidden dimension to normalize.
-        :param float eps: Numerical stability epsilon.
-        """
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(dim))
-        self.eps = eps
-
-    def forward(self, x: Tensor) -> Tensor:
-        """Normalize the last dimension by RMS while preserving input dtype.
-
-        :param Tensor x: Input activations.
-        :return Tensor: RMS-normalized activations.
-        """
-        x32 = x.float()
-        rms = torch.rsqrt(x32.pow(2).mean(dim=-1, keepdim=True) + self.eps)
-        y = x32 * rms
-        return (y * self.weight.float()).to(dtype=x.dtype)
-
-
-def make_norm(dim: int, norm_kind: str, eps: float) -> nn.Module:
-    """Construct the requested normalization module for one hidden dimension.
-
-    :param int dim: Hidden dimension to normalize.
-    :param str norm_kind: Normalization type name.
-    :param float eps: Numerical stability epsilon.
-    :return nn.Module: Instantiated normalization layer.
-    """
-    kind = norm_kind.lower()
-    if kind == "rmsnorm":
-        return RMSNorm(dim, eps)
-    if kind == "layernorm":
-        return nn.LayerNorm(dim, eps=eps)
-    raise ValueError(f"Unknown NORM_KIND={norm_kind}")
-
-
-class Rotary(nn.Module):
-    """RoPE cache that lazily materializes cosine and sine tables."""
-
-    def __init__(self, dim: int, base: float = 10000.0):
-        """Create a rotary embedding helper for one attention head size.
-
-        :param int dim: Rotary dimension per attention head.
-        :param float base: RoPE frequency base.
-        """
-        super().__init__()
-        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
-        self._cached_seq_len = 0
-        self._cos: Optional[Tensor] = None
-        self._sin: Optional[Tensor] = None
-
-    def forward(
-        self, seq_len: int, device: torch.device, dtype: torch.dtype
-    ) -> tuple[Tensor, Tensor]:
-        """Return cached cosine and sine tensors for the requested sequence length.
-
-        :param int seq_len: Sequence length requiring rotary tables.
-        :param torch.device device: Device where the tables should live.
-        :param torch.dtype dtype: Dtype to cast the cached tables to.
-        :return tuple[Tensor, Tensor]: Cosine and sine RoPE caches.
-        """
-        if (
-            self._cos is None
-            or self._sin is None
-            or self._cached_seq_len < seq_len
-            or self._cos.device != device
-        ):
-            positions = torch.arange(seq_len, device=device, dtype=self.inv_freq.dtype)
-            freqs = torch.outer(positions, self.inv_freq.to(device))
-            self._cos = freqs.cos()[None, None, :, :]
-            self._sin = freqs.sin()[None, None, :, :]
-            self._cached_seq_len = seq_len
-        assert self._cos is not None and self._sin is not None
-        return self._cos[:, :, :seq_len, :].to(dtype=dtype), self._sin[
-            :, :, :seq_len, :
-        ].to(dtype=dtype)
-
-
-def apply_rotary_emb(x: Tensor, cos: Tensor, sin: Tensor) -> Tensor:
-    """Apply rotary position embedding to a query or key tensor.
-
-    :param Tensor x: Query or key tensor with even last dimension.
-    :param Tensor cos: Cosine rotary cache.
-    :param Tensor sin: Sine rotary cache.
-    :return Tensor: Rotated tensor.
-    """
-    half = x.size(-1) // 2
-    x1, x2 = x[..., :half], x[..., half:]
-    return torch.cat((x1 * cos + x2 * sin, x2 * cos - x1 * sin), dim=-1)
-
-
-def probe_sdpa_enable_gqa() -> bool:
-    """Check whether the local PyTorch build accepts ``enable_gqa=True`` in SDPA.
-
-    :return bool: ``True`` when grouped-query SDPA is supported by the runtime.
-    """
-    try:
-        q = torch.randn(1, 4, 2, 8)
-        k = torch.randn(1, 2, 2, 8)
-        v = torch.randn(1, 2, 2, 8)
-        _ = F.scaled_dot_product_attention(q, k, v, is_causal=True, enable_gqa=True)
-        return True
-    except Exception:
-        return False
-
-
-SDPA_ENABLE_GQA = probe_sdpa_enable_gqa()
-
-
-DeltaSpec = Any
-
-
-def materialize_delta(delta: DeltaSpec, x: Tensor) -> Optional[Tensor]:
-    """Resolve an optional tensor or callback delta against the current activations.
-
-    :param DeltaSpec delta: Tensor, callback, mapping entry, or ``None``.
-    :param Tensor x: Reference activation tensor for device and dtype.
-    :return Optional[Tensor]: Materialized delta tensor or ``None``.
-    """
-    if delta is None:
-        return None
-    out = delta
-    if callable(out):
-        try:
-            out = out(x)
-        except TypeError:
-            out = out()
-    if out is None:
-        return None
-    if not isinstance(out, Tensor):
-        raise TypeError(
-            f"Delta must be a Tensor, callable returning Tensor, or None; got {type(out)}"
-        )
-    return out.to(device=x.device, dtype=x.dtype)
-
-
-def parse_share_pattern(pattern: str) -> tuple[str, int]:
-    """Parse the configured layer-sharing pattern into a normalized representation.
-
-    :param str pattern: Raw share-pattern string from configuration.
-    :return tuple[str, int]: Canonical pattern name and repeat count.
-    """
-    p = pattern.strip().lower()
-    if p in {"chunk", "contiguous"}:
-        return "chunk", 0
-    if p in {"cycle", "round_robin", "roundrobin"}:
-        return "cycle", 0
-    repeat_n: Optional[int] = None
-    if p.startswith("repeat_"):
-        repeat_n = int(p.split("_", 1)[1])
-    elif p.startswith("repeat") and len(p) > len("repeat"):
-        suffix = p[len("repeat") :]
-        if suffix.startswith(":"):
-            suffix = suffix[1:]
-        repeat_n = int(suffix)
-    if repeat_n is not None:
-        if repeat_n <= 0:
-            raise ValueError(f"repeat_N requires N > 0, got {repeat_n}")
-        return "repeat", repeat_n
-    raise ValueError(f"Unknown SHARE_PATTERN={pattern}")
-
-
-# -----------------------------------------------------------------------------
-# MODEL
-# -----------------------------------------------------------------------------
-
-
-class CausalSelfAttention(nn.Module):
-    """Causal self-attention block with optional grouped-query attention."""
-
-    def __init__(
-        self,
-        dim: int,
-        num_heads: int,
-        num_kv_heads: int,
-        qk_norm: bool,
-        attn_dropout: float,
-        resid_dropout: float,
-        use_bias: bool,
-    ):
-        """Initialize the shared QKV projection and output projection layers.
-
-        :param int dim: Model hidden dimension.
-        :param int num_heads: Number of query heads.
-        :param int num_kv_heads: Number of key/value heads.
-        :param bool qk_norm: Whether to RMS-normalize queries and keys.
-        :param float attn_dropout: Attention dropout probability.
-        :param float resid_dropout: Residual dropout probability.
-        :param bool use_bias: Whether linear layers use bias terms.
-        """
-        super().__init__()
-        if dim % num_heads != 0:
-            raise ValueError("MODEL_DIM must be divisible by NUM_HEADS")
-        if num_heads % num_kv_heads != 0:
-            raise ValueError("NUM_HEADS must be divisible by NUM_KV_HEADS")
-        self.num_heads = num_heads
-        self.num_kv_heads = num_kv_heads
-        self.head_dim = dim // num_heads
-        if self.head_dim % 2 != 0:
-            raise ValueError("head_dim must be even for RoPE")
-        self.qk_norm = qk_norm
-        self.attn_dropout = attn_dropout
-        self.resid_dropout = nn.Dropout(resid_dropout)
-
-        kv_dim = num_kv_heads * self.head_dim
-        self.qkv = nn.Linear(dim, dim + 2 * kv_dim, bias=use_bias)
-        self.out_proj = nn.Linear(dim, dim, bias=use_bias)
-
-    def forward(
-        self,
-        x: Tensor,
-        rotary: Rotary,
-        q_delta: DeltaSpec = None,
-        v_delta: DeltaSpec = None,
-    ) -> Tensor:
-        """Run causal attention, optional deltas, and the output projection.
-
-        :param Tensor x: Input activations.
-        :param Rotary rotary: Rotary cache helper.
-        :param DeltaSpec q_delta: Optional additive query delta.
-        :param DeltaSpec v_delta: Optional additive value delta.
-        :return Tensor: Attention output after projection and residual dropout.
-        """
-        bsz, seq_len, _ = x.shape
-        kv_dim = self.num_kv_heads * self.head_dim
-        q, k, v = self.qkv(x).split(
-            (self.num_heads * self.head_dim, kv_dim, kv_dim), dim=-1
-        )
-
-        q_extra = materialize_delta(q_delta, x)
-        v_extra = materialize_delta(v_delta, x)
-        if q_extra is not None:
-            q = q + q_extra
-        if v_extra is not None:
-            v = v + v_extra
-
-        q = q.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-        k = k.view(bsz, seq_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
-        v = v.view(bsz, seq_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
-
-        if self.qk_norm:
-            q = F.rms_norm(q, (self.head_dim,))
-            k = F.rms_norm(k, (self.head_dim,))
-
-        cos, sin = rotary(seq_len, x.device, q.dtype)
-        q = apply_rotary_emb(q, cos, sin)
-        k = apply_rotary_emb(k, cos, sin)
-
-        if self.num_kv_heads != self.num_heads and SDPA_ENABLE_GQA:
-            y = F.scaled_dot_product_attention(
-                q,
-                k,
-                v,
-                attn_mask=None,
-                is_causal=True,
-                dropout_p=self.attn_dropout if self.training else 0.0,
-                enable_gqa=True,
-            )
-        else:
-            if self.num_kv_heads != self.num_heads:
-                repeat = self.num_heads // self.num_kv_heads
-                k = k.repeat_interleave(repeat, dim=1)
-                v = v.repeat_interleave(repeat, dim=1)
-            y = F.scaled_dot_product_attention(
-                q,
-                k,
-                v,
-                attn_mask=None,
-                is_causal=True,
-                dropout_p=self.attn_dropout if self.training else 0.0,
-            )
-
-        y = y.transpose(1, 2).contiguous().view(bsz, seq_len, -1)
-        return self.resid_dropout(self.out_proj(y))
-
-
-class SwiGLU(nn.Module):
-    """SwiGLU feed-forward block with rounded hidden width."""
-
-    def __init__(
-        self,
-        dim: int,
-        mlp_mult: float,
-        multiple_of: int,
-        resid_dropout: float,
-        use_bias: bool,
-    ):
-        """Initialize the gated MLP projections for one transformer block.
-
-        :param int dim: Model hidden dimension.
-        :param float mlp_mult: Feed-forward expansion ratio before rounding.
-        :param int multiple_of: Hidden width alignment multiple.
-        :param float resid_dropout: Residual dropout probability.
-        :param bool use_bias: Whether linear layers use bias terms.
-        """
-        super().__init__()
-        hidden = int(dim * mlp_mult)
-        hidden = multiple_of * ((hidden + multiple_of - 1) // multiple_of)
-        self.gate_up = nn.Linear(dim, hidden * 2, bias=use_bias)
-        self.down = nn.Linear(hidden, dim, bias=use_bias)
-        self.resid_dropout = nn.Dropout(resid_dropout)
-
-    def forward(self, x: Tensor) -> Tensor:
-        """Apply gated activation, down projection, and residual dropout.
-
-        :param Tensor x: Input activations.
-        :return Tensor: Feed-forward output.
-        """
-        gate, up = self.gate_up(x).chunk(2, dim=-1)
-        return self.resid_dropout(self.down(F.silu(gate) * up))
-
-
-class ALlamaBlock(nn.Module):
-    """One virtual transformer layer combining attention, MLP, and norms."""
-
-    def __init__(
-        self,
-        dim: int,
-        num_heads: int,
-        num_kv_heads: int,
-        mlp_mult: float,
-        mlp_multiple_of: int,
-        norm_kind: str,
-        norm_layout: str,
-        norm_eps: float,
-        qk_norm: bool,
-        attn_dropout: float,
-        resid_dropout: float,
-        use_bias: bool,
-    ):
-        """Construct one shared block instance used across virtual layers.
-
-        :param int dim: Model hidden dimension.
-        :param int num_heads: Number of query heads.
-        :param int num_kv_heads: Number of key/value heads.
-        :param float mlp_mult: Feed-forward expansion ratio before rounding.
-        :param int mlp_multiple_of: Hidden width alignment multiple.
-        :param str norm_kind: Normalization type name.
-        :param str norm_layout: Whether norms are pre- or post-residual.
-        :param float norm_eps: Numerical stability epsilon for normalization.
-        :param bool qk_norm: Whether to RMS-normalize queries and keys.
-        :param float attn_dropout: Attention dropout probability.
-        :param float resid_dropout: Residual dropout probability.
-        :param bool use_bias: Whether linear layers use bias terms.
-        """
-        super().__init__()
-        self.norm_layout = norm_layout.lower()
-        if self.norm_layout not in {"prenorm", "postnorm"}:
-            raise ValueError(f"Unknown NORM_LAYOUT={norm_layout}")
-        self.norm1 = make_norm(dim, norm_kind, norm_eps)
-        self.norm2 = make_norm(dim, norm_kind, norm_eps)
-        self.attn = CausalSelfAttention(
-            dim=dim,
-            num_heads=num_heads,
-            num_kv_heads=num_kv_heads,
-            qk_norm=qk_norm,
-            attn_dropout=attn_dropout,
-            resid_dropout=resid_dropout,
-            use_bias=use_bias,
-        )
-        self.mlp = SwiGLU(
-            dim=dim,
-            mlp_mult=mlp_mult,
-            multiple_of=mlp_multiple_of,
-            resid_dropout=resid_dropout,
-            use_bias=use_bias,
-        )
-
-    def forward(
-        self,
-        x: Tensor,
-        x0: Optional[Tensor],
-        rotary: Rotary,
-        attn_gain: Tensor | float = 1.0,
-        ffn_gain: Tensor | float = 1.0,
-        resid_mix_logits: Optional[Tensor] = None,
-        q_delta: DeltaSpec = None,
-        v_delta: DeltaSpec = None,
-    ) -> Tensor:
-        """Run one virtual layer update with optional x0 mixing and deltas.
-
-        :param Tensor x: Current hidden state.
-        :param Optional[Tensor] x0: Optional original hidden state shortcut.
-        :param Rotary rotary: Rotary cache helper.
-        :param Tensor | float attn_gain: Per-layer attention residual scale.
-        :param Tensor | float ffn_gain: Per-layer MLP residual scale.
-        :param Optional[Tensor] resid_mix_logits: Optional logits for x/x0 mixing.
-        :param DeltaSpec q_delta: Optional additive query delta.
-        :param DeltaSpec v_delta: Optional additive value delta.
-        :return Tensor: Updated hidden state.
-        """
-        if isinstance(attn_gain, Tensor):
-            attn_gain = attn_gain.to(dtype=x.dtype).view(1, 1, 1)
-        if isinstance(ffn_gain, Tensor):
-            ffn_gain = ffn_gain.to(dtype=x.dtype).view(1, 1, 1)
-
-        if x0 is not None and resid_mix_logits is not None:
-            mix = resid_mix_logits.to(dtype=x.dtype).softmax(dim=0)
-            x = mix[0][None, None, :] * x + mix[1][None, None, :] * x0
-
-        if self.norm_layout == "prenorm":
-            attn_in = self.norm1(x)
-            x = x + attn_gain * self.attn(
-                attn_in, rotary, q_delta=q_delta, v_delta=v_delta
-            )
-            x = x + ffn_gain * self.mlp(self.norm2(x))
-            return x
-
-        attn_out = self.attn(x, rotary, q_delta=q_delta, v_delta=v_delta)
-        x = self.norm1(x + attn_gain * attn_out)
-        x = self.norm2(x + ffn_gain * self.mlp(x))
-        return x
-
-
-class ALlama(nn.Module):
-    """Decoder-only ALBERT-style language model with configurable layer sharing."""
-
-    def __init__(self, args: Hyperparameters, vocab_size: int):
-        """Build the model modules and sharing layout from resolved hyperparameters.
-
-        :param Hyperparameters args: Resolved trainer and model configuration.
-        :param int vocab_size: Vocabulary size used for embeddings and logits.
-        """
-        super().__init__()
-        if args.num_layers <= 0:
-            raise ValueError("NUM_LAYERS must be positive")
-        if args.num_shared_blocks <= 0:
-            raise ValueError("NUM_SHARED_BLOCKS must be positive")
-        if args.num_shared_blocks > args.num_layers:
-            raise ValueError("NUM_SHARED_BLOCKS cannot exceed NUM_LAYERS")
-        if args.embed_dim <= 0:
-            raise ValueError("EMBED_DIM must be positive")
-        if args.model_dim % args.num_heads != 0:
-            raise ValueError("MODEL_DIM must be divisible by NUM_HEADS")
-
-        self.args = args
-        self.vocab_size = vocab_size
-        self.model_dim = args.model_dim
-        self.embed_dim = args.embed_dim
-        self.num_layers = args.num_layers
-        self.num_shared_blocks = args.num_shared_blocks
-        self.share_pattern, self.share_repeat_n = parse_share_pattern(
-            args.share_pattern
-        )
-
-        self.token_embedding = nn.Embedding(vocab_size, args.embed_dim)
-        self.embed_to_model = (
-            nn.Identity()
-            if args.embed_dim == args.model_dim
-            else nn.Linear(args.embed_dim, args.model_dim, bias=False)
-        )
-        self.rotary = Rotary(args.model_dim // args.num_heads, base=args.rope_base)
-        self.shared_blocks = nn.ModuleList(
-            [
-                ALlamaBlock(
-                    dim=args.model_dim,
-                    num_heads=args.num_heads,
-                    num_kv_heads=args.num_kv_heads,
-                    mlp_mult=args.mlp_mult,
-                    mlp_multiple_of=args.mlp_multiple_of,
-                    norm_kind=args.norm_kind,
-                    norm_layout=args.norm_layout,
-                    norm_eps=args.norm_eps,
-                    qk_norm=args.qk_norm,
-                    attn_dropout=args.attn_dropout,
-                    resid_dropout=args.resid_dropout,
-                    use_bias=args.use_bias,
-                )
-                for _ in range(args.num_shared_blocks)
-            ]
-        )
-        self.depth_gains = nn.Parameter(
-            torch.full(
-                (args.num_layers, 2), float(args.layer_scale_init), dtype=torch.float32
-            )
-        )
-        if args.use_x0_shortcut:
-            p = min(max(float(args.resid_mix_init), 1e-4), 1.0 - 1e-4)
-            init = torch.tensor([math.log(1.0 - p), math.log(p)], dtype=torch.float32)
-            self.resid_mix_logits = nn.Parameter(
-                init[:, None]
-                .repeat(1, args.model_dim)[None, :, :]
-                .repeat(args.num_layers, 1, 1)
-            )
-        else:
-            self.register_parameter("resid_mix_logits", None)
-        self.final_norm = (
-            make_norm(args.model_dim, args.norm_kind, args.norm_eps)
-            if args.use_final_norm
-            else nn.Identity()
-        )
-
-        if args.tie_embeddings:
-            self.model_to_embed = (
-                nn.Identity()
-                if args.embed_dim == args.model_dim
-                else nn.Linear(args.model_dim, args.embed_dim, bias=False)
-            )
-            self.lm_head = None
-        else:
-            self.model_to_embed = None
-            if args.embed_dim == args.model_dim:
-                self.lm_head = nn.Linear(args.model_dim, vocab_size, bias=False)
-            else:
-                self.lm_head = nn.Sequential(
-                    nn.Linear(args.model_dim, args.embed_dim, bias=False),
-                    nn.Linear(args.embed_dim, vocab_size, bias=False),
-                )
-
-        self._init_weights()
-
-    def _layer_to_block(self, layer_idx: int) -> int:
-        """Map a virtual layer index to its backing shared block index.
-
-        :param int layer_idx: Virtual layer index.
-        :return int: Shared block index used for that virtual layer.
-        """
-        if self.share_pattern == "cycle":
-            return layer_idx % self.num_shared_blocks
-        if self.share_pattern == "repeat":
-            return (layer_idx // self.share_repeat_n) % self.num_shared_blocks
-        return (layer_idx * self.num_shared_blocks) // self.num_layers
-
-    def layer_to_block_map(self) -> list[int]:
-        """Return the full virtual-layer to shared-block assignment map.
-
-        :return list[int]: Shared block index for each virtual layer.
-        """
-        return [self._layer_to_block(i) for i in range(self.num_layers)]
-
-    def _init_weights(self) -> None:
-        """Initialize weights and apply optional residual-zeroing heuristics."""
-        nn.init.normal_(self.token_embedding.weight, mean=0.0, std=0.02)
-        for module in self.modules():
-            if isinstance(module, nn.Linear):
-                nn.init.xavier_uniform_(module.weight)
-                if module.bias is not None:
-                    nn.init.zeros_(module.bias)
-
-        if self.args.zero_init_residual:
-            for block in self.shared_blocks:
-                nn.init.zeros_(block.attn.out_proj.weight)
-                if block.attn.out_proj.bias is not None:
-                    nn.init.zeros_(block.attn.out_proj.bias)
-                nn.init.zeros_(block.mlp.down.weight)
-                if block.mlp.down.bias is not None:
-                    nn.init.zeros_(block.mlp.down.bias)
-
-        if isinstance(self.embed_to_model, nn.Linear):
-            nn.init.xavier_uniform_(self.embed_to_model.weight)
-        if isinstance(self.model_to_embed, nn.Linear):
-            nn.init.xavier_uniform_(self.model_to_embed.weight)
-
-    def _resolve_layer_delta(
-        self, deltas: DeltaSpec, layer_idx: int, block_idx: int
-    ) -> DeltaSpec:
-        """Select the delta specification that applies to one virtual layer.
-
-        :param DeltaSpec deltas: Per-layer, per-block, or global delta specification.
-        :param int layer_idx: Virtual layer index.
-        :param int block_idx: Shared block index for the virtual layer.
-        :return DeltaSpec: Delta value to apply for this layer.
-        """
-        if deltas is None:
-            return None
-        if isinstance(deltas, Tensor):
-            if deltas.ndim >= 1 and deltas.shape[0] == self.num_layers:
-                return deltas[layer_idx]
-            if deltas.ndim >= 1 and deltas.shape[0] == self.num_shared_blocks:
-                return deltas[block_idx]
-            return deltas
-        if isinstance(deltas, (list, tuple)):
-            if layer_idx < len(deltas):
-                return deltas[layer_idx]
-            return None
-        if isinstance(deltas, Mapping):
-            if layer_idx in deltas:
-                return deltas[layer_idx]
-            if str(layer_idx) in deltas:
-                return deltas[str(layer_idx)]
-            if block_idx in deltas:
-                return deltas[block_idx]
-            if str(block_idx) in deltas:
-                return deltas[str(block_idx)]
-            for key in ("layers", "per_layer"):
-                if key in deltas:
-                    values = deltas[key]
-                    if (
-                        isinstance(values, Tensor)
-                        and values.ndim >= 1
-                        and values.shape[0] == self.num_layers
-                    ):
-                        return values[layer_idx]
-                    if isinstance(values, Sequence) and layer_idx < len(values):
-                        return values[layer_idx]
-            for key in ("blocks", "per_block"):
-                if key in deltas:
-                    values = deltas[key]
-                    if (
-                        isinstance(values, Tensor)
-                        and values.ndim >= 1
-                        and values.shape[0] == self.num_shared_blocks
-                    ):
-                        return values[block_idx]
-                    if isinstance(values, Sequence) and block_idx < len(values):
-                        return values[block_idx]
-            return None
-        return deltas
-
-    def forward(
-        self,
-        input_ids: Tensor,
-        target_ids: Optional[Tensor] = None,
-        *,
-        q_deltas: DeltaSpec = None,
-        v_deltas: DeltaSpec = None,
-        loss_reduction: str = "mean",
-    ) -> Tensor:
-        """Run the model and optionally return reduced or tokenwise training loss.
-
-        :param Tensor input_ids: Input token ids.
-        :param Optional[Tensor] target_ids: Optional next-token targets.
-        :param DeltaSpec q_deltas: Optional per-layer query deltas.
-        :param DeltaSpec v_deltas: Optional per-layer value deltas.
-        :param str loss_reduction: Loss reduction mode when targets are provided.
-        :return Tensor: Logits when no targets are given, otherwise the requested loss.
-        """
-        x = self.token_embedding(input_ids)
-        x = self.embed_to_model(x)
-        x0 = x if self.args.use_x0_shortcut else None
-
-        for layer_idx in range(self.num_layers):
-            block_idx = self._layer_to_block(layer_idx)
-            block = self.shared_blocks[block_idx]
-            gains = self.depth_gains[layer_idx]
-            resid_mix_logits = (
-                self.resid_mix_logits[layer_idx]
-                if self.resid_mix_logits is not None
-                else None
-            )
-            q_delta = self._resolve_layer_delta(q_deltas, layer_idx, block_idx)
-            v_delta = self._resolve_layer_delta(v_deltas, layer_idx, block_idx)
-            x = block(
-                x,
-                x0=x0,
-                rotary=self.rotary,
-                attn_gain=gains[0],
-                ffn_gain=gains[1],
-                resid_mix_logits=resid_mix_logits,
-                q_delta=q_delta,
-                v_delta=v_delta,
-            )
-
-        x = self.final_norm(x)
-
-        if self.args.tie_embeddings:
-            assert self.model_to_embed is not None
-            x_for_logits = self.model_to_embed(x)
-            logits = F.linear(x_for_logits, self.token_embedding.weight)
-        else:
-            assert self.lm_head is not None
-            logits = self.lm_head(x)
-
-        if self.args.logit_softcap > 0.0:
-            logits = self.args.logit_softcap * torch.tanh(
-                logits / self.args.logit_softcap
-            )
-
-        if target_ids is None:
-            return logits
-
-        if loss_reduction not in {"mean", "sum", "none"}:
-            raise ValueError(f"Unsupported loss_reduction={loss_reduction}")
-
-        loss_unreduced = F.cross_entropy(
-            logits.float().reshape(-1, logits.size(-1)),
-            target_ids.reshape(-1),
-            reduction="none",
-        ).view_as(target_ids)
-        if loss_reduction == "none":
-            return loss_unreduced
-        if loss_reduction == "sum":
-            return loss_unreduced.sum()
-        return loss_unreduced.mean()
-
+# The runtime model implementation lives in `allama_v4_shared_model.py`.
+# Keep this trainer focused on configuration, data, logging, and orchestration.
 
 # -----------------------------------------------------------------------------
 # TRAINING UTILITIES
@@ -1655,7 +998,11 @@ def compute_logical_parameter_counts(model: nn.Module) -> dict[str, float | int]
     """
     unique_total = count_parameters(model)
     unique_trainable = count_trainable_parameters(model)
-    if not isinstance(model, ALlama):
+    if not (
+        hasattr(model, "shared_blocks")
+        and hasattr(model, "layer_to_block_map")
+        and callable(getattr(model, "layer_to_block_map"))
+    ):
         return {
             "stored_params": unique_total,
             "stored_trainable_params": unique_trainable,
@@ -1771,13 +1118,43 @@ def payload_tensor_numel(payload: Mapping[str, object]) -> dict[str, int]:
     }
 
 
+def normalize_code_paths(code_paths: Path | Sequence[Path]) -> list[Path]:
+    """Normalize one or more source paths included in the submission artifact.
+
+    :param Path | Sequence[Path] code_paths: Source file path or paths to normalize.
+    :return list[Path]: Deduplicated resolved paths in stable order.
+    """
+    if isinstance(code_paths, Path):
+        paths = [code_paths]
+    else:
+        paths = list(code_paths)
+    deduped: list[Path] = []
+    seen: set[Path] = set()
+    for path in paths:
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        deduped.append(resolved)
+    return deduped
+
+
+def code_paths_nbytes(code_paths: Path | Sequence[Path]) -> int:
+    """Return the total source-byte size for one or more code paths.
+
+    :param Path | Sequence[Path] code_paths: Source file path or paths to measure.
+    :return int: Sum of on-disk byte sizes.
+    """
+    return int(sum(path.stat().st_size for path in normalize_code_paths(code_paths)))
+
+
 def model_footprint_report(
-    model: nn.Module, code_path: Path, args: Hyperparameters
+    model: nn.Module, code_paths: Path | Sequence[Path], args: Hyperparameters
 ) -> dict[str, float | int]:
     """Compute stored, serialized, and compressed size statistics for a model.
 
     :param nn.Module model: Model to summarize.
-    :param Path code_path: Trainer source file path included in the artifact.
+    :param Path | Sequence[Path] code_paths: Source file path(s) included in the artifact.
     :param Hyperparameters args: Export and quantization settings.
     :return dict[str, float | int]: Parameter and artifact size statistics.
     """
@@ -1786,7 +1163,7 @@ def model_footprint_report(
         for name, tensor in model.state_dict().items()
     }
     param_report = compute_logical_parameter_counts(model)
-    code_bytes = int(code_path.stat().st_size)
+    code_bytes = code_paths_nbytes(code_paths)
     checkpoint = {"config": asdict(args), "model": state}
     payload = build_int8_payload(
         state,
@@ -2717,6 +2094,7 @@ class WandbLogger:
         log_freq: int,
         log_fn: Optional[Callable[[str], None]] = None,
         use_hooks: bool = True,
+        compiled: bool = False,
     ) -> None:
         """Enable optional W&B parameter or gradient watching for a model.
 
@@ -2725,6 +2103,7 @@ class WandbLogger:
         :param int log_freq: Watch logging frequency.
         :param Optional[Callable[[str], None]] log_fn: Optional local logger for status.
         :param bool use_hooks: Whether to use W&B module hooks instead of manual histograms.
+        :param bool compiled: Whether the training graph is compiled.
         """
         if self.run is None or mode == "off":
             return
@@ -2740,19 +2119,23 @@ class WandbLogger:
                 )
             return
         try:
+            if compiled:
+                patch_wandb_watch_for_torch_compile(log_fn=log_fn)
             self.run.watch(model, log=mode, log_freq=max(1, log_freq))
-            self.watch_backend = "hooks"
+            self.watch_backend = "hooks_compile_safe" if compiled else "hooks"
         except Exception as exc:
+            self.watch_backend = "off"
             if log_fn is not None:
+                backend = "hooks_compile_safe" if compiled else "hooks"
                 log_fn(
-                    f"wandb_watch_warning mode={mode} log_freq={log_freq} backend=hooks error={exc}"
-                )
-                log_fn(
-                    f"wandb_watch mode={mode} log_freq={self.watch_log_freq} backend=manual_histogram"
+                    f"wandb_watch_warning mode={mode} log_freq={log_freq} backend={backend} error={exc}"
                 )
             return
         if log_fn is not None:
-            log_fn(f"wandb_watch mode={mode} log_freq={max(1, log_freq)} backend=hooks")
+            backend = "hooks_compile_safe" if compiled else "hooks"
+            log_fn(
+                f"wandb_watch mode={mode} log_freq={max(1, log_freq)} backend={backend}"
+            )
 
     def _histogram(self, tensor: Tensor) -> Optional["wandb.Histogram"]:
         """Build a W&B histogram from a tensor without materializing all values on CPU.
@@ -2931,11 +2314,20 @@ def main() -> None:
     distributed, rank, world_size, _local_rank, device, master_process = (
         init_distributed_and_device(args)
     )
-    sdpa_status: dict[str, bool | str] = {"requested": args.sdpa_backend}
+    sdpa_requested = args.sdpa_backend
+    sdpa_effective = args.sdpa_backend
+    sdpa_status: dict[str, bool | str] = {
+        "requested": sdpa_requested,
+        "effective": sdpa_effective,
+    }
 
     if device.type == "cuda":
         configure_cuda_precision()
-        sdpa_status = configure_sdpa_backend(args.sdpa_backend)
+        if sdpa_effective == "auto":
+            sdpa_effective = "flash"
+        sdpa_status = configure_sdpa_backend(sdpa_effective)
+        sdpa_status["requested"] = sdpa_requested
+        sdpa_status["effective"] = sdpa_effective
     elif args.sdpa_backend != "auto":
         raise ValueError(
             f"SDPA_BACKEND={args.sdpa_backend} requires CUDA; got device={device}"
@@ -2973,7 +2365,18 @@ def main() -> None:
     metric = setup_bpb_metric(backend, args, vocab_size, device)
     device_type, amp_dtype, use_autocast = resolve_dtype(args, device)
 
-    report_model = ALlama(args, vocab_size=vocab_size).to(device)
+    submission_code_paths = [
+        Path(__file__).resolve(),
+        Path(allama_v4_shared_model_module.__file__).resolve(),
+        Path(allama_v4_integration_module.__file__).resolve(),
+        Path(wandb_compile_safe_watch_module.__file__).resolve(),
+    ]
+
+    report_model = build_hyper_shared_model_from_args(
+        args,
+        vocab_size=vocab_size,
+        device=device,
+    )
     model_no_ddp = report_model
 
     run_dir = Path(args.out_dir) / args.run_id
@@ -3007,11 +2410,16 @@ def main() -> None:
     maybe_load_model_weights(report_model, args, log)
 
     compile_enabled = False
+    compile_fullgraph = args.wandb_watch == "off"
     if args.compile_model:
         if not hasattr(torch, "compile"):
             log("note=torch.compile requested but unavailable in this PyTorch build")
         else:
-            model_no_ddp = torch.compile(model_no_ddp)  # type: ignore[assignment]
+            model_no_ddp = compile_model_for_train(
+                model_no_ddp,
+                True,
+                fullgraph=compile_fullgraph,
+            )
             compile_enabled = True
 
     if distributed:
@@ -3061,18 +2469,16 @@ def main() -> None:
     final_step_tokens = epoch_step_token_counts[-1] if epoch_step_token_counts else 0
     variable_step_tokens = len(set(epoch_step_token_counts)) > 1
 
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=args.learning_rate,
-        betas=(args.beta1, args.beta2),
-        eps=args.adam_eps,
-        weight_decay=args.weight_decay,
-        fused=(device.type == "cuda"),
-    )
+    optimizer = build_hyper_shared_optimizers_from_args(report_model, args)
+    base_matrix_lr = max(float(optimizer.matrix_lr), 1e-12)
 
     param_report = compute_logical_parameter_counts(report_model)
     if args.report_artifact:
-        footprint_report = model_footprint_report(report_model, Path(__file__), args)
+        footprint_report = model_footprint_report(
+            report_model,
+            submission_code_paths,
+            args,
+        )
     else:
         footprint_report = dict(param_report)
 
@@ -3093,14 +2499,16 @@ def main() -> None:
             f.write(summary_text + "\n")
 
     log(
-        f"run_id={args.run_id} backend={backend} device={device} dtype={amp_dtype} compile={int(compile_enabled)} "
+        f"run_id={args.run_id} backend={backend} device={device} dtype={amp_dtype} "
+        f"compile={int(compile_enabled)} compile_fullgraph={int(compile_fullgraph)} "
         f"stored_params={physical_param_count} functional_params={logical_param_count} "
         f"sharing_ratio={sharing_ratio:.4f} logical_layers={args.num_layers} shared_blocks={args.num_shared_blocks} "
         f"share_pattern={args.share_pattern} layer_map={report_model.layer_to_block_map()} eval_mode={eval_mode}"
     )
     if device.type == "cuda":
         log(
-            f"sdpa_config requested={sdpa_status['requested']} flash_available={int(bool(sdpa_status['flash_available']))} "
+            f"sdpa_config requested={sdpa_status['requested']} effective={sdpa_status.get('effective', sdpa_status['requested'])} "
+            f"flash_available={int(bool(sdpa_status['flash_available']))} "
             f"flash_enabled={int(bool(sdpa_status['flash_enabled']))} math_enabled={int(bool(sdpa_status['math_enabled']))} "
             f"efficient_enabled={int(bool(sdpa_status['efficient_enabled']))} cudnn_enabled={int(bool(sdpa_status['cudnn_enabled']))}"
         )
@@ -3146,8 +2554,10 @@ def main() -> None:
             "note=eval_batch_is_larger_than_train_microbatch"
         )
     log(
-        f"x0_shortcut={args.use_x0_shortcut} resid_mix_init={args.resid_mix_init} "
-        f"global_rotary=1 enable_gqa_probe={int(SDPA_ENABLE_GQA)}"
+        f"x0_shortcut={args.use_x0_shortcut} x0_gate_init={args.x0_gate_init} "
+        f"q_gain_init={args.q_gain_init} simple_layer_modulation=1 "
+        "global_rotary=1 "
+        f"enable_gqa_probe={int(allama_v4_shared_model_module.sdpa_enable_gqa_available())}"
     )
     log(format_model_count_report("model_init", param_report))
     if metric.kind == "none":
@@ -3170,7 +2580,13 @@ def main() -> None:
     wandb_config = asdict(args) | {
         "backend": backend,
         "compile_enabled": bool(compile_enabled),
+        "compile_fullgraph": bool(compile_fullgraph),
         "resolved_eval_mode": eval_mode,
+        "sdpa_backend_effective": str(sdpa_status.get("effective", args.sdpa_backend)),
+        "token_lr_base": float(optimizer.token_lr),
+        "head_lr_base": float(optimizer.head_lr),
+        "matrix_lr_base": float(optimizer.matrix_lr),
+        "scalar_lr_base": float(optimizer.scalar_lr),
         "sampled_eval_batch_size": int(sampled_eval_batch_size),
         "resolved_eval_batch_tokens": int(eval_batch_tokens),
         "full_eval_local_batch_size": int(full_eval_local_batch_size),
@@ -3232,7 +2648,8 @@ def main() -> None:
         mode=args.wandb_watch,
         log_freq=args.wandb_watch_log_freq,
         log_fn=log,
-        use_hooks=not compile_enabled,
+        use_hooks=True,
+        compiled=compile_enabled,
     )
 
     if (
@@ -3258,7 +2675,7 @@ def main() -> None:
         if not master_process:
             return
         final_report = (
-            model_footprint_report(report_model, Path(__file__), args)
+            model_footprint_report(report_model, submission_code_paths, args)
             if args.report_artifact
             else compute_logical_parameter_counts(report_model)
         )
@@ -3493,8 +2910,7 @@ def main() -> None:
             )
 
             lr = get_lr(completed_steps, total_training_steps, args)
-            for group in optimizer.param_groups:
-                group["lr"] = lr
+            optimizer.set_lr_multiplier(lr / base_matrix_lr)
 
             for micro_step, spec in enumerate(micro_specs):
                 x, y = train_loader.next_batch(
