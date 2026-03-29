@@ -573,3 +573,118 @@ python train_allama.py
 - On CUDA, the trainer uses `bf16` autocast. There is no user-facing half-precision path to care about here.
 - `model_summary.txt` is deduped by parameter identity, so shared blocks are counted once in the stored-parameter view.
 - The meaningful comparison for this project is not just loss. It is **loss at a given artifact size**.
+
+## sbcal_v4 sweep results
+
+The `sbcal_v4` ablate sweep finished cleanly on the 5090 with the current
+near-cap family set. All `29/29` expected runs completed, and all ALlama runs
+landed under the `16,000,000` byte artifact cap.
+
+These numbers are from the default local sweep contract:
+
+- `EVAL_MODE=sampled`
+- `TRAIN_BATCH_TOKENS=262144`
+- `GRAD_ACCUM_STEPS=64`
+- `MAX_STEPS=750`
+- `--compile`
+
+So treat them as local ranking signals, not final full-validation results.
+
+### Best runs
+
+Best overall ALlama run:
+
+- `shortfat_s4_ff15 + shortcut_gate005`
+- `val_bpb=1.434684`
+- `artifact_bytes=15,655,289`
+- `tokens_per_s=131,832`
+
+Very close runner-up:
+
+- `shortfat_s4_ff15 + prenorm+rmsnorm`
+- `val_bpb=1.436112`
+- `artifact_bytes=15,674,897`
+- `tokens_per_s=133,391`
+
+GPT reference for context:
+
+- `train_gpt.py` reference: `val_bpb=1.442339`
+- `artifact_bytes=11,403,868`
+- `tokens_per_s=444,921`
+
+Meaning:
+
+- the best ALlama variant beat the matched GPT reference on sampled `val_bpb`
+- GPT is still dramatically faster and much smaller
+- the quality frontier is real, but the speed frontier is still not competitive
+
+### Family takeaways
+
+- `shortfat_s4_ff15` is the clear quality winner. Its baseline was already the
+  best ALlama baseline at `1.448978`, and both `shortcut_gate005` and
+  `prenorm+rmsnorm` improved it further.
+- `wide_s4_e384_ff10` is the best speed/quality ALlama tradeoff. Its best run,
+  `wide + prenorm`, reached `1.450962` at `183,667 tok/s`.
+- `balanced_s4_e1472_ff175` and `tall_s4_e832_ff2125` are dominated after this
+  sweep. Their best variants improved meaningfully over their own baselines,
+  but they still lost to the best shortfat and wide variants while being slower
+  and/or larger.
+
+### Ablation signal
+
+The strongest consistent ablation in this sweep was `prenorm+rmsnorm`.
+It improved every family:
+
+- `wide`: `1.479425 -> 1.450962` (`-0.028463`)
+- `shortfat`: `1.448978 -> 1.436112` (`-0.012866`)
+- `balanced`: `1.499955 -> 1.456177` (`-0.043778`)
+- `tall`: `1.495737 -> 1.457064` (`-0.038673`)
+
+Other patterns were weaker:
+
+- `norm_post_rms` was effectively a no-op versus baseline
+- `share_chunk` was mostly harmful
+- `share_repeat2` was occasionally slightly helpful, but not a headline win
+- shortcut changes were family-dependent:
+  - `shortcut_gate005` was best for shortfat and clearly helped wide/tall
+  - `no_x0` helped wide and balanced, but not shortfat
+
+### Current frontier
+
+The useful local frontier after `sbcal_v4` is:
+
+- `shortfat_s4_ff15 + shortcut_gate005`
+- `shortfat_s4_ff15 + prenorm+rmsnorm`
+- `wide_s4_e384_ff10 + prenorm+rmsnorm`
+- `wide_s4_e384_ff10 + no_x0`
+
+Everything else is currently behind those on quality, speed, or both.
+
+### Recommended next steps
+
+1. Prune the family set to `shortfat` and `wide`.
+2. Keep `prenorm+rmsnorm` as a default candidate, not just an ablation.
+3. Keep `shortcut_gate005` for shortfat and keep both `shortcut_gate005` and
+   `no_x0` alive for wide.
+4. Drop `norm_post_rms` from the default sweep space.
+5. Drop `share_chunk` from the default sweep space.
+6. Keep `share_repeat2` only if you want one cheap residual check for
+   speed/quality interaction.
+7. Run combination tests on the frontier families, because this sweep only
+   changed one factor at a time. The missing obvious combinations are:
+   - `shortfat + prenorm + shortcut_gate005`
+   - `wide + prenorm + shortcut_gate005`
+   - `wide + prenorm + no_x0`
+8. Run `EVAL_MODE=full` on the finalists before treating the local ranking as
+   final.
+
+If the goal is the next serious ALlama sweep rather than another wide search,
+the most defensible reduced matrix is:
+
+- families: `shortfat_s4_ff15`, `wide_s4_e384_ff10`
+- norm layouts: `prenorm` and current baseline only if you want a control
+- shortcuts: `shortcut_gate005`, `no_x0`, baseline
+- share patterns: baseline plus at most `repeat_2`
+
+That keeps the next pass focused on the only parts of the space that actually
+showed frontier behavior here.
