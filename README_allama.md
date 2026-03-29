@@ -705,7 +705,7 @@ To answer the narrower question "is postnorm being artificially hampered?", use
 the dedicated reduced sweep instead of the full `sbcal_v4` matrix:
 
 ```bash
-bash scripts/run_allama_norm_kind_checks.sh
+bash scripts/run_allama_reduced_norm_sweep.sh
 ```
 
 That script:

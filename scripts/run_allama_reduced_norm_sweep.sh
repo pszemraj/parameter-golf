@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 # run this from the repo root
+# user-run sweep; do not launch from chat unless explicitly told to do so
 
 export WANDB=1
 export WANDB_PROJECT=param-golf-ablations
@@ -34,7 +35,7 @@ NUM_EPOCHS_VALUE="${NUM_EPOCHS:-1}"
 MAX_WALLCLOCK_SECONDS_VALUE="${MAX_WALLCLOCK_SECONDS:-0}"
 COMPILE_WARMUP_STEPS_VALUE="${COMPILE_WARMUP_STEPS:-20}"
 CONTROL_TENSOR_NAME_PATTERNS_VALUE="${CONTROL_TENSOR_NAME_PATTERNS:-attn_scale,mlp_scale,q_gain,x0_gate,norm}"
-RUN_ID_PREFIX="${RUN_ID_PREFIX:-normkind_v1_}"
+RUN_ID_PREFIX="${RUN_ID_PREFIX:-reducednorm_v1_}"
 RUN_COMPILE="${RUN_COMPILE:-1}"
 FORCE_RERUN="${FORCE_RERUN:-0}"
 
