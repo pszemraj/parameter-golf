@@ -7,7 +7,7 @@ fusion and unrolling.
 
 Key choices in this version:
 - plain PyTorch elementwise ops only; no custom `autograd.Function` wrappers
-- additive x0 reinjection + RMSNorm in a direct `F.rms_norm` path
+- additive x0 reinjection + direct PyTorch norm ops
 - simple learned per-layer modulation tensors instead of a controller network
 - fixed layer-to-block assignment computed once at init
 - Muon + Adam optimizer split retained from the v3 work
@@ -160,6 +160,35 @@ class RMSNormWeight(nn.Module):
         return F.rms_norm(x, (x.size(-1),), self.weight.to(dtype=x.dtype), eps=self.eps)
 
 
+class LayerNormWeightBias(nn.Module):
+    """Minimal LayerNorm storing learned scale and bias vectors."""
+
+    def __init__(self, dim: int, eps: float = 1e-5):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(dim, dtype=torch.float32))
+        self.bias = nn.Parameter(torch.zeros(dim, dtype=torch.float32))
+        self.eps = float(eps)
+
+    def forward(self, x: Tensor) -> Tensor:
+        return F.layer_norm(
+            x,
+            (x.size(-1),),
+            self.weight.to(dtype=x.dtype),
+            self.bias.to(dtype=x.dtype),
+            eps=self.eps,
+        )
+
+
+def build_norm(dim: int, kind: str, eps: float) -> nn.Module:
+    """Construct the requested normalization layer."""
+    norm_kind = kind.strip().lower()
+    if norm_kind == "rmsnorm":
+        return RMSNormWeight(dim, eps=eps)
+    if norm_kind == "layernorm":
+        return LayerNormWeightBias(dim, eps=eps)
+    raise ValueError(f"expected norm_kind in {{'rmsnorm', 'layernorm'}}, got {kind!r}")
+
+
 class Rotary(nn.Module):
     """RoPE cache keyed by sequence length and device."""
 
@@ -261,21 +290,21 @@ def make_layer_to_block(
     return out
 
 
-def prenorm_with_x0(
+def mix_x0(
     x: Tensor,
     x0: Optional[Tensor],
     gate: Optional[Tensor],
-    weight: Tensor,
-    eps: float,
 ) -> Tensor:
-    """Additively mix in ``x0`` and apply RMSNorm using plain PyTorch ops.
+    """Additively mix in ``x0`` with a bounded gate using plain PyTorch ops.
 
     This intentionally stays as simple PyTorch so `torch.compile` can fuse the
     elementwise pieces instead of being blocked by a custom autograd boundary.
+    The same bounded gate is used in both prenorm and postnorm paths so the
+    layout comparison is not confounded by different shortcut parameterization.
     """
     if x0 is not None and gate is not None:
         x = x + torch.sigmoid(gate).to(dtype=x.dtype)[None, None, :] * x0
-    return F.rms_norm(x, (x.size(-1),), weight.to(dtype=x.dtype), eps=eps)
+    return x
 
 
 # -----------------------------------------------------------------------------
@@ -425,15 +454,18 @@ class HyperSharedBlock(nn.Module):
 
     def __init__(self, cfg: HyperSharedConfig):
         super().__init__()
-        if cfg.norm_kind.strip().lower() != "rmsnorm":
-            raise ValueError(f"v4 shared model expects RMSNorm; got {cfg.norm_kind!r}")
+        self.norm_kind = cfg.norm_kind.strip().lower()
+        if self.norm_kind not in {"rmsnorm", "layernorm"}:
+            raise ValueError(
+                f"v4 shared model expects RMSNorm or LayerNorm; got {cfg.norm_kind!r}"
+            )
         self.norm_layout = cfg.norm_layout.strip().lower()
         if self.norm_layout not in {"prenorm", "postnorm"}:
             raise ValueError(
                 f"v4 shared model expects prenorm or postnorm layout; got {cfg.norm_layout!r}"
             )
-        self.attn_norm = RMSNormWeight(cfg.model_dim, eps=cfg.norm_eps)
-        self.mlp_norm = RMSNormWeight(cfg.model_dim, eps=cfg.norm_eps)
+        self.attn_norm = build_norm(cfg.model_dim, cfg.norm_kind, cfg.norm_eps)
+        self.mlp_norm = build_norm(cfg.model_dim, cfg.norm_kind, cfg.norm_eps)
         self.attn = HyperSharedAttention(cfg)
         self.mlp = HyperSharedSwiGLU(cfg)
 
@@ -450,22 +482,14 @@ class HyperSharedBlock(nn.Module):
         mlp_scale = mlp_scale.to(dtype=x.dtype)[None, None, :]
 
         if self.norm_layout == "prenorm":
-            attn_in = prenorm_with_x0(
-                x,
-                x0,
-                x0_gate,
-                self.attn_norm.weight,
-                self.attn_norm.eps,
-            )
+            attn_in = self.attn_norm(mix_x0(x, x0, x0_gate))
             attn_out = self.attn(attn_in, q_gain=q_gain)
             x = x + attn_scale * attn_out
             mlp_out = self.mlp(self.mlp_norm(x))
             x = x + mlp_scale * mlp_out
             return x
 
-        attn_in = x
-        if x0 is not None and x0_gate is not None:
-            attn_in = attn_in + x0_gate.to(dtype=x.dtype)[None, None, :] * x0
+        attn_in = mix_x0(x, x0, x0_gate)
         attn_out = self.attn(attn_in, q_gain=q_gain)
         x = self.attn_norm(x + attn_scale * attn_out)
         mlp_out = self.mlp(x)
@@ -494,7 +518,7 @@ class HyperSharedALlama(nn.Module):
             if cfg.embed_dim == cfg.model_dim
             else nn.Linear(cfg.embed_dim, cfg.model_dim, bias=False)
         )
-        self.stem_norm = RMSNormWeight(cfg.model_dim, eps=cfg.norm_eps)
+        self.stem_norm = build_norm(cfg.model_dim, cfg.norm_kind, cfg.norm_eps)
         self.shared_blocks = nn.ModuleList(
             [HyperSharedBlock(cfg) for _ in range(cfg.num_shared_blocks)]
         )
@@ -532,7 +556,7 @@ class HyperSharedALlama(nn.Module):
         else:
             self.register_parameter("x0_gate", None)
         self.final_norm = (
-            RMSNormWeight(cfg.model_dim, eps=cfg.norm_eps)
+            build_norm(cfg.model_dim, cfg.norm_kind, cfg.norm_eps)
             if cfg.use_final_norm
             else nn.Identity()
         )

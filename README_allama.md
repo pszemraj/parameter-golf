@@ -580,6 +580,16 @@ The `sbcal_v4` ablate sweep finished cleanly on the 5090 with the current
 near-cap family set. All `29/29` expected runs completed, and all ALlama runs
 landed under the `16,000,000` byte artifact cap.
 
+Important historical note:
+
+- these `sbcal_v4` numbers were produced before `layernorm` support was added
+  to the shared model
+- they also predate the postnorm `x0_gate` symmetry fix, so they should not be
+  treated as the final word on postnorm
+- `baseline` and `norm_post_rms` in that sweep were the same configuration, so
+  that specific block only established that `postnorm+rmsnorm` matched the
+  existing baseline control
+
 These numbers are from the default local sweep contract:
 
 - `EVAL_MODE=sampled`
@@ -688,3 +698,27 @@ the most defensible reduced matrix is:
 
 That keeps the next pass focused on the only parts of the space that actually
 showed frontier behavior here.
+
+## Focused norm-kind check
+
+To answer the narrower question "is postnorm being artificially hampered?", use
+the dedicated reduced sweep instead of the full `sbcal_v4` matrix:
+
+```bash
+bash scripts/run_allama_norm_kind_checks.sh
+```
+
+That script:
+
+- keeps the family set fixed to the two frontier families:
+  `wide_s4_e384_ff10` and `shortfat_s4_ff15`
+- holds sharing and shortcut settings aligned
+- runs the four direct norm comparisons:
+  - `postnorm+rmsnorm`
+  - `prenorm+rmsnorm`
+  - `postnorm+layernorm`
+  - `prenorm+layernorm`
+
+The shared model now supports both `rmsnorm` and `layernorm`, and the same
+sigmoided `x0` gate is applied in both prenorm and postnorm paths so the norm
+comparison is not confounded by a different shortcut parameterization.
