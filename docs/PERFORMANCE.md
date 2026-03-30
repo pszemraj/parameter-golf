@@ -468,3 +468,84 @@ Latest harness smoke check:
     around the repeated shared block instead of just replacing q/k transforms
   - CUDA graphs are worth keeping available, but they are a secondary systems
     optimization, not the main answer
+
+## Larger MLP Block Candidate
+
+- Added `scripts/benchmark_allama_mlp_block.py`.
+- Boundary under test:
+  - vendor RMSNorm
+  - vendor `gate_up` GEMM
+  - Triton fused `SwiGLU + down projection + residual add/scale`
+- The kernel reads `gate_up` output in `[M, 2H]`, computes `silu(gate) * up`
+  on the fly, multiplies directly by `down_weight_t`, and writes the residual
+  epilogue output without materializing the hidden MLP activation.
+- Backward is intentionally straightforward PyTorch:
+  - `grad_branch = grad_out * scale`
+  - `grad_hidden = grad_branch @ W^T`
+  - elementwise `SwiGLU` backward
+  - `grad_W = hidden^T @ grad_branch`
+- Representative anchor-shape result in
+  `runs_allama_validation/mlp_block_v1/summary.json`:
+  - shape: `batch=4`, `seq_len=1024`, `dim=896`, `hidden=1408`
+  - forward:
+    - eager reference: `0.28782 ms`
+    - eager custom: `0.28372 ms`
+    - compiled reference: `0.25822 ms`
+    - compiled custom: `0.27940 ms`
+  - backward:
+    - eager reference: `0.94483 ms`
+    - eager custom: `1.11486 ms`
+    - compiled reference: `0.83704 ms`
+    - compiled custom: `0.94980 ms`
+  - numerical drift stayed within a reasonable bf16 range:
+    - forward `max_rel=0.00676`
+    - backward `max_rel=0.00838`
+- Notes:
+  - the first naive tiling was materially worse; grouped tiling and a bf16
+    tensor-core-friendly dot path recovered most of the loss
+  - even after that recovery, this boundary is still not a shipped kernel:
+    compiled forward remains about `7.6%` slower than the compiled PyTorch
+    baseline and compiled backward remains about `13.5%` slower
+- Conclusion:
+  - this is no longer an obviously bad idea, but the current MLP boundary is
+    still not strong enough for end-to-end integration
+  - if we stay on the MLP side, the next move should be an even larger boundary
+    or a real custom backward, not more polish on this exact kernel
+
+## Larger Attention Block Candidate
+
+- Added `scripts/benchmark_allama_attention_block.py`.
+- Boundary under test:
+  - flash-attention output in head-major layout `[B, H, T, Dh]`
+  - Triton fused output projection + residual add/scale
+- The kernel avoids materializing the transposed `[B, T, D]` flash-attention
+  output before the projection matmul.
+- Backward is intentionally straightforward PyTorch:
+  - `grad_branch = grad_out * scale`
+  - `grad_W = attn_flat^T @ grad_branch`
+  - `grad_attn = grad_branch @ W^T`, then reshape back to `[B, H, T, Dh]`
+- Representative anchor-shape result in
+  `runs_allama_validation/attention_block_v1/summary.json`:
+  - shape: `batch=4`, `seq_len=1024`, `num_heads=14`, `head_dim=64`, `dim=896`
+  - forward:
+    - eager reference: `0.09131 ms`
+    - eager custom: `0.04000 ms`
+    - compiled reference: `0.05558 ms`
+    - compiled custom: `0.05245 ms`
+  - backward:
+    - eager reference: `0.31109 ms`
+    - eager custom: `0.49060 ms`
+    - compiled reference: `0.34759 ms`
+    - compiled custom: `0.46758 ms`
+  - numerical agreement was exact in backward for this boundary and stayed
+    within bf16 rounding tolerance in forward:
+    - forward `max_rel=0.00442`
+    - backward `max_rel=0.0`
+- Conclusion:
+  - this is the first larger custom boundary that shows a real compiled forward
+    win: compiled custom forward is about `5.6%` faster than compiled PyTorch
+  - it is not ready for training integration because the PyTorch backward path
+    gives back that win and more; compiled backward is about `34.5%` slower
+  - this is currently the most promising initial custom-kernel direction, but
+    it needs a real backward kernel or a smarter integration strategy before it
+    can help end-to-end throughput
