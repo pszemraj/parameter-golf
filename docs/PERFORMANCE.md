@@ -331,6 +331,36 @@ Latest harness smoke check:
   - the next practical step is an opt-in integration in the real model path,
     not more synthetic micro-benchmarks of smaller glue fragments
 
+### 2026-03-30
+
+- Tested an opt-in integration of `residual_scale_rms_norm_pair` in the real
+  ALlama anchor, limited to the prenorm MLP boundary where the block genuinely
+  consumes both outputs.
+- End-to-end harness comparison under the normal compiled anchor contract:
+  - baseline:
+    `runs_allama_validation/perf_cpp_pair_compare/off/allama_anchor/baseline/run_summary.json`
+    - `131,437 tok/s`
+    - `1.994 s/step`
+  - opt-in C++ pair op:
+    `runs_allama_validation/perf_cpp_pair_compare/on/allama_anchor/cpp_mlp_pair_rmsnorm_on/run_summary.json`
+    - `128,659 tok/s`
+    - `2.038 s/step`
+  - net result: about `2.1%` slower
+- Follow-up profiler read:
+  - profile location:
+    `runs_allama_validation/perf_cpp_pair_profile/on/allama_anchor/cpp_mlp_pair_rmsnorm_on`
+  - the custom op showed up as
+    `allama_cpp::residual_scale_rms_norm_pair`
+  - it accounted for only about `0.93%` of self CUDA time across `1,280` calls
+  - implication:
+    - this is not a case where the custom kernel itself is individually slow
+    - the regression comes from the surrounding graph/autograd integration cost
+- Conclusion:
+  - do not keep the opt-in model integration path in the tree
+  - keep the standalone C++/CUDA benchmark scaffold and extension sources
+  - the next custom-op attempt needs to absorb more of the surrounding backward
+    and graph structure, not just replace one forward prologue boundary
+
 ## Next Work
 
 - Keep `frontier_v1_shortfat_s4_ff15_pre_rms_gate005` as the quality anchor.
@@ -338,6 +368,6 @@ Latest harness smoke check:
 - Use the profiler traces as the starting point for a custom kernel plan around
   the repeated shared block, especially larger-grain epilogue/prologue fusion
   around the attention and MLP boundaries.
-- Test an opt-in integration path for `residual_scale_rms_norm_pair` and
-  measure it on the real compiled anchor harness before expanding the extension
-  surface.
+- Design the next custom-op attempt around a larger boundary than the current
+  pair op, so the real model path can avoid paying the current graph/autograd
+  integration penalty.
