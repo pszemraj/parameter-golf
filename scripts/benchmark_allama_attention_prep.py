@@ -1,0 +1,580 @@
+#!/usr/bin/env python3
+"""Benchmark a fused ALlama attention-prep kernel candidate.
+
+This isolates the attention boundary immediately after the fused qkv projection:
+
+- split qkv into q, k, v
+- reshape into SDPA layout
+- apply q/k RMSNorm
+- apply RoPE
+- apply q_gain to q
+
+The goal is to test whether a larger attention-side boundary can beat the
+compiled PyTorch reference before any training-path integration work.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import time
+from pathlib import Path
+from typing import Any, Callable
+
+import torch
+import torch.nn.functional as F
+import triton
+import triton.language as tl
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from allama_shared import apply_rotary_emb, sdpa_enable_gqa_available  # noqa: E402
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse CLI arguments for the attention-prep benchmark.
+
+    :return argparse.Namespace: Parsed benchmark configuration.
+    """
+    parser = argparse.ArgumentParser(allow_abbrev=False)
+    parser.add_argument(
+        "--out-dir",
+        type=Path,
+        default=Path("./runs_allama_validation/attention_prep"),
+        help="Directory for benchmark JSON outputs.",
+    )
+    parser.add_argument(
+        "--warmup-iters",
+        type=int,
+        default=50,
+        help="Warmup iterations before timing.",
+    )
+    parser.add_argument(
+        "--measured-iters",
+        type=int,
+        default=200,
+        help="Measured iterations for timing.",
+    )
+    return parser.parse_args()
+
+
+def next_power_of_2(value: int) -> int:
+    """Return the next power-of-two integer greater than or equal to ``value``."""
+    return 1 if value <= 1 else 1 << (value - 1).bit_length()
+
+
+def rotary_cache(
+    seq_len: int,
+    head_dim: int,
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+    base: float = 10000.0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Construct RoPE cos/sin tensors matching the ALlama attention path."""
+    inv_freq = 1.0 / (
+        base
+        ** (torch.arange(0, head_dim, 2, device=device, dtype=torch.float32) / head_dim)
+    )
+    t = torch.arange(seq_len, device=device, dtype=torch.float32)
+    freqs = torch.outer(t, inv_freq)
+    cos = freqs.cos().to(dtype=dtype)
+    sin = freqs.sin().to(dtype=dtype)
+    return cos, sin
+
+
+def attention_prep_reference(
+    qkv: torch.Tensor,
+    q_gain: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    *,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    qk_norm: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Reference PyTorch implementation of the attention-prep boundary."""
+    bsz, seqlen, qkv_dim = qkv.shape
+    q_dim = num_heads * head_dim
+    kv_dim = num_kv_heads * head_dim
+    if qkv_dim != q_dim + 2 * kv_dim:
+        raise ValueError("qkv shape does not match the requested head layout")
+    q, k, v = qkv.split((q_dim, kv_dim, kv_dim), dim=-1)
+    q = q.view(bsz, seqlen, num_heads, head_dim).transpose(1, 2)
+    k = k.view(bsz, seqlen, num_kv_heads, head_dim).transpose(1, 2)
+    v = v.view(bsz, seqlen, num_kv_heads, head_dim).transpose(1, 2)
+    if qk_norm:
+        q = F.rms_norm(q, (head_dim,))
+        k = F.rms_norm(k, (head_dim,))
+    q = apply_rotary_emb(q, cos[None, None, :, :], sin[None, None, :, :])
+    k = apply_rotary_emb(k, cos[None, None, :, :], sin[None, None, :, :])
+    q = q * q_gain.to(dtype=q.dtype)[None, :, None, None]
+    return q, k, v
+
+
+def attention_forward_reference(
+    qkv: torch.Tensor,
+    q_gain: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    *,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    qk_norm: bool = True,
+) -> torch.Tensor:
+    """Reference prep plus flash-attention forward."""
+    q, k, v = attention_prep_reference(
+        qkv,
+        q_gain,
+        cos,
+        sin,
+        num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+        qk_norm=qk_norm,
+    )
+    if num_heads != num_kv_heads and sdpa_enable_gqa_available():
+        return F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            is_causal=True,
+            enable_gqa=True,
+        )
+    if num_heads != num_kv_heads:
+        repeat = num_heads // num_kv_heads
+        k = k.repeat_interleave(repeat, dim=1)
+        v = v.repeat_interleave(repeat, dim=1)
+    return F.scaled_dot_product_attention(q, k, v, is_causal=True)
+
+
+@triton.jit
+def attention_prep_kernel(
+    qkv_ptr,
+    q_gain_ptr,
+    cos_ptr,
+    sin_ptr,
+    q_ptr,
+    k_ptr,
+    v_ptr,
+    batch_size,
+    seq_len,
+    num_heads,
+    num_kv_heads,
+    head_dim,
+    q_dim,
+    kv_dim,
+    qkv_stride_b,
+    qkv_stride_t,
+    q_stride_b,
+    q_stride_h,
+    q_stride_t,
+    q_stride_d,
+    kv_stride_b,
+    kv_stride_h,
+    kv_stride_t,
+    kv_stride_d,
+    BLOCK_D: tl.constexpr,
+):
+    """Fused Triton kernel for the ALlama attention-prep boundary."""
+    token_idx = tl.program_id(0)
+    head_idx = tl.program_id(1)
+    b = token_idx // seq_len
+    t = token_idx % seq_len
+    cols = tl.arange(0, BLOCK_D)
+    mask = cols < head_dim
+
+    qkv_base = qkv_ptr + b * qkv_stride_b + t * qkv_stride_t
+    half = head_dim // 2
+    half_cols = tl.arange(0, BLOCK_D // 2)
+    half_mask = half_cols < half
+    cos_ptrs = cos_ptr + t * half + half_cols
+    sin_ptrs = sin_ptr + t * half + half_cols
+    cos_vals = tl.load(cos_ptrs, mask=half_mask, other=0.0).to(tl.float32)
+    sin_vals = tl.load(sin_ptrs, mask=half_mask, other=0.0).to(tl.float32)
+
+    if head_idx < num_heads:
+        q_head_base = qkv_base + head_idx * head_dim
+        q1 = tl.load(q_head_base + half_cols, mask=half_mask, other=0.0).to(tl.float32)
+        q2 = tl.load(q_head_base + half + half_cols, mask=half_mask, other=0.0).to(
+            tl.float32
+        )
+        rms = tl.sqrt(
+            (tl.sum(q1 * q1, axis=0) + tl.sum(q2 * q2, axis=0)) / head_dim + 1e-5
+        )
+        q1 = q1 / rms
+        q2 = q2 / rms
+        rot_first = q1 * cos_vals + q2 * sin_vals
+        rot_second = q2 * cos_vals - q1 * sin_vals
+        gain = tl.load(q_gain_ptr + head_idx).to(tl.float32)
+        q_out_base = q_ptr + b * q_stride_b + head_idx * q_stride_h + t * q_stride_t
+        tl.store(
+            q_out_base + half_cols * q_stride_d,
+            (rot_first * gain).to(tl.bfloat16),
+            mask=half_mask,
+        )
+        tl.store(
+            q_out_base + (half + half_cols) * q_stride_d,
+            (rot_second * gain).to(tl.bfloat16),
+            mask=half_mask,
+        )
+        return
+
+    kv_head = head_idx - num_heads
+    if kv_head >= num_kv_heads:
+        return
+
+    k_head_base = qkv_base + q_dim + kv_head * head_dim
+    v_head_base = qkv_base + q_dim + kv_dim + kv_head * head_dim
+    k1 = tl.load(k_head_base + half_cols, mask=half_mask, other=0.0).to(tl.float32)
+    k2 = tl.load(k_head_base + half + half_cols, mask=half_mask, other=0.0).to(
+        tl.float32
+    )
+    v_vals = tl.load(v_head_base + cols, mask=mask, other=0.0)
+    rms = tl.sqrt((tl.sum(k1 * k1, axis=0) + tl.sum(k2 * k2, axis=0)) / head_dim + 1e-5)
+    k1 = k1 / rms
+    k2 = k2 / rms
+    rot_first = k1 * cos_vals + k2 * sin_vals
+    rot_second = k2 * cos_vals - k1 * sin_vals
+    k_out_base = k_ptr + b * kv_stride_b + kv_head * kv_stride_h + t * kv_stride_t
+    v_out_ptrs = (
+        v_ptr
+        + b * kv_stride_b
+        + kv_head * kv_stride_h
+        + t * kv_stride_t
+        + cols * kv_stride_d
+    )
+    tl.store(
+        k_out_base + half_cols * kv_stride_d,
+        rot_first.to(tl.bfloat16),
+        mask=half_mask,
+    )
+    tl.store(
+        k_out_base + (half + half_cols) * kv_stride_d,
+        rot_second.to(tl.bfloat16),
+        mask=half_mask,
+    )
+    tl.store(v_out_ptrs, v_vals.to(tl.bfloat16), mask=mask)
+
+
+def attention_prep_triton(
+    qkv: torch.Tensor,
+    q_gain: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    *,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Run the fused Triton attention-prep kernel."""
+    batch_size, seq_len, _ = qkv.shape
+    q = torch.empty(
+        (batch_size, num_heads, seq_len, head_dim),
+        device=qkv.device,
+        dtype=qkv.dtype,
+    )
+    k = torch.empty(
+        (batch_size, num_kv_heads, seq_len, head_dim),
+        device=qkv.device,
+        dtype=qkv.dtype,
+    )
+    v = torch.empty_like(k)
+    block_d = next_power_of_2(head_dim)
+    grid = (batch_size * seq_len, num_heads + num_kv_heads)
+    q_dim = num_heads * head_dim
+    kv_dim = num_kv_heads * head_dim
+    attention_prep_kernel[grid](
+        qkv,
+        q_gain,
+        cos,
+        sin,
+        q,
+        k,
+        v,
+        batch_size,
+        seq_len,
+        num_heads,
+        num_kv_heads,
+        head_dim,
+        q_dim,
+        kv_dim,
+        qkv.stride(0),
+        qkv.stride(1),
+        q.stride(0),
+        q.stride(1),
+        q.stride(2),
+        q.stride(3),
+        k.stride(0),
+        k.stride(1),
+        k.stride(2),
+        k.stride(3),
+        BLOCK_D=block_d,
+        num_warps=2 if head_dim <= 64 else 4,
+    )
+    return q, k, v
+
+
+def attention_forward_triton(
+    qkv: torch.Tensor,
+    q_gain: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    *,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+) -> torch.Tensor:
+    """Run the fused Triton prep kernel followed by flash-attention forward."""
+    q, k, v = attention_prep_triton(
+        qkv,
+        q_gain,
+        cos,
+        sin,
+        num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+    )
+    if num_heads != num_kv_heads and sdpa_enable_gqa_available():
+        return F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            is_causal=True,
+            enable_gqa=True,
+        )
+    if num_heads != num_kv_heads:
+        repeat = num_heads // num_kv_heads
+        k = k.repeat_interleave(repeat, dim=1)
+        v = v.repeat_interleave(repeat, dim=1)
+    return F.scaled_dot_product_attention(q, k, v, is_causal=True)
+
+
+def measure_ms(fn: Callable[[], Any], warmup_iters: int, measured_iters: int) -> float:
+    """Measure mean CUDA runtime for a callable that launches work."""
+    for _ in range(warmup_iters):
+        fn()
+    torch.cuda.synchronize()
+    t0 = time.perf_counter()
+    for _ in range(measured_iters):
+        fn()
+    torch.cuda.synchronize()
+    elapsed = time.perf_counter() - t0
+    return 1000.0 * elapsed / measured_iters
+
+
+def max_diff(ref: torch.Tensor, out: torch.Tensor) -> tuple[float, float]:
+    """Return max absolute and relative error for two tensors."""
+    diff = (ref.float() - out.float()).abs()
+    max_abs = diff.max().item()
+    max_rel = (diff.max() / ref.float().abs().max().clamp_min(1e-6)).item()
+    return float(max_abs), float(max_rel)
+
+
+def main() -> None:
+    """Run the standalone attention-prep benchmark."""
+    args = parse_args()
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is required for the attention-prep benchmark")
+
+    device = torch.device("cuda")
+    torch.manual_seed(1337)
+    batch = 4
+    seq_len = 1024
+    num_heads = 14
+    num_kv_heads = 2
+    head_dim = 64
+    q_dim = num_heads * head_dim
+    kv_dim = num_kv_heads * head_dim
+    qkv_dim = q_dim + 2 * kv_dim
+
+    qkv = torch.randn(batch, seq_len, qkv_dim, device=device, dtype=torch.bfloat16)
+    q_gain = torch.randn(num_heads, device=device, dtype=torch.float32)
+    cos, sin = rotary_cache(seq_len, head_dim, device=device, dtype=torch.bfloat16)
+
+    ref_q, ref_k, ref_v = attention_prep_reference(
+        qkv,
+        q_gain,
+        cos,
+        sin,
+        num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+    )
+    tri_q, tri_k, tri_v = attention_prep_triton(
+        qkv,
+        q_gain,
+        cos,
+        sin,
+        num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+    )
+    prep_abs = 0.0
+    prep_rel = 0.0
+    for ref_tensor, tri_tensor in ((ref_q, tri_q), (ref_k, tri_k), (ref_v, tri_v)):
+        max_abs, max_rel = max_diff(ref_tensor, tri_tensor)
+        prep_abs = max(prep_abs, max_abs)
+        prep_rel = max(prep_rel, max_rel)
+
+    ref_prep_ms = measure_ms(
+        lambda: attention_prep_reference(
+            qkv,
+            q_gain,
+            cos,
+            sin,
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+        ),
+        warmup_iters=args.warmup_iters,
+        measured_iters=args.measured_iters,
+    )
+    compiled_ref_prep = torch.compile(
+        attention_prep_reference,
+        dynamic=False,
+        fullgraph=True,
+    )
+    compiled_ref_prep_ms = measure_ms(
+        lambda: compiled_ref_prep(
+            qkv,
+            q_gain,
+            cos,
+            sin,
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+        ),
+        warmup_iters=args.warmup_iters,
+        measured_iters=args.measured_iters,
+    )
+    triton_prep_ms = measure_ms(
+        lambda: attention_prep_triton(
+            qkv,
+            q_gain,
+            cos,
+            sin,
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+        ),
+        warmup_iters=args.warmup_iters,
+        measured_iters=args.measured_iters,
+    )
+
+    ref_attn = attention_forward_reference(
+        qkv,
+        q_gain,
+        cos,
+        sin,
+        num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+    )
+    tri_attn = attention_forward_triton(
+        qkv,
+        q_gain,
+        cos,
+        sin,
+        num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+    )
+    attn_abs, attn_rel = max_diff(ref_attn, tri_attn)
+    ref_attn_ms = measure_ms(
+        lambda: attention_forward_reference(
+            qkv,
+            q_gain,
+            cos,
+            sin,
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+        ),
+        warmup_iters=args.warmup_iters,
+        measured_iters=args.measured_iters,
+    )
+    compiled_ref_attn = torch.compile(
+        attention_forward_reference,
+        dynamic=False,
+        fullgraph=True,
+    )
+    compiled_ref_attn_ms = measure_ms(
+        lambda: compiled_ref_attn(
+            qkv,
+            q_gain,
+            cos,
+            sin,
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+        ),
+        warmup_iters=args.warmup_iters,
+        measured_iters=args.measured_iters,
+    )
+    triton_attn_ms = measure_ms(
+        lambda: attention_forward_triton(
+            qkv,
+            q_gain,
+            cos,
+            sin,
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+        ),
+        warmup_iters=args.warmup_iters,
+        measured_iters=args.measured_iters,
+    )
+
+    summary = {
+        "shape": [batch, seq_len, qkv_dim],
+        "heads": {
+            "num_heads": num_heads,
+            "num_kv_heads": num_kv_heads,
+            "head_dim": head_dim,
+        },
+        "warmup_iters": int(args.warmup_iters),
+        "measured_iters": int(args.measured_iters),
+        "torch_version": torch.__version__,
+        "triton_version": triton.__version__,
+        "cuda_version": torch.version.cuda,
+        "device_name": torch.cuda.get_device_name(device),
+        "cases": [
+            {
+                "case": "attention_prep",
+                "reference_ms": float(ref_prep_ms),
+                "compiled_reference_ms": float(compiled_ref_prep_ms),
+                "triton_ms": float(triton_prep_ms),
+                "speedup": float(ref_prep_ms / triton_prep_ms),
+                "speedup_vs_compiled": float(compiled_ref_prep_ms / triton_prep_ms),
+                "max_abs": prep_abs,
+                "max_rel": prep_rel,
+            },
+            {
+                "case": "attention_prep_plus_flash_fwd",
+                "reference_ms": float(ref_attn_ms),
+                "compiled_reference_ms": float(compiled_ref_attn_ms),
+                "triton_ms": float(triton_attn_ms),
+                "speedup": float(ref_attn_ms / triton_attn_ms),
+                "speedup_vs_compiled": float(compiled_ref_attn_ms / triton_attn_ms),
+                "max_abs": attn_abs,
+                "max_rel": attn_rel,
+            },
+        ],
+    }
+
+    args.out_dir.mkdir(parents=True, exist_ok=True)
+    (args.out_dir / "summary.json").write_text(
+        json.dumps(summary, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    print(json.dumps(summary, indent=2))
+
+
+if __name__ == "__main__":
+    main()

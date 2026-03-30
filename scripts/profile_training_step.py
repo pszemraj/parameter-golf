@@ -93,6 +93,7 @@ class HarnessSummary:
     :param bool compile: Whether `torch.compile` was enabled.
     :param bool fullgraph: Whether fullgraph capture was requested.
     :param str sdpa_backend: Requested SDPA backend.
+    :param bool cuda_graph_forward_backward: Whether the forward/backward loop used CUDA graphs.
     :param float mean_step_s: Mean wall-clock time per global step.
     :param float tokens_per_s: Effective tokens per second for measured steps.
     :param int peak_cuda_mem_bytes: Peak CUDA memory during measured steps.
@@ -109,6 +110,7 @@ class HarnessSummary:
     compile: bool
     fullgraph: bool
     sdpa_backend: str
+    cuda_graph_forward_backward: bool
     mean_step_s: float
     tokens_per_s: float
     peak_cuda_mem_bytes: int
@@ -216,6 +218,11 @@ def parse_args() -> argparse.Namespace:
         "--cuda-profiler-range",
         action="store_true",
         help="Bracket the measured region with cudaProfilerStart/Stop for Nsight.",
+    )
+    parser.add_argument(
+        "--cuda-graph-forward-backward",
+        action="store_true",
+        help="Capture the fixed forward/backward microbatch loop with CUDA graphs and step optimizers outside the graph.",
     )
     compile_group = parser.add_mutually_exclusive_group()
     compile_group.add_argument(
@@ -585,6 +592,82 @@ def benchmark(
         compile=bool(args.compile_model),
         fullgraph=bool(args.fullgraph),
         sdpa_backend=spec.sdpa_backend,
+        cuda_graph_forward_backward=False,
+        mean_step_s=float(mean_step),
+        tokens_per_s=float(spec.train_batch_tokens * args.measured_steps / elapsed),
+        peak_cuda_mem_bytes=int(torch.cuda.max_memory_allocated()),
+    )
+
+
+def benchmark_cuda_graph_forward_backward(
+    spec: ModelSpec,
+    model: nn.Module,
+    optimizers: Any,
+    input_ids: Tensor,
+    target_ids: Tensor,
+    args: argparse.Namespace,
+) -> HarnessSummary:
+    """Measure steady-state step time with CUDA-graph-captured forward/backward.
+
+    The capture boundary intentionally excludes `optimizer.step()`, because the
+    current ALlama/GPT optimizer stacks include Python-side work and custom
+    state updates that are not the main launch bottleneck under study here.
+
+    :param ModelSpec spec: Resolved benchmark contract.
+    :param nn.Module model: Model under test.
+    :param Any optimizers: Optimizer bundle or adapter.
+    :param Tensor input_ids: Static synthetic inputs.
+    :param Tensor target_ids: Static synthetic targets.
+    :param argparse.Namespace args: Parsed CLI arguments.
+    :return HarnessSummary: Serializable benchmark summary.
+    """
+    model.train()
+    grad_scale = 1.0 / spec.microbatches
+    for warmup_idx in range(args.warmup_steps):
+        run_global_step(
+            model,
+            optimizers,
+            input_ids,
+            target_ids,
+            spec.microbatches,
+            grad_scale=grad_scale,
+            cuda_profiler_range=False,
+            step_label=f"warmup_step_{warmup_idx:02d}",
+        )
+    torch.cuda.synchronize()
+    optimizers.zero_grad(set_to_none=False)
+    torch.cuda.synchronize()
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        optimizers.zero_grad(set_to_none=False)
+        for microbatch_idx in range(spec.microbatches):
+            loss = model(input_ids, target_ids)
+            (loss * grad_scale).backward()
+
+    torch.cuda.synchronize()
+    torch.cuda.reset_peak_memory_stats()
+    t0 = time.perf_counter()
+    for _step_idx in range(args.measured_steps):
+        graph.replay()
+        optimizers.step()
+    torch.cuda.synchronize()
+    elapsed = time.perf_counter() - t0
+    mean_step = elapsed / args.measured_steps
+    stored_params = int(sum(param.numel() for param in model.parameters()))
+    return HarnessSummary(
+        model=spec.model,
+        stored_params=stored_params,
+        local_batch_size=spec.local_batch_size,
+        train_seq_len=spec.train_seq_len,
+        microbatches=spec.microbatches,
+        train_batch_tokens=spec.train_batch_tokens,
+        warmup_steps=int(args.warmup_steps),
+        measured_steps=int(args.measured_steps),
+        compile=bool(args.compile_model),
+        fullgraph=bool(args.fullgraph),
+        sdpa_backend=spec.sdpa_backend,
+        cuda_graph_forward_backward=True,
         mean_step_s=float(mean_step),
         tokens_per_s=float(spec.train_batch_tokens * args.measured_steps / elapsed),
         peak_cuda_mem_bytes=int(torch.cuda.max_memory_allocated()),
@@ -690,6 +773,7 @@ def run_torch_profiler(
         compile=bool(args.compile_model),
         fullgraph=bool(args.fullgraph),
         sdpa_backend=spec.sdpa_backend,
+        cuda_graph_forward_backward=False,
         mean_step_s=float(elapsed / args.measured_steps),
         tokens_per_s=float(spec.train_batch_tokens * args.measured_steps / elapsed),
         peak_cuda_mem_bytes=int(torch.cuda.max_memory_allocated()),
@@ -704,7 +788,8 @@ def main() -> None:
     args = parse_args()
     spec = build_model_spec(args)
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    run_dir = args.out_dir / spec.model
+    variant = "cuda_graph_fwbw_on" if args.cuda_graph_forward_backward else "baseline"
+    run_dir = args.out_dir / spec.model / variant
     run_dir.mkdir(parents=True, exist_ok=True)
 
     torch.manual_seed(int(args.seed))
@@ -721,8 +806,22 @@ def main() -> None:
     input_ids, target_ids = make_static_batch(spec, device=device, seed=int(args.seed))
 
     if args.mode == "benchmark":
-        summary = benchmark(spec, model, optimizers, input_ids, target_ids, args)
+        if args.cuda_graph_forward_backward:
+            summary = benchmark_cuda_graph_forward_backward(
+                spec,
+                model,
+                optimizers,
+                input_ids,
+                target_ids,
+                args,
+            )
+        else:
+            summary = benchmark(spec, model, optimizers, input_ids, target_ids, args)
     else:
+        if args.cuda_graph_forward_backward:
+            raise ValueError(
+                "--cuda-graph-forward-backward is only supported in benchmark mode"
+            )
         summary = run_torch_profiler(
             spec, model, optimizers, input_ids, target_ids, args, run_dir
         )

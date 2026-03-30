@@ -388,6 +388,70 @@ Latest harness smoke check:
   - the next custom-op candidate should be a larger boundary, not more polish
     on this same pair operator
 
+### 2026-03-30
+
+- Added an optional CUDA-graph benchmark mode to the checked-in perf harness for
+  the fixed forward/backward microbatch loop.
+- Outputs:
+  - ALlama anchor baseline:
+    `runs_allama_validation/perf_cuda_graph_compare/off/allama_anchor/baseline/run_summary.json`
+  - ALlama anchor CUDA graph:
+    `runs_allama_validation/perf_cuda_graph_compare/on/allama_anchor/cuda_graph_fwbw_on/run_summary.json`
+  - GPT baseline:
+    `runs_allama_validation/perf_cuda_graph_compare/off/gpt_reference/baseline/run_summary.json`
+  - GPT CUDA graph:
+    `runs_allama_validation/perf_cuda_graph_compare/on/gpt_reference/cuda_graph_fwbw_on/run_summary.json`
+- Result:
+  - ALlama anchor:
+    - baseline: `137,601 tok/s`
+    - CUDA graph forward/backward: `143,654 tok/s`
+    - gain: about `4.4%`
+  - GPT reference:
+    - baseline: `244,580 tok/s`
+    - CUDA graph forward/backward: `258,874 tok/s`
+    - gain: about `5.8%`
+- Interpretation:
+  - static CUDA-graph capture is viable on the local contract and is worth
+    keeping in mind as a systems optimization
+  - but the gain is generic rather than ALlama-specific, and it is not large
+    enough to solve the fundamental throughput gap by itself
+
+### 2026-03-30
+
+- Added a standalone Triton benchmark for a larger attention-side candidate
+  boundary:
+  - split fused `qkv`
+  - reshape into SDPA layout
+  - q/k RMSNorm
+  - RoPE
+  - q_gain
+- File:
+  - `scripts/benchmark_allama_attention_prep.py`
+- Outputs:
+  - summary:
+    `runs_allama_validation/attention_prep_v1/summary.json`
+- Result on representative anchor shape `qkv=[4, 1024, 1152]`,
+  `num_heads=14`, `num_kv_heads=2`, `head_dim=64`:
+  - prep-only boundary:
+    - compiled PyTorch reference: `0.03960 ms`
+    - Triton kernel: `0.04098 ms`
+    - result: essentially tied, slightly slower than compiled reference
+  - prep plus flash-attention forward:
+    - compiled PyTorch reference: `0.08764 ms`
+    - Triton prep + flash forward: `0.11069 ms`
+    - result: about `20.8%` slower than compiled reference
+  - numerical drift stayed in a reasonable bf16 range:
+    - prep-only `max_rel=0.0070`
+    - prep+flash `max_rel=0.0103`
+- Conclusion:
+  - this attention-prep boundary is not strong enough to be a first shipped
+    kernel
+  - even though it collapses a larger sequence of attention-side glue ops than
+    the earlier prenorm/pair experiments, compiled PyTorch plus flash-attention
+    is already strong here
+  - the first serious custom kernels should be larger block-level boundaries,
+    not more polish on attention prep alone
+
 ## Next Work
 
 - Keep `frontier_v1_shortfat_s4_ff15_pre_rms_gate005` as the quality anchor.
@@ -395,6 +459,12 @@ Latest harness smoke check:
 - Use the profiler traces as the starting point for a custom kernel plan around
   the repeated shared block, especially larger-grain epilogue/prologue fusion
   around the attention and MLP boundaries.
-- Design the next custom-op attempt around a larger boundary than the current
-  pair op, so the real model path can avoid paying the current graph/autograd
-  integration penalty.
+- The current evidence has converged the initial kernel priorities:
+  - first priority: a larger MLP-block kernel path that absorbs enough of the
+    forward and backward structure around `gate_up`, `silu*up`, `down`, and the
+    residual epilogue to matter beyond microbenchmarks
+  - second priority: an attention-block boundary larger than prep alone,
+    likely something that meaningfully reduces the qkv-to-flash-to-proj glue
+    around the repeated shared block instead of just replacing q/k transforms
+  - CUDA graphs are worth keeping available, but they are a secondary systems
+    optimization, not the main answer

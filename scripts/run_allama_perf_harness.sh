@@ -14,6 +14,7 @@ MICROBATCHES="${MICROBATCHES:-64}"
 SDPA_BACKEND="${SDPA_BACKEND:-auto}"
 COMPILE_FLAG="${COMPILE_FLAG:---compile}"
 FULLGRAPH_FLAG="${FULLGRAPH_FLAG:---fullgraph}"
+CUDA_GRAPH_FLAG="${CUDA_GRAPH_FLAG:-}"
 if [[ $# -eq 0 ]]; then
   MODELS=(allama_anchor gpt_reference)
 else
@@ -33,5 +34,6 @@ for MODEL in "${MODELS[@]}"; do
     --microbatches "${MICROBATCHES}" \
     --sdpa-backend "${SDPA_BACKEND}" \
     "${COMPILE_FLAG}" \
-    "${FULLGRAPH_FLAG}"
+    "${FULLGRAPH_FLAG}" \
+    ${CUDA_GRAPH_FLAG}
 done
