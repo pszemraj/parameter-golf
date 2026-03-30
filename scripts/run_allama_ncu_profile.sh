@@ -27,10 +27,9 @@ for CASE_NAME in "${CASES[@]}"; do
     --force-overwrite \
     --target-processes all \
     --kernel-name-base demangled \
-    --set speedOfLight \
+    --set basic \
+    --profile-from-start off \
     --export "${REP_BASE}" \
-    --capture-range cudaProfilerApi \
-    --capture-range-end stop \
     conda run -s --name train python scripts/profile_hot_kernels.py \
       --case "${CASE_NAME}" \
       --warmup-iters 10 \
