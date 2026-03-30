@@ -1,4 +1,5 @@
 #include <torch/extension.h>
+#include <tuple>
 
 namespace {
 
@@ -34,9 +35,34 @@ torch::Tensor residual_scale_rms_norm_cpu(
   return (mixed * inv_rms * weight_cast).view_as(x);
 }
 
+std::tuple<torch::Tensor, torch::Tensor> residual_scale_rms_norm_pair_cpu(
+    const torch::Tensor& x,
+    const torch::Tensor& branch,
+    const torch::Tensor& scale,
+    const torch::Tensor& weight,
+    double eps) {
+  auto x2 = x.contiguous().view({-1, x.size(-1)});
+  auto branch2 = branch.contiguous().view({-1, branch.size(-1)});
+  auto scale_cast = scale.to(x.scalar_type()).view({1, x.size(-1)});
+  auto weight_cast = weight.to(x.scalar_type()).view({1, x.size(-1)});
+  auto mixed = x2 + branch2 * scale_cast;
+  auto inv_rms = (mixed.to(torch::kFloat32).square().mean(-1, true) + eps)
+                     .rsqrt()
+                     .to(mixed.scalar_type());
+  auto normed = mixed * inv_rms * weight_cast;
+  return {mixed.view_as(x), normed.view_as(x)};
+}
+
 }  // namespace
 
 torch::Tensor residual_scale_rms_norm_cuda(
+    const torch::Tensor& x,
+    const torch::Tensor& branch,
+    const torch::Tensor& scale,
+    const torch::Tensor& weight,
+    double eps);
+
+std::tuple<torch::Tensor, torch::Tensor> residual_scale_rms_norm_pair_cuda(
     const torch::Tensor& x,
     const torch::Tensor& branch,
     const torch::Tensor& scale,
@@ -59,9 +85,29 @@ torch::Tensor residual_scale_rms_norm(
   return residual_scale_rms_norm_cpu(x, branch, scale, weight, eps);
 }
 
+std::tuple<torch::Tensor, torch::Tensor> residual_scale_rms_norm_pair(
+    const torch::Tensor& x,
+    const torch::Tensor& branch,
+    const torch::Tensor& scale,
+    const torch::Tensor& weight,
+    double eps) {
+  check_inputs(x, branch, scale, weight);
+  if (x.is_cuda()) {
+    TORCH_CHECK(
+        scale.is_cuda() && weight.is_cuda(),
+        "scale and weight must be CUDA tensors when x is on CUDA");
+    return residual_scale_rms_norm_pair_cuda(x, branch, scale, weight, eps);
+  }
+  return residual_scale_rms_norm_pair_cpu(x, branch, scale, weight, eps);
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def(
       "residual_scale_rms_norm",
       &residual_scale_rms_norm,
       "Fused residual add, per-channel scale, and RMSNorm");
+  m.def(
+      "residual_scale_rms_norm_pair",
+      &residual_scale_rms_norm_pair,
+      "Fused residual add, per-channel scale, and RMSNorm with mixed output");
 }

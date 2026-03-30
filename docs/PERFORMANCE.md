@@ -303,6 +303,34 @@ Latest harness smoke check:
   - the next question is whether an opt-in integration path preserves that win
     once autograd and full model compilation are involved
 
+### 2026-03-30
+
+- Extended the standalone C++/CUDA benchmark to a more realistic two-output
+  boundary:
+  `residual_scale_rms_norm_pair(x, branch, scale, weight, eps) ->
+  (mixed, normed)`.
+- Why this matters:
+  - the single-output op only returns the normalized tensor
+  - the real prenorm block also still needs the mixed residual tensor
+  - this pair-output version is a more honest test of whether a fused prologue
+    can pay for itself once integrated
+- Benchmark on the same representative ALlama anchor shape `[4, 1024, 896]`:
+  - summary:
+    `runs_allama_validation/cpp_ops_v1/residual_scale_rms_norm_pair_summary.json`
+  - eager PyTorch reference: `0.02699 ms`
+  - compiled PyTorch reference: `0.01819 ms`
+  - custom C++/CUDA pair op: `0.01240 ms`
+  - speedup vs eager: `2.18x`
+  - speedup vs compiled reference: `1.47x`
+  - numerical drift stayed in the same bf16 band:
+    - `max_abs=0.125`
+    - `max_rel=0.0095`
+- Conclusion:
+  - the pair-output boundary is materially more promising than the earlier
+    single-output sketch
+  - the next practical step is an opt-in integration in the real model path,
+    not more synthetic micro-benchmarks of smaller glue fragments
+
 ## Next Work
 
 - Keep `frontier_v1_shortfat_s4_ff15_pre_rms_gate005` as the quality anchor.
@@ -310,5 +338,6 @@ Latest harness smoke check:
 - Use the profiler traces as the starting point for a custom kernel plan around
   the repeated shared block, especially larger-grain epilogue/prologue fusion
   around the attention and MLP boundaries.
-- Test an opt-in integration path for `residual_scale_rms_norm` and measure it
-  on the real compiled anchor harness before expanding the extension surface.
+- Test an opt-in integration path for `residual_scale_rms_norm_pair` and
+  measure it on the real compiled anchor harness before expanding the extension
+  surface.
