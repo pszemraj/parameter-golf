@@ -593,3 +593,64 @@ Latest harness smoke check:
     directions:
     - MLP: fused gate-up projection + `SwiGLU`
     - attention: fused post-flash output projection + residual epilogue
+
+## End-to-End Harness Checks
+
+- Tried opt-in model-path integration of the strongest benchmark candidates on
+  the real compiled ALlama anchor harness.
+- Result:
+  - neither candidate is ready to stay in the model path yet
+  - both train-step integrations were removed after measurement so the main code
+    stays clean and baseline-stable
+
+### MLP Gate-Up Integration Check
+
+- Integrated the fused gate-up `SwiGLU` kernel into the shared MLP path behind a
+  temporary harness-only flag, then measured the real compiled anchor step with
+  the standard local accumulation contract.
+- Representative rerun in
+  `runs_allama_validation/perf_gateup_compare_rerun/`:
+  - baseline:
+    - `mean_step_s=2.03157`
+    - `tokens_per_s=129035.49`
+  - Triton gate-up path:
+    - `mean_step_s=2.07339`
+    - `tokens_per_s=126432.65`
+- Conclusion:
+  - despite the standalone compiled forward win, the real train step regressed
+    by about `2.0%`
+  - an earlier one-off compare showed a small positive delta, but the
+    back-to-back rerun did not reproduce it, so that earlier result was not
+    treated as reliable
+  - the model-path integration was removed
+
+### Attention Out-Proj Integration Check
+
+- Integrated the fused post-flash output-projection kernel behind a temporary
+  harness-only flag and measured the same compiled anchor contract.
+- Representative compare in
+  `runs_allama_validation/perf_attn_compare/`:
+  - baseline:
+    - `mean_step_s=2.00584`
+    - `tokens_per_s=130690.36`
+  - Triton attention out-proj path:
+    - `mean_step_s=2.15642`
+    - `tokens_per_s=121564.50`
+- Conclusion:
+  - the real train step regressed by about `7.0%`
+  - this confirms the standalone forward win is not enough when the current
+    backward and integration shape are included
+  - the model-path integration was removed
+
+### Updated State
+
+- Keep the larger-boundary benchmark scripts.
+- Do not keep the experimental kernels in `allama_shared.py` until an end-to-end
+  harness compare is consistently positive.
+- The benchmark evidence is still useful:
+  - MLP gate-up fusion remains the strongest forward-only MLP candidate
+  - attention out-proj remains a plausible forward-only attention candidate
+- The next time these come back into the model path, they need either:
+  - a stronger custom backward path
+  - a different integration boundary that avoids giving the forward win back
+    during training

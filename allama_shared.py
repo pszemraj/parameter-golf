@@ -423,7 +423,6 @@ class HyperSharedAttention(nn.Module):
                 is_causal=True,
                 dropout_p=self.attn_dropout if self.training else 0.0,
             )
-
         y = y.transpose(1, 2).contiguous().view(bsz, seqlen, dim)
         return self.resid_dropout(self.proj(y))
 
