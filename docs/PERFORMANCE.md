@@ -361,6 +361,33 @@ Latest harness smoke check:
   - the next custom-op attempt needs to absorb more of the surrounding backward
     and graph structure, not just replace one forward prologue boundary
 
+### 2026-03-30
+
+- Extended the standalone C++/CUDA scaffold with a real backward kernel for the
+  pair boundary and benchmarked it through a benchmark-local opaque custom op.
+- Outputs:
+  - directory: `runs_allama_validation/cpp_ops_v2`
+  - combined summary: `runs_allama_validation/cpp_ops_v2/summary.json`
+- Result on representative shape `[4, 1024, 896]`:
+  - forward-only pair op still wins in isolation:
+    - compiled PyTorch reference: `0.01837 ms`
+    - custom C++/CUDA pair op: `0.01451 ms`
+    - speedup vs compiled reference: `1.27x`
+  - backward-inclusive isolated benchmark does not win yet:
+    - compiled PyTorch reference: `0.21968 ms`
+    - compiled custom forward+backward path: `0.25292 ms`
+    - net result: about `13.1%` slower than compiled reference
+  - numerical drift remained acceptable for bf16 prototype work:
+    - `max_abs=1.1607`
+    - `max_rel=0.00746`
+- Conclusion:
+  - making the backward path opaque fixed the compileability problem, but not
+    the performance problem
+  - the current pair boundary is still too small to beat compiled PyTorch once
+    backward is part of the contract
+  - the next custom-op candidate should be a larger boundary, not more polish
+    on this same pair operator
+
 ## Next Work
 
 - Keep `frontier_v1_shortfat_s4_ff15_pre_rms_gate005` as the quality anchor.

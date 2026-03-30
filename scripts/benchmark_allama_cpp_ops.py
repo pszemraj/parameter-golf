@@ -132,6 +132,113 @@ def measure_ms(fn: Callable[[], Any], warmup_iters: int, measured_iters: int) ->
     return 1000.0 * elapsed / measured_iters
 
 
+def register_pair_autograd_custom_op(ext: Any) -> Any:
+    """Register a benchmark-local custom op with C++ forward and backward."""
+
+    @torch.library.custom_op(
+        "allama_cpp_bench::residual_scale_rms_norm_pair_autograd",
+        mutates_args=(),
+    )
+    def pair_autograd_op(
+        x: torch.Tensor,
+        branch: torch.Tensor,
+        scale: torch.Tensor,
+        weight: torch.Tensor,
+        eps: float,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return ext.residual_scale_rms_norm_pair(x, branch, scale, weight, eps)
+
+    @pair_autograd_op.register_fake
+    def _pair_autograd_op_fake(
+        x: torch.Tensor,
+        branch: torch.Tensor,
+        scale: torch.Tensor,
+        weight: torch.Tensor,
+        eps: float,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        del branch, scale, weight, eps
+        return x.new_empty(x.shape), x.new_empty(x.shape)
+
+    @torch.library.custom_op(
+        "allama_cpp_bench::residual_scale_rms_norm_pair_backward_op",
+        mutates_args=(),
+    )
+    def pair_backward_op(
+        mixed: torch.Tensor,
+        branch: torch.Tensor,
+        scale: torch.Tensor,
+        weight: torch.Tensor,
+        grad_mixed_out: torch.Tensor,
+        grad_normed_out: torch.Tensor,
+        eps: float,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        return ext.residual_scale_rms_norm_pair_backward(
+            mixed,
+            branch,
+            scale,
+            weight,
+            grad_mixed_out,
+            grad_normed_out,
+            eps,
+        )
+
+    @pair_backward_op.register_fake
+    def _pair_backward_op_fake(
+        mixed: torch.Tensor,
+        branch: torch.Tensor,
+        scale: torch.Tensor,
+        weight: torch.Tensor,
+        grad_mixed_out: torch.Tensor,
+        grad_normed_out: torch.Tensor,
+        eps: float,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        del grad_mixed_out, grad_normed_out, eps
+        return (
+            mixed.new_empty(mixed.shape),
+            branch.new_empty(branch.shape),
+            scale.new_empty(scale.shape),
+            weight.new_empty(weight.shape),
+        )
+
+    def setup_context(
+        ctx: Any,
+        inputs: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, float],
+        output: tuple[torch.Tensor, torch.Tensor],
+    ) -> None:
+        _, branch, scale, weight, eps = inputs
+        mixed, _ = output
+        ctx.save_for_backward(mixed, branch, scale, weight)
+        ctx.eps = float(eps)
+
+    def backward(
+        ctx: Any,
+        grad_mixed_out: torch.Tensor | None,
+        grad_normed_out: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, None]:
+        mixed, branch, scale, weight = ctx.saved_tensors
+        if grad_mixed_out is None:
+            grad_mixed_out = torch.zeros_like(mixed)
+        if grad_normed_out is None:
+            grad_normed_out = torch.zeros_like(mixed)
+        grad_x, grad_branch, grad_scale, grad_weight = pair_backward_op(
+            mixed,
+            branch,
+            scale,
+            weight,
+            grad_mixed_out,
+            grad_normed_out,
+            ctx.eps,
+        )
+        return grad_x, grad_branch, grad_scale, grad_weight, None
+
+    torch.library.register_autograd(
+        "allama_cpp_bench::residual_scale_rms_norm_pair_autograd",
+        backward,
+        setup_context=setup_context,
+    )
+    return pair_autograd_op
+
+
 def summarize_case(
     *,
     case: str,
@@ -156,6 +263,70 @@ def summarize_case(
     }
 
 
+def backward_step_reference(
+    x: torch.Tensor,
+    branch: torch.Tensor,
+    scale: torch.Tensor,
+    weight: torch.Tensor,
+    grad_mixed: torch.Tensor,
+    grad_normed: torch.Tensor,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Run one reference forward+backward step for the pair boundary."""
+    mixed, normed = residual_scale_rms_norm_pair_reference(
+        x, branch, scale, weight, eps
+    )
+    loss = (mixed * grad_mixed).sum() + (normed * grad_normed).sum()
+    return torch.autograd.grad(loss, (x, branch, scale, weight))
+
+
+def pair_loss_reference(
+    x: torch.Tensor,
+    branch: torch.Tensor,
+    scale: torch.Tensor,
+    weight: torch.Tensor,
+    grad_mixed: torch.Tensor,
+    grad_normed: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    """Return a scalar loss that exercises both pair outputs."""
+    mixed, normed = residual_scale_rms_norm_pair_reference(
+        x, branch, scale, weight, eps
+    )
+    return (mixed * grad_mixed).sum() + (normed * grad_normed).sum()
+
+
+def backward_step_custom(
+    op: Callable[..., tuple[torch.Tensor, torch.Tensor]],
+    x: torch.Tensor,
+    branch: torch.Tensor,
+    scale: torch.Tensor,
+    weight: torch.Tensor,
+    grad_mixed: torch.Tensor,
+    grad_normed: torch.Tensor,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Run one custom forward+backward step for the pair boundary."""
+    mixed, normed = op(x, branch, scale, weight, eps)
+    loss = (mixed * grad_mixed).sum() + (normed * grad_normed).sum()
+    return torch.autograd.grad(loss, (x, branch, scale, weight))
+
+
+def pair_loss_custom(
+    op: Callable[..., tuple[torch.Tensor, torch.Tensor]],
+    x: torch.Tensor,
+    branch: torch.Tensor,
+    scale: torch.Tensor,
+    weight: torch.Tensor,
+    grad_mixed: torch.Tensor,
+    grad_normed: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    """Return a scalar loss for the custom pair op."""
+    mixed, normed = op(x, branch, scale, weight, eps)
+    return (mixed * grad_mixed).sum() + (normed * grad_normed).sum()
+
+
 def main() -> None:
     """Build the candidate extension and benchmark it against the reference."""
     args = parse_args()
@@ -166,6 +337,7 @@ def main() -> None:
     torch.manual_seed(1337)
 
     ext = load_extension(args.build_dir)
+    pair_autograd_op = register_pair_autograd_custom_op(ext)
     batch = 4
     seq_len = 1024
     dim = 896
@@ -263,6 +435,148 @@ def main() -> None:
         max_rel=pair_max_rel,
     )
 
+    x_ref = x.detach().clone().requires_grad_(True)
+    branch_ref = branch.detach().clone().requires_grad_(True)
+    scale_ref = scale.detach().clone().requires_grad_(True)
+    weight_ref = weight.detach().clone().requires_grad_(True)
+    x_custom = x.detach().clone().requires_grad_(True)
+    branch_custom = branch.detach().clone().requires_grad_(True)
+    scale_custom = scale.detach().clone().requires_grad_(True)
+    weight_custom = weight.detach().clone().requires_grad_(True)
+    grad_mixed = torch.randn_like(x)
+    grad_normed = torch.randn_like(x)
+
+    ref_grads = backward_step_reference(
+        x_ref,
+        branch_ref,
+        scale_ref,
+        weight_ref,
+        grad_mixed,
+        grad_normed,
+        eps,
+    )
+    custom_grads = backward_step_custom(
+        pair_autograd_op,
+        x_custom,
+        branch_custom,
+        scale_custom,
+        weight_custom,
+        grad_mixed,
+        grad_normed,
+        eps,
+    )
+    pair_backward_max_abs = max(
+        (ref_grad.float() - custom_grad.float()).abs().max().item()
+        for ref_grad, custom_grad in zip(ref_grads, custom_grads, strict=True)
+    )
+    pair_backward_max_rel = max(
+        (
+            (ref_grad.float() - custom_grad.float()).abs().max()
+            / ref_grad.float().abs().max().clamp_min(1e-6)
+        ).item()
+        for ref_grad, custom_grad in zip(ref_grads, custom_grads, strict=True)
+    )
+
+    pair_backward_ref_ms = measure_ms(
+        lambda: backward_step_reference(
+            x_ref,
+            branch_ref,
+            scale_ref,
+            weight_ref,
+            grad_mixed,
+            grad_normed,
+            eps,
+        ),
+        warmup_iters=args.warmup_iters,
+        measured_iters=args.measured_iters,
+    )
+    compiled_pair_loss_ref = torch.compile(
+        pair_loss_reference,
+        dynamic=False,
+        fullgraph=True,
+    )
+    compiled_pair_backward_ref_ms = measure_ms(
+        lambda: torch.autograd.grad(
+            compiled_pair_loss_ref(
+                x_ref,
+                branch_ref,
+                scale_ref,
+                weight_ref,
+                grad_mixed,
+                grad_normed,
+                eps,
+            ),
+            (x_ref, branch_ref, scale_ref, weight_ref),
+        ),
+        warmup_iters=args.warmup_iters,
+        measured_iters=args.measured_iters,
+    )
+    pair_backward_custom_ms = measure_ms(
+        lambda: backward_step_custom(
+            pair_autograd_op,
+            x_custom,
+            branch_custom,
+            scale_custom,
+            weight_custom,
+            grad_mixed,
+            grad_normed,
+            eps,
+        ),
+        warmup_iters=args.warmup_iters,
+        measured_iters=args.measured_iters,
+    )
+    compiled_pair_loss_custom = torch.compile(
+        lambda x_, branch_, scale_, weight_, grad_mixed_, grad_normed_, eps_: (
+            pair_loss_custom(
+                pair_autograd_op,
+                x_,
+                branch_,
+                scale_,
+                weight_,
+                grad_mixed_,
+                grad_normed_,
+                eps_,
+            )
+        ),
+        dynamic=False,
+        fullgraph=True,
+    )
+    compiled_pair_backward_custom_ms = measure_ms(
+        lambda: torch.autograd.grad(
+            compiled_pair_loss_custom(
+                x_custom,
+                branch_custom,
+                scale_custom,
+                weight_custom,
+                grad_mixed,
+                grad_normed,
+                eps,
+            ),
+            (x_custom, branch_custom, scale_custom, weight_custom),
+        ),
+        warmup_iters=args.warmup_iters,
+        measured_iters=args.measured_iters,
+    )
+    pair_backward_summary = {
+        "case": "residual_scale_rms_norm_pair_backward",
+        "reference_ms": float(pair_backward_ref_ms),
+        "compiled_reference_ms": float(compiled_pair_backward_ref_ms),
+        "custom_ms": float(pair_backward_custom_ms),
+        "compiled_custom_ms": float(compiled_pair_backward_custom_ms),
+        "speedup": (
+            float(pair_backward_ref_ms / pair_backward_custom_ms)
+            if pair_backward_custom_ms > 0.0
+            else 0.0
+        ),
+        "speedup_vs_compiled_reference": (
+            float(compiled_pair_backward_ref_ms / compiled_pair_backward_custom_ms)
+            if compiled_pair_backward_custom_ms > 0.0
+            else 0.0
+        ),
+        "max_abs": float(pair_backward_max_abs),
+        "max_rel": float(pair_backward_max_rel),
+    }
+
     summary = {
         "shape": [batch, seq_len, dim],
         "warmup_iters": int(args.warmup_iters),
@@ -270,7 +584,7 @@ def main() -> None:
         "torch_version": torch.__version__,
         "cuda_version": torch.version.cuda,
         "device_name": torch.cuda.get_device_name(device),
-        "cases": [single_summary, pair_summary],
+        "cases": [single_summary, pair_summary, pair_backward_summary],
     }
 
     out_dir = args.out_dir
