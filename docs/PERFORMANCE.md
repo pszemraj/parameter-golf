@@ -257,6 +257,20 @@ Latest harness smoke check:
     block-level epilogue/prologue path or a C++/CUTLASS operator that absorbs
     more of the repeated shared-block glue at once
 
+### 2026-03-30
+
+- Checked local extension-toolchain readiness for the next kernel path.
+- Result:
+  - local C++/CUDA extension builds are viable on this machine
+  - `CUDA_HOME=/usr/local/cuda`
+  - `nvcc` is `12.9`
+  - the system C++ compiler is `g++ 13.3`
+  - CUTLASS headers are not bundled under `/usr/local/cuda/include`
+- Implication:
+  - a custom C++/CUDA operator path is realistic locally
+  - if we want CUTLASS epilogue fusion, we need to vendor CUTLASS or bring it
+    in explicitly instead of assuming it ships with the CUDA toolkit
+
 ## Next Work
 
 - Keep `frontier_v1_shortfat_s4_ff15_pre_rms_gate005` as the quality anchor.
