@@ -50,3 +50,5 @@ for CASE_NAME in "${CASES[@]}"; do
     --import "${REP_BASE}.ncu-rep" \
     --page details > "${REP_BASE}.txt"
 done
+
+chmod -R 777 "${RUN_DIR}"
