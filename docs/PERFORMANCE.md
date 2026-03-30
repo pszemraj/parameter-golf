@@ -70,6 +70,34 @@ Key interpretation:
 - hot shapes are already tensor-core-friendly, so the main problem is repeated
   compute and launch count, not obviously bad divisibility
 
+## Repro Harness
+
+Checked-in scripts now exist for repeatable local performance work:
+
+- full-step benchmark or `torch.profiler` harness:
+  - `bash scripts/run_allama_perf_harness.sh`
+- Nsight Systems on the frozen ALlama anchor:
+  - `bash scripts/run_allama_nsys_profile.sh allama_anchor`
+- Nsight Compute on the representative hot kernels:
+  - `bash scripts/run_allama_ncu_profile.sh`
+
+These scripts assume the current local 5090 contract:
+
+- `TORCH_BLAS_PREFER_CUBLASLT=1`
+- single-GPU `4 x 1024 x 64` accumulation semantics
+- compiled steady-state training on the frozen ALlama anchor or GPT reference
+
+The harness owns the model contracts directly:
+
+- `allama_anchor`: `shortfat_s4_ff15 + prenorm + rmsnorm + shortcut_gate005`
+- `gpt_reference`: the current `train_gpt.py` reference defaults under the same
+  batch contract
+
+Latest harness smoke check:
+
+- GPT reference: `441,358 tok/s`, `0.594 s/step`, `0.98 GB` peak CUDA memory
+- ALlama anchor: `125,857 tok/s`, `2.083 s/step`, `2.65 GB` peak CUDA memory
+
 ## Improvement Log
 
 ### 2026-03-29
@@ -110,6 +138,44 @@ Key interpretation:
   - established the need for a custom Triton or C++ kernel path aimed at
     block-level fusion and launch reduction
 
+### 2026-03-30
+
+- Checked in the reproducible performance harness:
+  - `scripts/profile_training_step.py`
+  - `scripts/profile_hot_kernels.py`
+  - `scripts/run_allama_perf_harness.sh`
+  - `scripts/run_allama_nsys_profile.sh`
+  - `scripts/run_allama_ncu_profile.sh`
+- Result:
+  - benchmark and profiler work is now scriptable from the repo instead of
+    living only in ad hoc local commands
+  - the frozen quality anchor is now encoded directly in the harness
+  - the harness smoke reproduced the expected throughput gap: GPT around
+    `441k tok/s`, ALlama around `126k tok/s`
+
+### 2026-03-30
+
+- Ran `nsys` on the frozen ALlama anchor using the checked-in harness.
+- Result:
+  - the timeline confirms the launch-heavy repeated-block picture from
+    `torch.profiler`
+  - one profiled global step issued `47,984` `cuLaunchKernel` calls and
+    `11,638` `cudaLaunchKernel` calls
+  - the top GPU kernels are still the same CUTLASS GEMMs plus flash-attention
+    backward and forward
+  - representative report location:
+    `runs_allama_validation/nsight_systems/20260330_024707_allama_anchor`
+
+### 2026-03-30
+
+- Started the checked-in `ncu` path for the anchor hot kernels.
+- Result:
+  - wrapper issues are fixed
+  - current blocker is local GPU performance-counter permissions:
+    `ERR_NVGPUCTRPERM`
+  - once counters are re-enabled locally, rerun:
+    `bash scripts/run_allama_ncu_profile.sh`
+
 ## Next Work
 
 - Keep `frontier_v1_shortfat_s4_ff15_pre_rms_gate005` as the quality anchor.
@@ -117,3 +183,5 @@ Key interpretation:
 - Use the profiler traces as the starting point for a custom kernel plan around
   the repeated shared block, especially the prenorm/x0 mix/norm/projection
   boundaries and residual epilogues.
+- Finish the `ncu` pass on the hot kernels after GPU performance-counter access
+  is restored, then pick the first kernel to replace.
