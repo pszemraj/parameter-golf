@@ -1,5 +1,8 @@
 # ALlama
 
+See [PERFORMANCE.md](PERFORMANCE.md) for the current speed/quality state and
+the running improvement log.
+
 ## What this trainer fixes
 
 This version is the one meant for actual local ablations on a 5090:
@@ -246,7 +249,8 @@ Interpretation:
 
 ### Phase 2: final-size calibration
 
-Per [README.md](README.md), the thing that counts is compressed artifact size, defined as:
+Per [README.md](../README.md), the thing that counts is compressed artifact
+size, defined as:
 
 ```text
 artifact_bytes = code_bytes + int8_payload_zlib_bytes
