@@ -173,6 +173,11 @@ Latest harness smoke check:
   - wrapper issues are fixed
   - current blocker is local GPU performance-counter permissions:
     `ERR_NVGPUCTRPERM`
+  - on this machine, `sudo`-launched `ncu` can also fail on
+    `/tmp/nsight-compute-lock` because `fs.protected_regular=2` interacts badly
+    with sticky `/tmp`
+  - the wrapper now sets a per-run `TMPDIR` inside the run directory so `ncu`
+    does not depend on `/tmp` for its lock file
   - once counters are re-enabled locally, rerun:
     `bash scripts/run_allama_ncu_profile.sh`
 

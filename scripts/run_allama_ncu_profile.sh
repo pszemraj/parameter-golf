@@ -9,6 +9,15 @@ STAMP="$(date +%Y%m%d_%H%M%S)"
 RUN_DIR="${OUT_ROOT}/${STAMP}"
 mkdir -p "${RUN_DIR}"
 
+# Avoid /tmp lock-file failures on systems with sticky /tmp and
+# fs.protected_regular enabled. Nsight Compute uses TMPDIR for its
+# inter-process lock, so keep it inside this run directory instead.
+NCU_TMPDIR="$(mktemp -d "${RUN_DIR}/tmp.XXXXXX")"
+export TMPDIR="${NCU_TMPDIR}"
+export TMP="${NCU_TMPDIR}"
+export TEMP="${NCU_TMPDIR}"
+export TEMPDIR="${NCU_TMPDIR}"
+
 CASES=("$@")
 if [[ ${#CASES[@]} -eq 0 ]]; then
   CASES=(
