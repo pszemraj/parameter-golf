@@ -171,15 +171,58 @@ Latest harness smoke check:
 - Started the checked-in `ncu` path for the anchor hot kernels.
 - Result:
   - wrapper issues are fixed
-  - current blocker is local GPU performance-counter permissions:
-    `ERR_NVGPUCTRPERM`
   - on this machine, `sudo`-launched `ncu` can also fail on
     `/tmp/nsight-compute-lock` because `fs.protected_regular=2` interacts badly
     with sticky `/tmp`
   - the wrapper now sets a per-run `TMPDIR` inside the run directory so `ncu`
     does not depend on `/tmp` for its lock file
-  - once counters are re-enabled locally, rerun:
-    `bash scripts/run_allama_ncu_profile.sh`
+  - output artifacts are chmodded open at the end of the run so root-owned
+    reports are still easy to inspect locally
+
+### 2026-03-30
+
+- Completed `ncu` on the representative hot kernels at:
+  `runs_allama_validation/nsight_compute/20260330_031014`
+- Result:
+  - the hot MLP GEMMs are large, latency-limited CUTLASS kernels rather than
+    obviously broken shapes
+  - `allama_mlp_up` primary GEMM:
+    - `190.72 us`
+    - `31.34%` compute throughput
+    - `16.63%` achieved occupancy
+    - `232` registers/thread
+    - `73.73 KB` dynamic shared memory/block
+  - `allama_mlp_down` primary GEMM:
+    - `200.96 us`
+    - `34.81%` compute throughput
+    - `8.33%` achieved occupancy
+    - `230` registers/thread
+    - `81.92 KB` dynamic shared memory/block
+  - `allama_qkv` primary GEMM:
+    - `64.93 us`
+    - `41.35%` compute throughput
+    - `15.71%` achieved occupancy
+    - `88` registers/thread
+    - `49.15 KB` dynamic shared memory/block
+  - `allama_attn_proj` primary GEMM:
+    - `60.38 us`
+    - `35.23%` compute throughput
+    - `15.50%` achieved occupancy
+    - `88` registers/thread
+    - `49.15 KB` dynamic shared memory/block
+  - flash-attention backward is also latency-limited:
+    - `flash_bwd_dq_dk_dv_loop_seqk_parallel_kernel` took `200.29 us`
+    - `30.78%` compute throughput
+    - `16.64%` achieved occupancy
+    - `255` registers/thread
+    - `73.73 KB` dynamic shared memory/block
+  - implication:
+    - the main cost is still the repeated shared-block compute itself
+    - the vendor GEMMs are not trivially replaceable by a small custom matmul
+      tweak
+    - the first custom kernel effort should still target block-level launch
+      reduction and fused glue around the repeated shared block, not the
+      optimizer
 
 ## Next Work
 
@@ -188,5 +231,4 @@ Latest harness smoke check:
 - Use the profiler traces as the starting point for a custom kernel plan around
   the repeated shared block, especially the prenorm/x0 mix/norm/projection
   boundaries and residual epilogues.
-- Finish the `ncu` pass on the hot kernels after GPU performance-counter access
-  is restored, then pick the first kernel to replace.
+- Use the `ncu` hot-kernel results to choose the first custom kernel path.
