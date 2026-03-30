@@ -224,11 +224,44 @@ Latest harness smoke check:
       reduction and fused glue around the repeated shared block, not the
       optimizer
 
+### 2026-03-30
+
+- Prototyped a first narrow Triton kernel for the prenorm prologue:
+  fused `x0` mix plus RMSNorm before attention.
+- Validation:
+  - forward and backward stayed numerically close to the PyTorch reference on
+    CUDA
+  - compiled CUDA smoke worked under the local 5090 contract with
+    `TORCH_BLAS_PREFER_CUBLASLT=1`
+- Benchmark result using the checked-in harness on the frozen anchor:
+  - baseline:
+    `runs_allama_validation/perf_triton_prenorm_compare/off/allama_anchor/run_summary.json`
+    - `126,416 tok/s`
+    - `2.074 s/step`
+  - Triton prenorm prototype:
+    `runs_allama_validation/perf_triton_prenorm_compare/on/allama_anchor/run_summary.json`
+    - `117,741 tok/s`
+    - `2.226 s/step`
+  - net result: about `6.9%` slower
+- Follow-up profiler read:
+  - profile location:
+    `runs_allama_validation/perf_triton_prenorm_profile/on/allama_anchor`
+  - the custom forward kernel itself was only about `0.52%` of self CUDA time
+  - the regression came from worse end-to-end graph behavior and extra launch
+    pressure, not from the fused forward kernel being individually expensive
+- Conclusion:
+  - do not keep the narrow forward-only Triton prenorm path in the model
+  - Inductor already does enough on this small prologue that a custom op there
+    is not a free win
+  - the next custom-kernel target should be larger-grain fusion, likely a
+    block-level epilogue/prologue path or a C++/CUTLASS operator that absorbs
+    more of the repeated shared-block glue at once
+
 ## Next Work
 
 - Keep `frontier_v1_shortfat_s4_ff15_pre_rms_gate005` as the quality anchor.
 - Stop spending best-model sweep budget on `wide` or `layernorm`.
 - Use the profiler traces as the starting point for a custom kernel plan around
-  the repeated shared block, especially the prenorm/x0 mix/norm/projection
-  boundaries and residual epilogues.
+  the repeated shared block, especially larger-grain epilogue/prologue fusion
+  around the attention and MLP boundaries.
 - Use the `ncu` hot-kernel results to choose the first custom kernel path.
