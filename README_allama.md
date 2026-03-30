@@ -722,3 +722,71 @@ That script:
 The shared model now supports both `rmsnorm` and `layernorm`, and the same
 sigmoided `x0` gate is applied in both prenorm and postnorm paths so the norm
 comparison is not confounded by a different shortcut parameterization.
+
+### Reduced norm-kind results
+
+The reduced norm-kind sweep establishes a narrower, more useful conclusion than
+`sbcal_v4`:
+
+- drop `layernorm` from the next best-model sweep; it lost to `rmsnorm` in both
+  families and both layouts
+- keep `postnorm+rmsnorm` alive for `wide_s4_e384_ff10`; it was nearly tied
+  with `prenorm+rmsnorm`
+- prefer `prenorm+rmsnorm` for `shortfat_s4_ff15`; it still won clearly there
+
+Best runs from that reduced sweep:
+
+- `shortfat + prenorm + rmsnorm`: `val_bpb=1.435873`
+- `wide + prenorm + rmsnorm`: `val_bpb=1.447867`
+- `wide + postnorm + rmsnorm`: `val_bpb=1.449017`
+
+That means the old broad statement "postnorm is worse" was too strong.
+The corrected statement is:
+
+- `layernorm` does not help here
+- `postnorm+rmsnorm` is family-dependent and still viable for `wide`
+- `prenorm+rmsnorm` remains the safest default for quality
+
+## Frontier v1 sweep
+
+The next serious best-model sweep should be a combination sweep, not another
+generic one-factor ablation pass. The dedicated script is:
+
+```bash
+bash scripts/run_allama_frontier_sweep.sh
+```
+
+This script intentionally does not repurpose `sbcal_v4`. It runs a new,
+frontier-only matrix under the same local training contract:
+
+- families: `shortfat_s4_ff15`, `wide_s4_e384_ff10`
+- norm kind: `rmsnorm` only
+- layouts:
+  - `shortfat`: `postnorm` and `prenorm`
+  - `wide`: `postnorm` and `prenorm`
+- shortcut combinations:
+  - `shortfat`: baseline gate and `shortcut_gate005`
+  - `wide`: baseline shortcut and `shortcut_no_x0`
+
+The resulting Allama matrix is:
+
+- `shortfat post_rms control`
+- `shortfat pre_rms control`
+- `shortfat post_rms gate005`
+- `shortfat pre_rms gate005`
+- `wide post_rms control`
+- `wide pre_rms control`
+- `wide post_rms no_x0`
+- `wide pre_rms no_x0`
+
+plus the optional GPT reference run.
+
+Why this is the right next sweep:
+
+- it keeps only the families that still sit on the local frontier
+- it drops `layernorm`, which did not pay off
+- it retests `shortcut_gate005` for `shortfat` under the corrected norm/gate
+  implementation instead of trusting the historical pre-fix result
+- it tests `shortcut_no_x0` for `wide` in both viable norm layouts
+- it focuses on missing combinations that can still plausibly beat the current
+  best ALlama run instead of spending runs on obviously dominated regions
