@@ -549,3 +549,47 @@ Latest harness smoke check:
   - this is currently the most promising initial custom-kernel direction, but
     it needs a real backward kernel or a smarter integration strategy before it
     can help end-to-end throughput
+
+## Larger MLP Gate-Up Candidate
+
+- Added `scripts/benchmark_allama_mlp_gateup_block.py`.
+- Boundary under test:
+  - vendor RMSNorm
+  - Triton fused gate projection + up projection + `SwiGLU` epilogue
+  - vendor down projection
+  - vendor residual add/scale
+- This kernel avoids materializing the larger `[M, 2H]` gate-up activation
+  tensor and instead emits the hidden `[M, H]` activation directly.
+- Backward is intentionally straightforward PyTorch:
+  - recompute `gate = x_norm @ W_gate` and `up = x_norm @ W_up`
+  - `grad_gate = grad_hidden * up * silu'(gate)`
+  - `grad_up = grad_hidden * silu(gate)`
+  - `grad_x = grad_gate @ W_gate^T + grad_up @ W_up^T`
+  - `grad_W_gate = x_norm^T @ grad_gate`
+  - `grad_W_up = x_norm^T @ grad_up`
+- Representative anchor-shape result in
+  `runs_allama_validation/mlp_gateup_block_v1/summary.json`:
+  - shape: `batch=4`, `seq_len=1024`, `dim=896`, `hidden=1408`
+  - forward:
+    - eager reference: `0.25838 ms`
+    - eager custom: `0.21456 ms`
+    - compiled reference: `0.23551 ms`
+    - compiled custom: `0.20559 ms`
+  - backward:
+    - eager reference: `0.77249 ms`
+    - eager custom: `0.95725 ms`
+    - compiled reference: `0.69488 ms`
+    - compiled custom: `0.79333 ms`
+  - numerical drift stayed within a reasonable bf16 range:
+    - forward `max_rel=0.00575`
+    - backward `max_rel=0.01087`
+- Conclusion:
+  - this is the strongest MLP-side candidate so far
+  - compiled custom forward is about `14.6%` faster than compiled PyTorch,
+    which is materially better than the earlier down-side fusion
+  - it is still not ready for training integration because compiled backward is
+    about `14.2%` slower than the compiled reference
+  - the evidence now points to these two forward kernels as the best initial
+    directions:
+    - MLP: fused gate-up projection + `SwiGLU`
+    - attention: fused post-flash output projection + residual epilogue
