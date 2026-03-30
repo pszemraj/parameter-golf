@@ -790,3 +790,70 @@ Why this is the right next sweep:
 - it tests `shortcut_no_x0` for `wide` in both viable norm layouts
 - it focuses on missing combinations that can still plausibly beat the current
   best ALlama run instead of spending runs on obviously dominated regions
+
+## Frontier v1 results
+
+Timestamp:
+
+- `2026-03-30T01:51:27-04:00`
+
+The `frontier_v1` sweep completed cleanly on the local 5090. All `9/9` runs
+finished, including the GPT reference, and every ALlama run stayed under the
+`16,000,000` byte artifact cap.
+
+### Best run
+
+Best overall ALlama run from this sweep:
+
+- `shortfat_s4_ff15 + prenorm + rmsnorm + shortcut_gate005`
+- `val_bpb=1.434141`
+- `tokens_per_s=133,833`
+- `artifact_bytes=15,683,554`
+
+Compared with the matched GPT reference from the same sweep:
+
+- GPT reference: `val_bpb=1.443775`
+- GPT reference: `tokens_per_s=442,941`
+- GPT reference: `artifact_bytes=11,404,805`
+
+So the best ALlama run beat GPT on sampled `val_bpb` by `0.009634`, while GPT
+remained dramatically faster and smaller.
+
+Compared with the previous best ALlama run from `sbcal_v4`:
+
+- old best: `shortfat_s4_ff15 + shortcut_gate005`
+- old best `val_bpb=1.434684`
+- new best improved by `0.000543`
+
+### Sweep takeaways
+
+- `shortfat + shortcut_gate005` is real, and it works better with
+  `prenorm+rmsnorm` than with `postnorm+rmsnorm`
+- `shortfat pre_rms control -> pre_rms gate005` improved from `1.438043` to
+  `1.434141`
+- `shortfat post_rms control -> post_rms gate005` improved from `1.447484` to
+  `1.444011`
+- `wide + shortcut_no_x0` did not pay off on quality in either norm layout
+- `wide` still offered decent speed, but it no longer looked like the best path
+  for the strongest model
+
+Sorted ALlama runs from this sweep:
+
+- `shortfat pre_rms gate005`: `1.434141`
+- `shortfat pre_rms control`: `1.438043`
+- `shortfat post_rms gate005`: `1.444011`
+- `shortfat post_rms control`: `1.447484`
+- `wide post_rms control`: `1.450800`
+- `wide pre_rms control`: `1.450943`
+- `wide pre_rms no_x0`: `1.451374`
+- `wide post_rms no_x0`: `1.451696`
+
+### Updated recommendation
+
+- keep `shortfat_s4_ff15 + prenorm + rmsnorm + shortcut_gate005` as the new
+  primary ALlama candidate
+- drop `wide` from best-model quality sweeps unless the goal is explicitly
+  speed/quality tradeoff study rather than strongest `val_bpb`
+- drop `shortcut_no_x0` from the quality search space
+- use the remaining artifact headroom on the shortfat winner instead of
+  spending more runs on clearly dominated combinations
