@@ -271,6 +271,38 @@ Latest harness smoke check:
   - if we want CUTLASS epilogue fusion, we need to vendor CUTLASS or bring it
     in explicitly instead of assuming it ships with the CUDA toolkit
 
+### 2026-03-30
+
+- Added a standalone C++/CUDA benchmark scaffold for a larger shared-block
+  prologue candidate:
+  `residual_scale_rms_norm(x, branch, scale, weight, eps)`.
+- Files:
+  - `csrc/allama_ops.cpp`
+  - `csrc/allama_residual_scale_rms_norm.cu`
+  - `scripts/benchmark_allama_cpp_ops.py`
+- This operator is relevant because it can model both:
+  - the MLP prenorm prologue after attention:
+    `rms_norm(x + attn_scale * attn_out)`
+  - the attention prenorm shortcut mix if `scale=sigmoid(x0_gate)` and
+    `branch=x0`
+- Benchmark on representative ALlama anchor shape `[4, 1024, 896]`:
+  - summary:
+    `runs_allama_validation/cpp_ops_v1/residual_scale_rms_norm_summary.json`
+  - eager PyTorch reference: `0.02485 ms`
+  - compiled PyTorch reference: `0.01718 ms`
+  - custom C++/CUDA op: `0.01443 ms`
+  - speedup vs eager: `1.72x`
+  - speedup vs compiled reference: `1.19x`
+  - numerical drift stayed small for bf16:
+    - `max_abs=0.125`
+    - `max_rel=0.0095`
+- Conclusion:
+  - unlike the earlier narrow Triton prenorm attempt, this larger-grain
+    operator does beat the compiled PyTorch baseline in isolation
+  - the next question is no longer "can a custom op win at all"
+  - the next question is whether an opt-in integration path preserves that win
+    once autograd and full model compilation are involved
+
 ## Next Work
 
 - Keep `frontier_v1_shortfat_s4_ff15_pre_rms_gate005` as the quality anchor.
@@ -278,4 +310,5 @@ Latest harness smoke check:
 - Use the profiler traces as the starting point for a custom kernel plan around
   the repeated shared block, especially larger-grain epilogue/prologue fusion
   around the attention and MLP boundaries.
-- Use the `ncu` hot-kernel results to choose the first custom kernel path.
+- Test an opt-in integration path for `residual_scale_rms_norm` and measure it
+  on the real compiled anchor harness before expanding the extension surface.
