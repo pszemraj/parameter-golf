@@ -38,6 +38,58 @@ void check_grad_inputs(
       "backward grads must match mixed shape");
 }
 
+void check_attention_prep_inputs(
+    const torch::Tensor& qkv,
+    const torch::Tensor& q_gain,
+    const torch::Tensor& cos,
+    const torch::Tensor& sin,
+    int64_t num_heads,
+    int64_t num_kv_heads,
+    int64_t head_dim) {
+  TORCH_CHECK(qkv.dim() == 3, "qkv must be [B, S, D]");
+  TORCH_CHECK(q_gain.dim() == 1, "q_gain must be 1D");
+  TORCH_CHECK(cos.dim() == 2 && sin.dim() == 2, "cos and sin must be [S, D/2]");
+  TORCH_CHECK(head_dim > 0 && head_dim % 2 == 0, "head_dim must be positive and even");
+  TORCH_CHECK(num_heads > 0 && num_kv_heads > 0, "head counts must be positive");
+  TORCH_CHECK(
+      qkv.size(2) == (num_heads + 2 * num_kv_heads) * head_dim,
+      "qkv last dim must match head layout");
+  TORCH_CHECK(
+      q_gain.numel() == num_heads,
+      "q_gain length must match num_heads");
+  TORCH_CHECK(
+      cos.size(0) == qkv.size(1) && sin.size(0) == qkv.size(1),
+      "cos/sin sequence dim must match qkv");
+  TORCH_CHECK(
+      cos.size(1) == head_dim / 2 && sin.size(1) == head_dim / 2,
+      "cos/sin rotary dim must match head_dim / 2");
+}
+
+void check_attention_prep_backward_inputs(
+    const torch::Tensor& qkv,
+    const torch::Tensor& q_gain,
+    const torch::Tensor& cos,
+    const torch::Tensor& sin,
+    const torch::Tensor& grad_q,
+    const torch::Tensor& grad_k,
+    const torch::Tensor& grad_v,
+    int64_t num_heads,
+    int64_t num_kv_heads,
+    int64_t head_dim) {
+  check_attention_prep_inputs(qkv, q_gain, cos, sin, num_heads, num_kv_heads, head_dim);
+  TORCH_CHECK(
+      grad_q.dim() == 4 && grad_q.size(0) == qkv.size(0) && grad_q.size(1) == qkv.size(1)
+          && grad_q.size(2) == num_heads && grad_q.size(3) == head_dim,
+      "grad_q must be [B, S, num_heads, head_dim]");
+  TORCH_CHECK(
+      grad_k.dim() == 4 && grad_k.size(0) == qkv.size(0) && grad_k.size(1) == qkv.size(1)
+          && grad_k.size(2) == num_kv_heads && grad_k.size(3) == head_dim,
+      "grad_k must be [B, S, num_kv_heads, head_dim]");
+  TORCH_CHECK(
+      grad_v.sizes() == grad_k.sizes(),
+      "grad_v must match grad_k shape");
+}
+
 torch::Tensor residual_scale_rms_norm_cpu(
     const torch::Tensor& x,
     const torch::Tensor& branch,
@@ -109,6 +161,47 @@ residual_scale_rms_norm_pair_backward_cpu(
   return {grad_x, grad_branch, grad_scale, grad_weight};
 }
 
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> attention_prep_bshd_cpu(
+    const torch::Tensor& qkv,
+    const torch::Tensor& q_gain,
+    const torch::Tensor& cos,
+    const torch::Tensor& sin,
+    int64_t num_heads,
+    int64_t num_kv_heads,
+    int64_t head_dim) {
+  auto qkv_f = qkv.contiguous().to(torch::kFloat32);
+  auto q_gain_f = q_gain.contiguous().to(torch::kFloat32);
+  auto cos_f = cos.contiguous().to(torch::kFloat32);
+  auto sin_f = sin.contiguous().to(torch::kFloat32);
+  auto batch_size = qkv.size(0);
+  auto seq_len = qkv.size(1);
+  auto q_dim = num_heads * head_dim;
+  auto kv_dim = num_kv_heads * head_dim;
+  auto q = qkv_f.narrow(-1, 0, q_dim).view({batch_size, seq_len, num_heads, head_dim});
+  auto k = qkv_f.narrow(-1, q_dim, kv_dim).view({batch_size, seq_len, num_kv_heads, head_dim});
+  auto v = qkv_f.narrow(-1, q_dim + kv_dim, kv_dim)
+               .view({batch_size, seq_len, num_kv_heads, head_dim});
+  auto q_rms = (q.square().mean(-1, true) + 1e-5).rsqrt();
+  auto k_rms = (k.square().mean(-1, true) + 1e-5).rsqrt();
+  q = q * q_rms;
+  k = k * k_rms;
+  auto half = head_dim / 2;
+  auto cos_view = cos_f.view({1, seq_len, 1, half});
+  auto sin_view = sin_f.view({1, seq_len, 1, half});
+  auto q1 = q.slice(-1, 0, half);
+  auto q2 = q.slice(-1, half, head_dim);
+  auto k1 = k.slice(-1, 0, half);
+  auto k2 = k.slice(-1, half, head_dim);
+  auto q_rot = torch::cat({q1 * cos_view + q2 * sin_view, q2 * cos_view - q1 * sin_view}, -1);
+  auto k_rot = torch::cat({k1 * cos_view + k2 * sin_view, k2 * cos_view - k1 * sin_view}, -1);
+  q_rot = q_rot * q_gain_f.view({1, 1, num_heads, 1});
+  return {
+      q_rot.to(qkv.scalar_type()),
+      k_rot.to(qkv.scalar_type()),
+      v.to(qkv.scalar_type()),
+  };
+}
+
 }  // namespace
 
 torch::Tensor residual_scale_rms_norm_cuda(
@@ -134,6 +227,27 @@ residual_scale_rms_norm_pair_backward_cuda(
     const torch::Tensor& grad_mixed_out,
     const torch::Tensor& grad_normed_out,
     double eps);
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> attention_prep_bshd_cuda(
+    const torch::Tensor& qkv,
+    const torch::Tensor& q_gain,
+    const torch::Tensor& cos,
+    const torch::Tensor& sin,
+    int64_t num_heads,
+    int64_t num_kv_heads,
+    int64_t head_dim);
+
+std::tuple<torch::Tensor, torch::Tensor> attention_prep_bshd_backward_cuda(
+    const torch::Tensor& qkv,
+    const torch::Tensor& q_gain,
+    const torch::Tensor& cos,
+    const torch::Tensor& sin,
+    const torch::Tensor& grad_q,
+    const torch::Tensor& grad_k,
+    const torch::Tensor& grad_v,
+    int64_t num_heads,
+    int64_t num_kv_heads,
+    int64_t head_dim);
 
 torch::Tensor residual_scale_rms_norm(
     const torch::Tensor& x,
@@ -189,6 +303,46 @@ residual_scale_rms_norm_pair_backward(
       mixed, branch, scale, weight, grad_mixed_out, grad_normed_out, eps);
 }
 
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> attention_prep_bshd(
+    const torch::Tensor& qkv,
+    const torch::Tensor& q_gain,
+    const torch::Tensor& cos,
+    const torch::Tensor& sin,
+    int64_t num_heads,
+    int64_t num_kv_heads,
+    int64_t head_dim) {
+  check_attention_prep_inputs(qkv, q_gain, cos, sin, num_heads, num_kv_heads, head_dim);
+  if (qkv.is_cuda()) {
+    TORCH_CHECK(
+        q_gain.is_cuda() && cos.is_cuda() && sin.is_cuda(),
+        "q_gain, cos, and sin must be CUDA tensors when qkv is on CUDA");
+    return attention_prep_bshd_cuda(qkv, q_gain, cos, sin, num_heads, num_kv_heads, head_dim);
+  }
+  return attention_prep_bshd_cpu(qkv, q_gain, cos, sin, num_heads, num_kv_heads, head_dim);
+}
+
+std::tuple<torch::Tensor, torch::Tensor> attention_prep_bshd_backward(
+    const torch::Tensor& qkv,
+    const torch::Tensor& q_gain,
+    const torch::Tensor& cos,
+    const torch::Tensor& sin,
+    const torch::Tensor& grad_q,
+    const torch::Tensor& grad_k,
+    const torch::Tensor& grad_v,
+    int64_t num_heads,
+    int64_t num_kv_heads,
+    int64_t head_dim) {
+  check_attention_prep_backward_inputs(
+      qkv, q_gain, cos, sin, grad_q, grad_k, grad_v, num_heads, num_kv_heads, head_dim);
+  TORCH_CHECK(qkv.is_cuda(), "attention_prep_bshd_backward is CUDA-only");
+  TORCH_CHECK(
+      q_gain.is_cuda() && cos.is_cuda() && sin.is_cuda()
+          && grad_q.is_cuda() && grad_k.is_cuda() && grad_v.is_cuda(),
+      "attention_prep_bshd_backward inputs must be CUDA tensors");
+  return attention_prep_bshd_backward_cuda(
+      qkv, q_gain, cos, sin, grad_q, grad_k, grad_v, num_heads, num_kv_heads, head_dim);
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def(
       "residual_scale_rms_norm",
@@ -202,4 +356,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       "residual_scale_rms_norm_pair_backward",
       &residual_scale_rms_norm_pair_backward,
       "Backward for fused residual add, per-channel scale, and RMSNorm pair op");
+  m.def(
+      "attention_prep_bshd",
+      &attention_prep_bshd,
+      "C++/CUDA fused FA2 attention prep forward");
+  m.def(
+      "attention_prep_bshd_backward",
+      &attention_prep_bshd_backward,
+      "C++/CUDA fused FA2 attention prep backward");
 }

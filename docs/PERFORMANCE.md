@@ -7,7 +7,7 @@ materially improved or clarified it over time.
 
 Timestamp:
 
-- `2026-03-31T00:45:43-04:00`
+- `2026-03-31T01:02:12-04:00`
 
 Current best ALlama quality run:
 
@@ -68,6 +68,16 @@ Applied live kernel/path uplift on the sweep-scale winner shape:
   - whole FA2 branch live hook:
     - `139,660 tok/s -> 109,958 tok/s`
     - about `-21.3%`
+- Current attention-side C++ prep kernel does not survive live application
+  either:
+  - shortfat anchor, `ATTN_IMPL=fa2`, `MLP_KERNEL=triton_gateup`:
+    - `136,494 tok/s -> 129,411 tok/s`
+    - about `-5.2%`
+    - also worse than the same-family Triton prep path at `133,935 tok/s`
+  - wide control, `ATTN_IMPL=fa2`, `MLP_KERNEL=pytorch`:
+    - `179,015 tok/s -> 172,929 tok/s`
+    - about `-3.4%`
+    - also worse than the same-family Triton prep path at `174,236 tok/s`
 - Important scope note:
   - these are only the shortfat-anchor applied live kernel/path uplifts
 
@@ -134,6 +144,9 @@ Current read on the project:
 - Two additional live FA2-side Triton kernel paths now exist behind
   `ATTN_PREP_KERNEL=triton` and `ATTN_OUTPROJ_KERNEL=triton`, but as separate
   opaque boundaries they still regress end to end on the local compiled anchor.
+- The first C++/CUDA FA2 prep kernel path now exists behind
+  `ATTN_PREP_KERNEL=cpp`, but it also regresses end to end on both measured
+  sweep-scale families and is currently worse than the Triton prep path.
 - Switching those attention-side kernels from opaque `custom_op` wrappers to
   `torch.library.triton_op` improved benchmark-side behavior materially, but it
   still did not make the live model path positive.
@@ -1347,3 +1360,55 @@ Latest harness smoke check:
     - `ATTN_PREP_KERNEL=pytorch`
     - `ATTN_OUTPROJ_KERNEL=pytorch`
     - `MLP_KERNEL=triton_gateup`
+
+- Implemented the first C++/CUDA FA2 prep forward/backward kernel in:
+  - `csrc/allama_ops.cpp`
+  - `csrc/allama_attention_prep.cu`
+  - shared loader: `allama_cpp_extension.py`
+- Wired it into:
+  - the standalone C++ benchmark loader
+  - the FA2 attention-core benchmark via `--prep-kernel=cpp`
+  - an opt-in model path behind `ATTN_PREP_KERNEL=cpp`
+- Standalone compiled FA2 core comparison on the shortfat attention shape:
+  - C++ prep:
+    `runs_allama_validation/attention_core_cpp_smoke/summary.json`
+    - compiled forward: custom `0.16294 ms` vs reference `0.13850 ms`
+    - compiled backward: custom `0.66015 ms` vs reference `0.48258 ms`
+  - Triton prep on the same benchmark settings:
+    `runs_allama_validation/attention_core_triton_smoke/summary.json`
+    - compiled forward: custom `0.18128 ms` vs reference `0.13849 ms`
+    - compiled backward: custom `0.65690 ms` vs reference `0.47733 ms`
+- Interpretation of the standalone core benchmark:
+  - the C++ prep path improved compiled forward versus the Triton prep path
+  - compiled backward stayed effectively tied and still behind compiled
+    reference
+  - so the core benchmark alone was not enough to justify shipping it
+- Real compiled training-step compare with the C++ prep path:
+  - shortfat anchor baseline:
+    `runs_allama_validation/perf_fa2_cpp_prep_compare/anchor_baseline/allama_anchor/baseline/run_summary.json`
+    - `136,494.35 tok/s`
+  - shortfat anchor C++ prep:
+    `runs_allama_validation/perf_fa2_cpp_prep_compare/anchor_cpp/allama_anchor/baseline/run_summary.json`
+    - `129,411.39 tok/s`
+    - `-5.19%` versus baseline
+  - shortfat anchor Triton prep:
+    `runs_allama_validation/perf_fa2_cpp_prep_compare/anchor_triton/allama_anchor/baseline/run_summary.json`
+    - `133,935.19 tok/s`
+    - `-1.87%` versus baseline
+  - wide control baseline:
+    `runs_allama_validation/perf_fa2_cpp_prep_compare/wide_baseline/allama_wide/baseline/run_summary.json`
+    - `179,015.17 tok/s`
+  - wide control C++ prep:
+    `runs_allama_validation/perf_fa2_cpp_prep_compare/wide_cpp/allama_wide/baseline/run_summary.json`
+    - `172,928.96 tok/s`
+    - `-3.40%` versus baseline
+  - wide control Triton prep:
+    `runs_allama_validation/perf_fa2_cpp_prep_compare/wide_triton/allama_wide/baseline/run_summary.json`
+    - `174,235.62 tok/s`
+    - `-2.67%` versus baseline
+- Practical conclusion:
+  - the first C++/CUDA prep kernel is not a keeper
+  - it loses to the shipped FA2 path on both measured sweep-scale families
+  - it also loses to the current Triton prep path on both measured families
+  - the next attention-side C++/CUDA target needs to be a larger boundary than
+    prep alone

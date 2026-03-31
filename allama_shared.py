@@ -353,6 +353,7 @@ def mix_x0(
 
 _ALLAMA_MLP_GATEUP_OP: Optional[Any] = None
 _ALLAMA_ATTN_PREP_OP: Optional[Any] = None
+_ALLAMA_ATTN_PREP_CPP_OP: Optional[Any] = None
 _ALLAMA_ATTN_OUTPROJ_RESIDUAL_OP: Optional[Any] = None
 
 
@@ -1362,6 +1363,146 @@ def register_allama_attention_prep_custom_op() -> Optional[Any]:
     return _ALLAMA_ATTN_PREP_OP
 
 
+def register_allama_attention_prep_cpp_custom_op() -> Optional[Any]:
+    """Register the optional C++/CUDA FA2 prep custom op once."""
+    global _ALLAMA_ATTN_PREP_CPP_OP
+    if _ALLAMA_ATTN_PREP_CPP_OP is not None:
+        return _ALLAMA_ATTN_PREP_CPP_OP
+    try:
+        from allama_cpp_extension import load_allama_cpp_extension
+    except Exception:
+        return None
+    ext = load_allama_cpp_extension()
+
+    @torch.library.custom_op(
+        "allama_cpp::attention_prep_bshd_backward",
+        mutates_args=(),
+    )
+    def attention_prep_bshd_backward_cpp_op(
+        qkv: Tensor,
+        q_gain: Tensor,
+        cos: Tensor,
+        sin: Tensor,
+        grad_q: Tensor,
+        grad_k: Tensor,
+        grad_v: Tensor,
+        num_heads: int,
+        num_kv_heads: int,
+        head_dim: int,
+    ) -> tuple[Tensor, Tensor]:
+        return ext.attention_prep_bshd_backward(
+            qkv,
+            q_gain,
+            cos,
+            sin,
+            grad_q,
+            grad_k,
+            grad_v,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+        )
+
+    @attention_prep_bshd_backward_cpp_op.register_fake
+    def _attention_prep_bshd_backward_cpp_op_fake(
+        qkv: Tensor,
+        q_gain: Tensor,
+        cos: Tensor,
+        sin: Tensor,
+        grad_q: Tensor,
+        grad_k: Tensor,
+        grad_v: Tensor,
+        num_heads: int,
+        num_kv_heads: int,
+        head_dim: int,
+    ) -> tuple[Tensor, Tensor]:
+        del cos, sin, grad_q, grad_k, grad_v, num_heads, num_kv_heads, head_dim
+        return qkv.new_empty(qkv.shape), q_gain.new_empty(
+            q_gain.shape, dtype=torch.float32
+        )
+
+    @torch.library.custom_op(
+        "allama_cpp::attention_prep_bshd",
+        mutates_args=(),
+    )
+    def attention_prep_bshd_cpp_op(
+        qkv: Tensor,
+        q_gain: Tensor,
+        cos: Tensor,
+        sin: Tensor,
+        num_heads: int,
+        num_kv_heads: int,
+        head_dim: int,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        return ext.attention_prep_bshd(
+            qkv,
+            q_gain,
+            cos,
+            sin,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+        )
+
+    @attention_prep_bshd_cpp_op.register_fake
+    def _attention_prep_bshd_cpp_op_fake(
+        qkv: Tensor,
+        q_gain: Tensor,
+        cos: Tensor,
+        sin: Tensor,
+        num_heads: int,
+        num_kv_heads: int,
+        head_dim: int,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        del q_gain, cos, sin
+        batch_size, seq_len, _ = qkv.shape
+        q = qkv.new_empty((batch_size, seq_len, num_heads, head_dim))
+        k = qkv.new_empty((batch_size, seq_len, num_kv_heads, head_dim))
+        v = qkv.new_empty((batch_size, seq_len, num_kv_heads, head_dim))
+        return q, k, v
+
+    def setup_context(
+        ctx: Any,
+        inputs: tuple[Tensor, Tensor, Tensor, Tensor, int, int, int],
+        output: tuple[Tensor, Tensor, Tensor],
+    ) -> None:
+        del output
+        qkv, q_gain, cos, sin, num_heads, num_kv_heads, head_dim = inputs
+        ctx.save_for_backward(qkv, q_gain, cos, sin)
+        ctx.num_heads = int(num_heads)
+        ctx.num_kv_heads = int(num_kv_heads)
+        ctx.head_dim = int(head_dim)
+
+    def backward(
+        ctx: Any,
+        grad_q: Tensor,
+        grad_k: Tensor,
+        grad_v: Tensor,
+    ) -> tuple[Tensor, Tensor, None, None, None, None, None]:
+        qkv, q_gain, cos, sin = ctx.saved_tensors
+        grad_qkv, grad_q_gain = attention_prep_bshd_backward_cpp_op(
+            qkv,
+            q_gain,
+            cos,
+            sin,
+            grad_q,
+            grad_k,
+            grad_v,
+            ctx.num_heads,
+            ctx.num_kv_heads,
+            ctx.head_dim,
+        )
+        return grad_qkv, grad_q_gain, None, None, None, None, None
+
+    torch.library.register_autograd(
+        "allama_cpp::attention_prep_bshd",
+        backward,
+        setup_context=setup_context,
+    )
+    _ALLAMA_ATTN_PREP_CPP_OP = attention_prep_bshd_cpp_op
+    return _ALLAMA_ATTN_PREP_CPP_OP
+
+
 if triton is not None:
 
     @triton.autotune(
@@ -2086,9 +2227,10 @@ class HyperSharedAttention(nn.Module):
             raise ValueError(
                 f"Unsupported attn_impl={cfg.attn_impl!r}; expected sdpa, fa2, or fa2_kvpacked."
             )
-        if self.attn_prep_kernel not in {"pytorch", "triton"}:
+        if self.attn_prep_kernel not in {"pytorch", "triton", "cpp"}:
             raise ValueError(
-                f"Unsupported attn_prep_kernel={cfg.attn_prep_kernel!r}; expected pytorch or triton."
+                "Unsupported attn_prep_kernel="
+                f"{cfg.attn_prep_kernel!r}; expected pytorch, triton, or cpp."
             )
         if self.attn_outproj_kernel not in {"pytorch", "triton"}:
             raise ValueError(
@@ -2114,11 +2256,12 @@ class HyperSharedAttention(nn.Module):
         self.proj = linear_cls(cfg.model_dim, cfg.model_dim, bias=cfg.use_bias)
         self.proj._zero_init = True
         self.rotary = Rotary(self.head_dim, base=cfg.rope_base)
-        self.prep_op = (
-            register_allama_attention_prep_custom_op()
-            if self.attn_prep_kernel == "triton"
-            else None
-        )
+        if self.attn_prep_kernel == "triton":
+            self.prep_op = register_allama_attention_prep_custom_op()
+        elif self.attn_prep_kernel == "cpp":
+            self.prep_op = register_allama_attention_prep_cpp_custom_op()
+        else:
+            self.prep_op = None
         self.outproj_residual_op = (
             register_allama_attention_outproj_custom_op()
             if self.attn_outproj_kernel == "triton"
@@ -2166,7 +2309,7 @@ class HyperSharedAttention(nn.Module):
         if qkv_dim != expected:
             raise ValueError("qkv shape does not match the requested head layout")
         if (
-            self.attn_prep_kernel == "triton"
+            self.attn_prep_kernel in {"triton", "cpp"}
             and qkv.is_cuda
             and qkv.dtype == torch.bfloat16
             and self.prep_op is not None

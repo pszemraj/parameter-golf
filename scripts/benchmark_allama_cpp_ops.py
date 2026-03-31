@@ -16,11 +16,12 @@ from pathlib import Path
 from typing import Any, Callable
 
 import torch
-from torch.utils.cpp_extension import load
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+
+from allama_cpp_extension import load_allama_cpp_extension  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -62,18 +63,7 @@ def load_extension(build_dir: Path):
     :param Path build_dir: Build cache directory.
     :return Any: Imported extension module.
     """
-    build_dir.mkdir(parents=True, exist_ok=True)
-    return load(
-        name="allama_cpp_ops",
-        sources=[
-            str(REPO_ROOT / "csrc" / "allama_ops.cpp"),
-            str(REPO_ROOT / "csrc" / "allama_residual_scale_rms_norm.cu"),
-        ],
-        build_directory=str(build_dir),
-        extra_cuda_cflags=["--use_fast_math"],
-        extra_cflags=["-O3"],
-        verbose=False,
-    )
+    return load_allama_cpp_extension(str(build_dir))
 
 
 def residual_scale_rms_norm_reference(

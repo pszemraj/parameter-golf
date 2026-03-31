@@ -39,6 +39,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from allama_shared import (  # noqa: E402
     apply_rotary_emb,
+    register_allama_attention_prep_cpp_custom_op,
     register_allama_attention_prep_custom_op,
 )
 
@@ -63,6 +64,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=50,
         help="Measured iterations for timing.",
+    )
+    parser.add_argument(
+        "--prep-kernel",
+        choices=("triton", "cpp"),
+        default="triton",
+        help="Prep kernel implementation to benchmark inside the FA2 core path.",
     )
     return parser.parse_args()
 
@@ -205,6 +212,7 @@ def attention_core_reference(
 
 def register_attention_core_custom_op(
     prep_op: Callable[..., tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
+    prep_backward_op: Callable[..., tuple[torch.Tensor, torch.Tensor]],
 ) -> Callable[..., torch.Tensor]:
     """Register a benchmark-local FA2 attention-core op."""
 
@@ -365,7 +373,7 @@ def register_attention_core_custom_op(
             softmax_lse,
             rng_state,
         )
-        grad_qkv, grad_q_gain = torch.ops.allama_triton.attention_prep_bshd_backward(
+        grad_qkv, grad_q_gain = prep_backward_op(
             qkv,
             q_gain,
             cos,
@@ -445,10 +453,17 @@ def main() -> None:
 
     device = torch.device("cuda")
     torch.manual_seed(1337)
-    prep_op = register_allama_attention_prep_custom_op()
+    if args.prep_kernel == "triton":
+        prep_op = register_allama_attention_prep_custom_op()
+        prep_backward_op = torch.ops.allama_triton.attention_prep_bshd_backward
+    else:
+        prep_op = register_allama_attention_prep_cpp_custom_op()
+        prep_backward_op = torch.ops.allama_cpp.attention_prep_bshd_backward
     if prep_op is None:
-        raise RuntimeError("expected Triton attention prep op to be available")
-    core_op = register_attention_core_custom_op(prep_op)
+        raise RuntimeError(
+            f"expected attention prep op for {args.prep_kernel!r} to be available"
+        )
+    core_op = register_attention_core_custom_op(prep_op, prep_backward_op)
 
     batch = 4
     seq_len = 1024
@@ -700,6 +715,7 @@ def main() -> None:
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     summary = {
+        "prep_kernel": args.prep_kernel,
         "shape": {
             "batch": batch,
             "seq_len": seq_len,
