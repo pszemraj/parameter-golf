@@ -550,6 +550,7 @@ def attention_prep_backward_triton(
     num_heads: int,
     num_kv_heads: int,
     head_dim: int,
+    bshd: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Run the fused Triton backward kernel for the attention-prep boundary."""
     batch_size, seq_len, qkv_dim = qkv.shape
@@ -561,6 +562,16 @@ def attention_prep_backward_triton(
     grad_q_gain = torch.zeros_like(q_gain, dtype=torch.float32)
     block_d = next_power_of_2(head_dim)
     grid = (batch_size * seq_len, num_heads + num_kv_heads)
+    if bshd:
+        grad_q_stride_h = grad_q.stride(2)
+        grad_q_stride_t = grad_q.stride(1)
+        grad_k_stride_h = grad_k.stride(2)
+        grad_k_stride_t = grad_k.stride(1)
+    else:
+        grad_q_stride_h = grad_q.stride(1)
+        grad_q_stride_t = grad_q.stride(2)
+        grad_k_stride_h = grad_k.stride(1)
+        grad_k_stride_t = grad_k.stride(2)
     attention_prep_backward_kernel[grid](
         qkv,
         q_gain,
@@ -581,12 +592,12 @@ def attention_prep_backward_triton(
         qkv.stride(0),
         qkv.stride(1),
         grad_q.stride(0),
-        grad_q.stride(1),
-        grad_q.stride(2),
+        grad_q_stride_h,
+        grad_q_stride_t,
         grad_q.stride(3),
         grad_k.stride(0),
-        grad_k.stride(1),
-        grad_k.stride(2),
+        grad_k_stride_h,
+        grad_k_stride_t,
         grad_k.stride(3),
         grad_qkv.stride(0),
         grad_qkv.stride(1),
@@ -600,7 +611,7 @@ def register_attention_prep_custom_op() -> Any:
     """Register a benchmark-local custom op for the attention-prep boundary."""
 
     @torch.library.custom_op(
-        "allama_triton_bench::attention_prep_backward",
+        "allama_triton_bench::attention_prep_backward_v2",
         mutates_args=(),
     )
     def attention_prep_backward_op(
@@ -614,6 +625,7 @@ def register_attention_prep_custom_op() -> Any:
         num_heads: int,
         num_kv_heads: int,
         head_dim: int,
+        bshd: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return attention_prep_backward_triton(
             qkv,
@@ -626,6 +638,7 @@ def register_attention_prep_custom_op() -> Any:
             num_heads=num_heads,
             num_kv_heads=num_kv_heads,
             head_dim=head_dim,
+            bshd=bool(bshd),
         )
 
     @attention_prep_backward_op.register_fake
@@ -640,14 +653,15 @@ def register_attention_prep_custom_op() -> Any:
         num_heads: int,
         num_kv_heads: int,
         head_dim: int,
+        bshd: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        del cos, sin, grad_q, grad_k, grad_v, num_heads, num_kv_heads, head_dim
+        del cos, sin, grad_q, grad_k, grad_v, num_heads, num_kv_heads, head_dim, bshd
         return qkv.new_empty(qkv.shape), q_gain.new_empty(
             q_gain.shape, dtype=torch.float32
         )
 
     @torch.library.custom_op(
-        "allama_triton_bench::attention_prep",
+        "allama_triton_bench::attention_prep_v2",
         mutates_args=(),
     )
     def attention_prep_op(
@@ -727,11 +741,12 @@ def register_attention_prep_custom_op() -> Any:
             ctx.num_heads,
             ctx.num_kv_heads,
             ctx.head_dim,
+            ctx.bshd,
         )
         return grad_qkv, grad_q_gain, None, None, None, None, None, None
 
     torch.library.register_autograd(
-        "allama_triton_bench::attention_prep",
+        "allama_triton_bench::attention_prep_v2",
         backward,
         setup_context=setup_context,
     )

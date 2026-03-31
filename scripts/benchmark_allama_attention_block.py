@@ -60,6 +60,12 @@ def parse_args() -> argparse.Namespace:
         default=200,
         help="Measured iterations for timing.",
     )
+    parser.add_argument(
+        "--layout",
+        choices=("head_major", "bshd"),
+        default="bshd",
+        help="Attention-output layout to benchmark.",
+    )
     return parser.parse_args()
 
 
@@ -80,6 +86,17 @@ def measure_ms(fn: Callable[[], Any], warmup_iters: int, measured_iters: int) ->
     torch.cuda.synchronize()
     elapsed = time.perf_counter() - t0
     return 1000.0 * elapsed / measured_iters
+
+
+def attn_layout_meta(attn_y: torch.Tensor, *, bshd: bool) -> tuple[int, int, int, int]:
+    """Return ``(batch, num_heads, seq_len, head_dim)`` for the active layout."""
+    if attn_y.dim() != 4:
+        raise ValueError("attn_y must be rank-4")
+    if bshd:
+        batch, seq_len, num_heads, head_dim = attn_y.shape
+    else:
+        batch, num_heads, seq_len, head_dim = attn_y.shape
+    return batch, num_heads, seq_len, head_dim
 
 
 @triton.autotune(
@@ -410,6 +427,8 @@ def attn_outproj_residual_triton(
     attn_y: torch.Tensor,
     proj_weight_t: torch.Tensor,
     scale: torch.Tensor,
+    *,
+    bshd: bool = False,
 ) -> torch.Tensor:
     """Run the fused Triton attention-outproj-residual kernel.
 
@@ -423,9 +442,9 @@ def attn_outproj_residual_triton(
         raise TypeError("this benchmark currently targets bfloat16 tensors")
     if residual_x.dim() != 2 or attn_y.dim() != 4 or proj_weight_t.dim() != 2:
         raise ValueError(
-            "expected residual_x=[M,D], attn_y=[B,H,T,Dh], proj_weight_t=[D,D]"
+            "expected residual_x=[M,D], attn_y rank-4, proj_weight_t=[D,D]"
         )
-    batch, num_heads, seq_len, head_dim = attn_y.shape
+    batch, num_heads, seq_len, head_dim = attn_layout_meta(attn_y, bshd=bshd)
     model_dim = num_heads * head_dim
     if residual_x.shape != (batch * seq_len, model_dim):
         raise ValueError("residual_x shape must match the flattened attention output")
@@ -451,8 +470,8 @@ def attn_outproj_residual_triton(
         seq_len,
         head_dim,
         attn_y.stride(0),
-        attn_y.stride(1),
-        attn_y.stride(2),
+        attn_y.stride(2) if bshd else attn_y.stride(1),
+        attn_y.stride(1) if bshd else attn_y.stride(2),
         attn_y.stride(3),
         proj_weight_t.stride(0),
         proj_weight_t.stride(1),
@@ -468,9 +487,11 @@ def attn_grad_scale_triton(
     attn_y: torch.Tensor,
     proj_weight_t: torch.Tensor,
     grad_out: torch.Tensor,
+    *,
+    bshd: bool = False,
 ) -> torch.Tensor:
     """Run the fused branch-recompute reduction for ``grad_scale``."""
-    batch, num_heads, seq_len, head_dim = attn_y.shape
+    batch, num_heads, seq_len, head_dim = attn_layout_meta(attn_y, bshd=bshd)
     model_dim = num_heads * head_dim
     grad_scale = torch.zeros(model_dim, device=grad_out.device, dtype=torch.float32)
 
@@ -491,8 +512,8 @@ def attn_grad_scale_triton(
         seq_len,
         head_dim,
         attn_y.stride(0),
-        attn_y.stride(1),
-        attn_y.stride(2),
+        attn_y.stride(2) if bshd else attn_y.stride(1),
+        attn_y.stride(1) if bshd else attn_y.stride(2),
         attn_y.stride(3),
         proj_weight_t.stride(0),
         proj_weight_t.stride(1),
@@ -507,19 +528,31 @@ def attn_grad_attn_y_triton(
     proj_weight_t: torch.Tensor,
     seq_len: int,
     head_dim: int,
+    *,
+    bshd: bool = False,
 ) -> torch.Tensor:
     """Run the Triton backward kernel for ``grad_attn_y``."""
     model_dim = proj_weight_t.size(0)
     batch = grad_branch.size(0) // seq_len
     num_heads = model_dim // head_dim
-    grad_attn_y = torch.empty(
-        batch,
-        num_heads,
-        seq_len,
-        head_dim,
-        device=grad_branch.device,
-        dtype=grad_branch.dtype,
-    )
+    if bshd:
+        grad_attn_y = torch.empty(
+            batch,
+            seq_len,
+            num_heads,
+            head_dim,
+            device=grad_branch.device,
+            dtype=grad_branch.dtype,
+        )
+    else:
+        grad_attn_y = torch.empty(
+            batch,
+            num_heads,
+            seq_len,
+            head_dim,
+            device=grad_branch.device,
+            dtype=grad_branch.dtype,
+        )
 
     def grid(meta: dict[str, int]) -> tuple[int, int]:
         return (
@@ -541,8 +574,8 @@ def attn_grad_attn_y_triton(
         proj_weight_t.stride(0),
         proj_weight_t.stride(1),
         grad_attn_y.stride(0),
-        grad_attn_y.stride(1),
-        grad_attn_y.stride(2),
+        grad_attn_y.stride(2) if bshd else grad_attn_y.stride(1),
+        grad_attn_y.stride(1) if bshd else grad_attn_y.stride(2),
         grad_attn_y.stride(3),
     )
     return grad_attn_y
@@ -551,9 +584,11 @@ def attn_grad_attn_y_triton(
 def attn_grad_proj_weight_t_triton(
     attn_y: torch.Tensor,
     grad_branch: torch.Tensor,
+    *,
+    bshd: bool = False,
 ) -> torch.Tensor:
     """Run the Triton backward kernel for ``grad_proj_weight_t``."""
-    batch, num_heads, seq_len, head_dim = attn_y.shape
+    batch, num_heads, seq_len, head_dim = attn_layout_meta(attn_y, bshd=bshd)
     model_dim = num_heads * head_dim
     grad_proj_weight_t = torch.empty(
         model_dim,
@@ -578,8 +613,8 @@ def attn_grad_proj_weight_t_triton(
         seq_len,
         head_dim,
         attn_y.stride(0),
-        attn_y.stride(1),
-        attn_y.stride(2),
+        attn_y.stride(2) if bshd else attn_y.stride(1),
+        attn_y.stride(1) if bshd else attn_y.stride(2),
         attn_y.stride(3),
         grad_branch.stride(0),
         grad_branch.stride(1),
@@ -594,9 +629,14 @@ def attn_outproj_residual_reference(
     attn_y: torch.Tensor,
     proj_weight_t: torch.Tensor,
     scale: torch.Tensor,
+    *,
+    bshd: bool = False,
 ) -> torch.Tensor:
     """Reference PyTorch implementation of the post-flash attention boundary."""
-    attn_flat = attn_y.permute(0, 2, 1, 3).contiguous().view(residual_x.size(0), -1)
+    if bshd:
+        attn_flat = attn_y.contiguous().view(residual_x.size(0), -1)
+    else:
+        attn_flat = attn_y.permute(0, 2, 1, 3).contiguous().view(residual_x.size(0), -1)
     branch = attn_flat @ proj_weight_t
     return residual_x + branch * scale.to(dtype=residual_x.dtype)[None, :]
 
@@ -612,16 +652,18 @@ def register_attention_block_custom_op() -> Any:
         attn_y: torch.Tensor,
         proj_weight_t: torch.Tensor,
         grad_out: torch.Tensor,
+        bshd: int,
     ) -> torch.Tensor:
-        return attn_grad_scale_triton(attn_y, proj_weight_t, grad_out)
+        return attn_grad_scale_triton(attn_y, proj_weight_t, grad_out, bshd=bool(bshd))
 
     @attn_grad_scale_op.register_fake
     def _attn_grad_scale_op_fake(
         attn_y: torch.Tensor,
         proj_weight_t: torch.Tensor,
         grad_out: torch.Tensor,
+        bshd: int,
     ) -> torch.Tensor:
-        del attn_y, proj_weight_t
+        del attn_y, proj_weight_t, bshd
         return grad_out.new_empty((grad_out.size(1),), dtype=torch.float32)
 
     @torch.library.custom_op(
@@ -633,8 +675,15 @@ def register_attention_block_custom_op() -> Any:
         proj_weight_t: torch.Tensor,
         seq_len: int,
         head_dim: int,
+        bshd: int,
     ) -> torch.Tensor:
-        return attn_grad_attn_y_triton(grad_branch, proj_weight_t, seq_len, head_dim)
+        return attn_grad_attn_y_triton(
+            grad_branch,
+            proj_weight_t,
+            seq_len,
+            head_dim,
+            bshd=bool(bshd),
+        )
 
     @attn_grad_attn_y_op.register_fake
     def _attn_grad_attn_y_op_fake(
@@ -642,10 +691,13 @@ def register_attention_block_custom_op() -> Any:
         proj_weight_t: torch.Tensor,
         seq_len: int,
         head_dim: int,
+        bshd: int,
     ) -> torch.Tensor:
         model_dim = proj_weight_t.size(0)
         batch = grad_branch.size(0) // seq_len
         num_heads = model_dim // head_dim
+        if bool(bshd):
+            return grad_branch.new_empty((batch, seq_len, num_heads, head_dim))
         return grad_branch.new_empty((batch, num_heads, seq_len, head_dim))
 
     @torch.library.custom_op(
@@ -655,15 +707,18 @@ def register_attention_block_custom_op() -> Any:
     def attn_grad_proj_weight_t_op(
         attn_y: torch.Tensor,
         grad_branch: torch.Tensor,
+        bshd: int,
     ) -> torch.Tensor:
-        return attn_grad_proj_weight_t_triton(attn_y, grad_branch)
+        return attn_grad_proj_weight_t_triton(attn_y, grad_branch, bshd=bool(bshd))
 
     @attn_grad_proj_weight_t_op.register_fake
     def _attn_grad_proj_weight_t_op_fake(
         attn_y: torch.Tensor,
         grad_branch: torch.Tensor,
+        bshd: int,
     ) -> torch.Tensor:
-        model_dim = attn_y.size(1) * attn_y.size(3)
+        del bshd
+        model_dim = attn_y.size(-2) * attn_y.size(-1)
         return grad_branch.new_empty((model_dim, grad_branch.size(1)))
 
     @torch.library.custom_op(
@@ -675,8 +730,11 @@ def register_attention_block_custom_op() -> Any:
         attn_y: torch.Tensor,
         proj_weight_t: torch.Tensor,
         scale: torch.Tensor,
+        bshd: int,
     ) -> torch.Tensor:
-        return attn_outproj_residual_triton(residual_x, attn_y, proj_weight_t, scale)
+        return attn_outproj_residual_triton(
+            residual_x, attn_y, proj_weight_t, scale, bshd=bool(bshd)
+        )
 
     @attn_outproj_residual_op.register_fake
     def _attn_outproj_residual_op_fake(
@@ -684,37 +742,40 @@ def register_attention_block_custom_op() -> Any:
         attn_y: torch.Tensor,
         proj_weight_t: torch.Tensor,
         scale: torch.Tensor,
+        bshd: int,
     ) -> torch.Tensor:
-        del attn_y, proj_weight_t, scale
+        del attn_y, proj_weight_t, scale, bshd
         return residual_x.new_empty(residual_x.shape)
 
     def setup_context(
         ctx: Any,
-        inputs: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+        inputs: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int],
         output: torch.Tensor,
     ) -> None:
-        residual_x, attn_y, proj_weight_t, scale = inputs
+        residual_x, attn_y, proj_weight_t, scale, bshd = inputs
         del residual_x, output
         ctx.save_for_backward(attn_y, proj_weight_t, scale)
+        ctx.bshd = int(bshd)
 
     def backward(
         ctx: Any, grad_out: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, None]:
         attn_y, proj_weight_t, scale = ctx.saved_tensors
         scale_cast = scale.to(dtype=grad_out.dtype)[None, :]
         grad_x = grad_out
-        grad_scale = attn_grad_scale_op(attn_y, proj_weight_t, grad_out).to(
+        grad_scale = attn_grad_scale_op(attn_y, proj_weight_t, grad_out, ctx.bshd).to(
             dtype=scale.dtype
         )
         grad_branch = grad_out * scale_cast
-        grad_proj_weight_t = attn_grad_proj_weight_t_op(attn_y, grad_branch)
+        grad_proj_weight_t = attn_grad_proj_weight_t_op(attn_y, grad_branch, ctx.bshd)
         grad_attn_y = attn_grad_attn_y_op(
             grad_branch,
             proj_weight_t,
-            attn_y.size(2),
+            attn_y.size(1) if ctx.bshd else attn_y.size(2),
             attn_y.size(3),
+            ctx.bshd,
         )
-        return grad_x, grad_attn_y, grad_proj_weight_t, grad_scale
+        return grad_x, grad_attn_y, grad_proj_weight_t, grad_scale, None
 
     torch.library.register_autograd(
         "allama_triton_bench::attn_outproj_residual",
@@ -730,10 +791,14 @@ def loss_reference(
     proj_weight_t: torch.Tensor,
     scale: torch.Tensor,
     grad_out: torch.Tensor,
+    *,
+    bshd: bool = False,
 ) -> torch.Tensor:
     """Return a scalar loss that exercises the reference attention boundary."""
     return (
-        attn_outproj_residual_reference(residual_x, attn_y, proj_weight_t, scale)
+        attn_outproj_residual_reference(
+            residual_x, attn_y, proj_weight_t, scale, bshd=bshd
+        )
         * grad_out
     ).sum()
 
@@ -745,9 +810,13 @@ def loss_custom(
     proj_weight_t: torch.Tensor,
     scale: torch.Tensor,
     grad_out: torch.Tensor,
+    *,
+    bshd: bool = False,
 ) -> torch.Tensor:
     """Return a scalar loss that exercises the custom attention boundary."""
-    return (op(residual_x, attn_y, proj_weight_t, scale) * grad_out).sum()
+    return (
+        op(residual_x, attn_y, proj_weight_t, scale, 1 if bshd else 0) * grad_out
+    ).sum()
 
 
 def summarize_case(
@@ -789,6 +858,7 @@ def main() -> None:
     device = torch.device("cuda")
     torch.manual_seed(1337)
     op = register_attention_block_custom_op()
+    bshd = args.layout == "bshd"
 
     batch = 4
     seq_len = 1024
@@ -799,9 +869,14 @@ def main() -> None:
     residual_x = torch.randn(
         batch * seq_len, model_dim, device=device, dtype=torch.bfloat16
     )
-    attn_y = torch.randn(
-        batch, num_heads, seq_len, head_dim, device=device, dtype=torch.bfloat16
-    )
+    if bshd:
+        attn_y = torch.randn(
+            batch, seq_len, num_heads, head_dim, device=device, dtype=torch.bfloat16
+        )
+    else:
+        attn_y = torch.randn(
+            batch, num_heads, seq_len, head_dim, device=device, dtype=torch.bfloat16
+        )
     proj_weight_t = (
         torch.randn(model_dim, model_dim, device=device, dtype=torch.bfloat16)
         / model_dim**0.5
@@ -809,8 +884,10 @@ def main() -> None:
     scale = torch.randn(model_dim, device=device, dtype=torch.float32)
     grad_out = torch.randn_like(residual_x)
 
-    ref_out = attn_outproj_residual_reference(residual_x, attn_y, proj_weight_t, scale)
-    custom_out = op(residual_x, attn_y, proj_weight_t, scale)
+    ref_out = attn_outproj_residual_reference(
+        residual_x, attn_y, proj_weight_t, scale, bshd=bshd
+    )
+    custom_out = op(residual_x, attn_y, proj_weight_t, scale, 1 if bshd else 0)
     forward_max_abs = (ref_out.float() - custom_out.float()).abs().max().item()
     forward_max_rel = (
         (ref_out.float() - custom_out.float()).abs().max()
@@ -819,7 +896,7 @@ def main() -> None:
 
     ref_ms = measure_ms(
         lambda: attn_outproj_residual_reference(
-            residual_x, attn_y, proj_weight_t, scale
+            residual_x, attn_y, proj_weight_t, scale, bshd=bshd
         ),
         warmup_iters=args.warmup_iters,
         measured_iters=args.measured_iters,
@@ -830,17 +907,17 @@ def main() -> None:
         fullgraph=True,
     )
     compiled_ref_ms = measure_ms(
-        lambda: compiled_ref(residual_x, attn_y, proj_weight_t, scale),
+        lambda: compiled_ref(residual_x, attn_y, proj_weight_t, scale, bshd=bshd),
         warmup_iters=args.warmup_iters,
         measured_iters=args.measured_iters,
     )
     custom_ms = measure_ms(
-        lambda: op(residual_x, attn_y, proj_weight_t, scale),
+        lambda: op(residual_x, attn_y, proj_weight_t, scale, 1 if bshd else 0),
         warmup_iters=args.warmup_iters,
         measured_iters=args.measured_iters,
     )
     compiled_custom = torch.compile(
-        lambda x_, y_, w_t_, scale_: op(x_, y_, w_t_, scale_),
+        lambda x_, y_, w_t_, scale_: op(x_, y_, w_t_, scale_, 1 if bshd else 0),
         dynamic=False,
         fullgraph=True,
     )
@@ -876,6 +953,7 @@ def main() -> None:
             proj_weight_t_ref,
             scale_ref,
             grad_out,
+            bshd=bshd,
         ),
         (residual_x_ref, attn_y_ref, proj_weight_t_ref, scale_ref),
     )
@@ -887,6 +965,7 @@ def main() -> None:
             proj_weight_t_custom,
             scale_custom,
             grad_out,
+            bshd=bshd,
         ),
         (residual_x_custom, attn_y_custom, proj_weight_t_custom, scale_custom),
     )
@@ -910,6 +989,7 @@ def main() -> None:
                 proj_weight_t_ref,
                 scale_ref,
                 grad_out,
+                bshd=bshd,
             ),
             (residual_x_ref, attn_y_ref, proj_weight_t_ref, scale_ref),
         ),
@@ -925,6 +1005,7 @@ def main() -> None:
                 proj_weight_t_ref,
                 scale_ref,
                 grad_out,
+                bshd=bshd,
             ),
             (residual_x_ref, attn_y_ref, proj_weight_t_ref, scale_ref),
         ),
@@ -933,7 +1014,7 @@ def main() -> None:
     )
     compiled_custom_loss = torch.compile(
         lambda x_, y_, w_t_, scale_, grad_out_: loss_custom(
-            op, x_, y_, w_t_, scale_, grad_out_
+            op, x_, y_, w_t_, scale_, grad_out_, bshd=bshd
         ),
         dynamic=False,
         fullgraph=True,
@@ -947,6 +1028,7 @@ def main() -> None:
                 proj_weight_t_custom,
                 scale_custom,
                 grad_out,
+                bshd=bshd,
             ),
             (
                 residual_x_custom,
@@ -995,6 +1077,7 @@ def main() -> None:
             "num_heads": num_heads,
             "head_dim": head_dim,
             "model_dim": model_dim,
+            "layout": args.layout,
         },
         "triton_version": triton.__version__,
         "forward": forward_summary,

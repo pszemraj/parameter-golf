@@ -1060,3 +1060,58 @@ Latest harness smoke check:
     pursued further, it likely needs a better backward formulation or a larger
     fused attention-side boundary rather than a direct port of the older prep
     kernel
+
+- Fixed a real bug in the FA2 prep benchmark: the backward path was still
+  reading gradients with head-major stride assumptions in `BSHD`.
+- Re-ran the FA2 prep benchmark at
+  `runs_allama_validation/attention_prep_fa2_v2/summary.json`.
+- Updated result:
+  - prep-only forward:
+    - compiled PyTorch: `0.04276 ms`
+    - Triton: `0.03787 ms`
+    - about `+12.9%`
+  - prep-only backward:
+    - compiled PyTorch: `0.22220 ms`
+    - compiled Triton: `0.29726 ms`
+    - about `-25.3%`
+  - prep + FA2 forward:
+    - compiled PyTorch: `0.07990 ms`
+    - Triton: `0.10343 ms`
+    - about `-22.8%`
+  - prep + FA2 backward:
+    - compiled PyTorch: `0.34475 ms`
+    - compiled Triton: `0.39978 ms`
+    - about `-16.0%`
+- Correctness after the stride fix:
+  - prep backward max relative error dropped from `~1.65` to `0.00543`
+  - prep + FA2 backward max relative error dropped from `~1.60` to `0.00858`
+- Interpretation:
+  - the earlier FA2 prep backward result was biased by a real implementation
+    bug
+  - after fixing it, the kernel is numerically reasonable but still not a
+    performance win end to end
+
+- Retargeted the larger attention-block benchmark to support `BSHD` and ran it
+  at `runs_allama_validation/attention_block_fa2/summary.json`.
+- This boundary is the post-FA2 path:
+  - flatten `BSHD` attention output
+  - output projection GEMM
+  - residual add / scale
+- Result on the local 5090:
+  - forward:
+    - compiled PyTorch: `0.04902 ms`
+    - Triton custom op: `0.06444 ms` compiled, `0.04077 ms` eager
+    - the kernel itself wins, but the compiled custom-op path still loses
+  - backward:
+    - compiled PyTorch: `0.21630 ms`
+    - compiled Triton: `0.34829 ms`
+    - still much worse
+  - correctness:
+    - max relative error `0.00459` forward
+    - max relative error `0.00311` backward
+- Practical conclusion:
+  - the larger post-FA2 boundary is the most promising attention-side kernel so
+    far
+  - the forward kernel is good enough to matter
+  - the remaining blocker is still backward and compiled custom-op integration,
+    not raw kernel math
