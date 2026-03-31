@@ -7,7 +7,7 @@ materially improved or clarified it over time.
 
 Timestamp:
 
-- `2026-03-30T23:48:20-04:00`
+- `2026-03-31T00:35:00-04:00`
 
 Current best ALlama quality run:
 
@@ -23,10 +23,35 @@ Matched GPT reference from the same frontier sweep:
 - `tokens_per_s=442,941`
 - `artifact_bytes=11,404,805`
 
+Sweep-scale local training throughput references:
+
+- GPT reference baseline:
+  - `~442,941 tok/s`
+- `shortfat_s4_ff15` family:
+  - roughly `133k tok/s`
+  - examples:
+    - `frontier_v1_shortfat_s4_ff15_pre_rms_gate005`: `133,833 tok/s`
+    - `frontier_v1_shortfat_s4_ff15_post_rms_control`: `133,165 tok/s`
+- `wide_s4_e384_ff10` family:
+  - roughly `179k-184k tok/s`
+  - examples:
+    - `frontier_v1_wide_s4_e384_ff10_pre_rms_control`: `178,818 tok/s`
+    - `frontier_v1_wide_s4_e384_ff10_post_rms_no_x0`: `184,323 tok/s`
+
+Practical speed target:
+
+- catching back up toward the GPT baseline means clawing from roughly
+  `133k-184k tok/s` into the `~400k tok/s` regime on sweep-scale training runs,
+  not just winning a microbenchmark
+
 Current read on the project:
 
 - ALlama is ahead on sampled validation quality, but the implementation is still
   too slow relative to GPT for comfortable search velocity.
+- The speed gap to care about is the real sweep-scale one:
+  - best current quality family is around `133k tok/s`
+  - best current wider/speed-leaning family is around `184k tok/s`
+  - GPT reference baseline is around `443k tok/s`
 - The quality winner is currently `shortfat_s4_ff15 + prenorm + rmsnorm +
   shortcut_gate005`.
 - On the active local 5090 contract with `TORCH_BLAS_PREFER_CUBLASLT=1`, the
