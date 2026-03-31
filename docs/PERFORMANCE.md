@@ -917,5 +917,32 @@ Latest harness smoke check:
   - the result is still useful because:
     - it rules out “just switch to FA2” as an immediate local fix
     - it leaves open an H100-specific revisit, since official eval is on H100
-    - it does not unblock Flex `BACKEND=\"FLASH\"`, which still needs the
+  - it does not unblock Flex `BACKEND=\"FLASH\"`, which still needs the
       separate CuTe/FA4-capable FlashAttention stack rather than standard FA2
+
+- Re-ran the same backend compare with explicit compiler resets between cases
+  in `scripts/benchmark_allama_flex_attention.py` to avoid cross-case compile
+  cache contamination.
+- Current representative reset-per-case result in
+  `runs_allama_validation/flex_attention_fa2_reset/summary.json`:
+  - `sdpa_flash`:
+    - forward: `0.06839 ms`
+    - forward+backward: `0.28924 ms`
+  - `sdpa_cudnn`:
+    - forward: `0.07744 ms`
+    - forward+backward: `0.28942 ms`
+  - `flash_attn2_pretransposed`:
+    - forward: `0.08310 ms`
+    - forward+backward: `0.28953 ms`
+  - `flash_attn2_kvpacked_pretransposed`:
+    - forward: `0.07657 ms`
+    - forward+backward: `0.30617 ms`
+  - `flash_attn2_with_transpose`:
+    - forward: `0.09826 ms`
+    - forward+backward: `0.36999 ms`
+- Reset-run conclusion:
+  - the cache-clean rerun does not change the local decision
+  - pretransposed FA2 comes very close on forward+backward, but it still does
+    not beat SDPA flash on this 5090 benchmark
+  - if FA2 is revisited from here, it should be as a model-layout adaptation
+    question, not as a naïve drop-in backend swap

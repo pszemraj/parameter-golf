@@ -16,6 +16,7 @@ The benchmark uses the real ALlama attention shape:
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import time
 from pathlib import Path
@@ -66,6 +67,18 @@ def measure_ms(fn, warmup_iters: int, measured_iters: int) -> float:
         fn()
     torch.cuda.synchronize()
     return 1000.0 * (time.perf_counter() - t0) / measured_iters
+
+
+def reset_compile_state() -> None:
+    """Clear compiler and allocator state between backend cases."""
+    if hasattr(torch, "compiler") and hasattr(torch.compiler, "reset"):
+        torch.compiler.reset()
+    if hasattr(torch, "_dynamo") and hasattr(torch._dynamo, "reset"):
+        torch._dynamo.reset()
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
 
 
 def causal_mask(
@@ -157,6 +170,7 @@ def benchmark_case(
 ) -> dict[str, Any]:
     """Compile and benchmark one attention case, returning a serializable summary."""
     try:
+        reset_compile_state()
         compiled = compile_fn()
         q_case, k_case, v_case = clone_qkv(q, k, v)
         run_forward_backward(compiled, q_case, k_case, v_case)
@@ -394,6 +408,7 @@ def main() -> None:
         "torch_version": torch.__version__,
         "cuda_version": torch.version.cuda,
         "device_name": torch.cuda.get_device_name(device),
+        "compiler_reset_between_cases": True,
         "results": results,
     }
     out_path = args.out_dir / "summary.json"
