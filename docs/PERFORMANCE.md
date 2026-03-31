@@ -44,6 +44,35 @@ Practical speed target:
   `133k-184k tok/s` into the `~400k tok/s` regime on sweep-scale training runs,
   not just winning a microbenchmark
 
+Applied live kernel/path uplift on the sweep-scale winner shape:
+
+- The harness `allama_anchor` is the real `shortfat_s4_ff15 + pre_rms +
+  gate005` model shape under the same local batch contract as the sweeps.
+- Current real end-to-end gains that survive on that winner shape:
+  - `MLP_KERNEL=triton_gateup`:
+    - `130,978 tok/s -> 133,732 tok/s`
+    - about `+2.1%`
+  - on the current torch 2.11 local flash path with the 5090 BLAS knob active:
+    - `135,701 tok/s -> 139,109 tok/s`
+    - about `+2.5%`
+  - `ATTN_IMPL=fa2` over shipped SDPA on the same anchor:
+    - `134,046 tok/s -> 136,491 tok/s`
+    - about `+1.8%`
+- Current attention-side Triton kernels do not survive live application yet:
+  - `ATTN_PREP_KERNEL=triton`:
+    - `141,201 tok/s -> 133,682 tok/s`
+    - about `-5.3%`
+  - earlier out-proj-only live check:
+    - `139,660 tok/s -> 130,124 tok/s`
+    - about `-6.8%`
+  - whole FA2 branch live hook:
+    - `139,660 tok/s -> 109,958 tok/s`
+    - about `-21.3%`
+- Important scope note:
+  - these are the only defensible applied live kernel/path uplifts right now
+  - we do not yet have an apples-to-apples kernel-on/off harness result for the
+    `wide_s4_e384_ff10` family, only its raw sweep-scale throughput range
+
 Current read on the project:
 
 - ALlama is ahead on sampled validation quality, but the implementation is still
