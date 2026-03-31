@@ -1,6 +1,6 @@
 # Metrics
 
-Last updated: 2026-03-31 02:52 EDT
+Last updated: 2026-03-31 03:00 EDT
 
 This file tracks model-quality results from local 5090 runs in [`runs_hconv_quality_5090/`](../runs_hconv_quality_5090/).
 
@@ -30,11 +30,13 @@ This file tracks model-quality results from local 5090 runs in [`runs_hconv_qual
 | --- | --- | --- | --- | ---: | ---: | ---: | --- |
 | 2026-03-31 02:47:40 EDT | `GPT_REF` | `train_gpt.py` | 9-layer GPT reference, tied embeddings, `mlp_mult=2` | 1.3802 | 1.38262331 | 11316588 | [train.log](../runs_hconv_quality_5090/GPT_REF/train.log) |
 | 2026-03-31 02:52:13 EDT | `B1` | `train_hconv.py` | Vanilla hybrid: 10 conv + 3 attn, no dilation, no squared gate, no hippo init | 1.3726 | 1.37255835 | 15415397 | [train.log](../runs_hconv_quality_5090/B1/train.log) |
+| 2026-03-31 03:00:05 EDT | `C2` | `train_hconv.py` | Pure conv: 15 conv, 0 attn, no dilation, no squared gate, no hippo init | 1.5725 | 1.57226136 | 15235472 | [train.log](../runs_hconv_quality_5090/C2/train.log) |
 
 Current read:
 
 - `B1` beat `GPT_REF` by `0.0076` bpb on this sampled-validation comparison protocol.
 - `B1` is currently under the 16,000,000-byte compressed-model limit with `15,415,397` bytes.
+- `C2` is much worse than `B1` here by `0.1999` bpb, so the pure-conv variant does not look competitive on this protocol.
 
 ## Smoke / Bring-Up Runs
 
