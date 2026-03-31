@@ -55,8 +55,14 @@ Current read on the project:
 - Two additional live FA2-side Triton kernel paths now exist behind
   `ATTN_PREP_KERNEL=triton` and `ATTN_OUTPROJ_KERNEL=triton`, but as separate
   opaque boundaries they still regress end to end on the local compiled anchor.
-- The next attention-side target should therefore be a larger whole-branch FA2
-  boundary, not more polish on these two kernels in isolation.
+- Switching those attention-side kernels from opaque `custom_op` wrappers to
+  `torch.library.triton_op` improved benchmark-side behavior materially, but it
+  still did not make the live model path positive.
+- A whole FA2 attention-branch benchmark now gets much closer to parity under
+  `triton_op`, but the first live whole-branch hook still regressed badly.
+- So the attention-side work has converged to a narrower conclusion: larger
+  boundaries and `triton_op` help, but the current Triton-path attention
+  kernels are still not ready to ship into training.
 - `wide` is no longer the best-model quality path. It remains useful only if the
   goal is an explicit speed/quality tradeoff study.
 - `layernorm` is not part of the active search space. It lost to `rmsnorm` in
@@ -537,6 +543,57 @@ Latest harness smoke check:
     custom boundary rather than more local tuning of prep and post-proj in
     isolation
 
+### 2026-03-30
+
+- Switched the live FA2-side Triton attention ops from opaque
+  `torch.library.custom_op` wrappers to `torch.library.triton_op`, which lets
+  Inductor see their implementations instead of treating them as black boxes.
+- Re-benchmarked the whole FA2 attention branch in
+  `scripts/benchmark_allama_attention_branch.py`.
+- Results:
+  - v2 whole-branch benchmark with `triton_op` plus reference backward:
+    - summary:
+      `runs_allama_validation/attention_branch_fa2_v2/summary.json`
+    - compiled forward moved from `0.23551 ms` to `0.20060 ms`
+    - compiled reference forward was `0.18352 ms`
+    - backward stayed slower, but the gap narrowed as well
+  - v3 whole-branch benchmark with a real branch backward:
+    - summary:
+      `runs_allama_validation/attention_branch_fa2_v3/summary.json`
+    - backward now uses:
+      - custom out-proj residual backward pieces
+      - FA2 backward for `q/k/v`
+      - custom prep backward for `qkv` and `q_gain`
+      - manual qkv-linear gradients
+    - compiled forward: `0.20360 ms` vs compiled reference `0.19727 ms`
+    - compiled backward: `1.05324 ms` vs compiled reference `0.68584 ms`
+- Re-ran the live anchor with the `triton_op` attention kernels:
+  - baseline FA2 path:
+    - `139,660.45 tok/s`
+    - `1.8770 s/step`
+    - `2.219 GB` peak CUDA memory
+  - prep kernel only:
+    - `132,947.82 tok/s`
+    - `1.9718 s/step`
+    - `2.277 GB` peak CUDA memory
+  - out-proj kernel only:
+    - `130,124.20 tok/s`
+    - `2.0146 s/step`
+    - `2.270 GB` peak CUDA memory
+- Also tried a real live whole-branch hook and removed it again:
+  - run:
+    `runs_allama_validation/perf_fa2_branch_live/allama_anchor/baseline/run_summary.json`
+  - result:
+    - `109,957.89 tok/s`
+    - `2.3840 s/step`
+    - `2.430 GB` peak CUDA memory
+- Conclusion:
+  - `triton_op` is the right direction for attention-side experimentation
+  - larger whole-branch boundaries behave much better in benchmarks than the
+    earlier split custom-op approach
+  - but the current attention kernels are still not ready for the shipped model
+    path because the real compiled train-step contract still regresses badly
+
 ## Next Work
 
 - Keep `frontier_v1_shortfat_s4_ff15_pre_rms_gate005` as the quality anchor.
@@ -548,9 +605,10 @@ Latest harness smoke check:
   - first priority: a larger MLP-block kernel path that absorbs enough of the
     forward and backward structure around `gate_up`, `silu*up`, `down`, and the
     residual epilogue to matter beyond microbenchmarks
-  - second priority: a larger FA2 attention-branch boundary that subsumes the
-    current prep and post-proj kernels into one whole-branch custom path, since
-    the separate live kernels both regress as standalone opaque boundaries
+  - second priority: attention-side work should now focus on genuinely stronger
+    implementations, not more local Triton glue polish on the current FA2 path
+    since both the split live kernels and the first live whole-branch hook
+    still regress
   - CUDA graphs are worth keeping available, but they are a secondary systems
     optimization, not the main answer
 

@@ -1090,7 +1090,7 @@ def attention_prep_bshd_triton(
     q_dim = num_heads * head_dim
     kv_dim = num_kv_heads * head_dim
     grid = (batch_size * seq_len, num_heads + num_kv_heads)
-    attention_prep_bshd_kernel[grid](
+    torch.library.wrap_triton(attention_prep_bshd_kernel)[grid](
         qkv,
         q_gain,
         cos,
@@ -1145,7 +1145,7 @@ def attention_prep_bshd_backward_triton(
     grad_qkv = torch.empty_like(qkv)
     grad_q_gain = torch.zeros_like(q_gain, dtype=torch.float32)
     grid = (batch_size * seq_len, num_heads + num_kv_heads)
-    attention_prep_bshd_backward_kernel[grid](
+    torch.library.wrap_triton(attention_prep_bshd_backward_kernel)[grid](
         qkv,
         q_gain,
         cos,
@@ -1188,7 +1188,7 @@ def register_allama_attention_prep_custom_op() -> Optional[Any]:
     if triton is None:
         return None
 
-    @torch.library.custom_op(
+    @torch.library.triton_op(
         "allama_triton::attention_prep_bshd_backward",
         mutates_args=(),
     )
@@ -1235,7 +1235,7 @@ def register_allama_attention_prep_custom_op() -> Optional[Any]:
             q_gain.shape, dtype=torch.float32
         )
 
-    @torch.library.custom_op(
+    @torch.library.triton_op(
         "allama_triton::attention_prep_bshd",
         mutates_args=(),
     )
@@ -1674,7 +1674,7 @@ def attn_outproj_residual_bshd_triton(
             triton.cdiv(residual_x.size(1), meta["BLOCK_N"]),
         )
 
-    attn_outproj_residual_bshd_kernel[grid](
+    torch.library.wrap_triton(attn_outproj_residual_bshd_kernel)[grid](
         attn_y,
         proj_weight_t,
         residual_x,
@@ -1717,7 +1717,7 @@ def attn_grad_scale_bshd_triton(
             triton.cdiv(grad_out.size(1), meta["BLOCK_N"]),
         )
 
-    attn_grad_scale_bshd_kernel[grid](
+    torch.library.wrap_triton(attn_grad_scale_bshd_kernel)[grid](
         attn_y,
         proj_weight_t,
         grad_out,
@@ -1766,7 +1766,7 @@ def attn_grad_attn_y_bshd_triton(
             triton.cdiv(model_dim, meta["BLOCK_K"]),
         )
 
-    attn_grad_attn_y_bshd_kernel[grid](
+    torch.library.wrap_triton(attn_grad_attn_y_bshd_kernel)[grid](
         grad_branch,
         proj_weight_t,
         grad_attn_y,
@@ -1809,7 +1809,7 @@ def attn_grad_proj_weight_t_bshd_triton(
             triton.cdiv(grad_branch.size(1), meta["BLOCK_N"]),
         )
 
-    attn_grad_proj_weight_t_bshd_kernel[grid](
+    torch.library.wrap_triton(attn_grad_proj_weight_t_bshd_kernel)[grid](
         attn_y,
         grad_branch,
         grad_proj_weight_t,
@@ -1838,7 +1838,7 @@ def register_allama_attention_outproj_custom_op() -> Optional[Any]:
     if triton is None:
         return None
 
-    @torch.library.custom_op(
+    @torch.library.triton_op(
         "allama_triton::attn_grad_scale_bshd",
         mutates_args=(),
     )
@@ -1858,7 +1858,7 @@ def register_allama_attention_outproj_custom_op() -> Optional[Any]:
         del attn_y, proj_weight_t
         return grad_out.new_empty((grad_out.size(1),), dtype=torch.float32)
 
-    @torch.library.custom_op(
+    @torch.library.triton_op(
         "allama_triton::attn_grad_attn_y_bshd",
         mutates_args=(),
     )
@@ -1887,7 +1887,7 @@ def register_allama_attention_outproj_custom_op() -> Optional[Any]:
         num_heads = model_dim // head_dim
         return grad_branch.new_empty((batch, seq_len, num_heads, head_dim))
 
-    @torch.library.custom_op(
+    @torch.library.triton_op(
         "allama_triton::attn_grad_proj_weight_t_bshd",
         mutates_args=(),
     )
@@ -1905,7 +1905,7 @@ def register_allama_attention_outproj_custom_op() -> Optional[Any]:
         model_dim = attn_y.size(2) * attn_y.size(3)
         return grad_branch.new_empty((model_dim, grad_branch.size(1)))
 
-    @torch.library.custom_op(
+    @torch.library.triton_op(
         "allama_triton::attn_outproj_residual_bshd",
         mutates_args=(),
     )
