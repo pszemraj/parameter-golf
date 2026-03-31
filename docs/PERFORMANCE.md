@@ -1033,3 +1033,30 @@ Latest harness smoke check:
   - it does not materially change the dominant compute stack yet
   - that makes the next real attention-side kernel target clearer: the FA2
     prologue/epilogue around the QKV path, not the flash kernel itself
+
+- Retargeted `scripts/benchmark_allama_attention_prep.py` to support the
+  FA2-native `BSHD` path and benchmarked it at
+  `runs_allama_validation/attention_prep_fa2/summary.json`.
+- Result on the local 5090:
+  - prep-only forward:
+    - compiled PyTorch: `0.04315 ms`
+    - Triton: `0.03759 ms`
+    - about `+14.8%`
+  - prep + FA2 forward:
+    - compiled PyTorch: `0.08879 ms`
+    - Triton: `0.11724 ms`
+    - about `-24.2%`
+  - prep + FA2 backward:
+    - compiled PyTorch: `0.38177 ms`
+    - compiled Triton: `0.39365 ms`
+    - about `-3.0%`
+- Important caveat:
+  - the current FA2-targeted prep backward is not numerically trustworthy yet;
+    the benchmark shows large gradient deltas, so this path is not ready for
+    model integration even before the small performance loss is considered
+- Practical conclusion:
+  - a fused FA2 prologue is still the right boundary to investigate
+  - the current Triton implementation is not good enough; if this boundary is
+    pursued further, it likely needs a better backward formulation or a larger
+    fused attention-side boundary rather than a direct port of the older prep
+    kernel

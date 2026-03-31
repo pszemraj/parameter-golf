@@ -27,6 +27,11 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
+try:
+    from flash_attn import flash_attn_func
+except Exception:  # pragma: no cover
+    flash_attn_func = None
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -57,6 +62,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=200,
         help="Measured iterations for timing.",
+    )
+    parser.add_argument(
+        "--backend",
+        choices=("sdpa", "fa2"),
+        default="fa2",
+        help="Attention backend paired with the prep boundary benchmark.",
     )
     return parser.parse_args()
 
@@ -96,6 +107,7 @@ def attention_prep_reference(
     num_kv_heads: int,
     head_dim: int,
     qk_norm: bool = True,
+    bshd: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Reference PyTorch implementation of the attention-prep boundary."""
     bsz, seqlen, qkv_dim = qkv.shape
@@ -104,15 +116,27 @@ def attention_prep_reference(
     if qkv_dim != q_dim + 2 * kv_dim:
         raise ValueError("qkv shape does not match the requested head layout")
     q, k, v = qkv.split((q_dim, kv_dim, kv_dim), dim=-1)
-    q = q.view(bsz, seqlen, num_heads, head_dim).transpose(1, 2)
-    k = k.view(bsz, seqlen, num_kv_heads, head_dim).transpose(1, 2)
-    v = v.view(bsz, seqlen, num_kv_heads, head_dim).transpose(1, 2)
+    if bshd:
+        q = q.view(bsz, seqlen, num_heads, head_dim)
+        k = k.view(bsz, seqlen, num_kv_heads, head_dim)
+        v = v.view(bsz, seqlen, num_kv_heads, head_dim)
+    else:
+        q = q.view(bsz, seqlen, num_heads, head_dim).transpose(1, 2)
+        k = k.view(bsz, seqlen, num_kv_heads, head_dim).transpose(1, 2)
+        v = v.view(bsz, seqlen, num_kv_heads, head_dim).transpose(1, 2)
     if qk_norm:
         q = F.rms_norm(q, (head_dim,))
         k = F.rms_norm(k, (head_dim,))
-    q = apply_rotary_emb(q, cos[None, None, :, :], sin[None, None, :, :])
-    k = apply_rotary_emb(k, cos[None, None, :, :], sin[None, None, :, :])
-    q = q * q_gain.to(dtype=q.dtype)[None, :, None, None]
+    if bshd:
+        cos = cos[None, :, None, :]
+        sin = sin[None, :, None, :]
+        q = apply_rotary_emb(q, cos, sin)
+        k = apply_rotary_emb(k, cos, sin)
+        q = q * q_gain.to(dtype=q.dtype)[None, None, :, None]
+    else:
+        q = apply_rotary_emb(q, cos[None, None, :, :], sin[None, None, :, :])
+        k = apply_rotary_emb(k, cos[None, None, :, :], sin[None, None, :, :])
+        q = q * q_gain.to(dtype=q.dtype)[None, :, None, None]
     return q, k, v
 
 
@@ -126,8 +150,10 @@ def attention_forward_reference(
     num_kv_heads: int,
     head_dim: int,
     qk_norm: bool = True,
+    backend: str = "sdpa",
 ) -> torch.Tensor:
     """Reference prep plus flash-attention forward."""
+    use_fa2 = backend == "fa2"
     q, k, v = attention_prep_reference(
         qkv,
         q_gain,
@@ -137,7 +163,12 @@ def attention_forward_reference(
         num_kv_heads=num_kv_heads,
         head_dim=head_dim,
         qk_norm=qk_norm,
+        bshd=use_fa2,
     )
+    if use_fa2:
+        if flash_attn_func is None:
+            raise RuntimeError("backend='fa2' requires flash-attn to be installed")
+        return flash_attn_func(q, k, v, causal=True)
     if num_heads != num_kv_heads and sdpa_enable_gqa_available():
         return F.scaled_dot_product_attention(
             q,
@@ -437,19 +468,40 @@ def attention_prep_triton(
     num_heads: int,
     num_kv_heads: int,
     head_dim: int,
+    bshd: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Run the fused Triton attention-prep kernel."""
     batch_size, seq_len, _ = qkv.shape
-    q = torch.empty(
-        (batch_size, num_heads, seq_len, head_dim),
-        device=qkv.device,
-        dtype=qkv.dtype,
-    )
-    k = torch.empty(
-        (batch_size, num_kv_heads, seq_len, head_dim),
-        device=qkv.device,
-        dtype=qkv.dtype,
-    )
+    if bshd:
+        q = torch.empty(
+            (batch_size, seq_len, num_heads, head_dim),
+            device=qkv.device,
+            dtype=qkv.dtype,
+        )
+        k = torch.empty(
+            (batch_size, seq_len, num_kv_heads, head_dim),
+            device=qkv.device,
+            dtype=qkv.dtype,
+        )
+        q_stride_h = q.stride(2)
+        q_stride_t = q.stride(1)
+        kv_stride_h = k.stride(2)
+        kv_stride_t = k.stride(1)
+    else:
+        q = torch.empty(
+            (batch_size, num_heads, seq_len, head_dim),
+            device=qkv.device,
+            dtype=qkv.dtype,
+        )
+        k = torch.empty(
+            (batch_size, num_kv_heads, seq_len, head_dim),
+            device=qkv.device,
+            dtype=qkv.dtype,
+        )
+        q_stride_h = q.stride(1)
+        q_stride_t = q.stride(2)
+        kv_stride_h = k.stride(1)
+        kv_stride_t = k.stride(2)
     v = torch.empty_like(k)
     block_d = next_power_of_2(head_dim)
     grid = (batch_size * seq_len, num_heads + num_kv_heads)
@@ -473,12 +525,12 @@ def attention_prep_triton(
         qkv.stride(0),
         qkv.stride(1),
         q.stride(0),
-        q.stride(1),
-        q.stride(2),
+        q_stride_h,
+        q_stride_t,
         q.stride(3),
         k.stride(0),
-        k.stride(1),
-        k.stride(2),
+        kv_stride_h,
+        kv_stride_t,
         k.stride(3),
         BLOCK_D=block_d,
         num_warps=2 if head_dim <= 64 else 4,
@@ -606,6 +658,7 @@ def register_attention_prep_custom_op() -> Any:
         num_heads: int,
         num_kv_heads: int,
         head_dim: int,
+        bshd: int,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         return attention_prep_triton(
             qkv,
@@ -615,6 +668,7 @@ def register_attention_prep_custom_op() -> Any:
             num_heads=num_heads,
             num_kv_heads=num_kv_heads,
             head_dim=head_dim,
+            bshd=bool(bshd),
         )
 
     @attention_prep_op.register_fake
@@ -626,34 +680,41 @@ def register_attention_prep_custom_op() -> Any:
         num_heads: int,
         num_kv_heads: int,
         head_dim: int,
+        bshd: int,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         del q_gain, cos, sin
         batch_size, seq_len, _ = qkv.shape
-        q = qkv.new_empty((batch_size, num_heads, seq_len, head_dim))
-        k = qkv.new_empty((batch_size, num_kv_heads, seq_len, head_dim))
-        v = qkv.new_empty((batch_size, num_kv_heads, seq_len, head_dim))
+        if bool(bshd):
+            q = qkv.new_empty((batch_size, seq_len, num_heads, head_dim))
+            k = qkv.new_empty((batch_size, seq_len, num_kv_heads, head_dim))
+            v = qkv.new_empty((batch_size, seq_len, num_kv_heads, head_dim))
+        else:
+            q = qkv.new_empty((batch_size, num_heads, seq_len, head_dim))
+            k = qkv.new_empty((batch_size, num_kv_heads, seq_len, head_dim))
+            v = qkv.new_empty((batch_size, num_kv_heads, seq_len, head_dim))
         return q, k, v
 
     def setup_context(
         ctx: Any,
         inputs: tuple[
-            torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int, int, int
+            torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int, int, int, int
         ],
         output: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
     ) -> None:
         del output
-        qkv, q_gain, cos, sin, num_heads, num_kv_heads, head_dim = inputs
+        qkv, q_gain, cos, sin, num_heads, num_kv_heads, head_dim, bshd = inputs
         ctx.save_for_backward(qkv, q_gain, cos, sin)
         ctx.num_heads = int(num_heads)
         ctx.num_kv_heads = int(num_kv_heads)
         ctx.head_dim = int(head_dim)
+        ctx.bshd = int(bshd)
 
     def backward(
         ctx: Any,
         grad_q: torch.Tensor,
         grad_k: torch.Tensor,
         grad_v: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, None, None, None, None, None]:
+    ) -> tuple[torch.Tensor, torch.Tensor, None, None, None, None, None, None]:
         qkv, q_gain, cos, sin = ctx.saved_tensors
         grad_qkv, grad_q_gain = attention_prep_backward_op(
             qkv,
@@ -667,7 +728,7 @@ def register_attention_prep_custom_op() -> Any:
             ctx.num_kv_heads,
             ctx.head_dim,
         )
-        return grad_qkv, grad_q_gain, None, None, None, None, None
+        return grad_qkv, grad_q_gain, None, None, None, None, None, None
 
     torch.library.register_autograd(
         "allama_triton_bench::attention_prep",
@@ -686,8 +747,10 @@ def attention_forward_triton(
     num_heads: int,
     num_kv_heads: int,
     head_dim: int,
+    backend: str = "sdpa",
 ) -> torch.Tensor:
     """Run the fused Triton prep kernel followed by flash-attention forward."""
+    use_fa2 = backend == "fa2"
     q, k, v = attention_prep_triton(
         qkv,
         q_gain,
@@ -696,7 +759,12 @@ def attention_forward_triton(
         num_heads=num_heads,
         num_kv_heads=num_kv_heads,
         head_dim=head_dim,
+        bshd=use_fa2,
     )
+    if use_fa2:
+        if flash_attn_func is None:
+            raise RuntimeError("backend='fa2' requires flash-attn to be installed")
+        return flash_attn_func(q, k, v, causal=True)
     if num_heads != num_kv_heads and sdpa_enable_gqa_available():
         return F.scaled_dot_product_attention(
             q,
@@ -722,9 +790,24 @@ def attention_forward_custom(
     num_heads: int,
     num_kv_heads: int,
     head_dim: int,
+    backend: str = "sdpa",
 ) -> torch.Tensor:
     """Run the custom-op prep path followed by flash attention."""
-    q, k, v = op(qkv, q_gain, cos, sin, num_heads, num_kv_heads, head_dim)
+    use_fa2 = backend == "fa2"
+    q, k, v = op(
+        qkv,
+        q_gain,
+        cos,
+        sin,
+        num_heads,
+        num_kv_heads,
+        head_dim,
+        1 if use_fa2 else 0,
+    )
+    if use_fa2:
+        if flash_attn_func is None:
+            raise RuntimeError("backend='fa2' requires flash-attn to be installed")
+        return flash_attn_func(q, k, v, causal=True)
     if num_heads != num_kv_heads and sdpa_enable_gqa_available():
         return F.scaled_dot_product_attention(
             q,
@@ -773,6 +856,7 @@ def loss_reference_prep(
     num_heads: int,
     num_kv_heads: int,
     head_dim: int,
+    bshd: bool = False,
 ) -> torch.Tensor:
     """Return a scalar loss that exercises prep-only backward."""
     q, k, v = attention_prep_reference(
@@ -783,6 +867,7 @@ def loss_reference_prep(
         num_heads=num_heads,
         num_kv_heads=num_kv_heads,
         head_dim=head_dim,
+        bshd=bshd,
     )
     return (q * grad_q).sum() + (k * grad_k).sum() + (v * grad_v).sum()
 
@@ -800,9 +885,19 @@ def loss_custom_prep(
     num_heads: int,
     num_kv_heads: int,
     head_dim: int,
+    bshd: bool = False,
 ) -> torch.Tensor:
     """Return a scalar loss that exercises custom prep backward."""
-    q, k, v = op(qkv, q_gain, cos, sin, num_heads, num_kv_heads, head_dim)
+    q, k, v = op(
+        qkv,
+        q_gain,
+        cos,
+        sin,
+        num_heads,
+        num_kv_heads,
+        head_dim,
+        1 if bshd else 0,
+    )
     return (q * grad_q).sum() + (k * grad_k).sum() + (v * grad_v).sum()
 
 
@@ -816,6 +911,7 @@ def loss_reference_flash(
     num_heads: int,
     num_kv_heads: int,
     head_dim: int,
+    backend: str = "sdpa",
 ) -> torch.Tensor:
     """Return a scalar loss that exercises flash-attention through prep."""
     return (
@@ -827,6 +923,7 @@ def loss_reference_flash(
             num_heads=num_heads,
             num_kv_heads=num_kv_heads,
             head_dim=head_dim,
+            backend=backend,
         )
         * grad_out
     ).sum()
@@ -843,6 +940,7 @@ def loss_custom_flash(
     num_heads: int,
     num_kv_heads: int,
     head_dim: int,
+    backend: str = "sdpa",
 ) -> torch.Tensor:
     """Return a scalar loss that exercises custom prep plus flash backward."""
     return (
@@ -855,6 +953,7 @@ def loss_custom_flash(
             num_heads=num_heads,
             num_kv_heads=num_kv_heads,
             head_dim=head_dim,
+            backend=backend,
         )
         * grad_out
     ).sum()
@@ -877,6 +976,7 @@ def main() -> None:
     q_dim = num_heads * head_dim
     kv_dim = num_kv_heads * head_dim
     qkv_dim = q_dim + 2 * kv_dim
+    use_fa2 = args.backend == "fa2"
 
     qkv = torch.randn(batch, seq_len, qkv_dim, device=device, dtype=torch.bfloat16)
     q_gain = torch.randn(num_heads, device=device, dtype=torch.float32)
@@ -890,6 +990,7 @@ def main() -> None:
         num_heads=num_heads,
         num_kv_heads=num_kv_heads,
         head_dim=head_dim,
+        bshd=use_fa2,
     )
     tri_q, tri_k, tri_v = attention_prep_triton(
         qkv,
@@ -899,6 +1000,7 @@ def main() -> None:
         num_heads=num_heads,
         num_kv_heads=num_kv_heads,
         head_dim=head_dim,
+        bshd=use_fa2,
     )
     prep_abs = 0.0
     prep_rel = 0.0
@@ -916,6 +1018,7 @@ def main() -> None:
             num_heads=num_heads,
             num_kv_heads=num_kv_heads,
             head_dim=head_dim,
+            bshd=use_fa2,
         ),
         warmup_iters=args.warmup_iters,
         measured_iters=args.measured_iters,
@@ -934,6 +1037,7 @@ def main() -> None:
             num_heads=num_heads,
             num_kv_heads=num_kv_heads,
             head_dim=head_dim,
+            bshd=use_fa2,
         ),
         warmup_iters=args.warmup_iters,
         measured_iters=args.measured_iters,
@@ -947,6 +1051,7 @@ def main() -> None:
             num_heads=num_heads,
             num_kv_heads=num_kv_heads,
             head_dim=head_dim,
+            bshd=use_fa2,
         ),
         warmup_iters=args.warmup_iters,
         measured_iters=args.measured_iters,
@@ -960,6 +1065,7 @@ def main() -> None:
         num_heads=num_heads,
         num_kv_heads=num_kv_heads,
         head_dim=head_dim,
+        backend=args.backend,
     )
     tri_attn = attention_forward_triton(
         qkv,
@@ -969,6 +1075,7 @@ def main() -> None:
         num_heads=num_heads,
         num_kv_heads=num_kv_heads,
         head_dim=head_dim,
+        backend=args.backend,
     )
     attn_abs, attn_rel = max_diff(ref_attn, tri_attn)
     ref_attn_ms = measure_ms(
@@ -980,6 +1087,7 @@ def main() -> None:
             num_heads=num_heads,
             num_kv_heads=num_kv_heads,
             head_dim=head_dim,
+            backend=args.backend,
         ),
         warmup_iters=args.warmup_iters,
         measured_iters=args.measured_iters,
@@ -998,6 +1106,7 @@ def main() -> None:
             num_heads=num_heads,
             num_kv_heads=num_kv_heads,
             head_dim=head_dim,
+            backend=args.backend,
         ),
         warmup_iters=args.warmup_iters,
         measured_iters=args.measured_iters,
@@ -1011,6 +1120,7 @@ def main() -> None:
             num_heads=num_heads,
             num_kv_heads=num_kv_heads,
             head_dim=head_dim,
+            backend=args.backend,
         ),
         warmup_iters=args.warmup_iters,
         measured_iters=args.measured_iters,
@@ -1036,6 +1146,7 @@ def main() -> None:
             num_heads=num_heads,
             num_kv_heads=num_kv_heads,
             head_dim=head_dim,
+            bshd=use_fa2,
         ),
         (qkv_ref, q_gain_ref),
     )
@@ -1052,6 +1163,7 @@ def main() -> None:
             num_heads=num_heads,
             num_kv_heads=num_kv_heads,
             head_dim=head_dim,
+            bshd=use_fa2,
         ),
         (qkv_custom, q_gain_custom),
     )
@@ -1080,6 +1192,7 @@ def main() -> None:
                 num_heads=num_heads,
                 num_kv_heads=num_kv_heads,
                 head_dim=head_dim,
+                bshd=use_fa2,
             ),
             (qkv_ref, q_gain_ref),
         ),
@@ -1102,6 +1215,7 @@ def main() -> None:
                 num_heads=num_heads,
                 num_kv_heads=num_kv_heads,
                 head_dim=head_dim,
+                bshd=use_fa2,
             ),
             (qkv_ref, q_gain_ref),
         ),
@@ -1121,6 +1235,7 @@ def main() -> None:
             num_heads=num_heads,
             num_kv_heads=num_kv_heads,
             head_dim=head_dim,
+            bshd=use_fa2,
         ),
         dynamic=False,
         fullgraph=True,
@@ -1139,6 +1254,7 @@ def main() -> None:
                 num_heads=num_heads,
                 num_kv_heads=num_kv_heads,
                 head_dim=head_dim,
+                bshd=use_fa2,
             ),
             (qkv_custom, q_gain_custom),
         ),
@@ -1177,6 +1293,7 @@ def main() -> None:
             num_heads=num_heads,
             num_kv_heads=num_kv_heads,
             head_dim=head_dim,
+            backend=args.backend,
         ),
         (qkv_ref_flash, q_gain_ref_flash),
     )
@@ -1191,6 +1308,7 @@ def main() -> None:
             num_heads=num_heads,
             num_kv_heads=num_kv_heads,
             head_dim=head_dim,
+            backend=args.backend,
         ),
         (qkv_custom_flash, q_gain_custom_flash),
     )
@@ -1220,6 +1338,7 @@ def main() -> None:
                 num_heads=num_heads,
                 num_kv_heads=num_kv_heads,
                 head_dim=head_dim,
+                backend=args.backend,
             ),
             (qkv_ref_flash, q_gain_ref_flash),
         ),
@@ -1240,6 +1359,7 @@ def main() -> None:
                 num_heads=num_heads,
                 num_kv_heads=num_kv_heads,
                 head_dim=head_dim,
+                backend=args.backend,
             ),
             (qkv_ref_flash, q_gain_ref_flash),
         ),
@@ -1257,6 +1377,7 @@ def main() -> None:
             num_heads=num_heads,
             num_kv_heads=num_kv_heads,
             head_dim=head_dim,
+            backend=args.backend,
         ),
         dynamic=False,
         fullgraph=True,
@@ -1273,6 +1394,7 @@ def main() -> None:
                 num_heads=num_heads,
                 num_kv_heads=num_kv_heads,
                 head_dim=head_dim,
+                backend=args.backend,
             ),
             (qkv_custom_flash, q_gain_custom_flash),
         ),
@@ -1296,6 +1418,7 @@ def main() -> None:
 
     summary = {
         "shape": [batch, seq_len, qkv_dim],
+        "backend": args.backend,
         "heads": {
             "num_heads": num_heads,
             "num_kv_heads": num_kv_heads,
