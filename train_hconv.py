@@ -1,7 +1,29 @@
 """
-The `train_gpt.py` and `train_gpt_mlx.py` scripts are intended as good launching-off points for new participants, not SOTA configs. We'll accept PRs that tune, improve, or simplify these scripts without significantly increasing complexity, but competitive submissions should stay in the `/records` folder.
+train_hconv.py — Hybrid Gated Conv + GQA architecture for Parameter Golf.
 
-Hard stop: To keep readable for newcomers, let's make sure `train_gpt.py` and `train_gpt_mlx.py` never are longer than 1500 lines.
+Forked from train_gpt.py baseline. Replaces the all-attention GPT with a hybrid
+architecture: LFM2-style gated depthwise conv blocks for local pattern extraction,
+sparse GQA+MLP blocks for long-range dependencies. Supports weight tying across
+conv blocks for extreme depth within the 16MB budget.
+
+All training infrastructure preserved: Muon optimizer, distributed training,
+wallclock cap, int8+zlib quantization, BPB evaluation, sampled/full validation,
+and per-run output directories.
+
+Usage (single GPU):
+    torchrun --standalone --nproc_per_node=1 train_hconv.py \\
+        --run-id hconv_test \\
+        --data-path ./data/datasets/fineweb10B_sp1024/ \\
+        --tokenizer-path ./data/tokenizers/fineweb_1024_bpe.model \\
+        --vocab-size 1024
+
+Usage (8xH100):
+    torchrun --standalone --nproc_per_node=8 train_hconv.py \\
+        --run-id hconv_8gpu \\
+        --data-path ./data/datasets/fineweb10B_sp1024 \\
+        --tokenizer-path ./data/tokenizers/fineweb_1024_bpe.model \\
+        --vocab-size 1024 \\
+        --max-wallclock-seconds 600
 """
 
 from __future__ import annotations
@@ -13,8 +35,6 @@ import io
 import math
 import os
 import random
-import subprocess
-import sys
 import time
 import uuid
 import zlib
@@ -28,20 +48,15 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-# -----------------------------
+# =============================================================================
 # HYPERPARAMETERS
-# -----------------------------
-# Default Simple Baseline run:
-# - 9 transformer blocks at width 512
-# - 8 attention heads with 4 KV heads (GQA) and 2x MLP expansion
-# - vocab size 1024, sequence length 1024, tied embeddings
-# - 524,288 train tokens per step for 20,000 iterations with a ~10 minute cap
+# =============================================================================
 
 
 class Hyperparameters:
     """Trainer configuration populated from CLI flags with env defaults."""
 
-    # Data paths are shard globs produced by the existing preprocessing pipeline.
+    # Data paths
     data_path = os.environ.get("DATA_PATH", "./data/datasets/fineweb10B_sp1024")
     train_files = os.path.join(data_path, "fineweb_train_*.bin")
     val_files = os.path.join(data_path, "fineweb_val_*.bin")
@@ -52,9 +67,8 @@ class Hyperparameters:
     output_dir = os.environ.get("OUTPUT_DIR", ".")
     seed = int(os.environ.get("SEED", 1337))
 
-    # Validation cadence and batch size. By default validation uses the full
-    # fineweb_val split; sampled mode evaluates evenly spaced batches from that
-    # same fixed split.
+    # Validation. By default validation uses the full fineweb_val split; sampled
+    # mode evaluates evenly spaced batches from that same fixed split.
     val_batch_size = int(os.environ.get("VAL_BATCH_SIZE", 524_288))
     val_loss_every = int(os.environ.get("VAL_LOSS_EVERY", 1000))
     val_batches = int(os.environ.get("VAL_BATCHES", 0))
@@ -62,33 +76,39 @@ class Hyperparameters:
     eval_mode = os.environ.get("EVAL_MODE", "full").strip().lower()
     train_log_every = int(os.environ.get("TRAIN_LOG_EVERY", 200))
 
-    # Training length.
+    # Training length
     iterations = int(os.environ.get("MAX_STEPS", os.environ.get("ITERATIONS", 20000)))
     warmdown_iters = int(os.environ.get("WARMDOWN_ITERS", 1200))
     warmup_steps = int(os.environ.get("WARMUP_STEPS", 20))
     train_batch_tokens = int(os.environ.get("TRAIN_BATCH_TOKENS", 524_288))
     train_seq_len = int(os.environ.get("TRAIN_SEQ_LEN", 1024))
     max_wallclock_seconds = float(os.environ.get("MAX_WALLCLOCK_SECONDS", 600.0))
-    qk_gain_init = float(os.environ.get("QK_GAIN_INIT", 1.5))
     sdpa_backend = os.environ.get("SDPA_BACKEND", "auto").strip().lower()
     compile_disable = bool(int(os.environ.get("TORCH_COMPILE_DISABLE", "0")))
 
-    # Model shape.
+    # Model shape
     vocab_size = int(os.environ.get("VOCAB_SIZE", 1024))
-    num_layers = int(os.environ.get("NUM_LAYERS", 9))
-    num_kv_heads = int(os.environ.get("NUM_KV_HEADS", 4))
     model_dim = int(os.environ.get("MODEL_DIM", 512))
     num_heads = int(os.environ.get("NUM_HEADS", 8))
+    num_kv_heads = int(os.environ.get("NUM_KV_HEADS", 4))
     mlp_mult = int(os.environ.get("MLP_MULT", 2))
-    tie_embeddings = bool(int(os.environ.get("TIE_EMBEDDINGS", "1")))
     rope_base = float(os.environ.get("ROPE_BASE", 10000.0))
     logit_softcap = float(os.environ.get("LOGIT_SOFTCAP", 30.0))
-
-    # Optimizer hyperparameters.
-    embed_lr = float(os.environ.get("EMBED_LR", 0.6))
-    head_lr = float(os.environ.get("HEAD_LR", 0.008))
-    tied_embed_lr = float(os.environ.get("TIED_EMBED_LR", 0.05))
+    qk_gain_init = float(os.environ.get("QK_GAIN_INIT", 1.5))
     tied_embed_init_std = float(os.environ.get("TIED_EMBED_INIT_STD", 0.005))
+
+    # Hybrid architecture params
+    n_unique_conv = int(os.environ.get("N_UNIQUE_CONV", 6))
+    n_unique_attn = int(os.environ.get("N_UNIQUE_ATTN", 5))
+    n_conv_effective = int(os.environ.get("N_CONV_EFFECTIVE", 18))
+    conv_kernel_size = int(os.environ.get("CONV_KERNEL_SIZE", 3))
+    squared_gate = bool(int(os.environ.get("SQUARED_GATE", "0")))
+    dilated_conv = bool(int(os.environ.get("DILATED_CONV", "0")))
+    hippo_init = bool(int(os.environ.get("HIPPO_INIT", "0")))
+
+    # Optimizer hyperparameters
+    embed_lr = float(os.environ.get("EMBED_LR", 0.6))
+    tied_embed_lr = float(os.environ.get("TIED_EMBED_LR", 0.05))
     matrix_lr = float(os.environ.get("MATRIX_LR", 0.04))
     scalar_lr = float(os.environ.get("SCALAR_LR", 0.04))
     muon_momentum = float(os.environ.get("MUON_MOMENTUM", 0.95))
@@ -104,7 +124,7 @@ class Hyperparameters:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Build the CLI used by sweep scripts and ad hoc trainer runs.
+    """Build the CLI used by the 5090 sweep harness and ad hoc local runs.
 
     :return argparse.ArgumentParser: Parser for trainer CLI flags.
     """
@@ -166,36 +186,58 @@ def build_parser() -> argparse.ArgumentParser:
         choices=(0, 1),
         default=int(Hyperparameters.compile_disable),
     )
-    parser.add_argument(
-        "--qk-gain-init", type=float, default=Hyperparameters.qk_gain_init
-    )
     parser.add_argument("--vocab-size", type=int, default=Hyperparameters.vocab_size)
-    parser.add_argument("--num-layers", type=int, default=Hyperparameters.num_layers)
+    parser.add_argument("--model-dim", type=int, default=Hyperparameters.model_dim)
+    parser.add_argument("--num-heads", type=int, default=Hyperparameters.num_heads)
     parser.add_argument(
         "--num-kv-heads", type=int, default=Hyperparameters.num_kv_heads
     )
-    parser.add_argument("--model-dim", type=int, default=Hyperparameters.model_dim)
-    parser.add_argument("--num-heads", type=int, default=Hyperparameters.num_heads)
     parser.add_argument("--mlp-mult", type=int, default=Hyperparameters.mlp_mult)
-    parser.add_argument(
-        "--tie-embeddings",
-        type=int,
-        choices=(0, 1),
-        default=int(Hyperparameters.tie_embeddings),
-    )
     parser.add_argument("--rope-base", type=float, default=Hyperparameters.rope_base)
     parser.add_argument(
         "--logit-softcap", type=float, default=Hyperparameters.logit_softcap
     )
-    parser.add_argument("--embed-lr", type=float, default=Hyperparameters.embed_lr)
-    parser.add_argument("--head-lr", type=float, default=Hyperparameters.head_lr)
     parser.add_argument(
-        "--tied-embed-lr", type=float, default=Hyperparameters.tied_embed_lr
+        "--qk-gain-init", type=float, default=Hyperparameters.qk_gain_init
     )
     parser.add_argument(
         "--tied-embed-init-std",
         type=float,
         default=Hyperparameters.tied_embed_init_std,
+    )
+    parser.add_argument(
+        "--n-unique-conv", type=int, default=Hyperparameters.n_unique_conv
+    )
+    parser.add_argument(
+        "--n-unique-attn", type=int, default=Hyperparameters.n_unique_attn
+    )
+    parser.add_argument(
+        "--n-conv-effective", type=int, default=Hyperparameters.n_conv_effective
+    )
+    parser.add_argument(
+        "--conv-kernel-size", type=int, default=Hyperparameters.conv_kernel_size
+    )
+    parser.add_argument(
+        "--squared-gate",
+        type=int,
+        choices=(0, 1),
+        default=int(Hyperparameters.squared_gate),
+    )
+    parser.add_argument(
+        "--dilated-conv",
+        type=int,
+        choices=(0, 1),
+        default=int(Hyperparameters.dilated_conv),
+    )
+    parser.add_argument(
+        "--hippo-init",
+        type=int,
+        choices=(0, 1),
+        default=int(Hyperparameters.hippo_init),
+    )
+    parser.add_argument("--embed-lr", type=float, default=Hyperparameters.embed_lr)
+    parser.add_argument(
+        "--tied-embed-lr", type=float, default=Hyperparameters.tied_embed_lr
     )
     parser.add_argument("--matrix-lr", type=float, default=Hyperparameters.matrix_lr)
     parser.add_argument("--scalar-lr", type=float, default=Hyperparameters.scalar_lr)
@@ -236,8 +278,10 @@ def parse_args() -> Hyperparameters:
     args = Hyperparameters()
     for key, value in vars(parsed).items():
         setattr(args, key, value)
-    args.tie_embeddings = bool(args.tie_embeddings)
     args.compile_disable = bool(args.compile_disable)
+    args.squared_gate = bool(args.squared_gate)
+    args.dilated_conv = bool(args.dilated_conv)
+    args.hippo_init = bool(args.hippo_init)
     args.train_files = os.path.join(args.data_path, "fineweb_train_*.bin")
     args.val_files = os.path.join(args.data_path, "fineweb_val_*.bin")
     args.eval_mode = args.eval_mode.strip().lower()
@@ -245,19 +289,14 @@ def parse_args() -> Hyperparameters:
     return args
 
 
-# -----------------------------
-# MUON OPTIMIZER
-# -----------------------------
-#
-# As borrowed from modded-nanogpt
-# Background on Muon: https://kellerjordan.github.io/posts/muon/
+# =============================================================================
+# MUON OPTIMIZER (from modded-nanogpt)
+# =============================================================================
 
 
 def zeropower_via_newtonschulz5(
     G: Tensor, steps: int = 10, eps: float = 1e-7
 ) -> Tensor:
-    # Orthogonalize a 2D update matrix with a fast Newton-Schulz iteration.
-    # Muon uses this to normalize matrix-shaped gradients before applying them.
     a, b, c = (3.4445, -4.7750, 2.0315)
     X = G.bfloat16()
     X /= X.norm() + eps
@@ -293,7 +332,6 @@ class Muon(torch.optim.Optimizer):
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()
-
         distributed = dist.is_available() and dist.is_initialized()
         world_size = dist.get_world_size() if distributed else 1
         rank = dist.get_rank() if distributed else 0
@@ -306,12 +344,10 @@ class Muon(torch.optim.Optimizer):
             momentum = group["momentum"]
             backend_steps = group["backend_steps"]
             nesterov = group["nesterov"]
-
             total_params = sum(int(p.numel()) for p in params)
             updates_flat = torch.zeros(
                 total_params, device=params[0].device, dtype=torch.bfloat16
             )
-
             curr = 0
             for i, p in enumerate(params):
                 if i % world_size == rank and p.grad is not None:
@@ -324,31 +360,22 @@ class Muon(torch.optim.Optimizer):
                     if nesterov:
                         g = g.add(buf, alpha=momentum)
                     g = zeropower_via_newtonschulz5(g, steps=backend_steps)
-                    # Scale correction from Muon reference implementations.
                     g *= max(1, g.size(0) / g.size(1)) ** 0.5
                     updates_flat[curr : curr + p.numel()] = g.reshape(-1)
                 curr += p.numel()
-
             if distributed:
                 dist.all_reduce(updates_flat, op=dist.ReduceOp.SUM)
-
             curr = 0
             for p in params:
                 g = updates_flat[curr : curr + p.numel()].view_as(p).to(dtype=p.dtype)
                 p.add_(g, alpha=-lr)
                 curr += p.numel()
-
         return loss
 
 
-# -----------------------------
-# TOKENIZER-AGNOSTIC EVALUATION SETUP
-# -----------------------------
-#
-# It's common for small models have a large fraction of their parameters be embeddings, since the 2 * d_model * d_vocab vectors can be gigantic.
-# Instead of locking the tokenizer, we let you bring your own and calculate our validation metrics on the average compression of the validation set.
-# We calculate BPB (bits-per-byte) instead of validation loss, so we need methods to count the number of bits per token in the tokenizer.
-# Note: Submissions that edit the tokenizer will be examined more carefully, since screwing this up might unjustly improve your score.
+# =============================================================================
+# TOKENIZER-AGNOSTIC EVALUATION
+# =============================================================================
 
 
 def build_sentencepiece_luts(
@@ -367,7 +394,7 @@ def build_sentencepiece_luts(
             base_bytes_np[token_id] = 1
             continue
         piece = sp.id_to_piece(token_id)
-        if piece.startswith("▁"):
+        if piece.startswith("\u2581"):
             has_leading_space_np[token_id] = True
             piece = piece[1:]
         base_bytes_np[token_id] = len(piece.encode("utf-8"))
@@ -378,11 +405,84 @@ def build_sentencepiece_luts(
     )
 
 
+# =============================================================================
+# DATA LOADING
+# =============================================================================
+
+
+def load_data_shard(file: Path) -> Tensor:
+    header_bytes = 256 * np.dtype("<i4").itemsize
+    token_bytes = np.dtype("<u2").itemsize
+    header = np.fromfile(file, dtype="<i4", count=256)
+    if header.size != 256 or int(header[0]) != 20240520 or int(header[1]) != 1:
+        raise ValueError(f"Unexpected shard header for {file}")
+    num_tokens = int(header[2])
+    expected_size = header_bytes + num_tokens * token_bytes
+    if file.stat().st_size != expected_size:
+        raise ValueError(
+            f"Shard size mismatch for {file}: expected {expected_size} bytes"
+        )
+    tokens_np = np.fromfile(file, dtype="<u2", count=num_tokens, offset=header_bytes)
+    if tokens_np.size != num_tokens:
+        raise ValueError(f"Short read for {file}")
+    return torch.from_numpy(tokens_np.astype(np.uint16, copy=False))
+
+
+class TokenStream:
+    def __init__(self, pattern: str):
+        self.files = [Path(p) for p in sorted(glob.glob(pattern))]
+        if not self.files:
+            raise FileNotFoundError(f"No files found for pattern: {pattern}")
+        self.file_idx = 0
+        self.tokens = load_data_shard(self.files[0])
+        self.pos = 0
+
+    def _advance_file(self) -> None:
+        self.file_idx = (self.file_idx + 1) % len(self.files)
+        self.tokens = load_data_shard(self.files[self.file_idx])
+        self.pos = 0
+
+    def take(self, n: int) -> Tensor:
+        chunks: list[Tensor] = []
+        remaining = n
+        while remaining > 0:
+            avail = self.tokens.numel() - self.pos
+            if avail <= 0:
+                self._advance_file()
+                continue
+            k = min(remaining, avail)
+            chunks.append(self.tokens[self.pos : self.pos + k])
+            self.pos += k
+            remaining -= k
+        return chunks[0] if len(chunks) == 1 else torch.cat(chunks)
+
+
+class DistributedTokenLoader:
+    def __init__(self, pattern: str, rank: int, world_size: int, device: torch.device):
+        self.rank = rank
+        self.world_size = world_size
+        self.device = device
+        self.stream = TokenStream(pattern)
+
+    def next_batch(
+        self, global_tokens: int, seq_len: int, grad_accum_steps: int
+    ) -> tuple[Tensor, Tensor]:
+        local_tokens = global_tokens // (self.world_size * grad_accum_steps)
+        per_rank_span = local_tokens + 1
+        chunk = self.stream.take(per_rank_span * self.world_size)
+        start = self.rank * per_rank_span
+        local = chunk[start : start + per_rank_span].to(dtype=torch.int64)
+        x = local[:-1].reshape(-1, seq_len)
+        y = local[1:].reshape(-1, seq_len)
+        return x.to(self.device, non_blocking=True), y.to(
+            self.device, non_blocking=True
+        )
+
+
 def load_validation_tokens(pattern: str, seq_len: int) -> Tensor:
     files = [Path(p) for p in sorted(glob.glob(pattern))]
     if not files:
         raise FileNotFoundError(f"No files found for pattern: {pattern}")
-    # The export pipeline writes the fixed first-50k-doc validation set to fineweb_val_*.
     tokens = torch.cat([load_data_shard(file) for file in files]).contiguous()
     usable = ((tokens.numel() - 1) // seq_len) * seq_len
     if usable <= 0:
@@ -516,9 +616,6 @@ def eval_val(
     has_leading_space_lut: Tensor,
     is_boundary_token_lut: Tensor,
 ) -> tuple[float, float]:
-    # Validation computes two metrics:
-    # - val_loss: token cross-entropy (natural log)
-    # - val_bpb: tokenizer-agnostic compression metric used by the challenge
     _, local_batch_seqs = resolve_eval_local_batch_seqs(
         args, world_size, grad_accum_steps
     )
@@ -568,19 +665,15 @@ def eval_val(
     return float(val_loss.item()), float(bits_per_token * tokens_per_byte)
 
 
-# -----------------------------
-# POST-TRAINING QUANTIZATION
-# -----------------------------
-#
-# It's silly to export our model, which is trained in bf16 and fp32, at that same precision.
-# Instead, we get approximately the same model (with a small hit) by quantizing the model to int8 & zlib compressing.
-# We can then decompress the model and run in higher precision for evaluation, after closing in under the size limit.
+# =============================================================================
+# INT8 + ZLIB QUANTIZATION (from baseline)
+# =============================================================================
 
 CONTROL_TENSOR_NAME_PATTERNS = tuple(
     pattern
     for pattern in os.environ.get(
         "CONTROL_TENSOR_NAME_PATTERNS",
-        "attn_scale,attn_scales,mlp_scale,mlp_scales,resid_mix,resid_mixes,q_gain,skip_weight,skip_weights",
+        "attn_scale,mlp_scale,q_gain,conv_scale",
     ).split(",")
     if pattern
 )
@@ -617,118 +710,61 @@ def keep_float_tensor(
 def quantize_float_tensor(t: Tensor) -> tuple[Tensor, Tensor]:
     t32 = t.float()
     if t32.ndim == 2:
-        # Matrices get one scale per row, which usually tracks output-channel
-        # ranges much better than a single tensor-wide scale.
-        clip_abs = (
-            torch.quantile(t32.abs(), INT8_CLIP_Q, dim=1)
-            if t32.numel()
-            else torch.empty((t32.shape[0],), dtype=torch.float32)
+        row_abs = t32.abs()
+        clip_val = torch.quantile(row_abs, INT8_CLIP_Q, dim=1, keepdim=True).clamp(
+            min=1e-12
         )
-        clipped = torch.maximum(
-            torch.minimum(t32, clip_abs[:, None]), -clip_abs[:, None]
-        )
-        scale = (clip_abs / 127.0).clamp_min(1.0 / 127.0)
-        q = (
-            torch.clamp(torch.round(clipped / scale[:, None]), -127, 127)
-            .to(torch.int8)
-            .contiguous()
-        )
-        return q, scale.to(dtype=INT8_PER_ROW_SCALE_DTYPE).contiguous()
-
-    # Vectors / scalars use a simpler per-tensor scale.
-    clip_abs = (
-        float(torch.quantile(t32.abs().flatten(), INT8_CLIP_Q).item())
-        if t32.numel()
-        else 0.0
-    )
-    scale = torch.tensor(clip_abs / 127.0 if clip_abs > 0 else 1.0, dtype=torch.float32)
-    q = (
-        torch.clamp(
-            torch.round(torch.clamp(t32, -clip_abs, clip_abs) / scale), -127, 127
-        )
-        .to(torch.int8)
-        .contiguous()
-    )
-    return q, scale
+        t32 = t32.clamp(-clip_val, clip_val)
+        scale = t32.abs().amax(dim=1, keepdim=True).clamp(min=1e-12) / 127.0
+        quantized = (t32 / scale).round().clamp(-127, 127).to(torch.int8)
+        return quantized, scale.to(INT8_PER_ROW_SCALE_DTYPE).squeeze(1)
+    else:
+        clip_val = torch.quantile(t32.abs(), INT8_CLIP_Q).clamp(min=1e-12)
+        t32 = t32.clamp(-clip_val, clip_val)
+        scale = t32.abs().amax().clamp(min=1e-12) / 127.0
+        quantized = (t32 / scale).round().clamp(-127, 127).to(torch.int8)
+        return quantized, scale.to(INT8_PER_ROW_SCALE_DTYPE)
 
 
-def quantize_state_dict_int8(state_dict: dict[str, Tensor]):
-    # Single supported clean-script export format:
-    # - per-row int8 for 2D float tensors
-    # - per-tensor int8 for other float tensors
-    # - exact passthrough for non-floats
-    # - passthrough for small float tensors, stored as fp16 to save bytes
-    quantized: dict[str, Tensor] = {}
-    scales: dict[str, Tensor] = {}
-    dtypes: dict[str, str] = {}
-    passthrough: dict[str, Tensor] = {}
+def quantize_state_dict_int8(state_dict: dict[str, Tensor]) -> tuple[dict, dict]:
+    quantized = {}
+    passthrough = {}
     passthrough_orig_dtypes: dict[str, str] = {}
-    qmeta: dict[str, dict[str, object]] = {}
-    stats = dict.fromkeys(
-        (
-            "param_count",
-            "num_tensors",
-            "num_float_tensors",
-            "num_nonfloat_tensors",
-            "baseline_tensor_bytes",
-            "int8_payload_bytes",
-        ),
-        0,
-    )
+    baseline_bytes = 0
+    int8_bytes = 0
 
-    for name, tensor in state_dict.items():
-        t = tensor.detach().to("cpu").contiguous()
-        stats["param_count"] += int(t.numel())
-        stats["num_tensors"] += 1
-        stats["baseline_tensor_bytes"] += tensor_nbytes(t)
+    for name, t in state_dict.items():
+        t = t.detach().to("cpu").contiguous()
+        baseline_bytes += tensor_nbytes(t)
+        is_control = any(pattern in name for pattern in CONTROL_TENSOR_NAME_PATTERNS)
+        if (
+            t.is_floating_point()
+            and t.numel() > INT8_KEEP_FLOAT_MAX_NUMEL
+            and not is_control
+        ):
+            q, s = quantize_float_tensor(t)
+            quantized[name] = (q, s)
+            int8_bytes += tensor_nbytes(q) + tensor_nbytes(s)
+        else:
+            stored = keep_float_tensor(name, t, passthrough_orig_dtypes)
+            passthrough[name] = stored
+            int8_bytes += tensor_nbytes(stored)
 
-        if not t.is_floating_point():
-            stats["num_nonfloat_tensors"] += 1
-            passthrough[name] = t
-            stats["int8_payload_bytes"] += tensor_nbytes(t)
-            continue
-
-        # Small float tensors are cheap enough to keep directly. We still downcast
-        # fp32/bf16 passthrough tensors to fp16 so metadata does not dominate size.
-        if t.numel() <= INT8_KEEP_FLOAT_MAX_NUMEL:
-            kept = keep_float_tensor(name, t, passthrough_orig_dtypes)
-            passthrough[name] = kept
-            stats["int8_payload_bytes"] += tensor_nbytes(kept)
-            continue
-
-        stats["num_float_tensors"] += 1
-        q, s = quantize_float_tensor(t)
-        if s.ndim > 0:
-            qmeta[name] = {"scheme": "per_row", "axis": 0}
-        quantized[name] = q
-        scales[name] = s
-        dtypes[name] = str(t.dtype).removeprefix("torch.")
-        stats["int8_payload_bytes"] += tensor_nbytes(q) + tensor_nbytes(s)
-
-    obj: dict[str, object] = {
-        "__quant_format__": "int8_clean_per_row_v1",
+    obj = {
         "quantized": quantized,
-        "scales": scales,
-        "dtypes": dtypes,
         "passthrough": passthrough,
+        "passthrough_orig_dtypes": passthrough_orig_dtypes,
     }
-    if qmeta:
-        obj["qmeta"] = qmeta
-    if passthrough_orig_dtypes:
-        obj["passthrough_orig_dtypes"] = passthrough_orig_dtypes
+    stats = {"baseline_tensor_bytes": baseline_bytes, "int8_payload_bytes": int8_bytes}
     return obj, stats
 
 
-def dequantize_state_dict_int8(obj: dict[str, object]) -> dict[str, Tensor]:
+def dequantize_state_dict_int8(obj: dict) -> dict[str, Tensor]:
     out: dict[str, Tensor] = {}
-    qmeta = obj.get("qmeta", {})
     passthrough_orig_dtypes = obj.get("passthrough_orig_dtypes", {})
-    for name, q in obj["quantized"].items():
-        dtype = getattr(torch, obj["dtypes"][name])
-        s = obj["scales"][name]
-        if qmeta.get(name, {}).get("scheme") == "per_row" or s.ndim > 0:
-            s = s.to(dtype=torch.float32)
-            # Broadcast the saved row scale back across trailing dimensions.
+    for name, (q, s) in obj["quantized"].items():
+        dtype = torch.bfloat16
+        if s.ndim >= 1 and s.numel() == q.shape[0]:
             out[name] = (
                 (q.float() * s.view(q.shape[0], *([1] * (q.ndim - 1))))
                 .to(dtype=dtype)
@@ -738,7 +774,6 @@ def dequantize_state_dict_int8(obj: dict[str, object]) -> dict[str, Tensor]:
             scale = float(s.item())
             out[name] = (q.float() * scale).to(dtype=dtype).contiguous()
     for name, t in obj["passthrough"].items():
-        # Restore small tensors, undoing the temporary fp16 storage cast if needed.
         out_t = t.detach().to("cpu").contiguous()
         orig_dtype = passthrough_orig_dtypes.get(name)
         if isinstance(orig_dtype, str):
@@ -747,88 +782,9 @@ def dequantize_state_dict_int8(obj: dict[str, object]) -> dict[str, Tensor]:
     return out
 
 
-# -----------------------------
-# DATA LOADING
-# -----------------------------
-
-
-def load_data_shard(file: Path) -> Tensor:
-    header_bytes = 256 * np.dtype("<i4").itemsize
-    token_bytes = np.dtype("<u2").itemsize
-    header = np.fromfile(file, dtype="<i4", count=256)
-    # SHARD HEADER INTS & SHARD_MAGIC
-    if header.size != 256 or int(header[0]) != 20240520 or int(header[1]) != 1:
-        raise ValueError(f"Unexpected shard header for {file}")
-    num_tokens = int(header[2])
-    expected_size = header_bytes + num_tokens * token_bytes
-    if file.stat().st_size != expected_size:
-        raise ValueError(
-            f"Shard size mismatch for {file}: expected {expected_size} bytes"
-        )
-    tokens_np = np.fromfile(file, dtype="<u2", count=num_tokens, offset=header_bytes)
-    if tokens_np.size != num_tokens:
-        raise ValueError(f"Short read for {file}")
-    return torch.from_numpy(tokens_np.astype(np.uint16, copy=False))
-
-
-class TokenStream:
-    # Reads shards sequentially and wraps around forever. The training loop therefore
-    # has deterministic, simple streaming behavior with no sampling or workers.
-    def __init__(self, pattern: str):
-        self.files = [Path(p) for p in sorted(glob.glob(pattern))]
-        if not self.files:
-            raise FileNotFoundError(f"No files found for pattern: {pattern}")
-        self.file_idx = 0
-        self.tokens = load_data_shard(self.files[0])
-        self.pos = 0
-
-    def _advance_file(self) -> None:
-        self.file_idx = (self.file_idx + 1) % len(self.files)
-        self.tokens = load_data_shard(self.files[self.file_idx])
-        self.pos = 0
-
-    def take(self, n: int) -> Tensor:
-        chunks: list[Tensor] = []
-        remaining = n
-        while remaining > 0:
-            avail = self.tokens.numel() - self.pos
-            if avail <= 0:
-                self._advance_file()
-                continue
-            k = min(remaining, avail)
-            chunks.append(self.tokens[self.pos : self.pos + k])
-            self.pos += k
-            remaining -= k
-        return chunks[0] if len(chunks) == 1 else torch.cat(chunks)
-
-
-class DistributedTokenLoader:
-    # Each call consumes a contiguous chunk from the shared token stream, then slices out
-    # one disjoint span per rank. The extra "+1" token lets us build (x, y) by shifting.
-    def __init__(self, pattern: str, rank: int, world_size: int, device: torch.device):
-        self.rank = rank
-        self.world_size = world_size
-        self.device = device
-        self.stream = TokenStream(pattern)
-
-    def next_batch(
-        self, global_tokens: int, seq_len: int, grad_accum_steps: int
-    ) -> tuple[Tensor, Tensor]:
-        local_tokens = global_tokens // (self.world_size * grad_accum_steps)
-        per_rank_span = local_tokens + 1
-        chunk = self.stream.take(per_rank_span * self.world_size)
-        start = self.rank * per_rank_span
-        local = chunk[start : start + per_rank_span].to(dtype=torch.int64)
-        x = local[:-1].reshape(-1, seq_len)
-        y = local[1:].reshape(-1, seq_len)
-        return x.to(self.device, non_blocking=True), y.to(
-            self.device, non_blocking=True
-        )
-
-
-# -----------------------------
-# TRANSFORMER MODULES
-# -----------------------------
+# =============================================================================
+# MODEL PRIMITIVES
+# =============================================================================
 
 
 class RMSNorm(nn.Module):
@@ -841,14 +797,12 @@ class RMSNorm(nn.Module):
 
 
 class CastedLinear(nn.Linear):
-    # Keep weights in fp32 for optimizer/state quality, cast at matmul time for bf16 compute.
     def forward(self, x: Tensor) -> Tensor:
         bias = self.bias.to(x.dtype) if self.bias is not None else None
         return F.linear(x, self.weight.to(x.dtype), bias)
 
 
 def restore_low_dim_params_to_fp32(module: nn.Module) -> None:
-    # Keep small/control parameters in fp32 even when the model body runs in bf16.
     with torch.no_grad():
         for name, param in module.named_parameters():
             if (
@@ -859,7 +813,6 @@ def restore_low_dim_params_to_fp32(module: nn.Module) -> None:
 
 
 class Rotary(nn.Module):
-    # Caches cos/sin tables per sequence length on the current device.
     def __init__(self, dim: int, base: float = 10000.0):
         super().__init__()
         inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
@@ -873,7 +826,6 @@ class Rotary(nn.Module):
     ) -> tuple[Tensor, Tensor]:
         if (
             self._cos_cached is None
-            or self._sin_cached is None
             or self._seq_len_cached != seq_len
             or self._cos_cached.device != device
         ):
@@ -891,6 +843,87 @@ def apply_rotary_emb(x: Tensor, cos: Tensor, sin: Tensor) -> Tensor:
     return torch.cat((x1 * cos + x2 * sin, x1 * (-sin) + x2 * cos), dim=-1)
 
 
+# =============================================================================
+# CAUSAL DEPTHWISE CONV1D
+# =============================================================================
+
+
+class CausalDWConv1d(nn.Module):
+    """Causal depthwise conv1d. Pads left so output length == input length."""
+
+    def __init__(self, dim: int, kernel_size: int = 3, hippo_init: bool = False):
+        super().__init__()
+        self.kernel_size = kernel_size
+        self.weight = nn.Parameter(
+            torch.randn(dim, 1, kernel_size) * (1.0 / kernel_size)
+        )
+        self.bias = nn.Parameter(torch.zeros(dim))
+        self.dim = dim
+        if hippo_init:
+            with torch.no_grad():
+                for i in range(kernel_size):
+                    # Exponential decay: most weight on most recent token (rightmost = t)
+                    self.weight.data[:, 0, i] = math.exp(-0.5 * (kernel_size - 1 - i))
+                self.weight.data /= self.weight.data.sum(dim=-1, keepdim=True)
+
+    def forward(self, x: Tensor, dilation: int = 1) -> Tensor:
+        # x: (B, T, D)
+        x = x.transpose(1, 2)  # (B, D, T)
+        pad = (self.kernel_size - 1) * dilation
+        x = F.pad(x, (pad, 0))
+        x = F.conv1d(x, self.weight, self.bias, groups=self.dim, dilation=dilation)
+        return x.transpose(1, 2)
+
+
+# =============================================================================
+# GATED CONV BLOCK (LFM2-style)
+# =============================================================================
+
+
+class GatedConvBlock(nn.Module):
+    """
+    Replaces both attention and MLP in a single layer.
+    x -> RMSNorm -> Linear(d, 3d) -> [B_gate, C_gate, z]
+      -> y = B_gate * z (optionally squared)
+      -> y = CausalDWConv1d(y)
+      -> o = C_gate * y -> Linear(d, d) -> residual
+    ~4d² params per block. Half the cost of a transformer layer.
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        kernel_size: int = 3,
+        squared_gate: bool = False,
+        hippo_init: bool = False,
+    ):
+        super().__init__()
+        self.norm = RMSNorm()
+        self.expand = CastedLinear(dim, 3 * dim, bias=False)
+        self.conv = CausalDWConv1d(dim, kernel_size, hippo_init=hippo_init)
+        self.proj = CastedLinear(dim, dim, bias=False)
+        self.proj._zero_init = True
+        self.conv_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
+        self.squared_gate = squared_gate
+
+    def forward(self, x: Tensor, dilation: int = 1) -> Tensor:
+        h = self.expand(self.norm(x))
+        B_gate, C_gate, z = h.chunk(3, dim=-1)
+        if self.squared_gate:
+            y = (B_gate * z).square()
+        else:
+            y = B_gate * z
+        y = self.conv(y, dilation=dilation)
+        o = C_gate * y
+        o = self.proj(o)
+        return x + self.conv_scale.to(dtype=x.dtype)[None, None, :] * o
+
+
+# =============================================================================
+# ATTENTION BLOCK (GQA + ReLU² MLP)
+# =============================================================================
+
+
 class CausalSelfAttention(nn.Module):
     def __init__(
         self,
@@ -901,16 +934,12 @@ class CausalSelfAttention(nn.Module):
         qk_gain_init: float,
     ):
         super().__init__()
-        if dim % num_heads != 0:
-            raise ValueError("model_dim must be divisible by num_heads")
-        if num_heads % num_kv_heads != 0:
-            raise ValueError("num_heads must be divisible by num_kv_heads")
+        assert dim % num_heads == 0
+        assert num_heads % num_kv_heads == 0
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
         self.head_dim = dim // num_heads
-        if self.head_dim % 2 != 0:
-            raise ValueError("head_dim must be even for RoPE")
-        kv_dim = self.num_kv_heads * self.head_dim
+        kv_dim = num_kv_heads * self.head_dim
         self.c_q = CastedLinear(dim, dim, bias=False)
         self.c_k = CastedLinear(dim, kv_dim, bias=False)
         self.c_v = CastedLinear(dim, kv_dim, bias=False)
@@ -952,12 +981,10 @@ class CausalSelfAttention(nn.Module):
             is_causal=True,
             enable_gqa=(self.num_kv_heads != self.num_heads),
         )
-        y = y.transpose(1, 2).contiguous().reshape(bsz, seqlen, dim)
-        return self.proj(y)
+        return self.proj(y.transpose(1, 2).contiguous().reshape(bsz, seqlen, dim))
 
 
 class MLP(nn.Module):
-    # relu^2 MLP from the original modded-nanogpt setup
     def __init__(self, dim: int, mlp_mult: int):
         super().__init__()
         hidden = mlp_mult * dim
@@ -966,11 +993,12 @@ class MLP(nn.Module):
         self.proj._zero_init = True
 
     def forward(self, x: Tensor) -> Tensor:
-        x = torch.relu(self.fc(x))
-        return self.proj(x.square())
+        return self.proj(torch.relu(self.fc(x)).square())
 
 
-class Block(nn.Module):
+class AttentionBlock(nn.Module):
+    """Standard transformer block: GQA attention + ReLU² MLP."""
+
     def __init__(
         self,
         dim: int,
@@ -989,52 +1017,87 @@ class Block(nn.Module):
         self.mlp = MLP(dim, mlp_mult)
         self.attn_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
         self.mlp_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
-        self.resid_mix = nn.Parameter(
-            torch.stack((torch.ones(dim), torch.zeros(dim))).float()
-        )
 
-    def forward(self, x: Tensor, x0: Tensor) -> Tensor:
-        mix = self.resid_mix.to(dtype=x.dtype)
-        x = mix[0][None, None, :] * x + mix[1][None, None, :] * x0
-        attn_out = self.attn(self.attn_norm(x))
-        x = x + self.attn_scale.to(dtype=x.dtype)[None, None, :] * attn_out
+    def forward(self, x: Tensor) -> Tensor:
+        x = x + self.attn_scale.to(dtype=x.dtype)[None, None, :] * self.attn(
+            self.attn_norm(x)
+        )
         x = x + self.mlp_scale.to(dtype=x.dtype)[None, None, :] * self.mlp(
             self.mlp_norm(x)
         )
         return x
 
 
-class GPT(nn.Module):
+# =============================================================================
+# HYBRID MODEL
+# =============================================================================
+
+
+def build_layer_schedule(
+    n_conv_effective: int, n_attn: int, n_unique_conv: int, dilated: bool = False
+) -> list[tuple[str, int, int]]:
+    """
+    Build the virtual layer schedule.
+    Returns list of (kind, module_idx, dilation).
+    Places attention layers at roughly even intervals through the conv stack.
+    """
+    schedule: list[tuple[str, int, int]] = []
+    if n_attn == 0:
+        for i in range(n_conv_effective):
+            dil = (2 ** (i // 2)) if dilated else 1
+            schedule.append(("conv", i % n_unique_conv, min(dil, 64)))
+        return schedule
+
+    conv_per_section = n_conv_effective // (n_attn + 1)
+    remainder = n_conv_effective - conv_per_section * (n_attn + 1)
+    conv_pos = 0
+    for section in range(n_attn + 1):
+        n_in_section = conv_per_section + (1 if section < remainder else 0)
+        for _ in range(n_in_section):
+            dil = (2 ** (conv_pos // 2)) if dilated else 1
+            schedule.append(("conv", conv_pos % n_unique_conv, min(dil, 64)))
+            conv_pos += 1
+        if section < n_attn:
+            schedule.append(("attn", section, 1))
+    return schedule
+
+
+class HybridLM(nn.Module):
     def __init__(
         self,
         vocab_size: int,
-        num_layers: int,
         model_dim: int,
         num_heads: int,
         num_kv_heads: int,
         mlp_mult: int,
-        tie_embeddings: bool,
+        n_unique_conv: int,
+        n_unique_attn: int,
+        n_conv_effective: int,
+        conv_kernel_size: int,
+        squared_gate: bool,
+        dilated_conv: bool,
+        hippo_init: bool,
         tied_embed_init_std: float,
         logit_softcap: float,
         rope_base: float,
         qk_gain_init: float,
     ):
         super().__init__()
-        if logit_softcap <= 0.0:
-            raise ValueError(f"logit_softcap must be positive, got {logit_softcap}")
-        self.tie_embeddings = tie_embeddings
-        self.tied_embed_init_std = tied_embed_init_std
         self.logit_softcap = logit_softcap
         self.tok_emb = nn.Embedding(vocab_size, model_dim)
-        self.num_encoder_layers = num_layers // 2
-        self.num_decoder_layers = num_layers - self.num_encoder_layers
-        self.num_skip_weights = min(self.num_encoder_layers, self.num_decoder_layers)
-        self.skip_weights = nn.Parameter(
-            torch.ones(self.num_skip_weights, model_dim, dtype=torch.float32)
-        )
-        self.blocks = nn.ModuleList(
+
+        self.conv_blocks = nn.ModuleList(
             [
-                Block(
+                GatedConvBlock(
+                    model_dim, conv_kernel_size, squared_gate, hippo_init=hippo_init
+                )
+                for _ in range(n_unique_conv)
+            ]
+        )
+
+        self.attn_blocks = nn.ModuleList(
+            [
+                AttentionBlock(
                     model_dim,
                     num_heads,
                     num_kv_heads,
@@ -1042,20 +1105,19 @@ class GPT(nn.Module):
                     rope_base,
                     qk_gain_init,
                 )
-                for i in range(num_layers)
+                for _ in range(n_unique_attn)
             ]
         )
-        self.final_norm = RMSNorm()
-        self.lm_head = (
-            None if tie_embeddings else CastedLinear(model_dim, vocab_size, bias=False)
-        )
-        if self.lm_head is not None:
-            self.lm_head._zero_init = True
-        self._init_weights()
 
-    def _init_weights(self) -> None:
-        if self.tie_embeddings:
-            nn.init.normal_(self.tok_emb.weight, mean=0.0, std=self.tied_embed_init_std)
+        self.final_norm = RMSNorm()
+        self.layer_schedule = build_layer_schedule(
+            n_conv_effective, n_unique_attn, n_unique_conv, dilated_conv
+        )
+
+        self._init_weights(tied_embed_init_std)
+
+    def _init_weights(self, embed_std: float) -> None:
+        nn.init.normal_(self.tok_emb.weight, mean=0.0, std=embed_std)
         for module in self.modules():
             if isinstance(module, nn.Linear) and getattr(module, "_zero_init", False):
                 nn.init.zeros_(module.weight)
@@ -1063,51 +1125,55 @@ class GPT(nn.Module):
     def forward(self, input_ids: Tensor, target_ids: Tensor) -> Tensor:
         x = self.tok_emb(input_ids)
         x = F.rms_norm(x, (x.size(-1),))
-        x0 = x
-        skips: list[Tensor] = []
 
-        # First half stores skips; second half reuses them in reverse order.
-        for i in range(self.num_encoder_layers):
-            x = self.blocks[i](x, x0)
-            skips.append(x)
-        for i in range(self.num_decoder_layers):
-            if skips:
-                x = (
-                    x
-                    + self.skip_weights[i].to(dtype=x.dtype)[None, None, :]
-                    * skips.pop()
-                )
-            x = self.blocks[self.num_encoder_layers + i](x, x0)
+        for kind, module_idx, dilation in self.layer_schedule:
+            if kind == "conv":
+                x = self.conv_blocks[module_idx](x, dilation=dilation)
+            elif kind == "attn":
+                x = self.attn_blocks[module_idx](x)
 
         x = self.final_norm(x).reshape(-1, x.size(-1))
         targets = target_ids.reshape(-1)
-        if self.tie_embeddings:
-            logits_proj = F.linear(x, self.tok_emb.weight)
-        else:
-            if self.lm_head is None:
-                raise RuntimeError("lm_head is required when tie_embeddings=False")
-            logits_proj = self.lm_head(x)
-        logits = self.logit_softcap * torch.tanh(logits_proj / self.logit_softcap)
+        logits = F.linear(x, self.tok_emb.weight)  # tied embeddings
+        logits = self.logit_softcap * torch.tanh(logits / self.logit_softcap)
         return F.cross_entropy(logits.float(), targets, reduction="mean")
 
 
-# -----------------------------
+# =============================================================================
+# LOGGING
+# =============================================================================
+
+_rank0: bool = True
+_logfile: Path | None = None
+
+
+def log0(msg: str) -> None:
+    """Print and persist a rank-0 log line.
+
+    :param str msg: Message to emit.
+    """
+
+    if _rank0:
+        print(msg, flush=True)
+        if _logfile is not None:
+            with _logfile.open("a", encoding="utf-8") as f:
+                print(msg, file=f)
+
+
+# =============================================================================
 # TRAINING
-# -----------------------------
+# =============================================================================
 
 
 def main() -> None:
-    """Train, validate, serialize, and round-trip-evaluate the GPT baseline."""
+    """Train, validate, serialize, and round-trip-evaluate the hybrid model."""
 
-    global zeropower_via_newtonschulz5
+    global zeropower_via_newtonschulz5, _rank0, _logfile
 
     code = Path(__file__).read_text(encoding="utf-8")
     args = parse_args()
 
-    # -----------------------------
-    # DISTRIBUTED + CUDA SETUP
-    # -----------------------------
-
+    # ── Distributed + CUDA setup ──
     distributed = "RANK" in os.environ and "WORLD_SIZE" in os.environ
     rank = int(os.environ.get("RANK", "0"))
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
@@ -1122,74 +1188,30 @@ def main() -> None:
     grad_scale = 1.0 / grad_accum_steps
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required")
-    device = torch.device("cuda", local_rank)
+    device = torch.device(f"cuda:{local_rank}")
     torch.cuda.set_device(device)
+    master_process = rank == 0
+    _rank0 = master_process
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    if distributed:
-        dist.init_process_group(backend="nccl", device_id=device)
-        dist.barrier()
-    master_process = rank == 0
+    _logfile = output_dir / "train.log" if master_process else None
+    if _logfile is not None:
+        _logfile.write_text("", encoding="utf-8")
 
-    # Fast math knobs
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
+    if distributed:
+        dist.init_process_group(backend="nccl")
+
+    torch.manual_seed(args.seed)
+    random.seed(args.seed)
+    np.random.seed(args.seed)
     zeropower_via_newtonschulz5 = compile_maybe(
         zeropower_via_newtonschulz5,
         enabled=not args.compile_disable,
     )
+
     effective_sdpa_backend = configure_sdpa_backend(args.sdpa_backend)
 
-    logfile = None
-    if master_process:
-        logfile = str(output_dir / "train.log")
-        Path(logfile).write_text("", encoding="utf-8")
-        print(logfile)
-
-    def log0(msg: str, console: bool = True) -> None:
-        """Emit a rank-0 log line to console and the per-run log file.
-
-        :param str msg: Message to emit.
-        :param bool console: Whether to also print to stdout.
-        """
-
-        if not master_process:
-            return
-        if console:
-            print(msg)
-        if logfile is not None:
-            with open(logfile, "a", encoding="utf-8") as f:
-                print(msg, file=f)
-
-    log0(code, console=False)
-    log0("=" * 100, console=False)
-    log0(f"Running Python {sys.version}", console=False)
-    log0(f"Running PyTorch {torch.__version__}", console=False)
-    log0(
-        subprocess.run(
-            ["nvidia-smi"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=False,
-        ).stdout,
-        console=False,
-    )
-    log0("=" * 100, console=False)
-
-    # -----------------------------
-    # TOKENIZER + VALIDATION METRIC SETUP
-    # -----------------------------
-
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    torch.cuda.manual_seed_all(args.seed)
-
-    if not args.tokenizer_path.endswith(".model"):
-        raise ValueError(
-            f"Script only setup for SentencePiece .model file: {args.tokenizer_path}"
-        )
+    # ── Tokenizer ──
     sp = spm.SentencePieceProcessor(model_file=args.tokenizer_path)
     if int(sp.vocab_size()) != args.vocab_size:
         raise ValueError(
@@ -1207,19 +1229,21 @@ def main() -> None:
     log0(f"train_loader:dataset:{dataset_dir.name} train_shards:{actual_train_files}")
     log0(f"val_loader:shards pattern={args.val_files} tokens:{val_tokens.numel() - 1}")
 
-    # -----------------------------
-    # MODEL + OPTIMIZER SETUP
-    # -----------------------------
-
+    # ── Model setup ──
     base_model = (
-        GPT(
+        HybridLM(
             vocab_size=args.vocab_size,
-            num_layers=args.num_layers,
             model_dim=args.model_dim,
             num_heads=args.num_heads,
             num_kv_heads=args.num_kv_heads,
             mlp_mult=args.mlp_mult,
-            tie_embeddings=args.tie_embeddings,
+            n_unique_conv=args.n_unique_conv,
+            n_unique_attn=args.n_unique_attn,
+            n_conv_effective=args.n_conv_effective,
+            conv_kernel_size=args.conv_kernel_size,
+            squared_gate=args.squared_gate,
+            dilated_conv=args.dilated_conv,
+            hippo_init=args.hippo_init,
             tied_embed_init_std=args.tied_embed_init_std,
             logit_softcap=args.logit_softcap,
             rope_base=args.rope_base,
@@ -1244,27 +1268,34 @@ def main() -> None:
         else compiled_model
     )
 
-    # Optimizer split:
-    # - token embedding (Adam) uses EMBED_LR
-    # - untied lm_head (Adam) uses HEAD_LR
-    # - matrix params in transformer blocks use MATRIX_LR via Muon
-    # - vectors/scalars use SCALAR_LR via Adam
-    block_named_params = list(base_model.blocks.named_parameters())
+    # ── Optimizer setup ──
+    # Collect matrix params from conv_blocks and attn_blocks for Muon
+    all_block_named_params: list[tuple[str, nn.Parameter]] = []
+    all_block_named_params.extend(base_model.conv_blocks.named_parameters())
+    all_block_named_params.extend(base_model.attn_blocks.named_parameters())
+
     matrix_params = [
         p
-        for name, p in block_named_params
+        for name, p in all_block_named_params
         if p.ndim == 2
         and not any(pattern in name for pattern in CONTROL_TENSOR_NAME_PATTERNS)
     ]
     scalar_params = [
         p
-        for name, p in block_named_params
+        for name, p in all_block_named_params
         if p.ndim < 2
         or any(pattern in name for pattern in CONTROL_TENSOR_NAME_PATTERNS)
     ]
-    if base_model.skip_weights.numel() > 0:
-        scalar_params.append(base_model.skip_weights)
-    token_lr = args.tied_embed_lr if args.tie_embeddings else args.embed_lr
+    # Conv kernel weights (ndim=3) go to Muon reshaped, or Adam. They're tiny (k*d params).
+    # Put them in scalar/Adam group since Muon expects 2D matrices.
+    conv_kernel_params = [
+        p
+        for name, p in all_block_named_params
+        if p.ndim == 3  # CausalDWConv1d weight: (dim, 1, kernel_size)
+    ]
+    scalar_params.extend(conv_kernel_params)
+
+    token_lr = args.tied_embed_lr
     optimizer_tok = torch.optim.Adam(
         [{"params": [base_model.tok_emb.weight], "lr": token_lr, "base_lr": token_lr}],
         betas=(args.beta1, args.beta2),
@@ -1290,23 +1321,20 @@ def main() -> None:
         optimizer_muon,
         optimizer_scalar,
     ]
-    if base_model.lm_head is not None:
-        optimizer_head = torch.optim.Adam(
-            [
-                {
-                    "params": [base_model.lm_head.weight],
-                    "lr": args.head_lr,
-                    "base_lr": args.head_lr,
-                }
-            ],
-            betas=(args.beta1, args.beta2),
-            eps=args.adam_eps,
-            fused=True,
-        )
-        optimizers.insert(1, optimizer_head)
 
     n_params = sum(p.numel() for p in base_model.parameters())
-    log0(f"model_params:{n_params}")
+    n_effective_layers = len(base_model.layer_schedule)
+    n_conv_layers = sum(1 for k, _, _ in base_model.layer_schedule if k == "conv")
+    n_attn_layers = sum(1 for k, _, _ in base_model.layer_schedule if k == "attn")
+    log0(
+        f"model_params:{n_params} effective_layers:{n_effective_layers} conv:{n_conv_layers} attn:{n_attn_layers}"
+    )
+    log0(
+        f"unique_conv_blocks:{args.n_unique_conv} unique_attn_blocks:{args.n_unique_attn}"
+    )
+    log0(
+        f"conv_kernel:{args.conv_kernel_size} squared_gate:{args.squared_gate} dilated:{args.dilated_conv} hippo_init:{args.hippo_init}"
+    )
     log0(f"world_size:{world_size} grad_accum_steps:{grad_accum_steps}")
     log0(
         f"sdp_backend:requested={args.sdpa_backend} effective={effective_sdpa_backend}"
@@ -1315,8 +1343,7 @@ def main() -> None:
         f"attention_mode:gqa num_heads:{args.num_heads} num_kv_heads:{args.num_kv_heads}"
     )
     log0(
-        f"tie_embeddings:{args.tie_embeddings} embed_lr:{token_lr} "
-        f"head_lr:{args.head_lr if base_model.lm_head is not None else 0.0} "
+        f"tie_embeddings:True embed_lr:{token_lr} "
         f"matrix_lr:{args.matrix_lr} scalar_lr:{args.scalar_lr}"
     )
     log0(
@@ -1334,10 +1361,7 @@ def main() -> None:
     log0(f"compile_enabled:{not args.compile_disable} output_dir:{output_dir}")
     log0(f"seed:{args.seed}")
 
-    # -----------------------------
-    # DATA LOADER & MODEL WARMUP
-    # -----------------------------
-
+    # ── Data loader & model warmup ──
     train_loader = DistributedTokenLoader(args.train_files, rank, world_size, device)
 
     def zero_grad_all() -> None:
@@ -1376,8 +1400,7 @@ def main() -> None:
             else 1.0
         )
 
-    # Warmup primes the compiled forward/backward/optimizer paths, then we restore the
-    # initial weights/optimizer state so measured training starts from the true init.
+    # Warmup: prime compiled forward/backward/optimizer, then restore initial state
     if args.warmup_steps > 0:
         initial_model_state = {
             name: tensor.detach().cpu().clone()
@@ -1421,10 +1444,7 @@ def main() -> None:
             args.train_files, rank, world_size, device
         )
 
-    # -----------------------------
-    # MAIN TRAINING LOOP
-    # -----------------------------
-
+    # ── Main training loop ──
     training_time_ms = 0.0
     stop_after_step: int | None = None
     torch.cuda.synchronize()
@@ -1485,6 +1505,7 @@ def main() -> None:
             (loss * grad_scale).backward()
         train_loss /= grad_accum_steps
 
+        # Muon momentum warmup
         frac = (
             min(step / args.muon_momentum_warmup_steps, 1.0)
             if args.muon_momentum_warmup_steps > 0
@@ -1519,7 +1540,6 @@ def main() -> None:
                 f"train_time:{approx_training_time_ms:.0f}ms step_avg:{approx_training_time_ms / step:.2f}ms"
             )
 
-        # Needed to sync whether we've reached the wallclock cap.
         reached_cap = (
             max_wallclock_ms is not None and approx_training_time_ms >= max_wallclock_ms
         )
@@ -1535,12 +1555,7 @@ def main() -> None:
         f"reserved: {torch.cuda.max_memory_reserved() // 1024 // 1024} MiB"
     )
 
-    # -----------------------------
-    # SERIALIZATION + ROUNDTRIP VALIDATION
-    # -----------------------------
-    # Save the raw state (useful for debugging/loading in PyTorch directly), then always produce
-    # the compressed int8+zlib artifact and validate the round-tripped weights.
-
+    # ── Serialization + roundtrip validation ──
     if master_process:
         final_model_path = output_dir / "final_model.pt"
         torch.save(base_model.state_dict(), final_model_path)
