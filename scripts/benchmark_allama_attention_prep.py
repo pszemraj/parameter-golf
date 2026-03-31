@@ -262,6 +262,172 @@ def attention_prep_kernel(
     tl.store(v_out_ptrs, v_vals.to(tl.bfloat16), mask=mask)
 
 
+@triton.jit
+def attention_prep_backward_kernel(
+    qkv_ptr,
+    q_gain_ptr,
+    cos_ptr,
+    sin_ptr,
+    grad_q_ptr,
+    grad_k_ptr,
+    grad_v_ptr,
+    grad_qkv_ptr,
+    grad_q_gain_ptr,
+    batch_size,
+    seq_len,
+    num_heads,
+    num_kv_heads,
+    head_dim,
+    q_dim,
+    kv_dim,
+    qkv_stride_b,
+    qkv_stride_t,
+    grad_q_stride_b,
+    grad_q_stride_h,
+    grad_q_stride_t,
+    grad_q_stride_d,
+    grad_k_stride_b,
+    grad_k_stride_h,
+    grad_k_stride_t,
+    grad_k_stride_d,
+    grad_qkv_stride_b,
+    grad_qkv_stride_t,
+    BLOCK_D: tl.constexpr,
+):
+    """Fuse backward through q/k RMSNorm, RoPE, q_gain, and v copy."""
+    token_idx = tl.program_id(0)
+    head_idx = tl.program_id(1)
+    b = token_idx // seq_len
+    t = token_idx % seq_len
+    cols = tl.arange(0, BLOCK_D)
+    mask = cols < head_dim
+    half = head_dim // 2
+    half_cols = tl.arange(0, BLOCK_D // 2)
+    half_mask = half_cols < half
+
+    qkv_base = qkv_ptr + b * qkv_stride_b + t * qkv_stride_t
+    grad_qkv_base = grad_qkv_ptr + b * grad_qkv_stride_b + t * grad_qkv_stride_t
+    cos_ptrs = cos_ptr + t * half + half_cols
+    sin_ptrs = sin_ptr + t * half + half_cols
+    cos_vals = tl.load(cos_ptrs, mask=half_mask, other=0.0).to(tl.float32)
+    sin_vals = tl.load(sin_ptrs, mask=half_mask, other=0.0).to(tl.float32)
+
+    if head_idx < num_heads:
+        q_head_base = qkv_base + head_idx * head_dim
+        q1 = tl.load(q_head_base + half_cols, mask=half_mask, other=0.0).to(tl.float32)
+        q2 = tl.load(q_head_base + half + half_cols, mask=half_mask, other=0.0).to(
+            tl.float32
+        )
+        rms = tl.sqrt(
+            (tl.sum(q1 * q1, axis=0) + tl.sum(q2 * q2, axis=0)) / head_dim + 1e-5
+        )
+        q1_norm = q1 / rms
+        q2_norm = q2 / rms
+        rot_first = q1_norm * cos_vals + q2_norm * sin_vals
+        rot_second = q2_norm * cos_vals - q1_norm * sin_vals
+        gain = tl.load(q_gain_ptr + head_idx).to(tl.float32)
+
+        grad_q_base = (
+            grad_q_ptr
+            + b * grad_q_stride_b
+            + head_idx * grad_q_stride_h
+            + t * grad_q_stride_t
+        )
+        grad_q1 = tl.load(
+            grad_q_base + half_cols * grad_q_stride_d,
+            mask=half_mask,
+            other=0.0,
+        ).to(tl.float32)
+        grad_q2 = tl.load(
+            grad_q_base + (half + half_cols) * grad_q_stride_d,
+            mask=half_mask,
+            other=0.0,
+        ).to(tl.float32)
+        grad_rot_first = grad_q1 * gain
+        grad_rot_second = grad_q2 * gain
+        grad_q1_norm = grad_rot_first * cos_vals - grad_rot_second * sin_vals
+        grad_q2_norm = grad_rot_first * sin_vals + grad_rot_second * cos_vals
+        dot = (
+            tl.sum(grad_q1_norm * q1_norm, axis=0)
+            + tl.sum(grad_q2_norm * q2_norm, axis=0)
+        ) / head_dim
+        grad_q1_orig = (grad_q1_norm - q1_norm * dot) / rms
+        grad_q2_orig = (grad_q2_norm - q2_norm * dot) / rms
+        grad_qkv_q_base = grad_qkv_base + head_idx * head_dim
+        tl.store(
+            grad_qkv_q_base + half_cols,
+            grad_q1_orig.to(tl.bfloat16),
+            mask=half_mask,
+        )
+        tl.store(
+            grad_qkv_q_base + half + half_cols,
+            grad_q2_orig.to(tl.bfloat16),
+            mask=half_mask,
+        )
+        grad_gain = tl.sum(grad_q1 * rot_first + grad_q2 * rot_second, axis=0)
+        tl.atomic_add(grad_q_gain_ptr + head_idx, grad_gain)
+        return
+
+    kv_head = head_idx - num_heads
+    if kv_head >= num_kv_heads:
+        return
+
+    k_head_base = qkv_base + q_dim + kv_head * head_dim
+    k1 = tl.load(k_head_base + half_cols, mask=half_mask, other=0.0).to(tl.float32)
+    k2 = tl.load(k_head_base + half + half_cols, mask=half_mask, other=0.0).to(
+        tl.float32
+    )
+    rms = tl.sqrt((tl.sum(k1 * k1, axis=0) + tl.sum(k2 * k2, axis=0)) / head_dim + 1e-5)
+    k1_norm = k1 / rms
+    k2_norm = k2 / rms
+
+    grad_k_base = (
+        grad_k_ptr
+        + b * grad_k_stride_b
+        + kv_head * grad_k_stride_h
+        + t * grad_k_stride_t
+    )
+    grad_k1 = tl.load(
+        grad_k_base + half_cols * grad_k_stride_d,
+        mask=half_mask,
+        other=0.0,
+    ).to(tl.float32)
+    grad_k2 = tl.load(
+        grad_k_base + (half + half_cols) * grad_k_stride_d,
+        mask=half_mask,
+        other=0.0,
+    ).to(tl.float32)
+    grad_k1_norm = grad_k1 * cos_vals - grad_k2 * sin_vals
+    grad_k2_norm = grad_k1 * sin_vals + grad_k2 * cos_vals
+    dot = (
+        tl.sum(grad_k1_norm * k1_norm, axis=0) + tl.sum(grad_k2_norm * k2_norm, axis=0)
+    ) / head_dim
+    grad_k1_orig = (grad_k1_norm - k1_norm * dot) / rms
+    grad_k2_orig = (grad_k2_norm - k2_norm * dot) / rms
+    grad_qkv_k_base = grad_qkv_base + q_dim + kv_head * head_dim
+    tl.store(
+        grad_qkv_k_base + half_cols,
+        grad_k1_orig.to(tl.bfloat16),
+        mask=half_mask,
+    )
+    tl.store(
+        grad_qkv_k_base + half + half_cols,
+        grad_k2_orig.to(tl.bfloat16),
+        mask=half_mask,
+    )
+
+    grad_v_ptrs = (
+        grad_v_ptr
+        + b * grad_k_stride_b
+        + kv_head * grad_k_stride_h
+        + t * grad_k_stride_t
+        + cols * grad_k_stride_d
+    )
+    grad_v_vals = tl.load(grad_v_ptrs, mask=mask, other=0.0)
+    grad_qkv_v_ptrs = grad_qkv_base + q_dim + kv_dim + kv_head * head_dim + cols
+    tl.store(grad_qkv_v_ptrs, grad_v_vals.to(tl.bfloat16), mask=mask)
+
+
 def attention_prep_triton(
     qkv: torch.Tensor,
     q_gain: torch.Tensor,
@@ -320,6 +486,197 @@ def attention_prep_triton(
     return q, k, v
 
 
+def attention_prep_backward_triton(
+    qkv: torch.Tensor,
+    q_gain: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    grad_q: torch.Tensor,
+    grad_k: torch.Tensor,
+    grad_v: torch.Tensor,
+    *,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Run the fused Triton backward kernel for the attention-prep boundary."""
+    batch_size, seq_len, qkv_dim = qkv.shape
+    q_dim = num_heads * head_dim
+    kv_dim = num_kv_heads * head_dim
+    if qkv_dim != q_dim + 2 * kv_dim:
+        raise ValueError("qkv shape does not match the requested head layout")
+    grad_qkv = torch.empty_like(qkv)
+    grad_q_gain = torch.zeros_like(q_gain, dtype=torch.float32)
+    block_d = next_power_of_2(head_dim)
+    grid = (batch_size * seq_len, num_heads + num_kv_heads)
+    attention_prep_backward_kernel[grid](
+        qkv,
+        q_gain,
+        cos,
+        sin,
+        grad_q,
+        grad_k,
+        grad_v,
+        grad_qkv,
+        grad_q_gain,
+        batch_size,
+        seq_len,
+        num_heads,
+        num_kv_heads,
+        head_dim,
+        q_dim,
+        kv_dim,
+        qkv.stride(0),
+        qkv.stride(1),
+        grad_q.stride(0),
+        grad_q.stride(1),
+        grad_q.stride(2),
+        grad_q.stride(3),
+        grad_k.stride(0),
+        grad_k.stride(1),
+        grad_k.stride(2),
+        grad_k.stride(3),
+        grad_qkv.stride(0),
+        grad_qkv.stride(1),
+        BLOCK_D=block_d,
+        num_warps=2 if head_dim <= 64 else 4,
+    )
+    return grad_qkv, grad_q_gain
+
+
+def register_attention_prep_custom_op() -> Any:
+    """Register a benchmark-local custom op for the attention-prep boundary."""
+
+    @torch.library.custom_op(
+        "allama_triton_bench::attention_prep_backward",
+        mutates_args=(),
+    )
+    def attention_prep_backward_op(
+        qkv: torch.Tensor,
+        q_gain: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        grad_q: torch.Tensor,
+        grad_k: torch.Tensor,
+        grad_v: torch.Tensor,
+        num_heads: int,
+        num_kv_heads: int,
+        head_dim: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return attention_prep_backward_triton(
+            qkv,
+            q_gain,
+            cos,
+            sin,
+            grad_q,
+            grad_k,
+            grad_v,
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+        )
+
+    @attention_prep_backward_op.register_fake
+    def _attention_prep_backward_op_fake(
+        qkv: torch.Tensor,
+        q_gain: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        grad_q: torch.Tensor,
+        grad_k: torch.Tensor,
+        grad_v: torch.Tensor,
+        num_heads: int,
+        num_kv_heads: int,
+        head_dim: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        del cos, sin, grad_q, grad_k, grad_v, num_heads, num_kv_heads, head_dim
+        return qkv.new_empty(qkv.shape), q_gain.new_empty(
+            q_gain.shape, dtype=torch.float32
+        )
+
+    @torch.library.custom_op(
+        "allama_triton_bench::attention_prep",
+        mutates_args=(),
+    )
+    def attention_prep_op(
+        qkv: torch.Tensor,
+        q_gain: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        num_heads: int,
+        num_kv_heads: int,
+        head_dim: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        return attention_prep_triton(
+            qkv,
+            q_gain,
+            cos,
+            sin,
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+        )
+
+    @attention_prep_op.register_fake
+    def _attention_prep_op_fake(
+        qkv: torch.Tensor,
+        q_gain: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        num_heads: int,
+        num_kv_heads: int,
+        head_dim: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        del q_gain, cos, sin
+        batch_size, seq_len, _ = qkv.shape
+        q = qkv.new_empty((batch_size, num_heads, seq_len, head_dim))
+        k = qkv.new_empty((batch_size, num_kv_heads, seq_len, head_dim))
+        v = qkv.new_empty((batch_size, num_kv_heads, seq_len, head_dim))
+        return q, k, v
+
+    def setup_context(
+        ctx: Any,
+        inputs: tuple[
+            torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int, int, int
+        ],
+        output: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    ) -> None:
+        del output
+        qkv, q_gain, cos, sin, num_heads, num_kv_heads, head_dim = inputs
+        ctx.save_for_backward(qkv, q_gain, cos, sin)
+        ctx.num_heads = int(num_heads)
+        ctx.num_kv_heads = int(num_kv_heads)
+        ctx.head_dim = int(head_dim)
+
+    def backward(
+        ctx: Any,
+        grad_q: torch.Tensor,
+        grad_k: torch.Tensor,
+        grad_v: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, None, None, None, None, None]:
+        qkv, q_gain, cos, sin = ctx.saved_tensors
+        grad_qkv, grad_q_gain = attention_prep_backward_op(
+            qkv,
+            q_gain,
+            cos,
+            sin,
+            grad_q,
+            grad_k,
+            grad_v,
+            ctx.num_heads,
+            ctx.num_kv_heads,
+            ctx.head_dim,
+        )
+        return grad_qkv, grad_q_gain, None, None, None, None, None
+
+    torch.library.register_autograd(
+        "allama_triton_bench::attention_prep",
+        backward,
+        setup_context=setup_context,
+    )
+    return attention_prep_op
+
+
 def attention_forward_triton(
     qkv: torch.Tensor,
     q_gain: torch.Tensor,
@@ -340,6 +697,34 @@ def attention_forward_triton(
         num_kv_heads=num_kv_heads,
         head_dim=head_dim,
     )
+    if num_heads != num_kv_heads and sdpa_enable_gqa_available():
+        return F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            is_causal=True,
+            enable_gqa=True,
+        )
+    if num_heads != num_kv_heads:
+        repeat = num_heads // num_kv_heads
+        k = k.repeat_interleave(repeat, dim=1)
+        v = v.repeat_interleave(repeat, dim=1)
+    return F.scaled_dot_product_attention(q, k, v, is_causal=True)
+
+
+def attention_forward_custom(
+    op: Callable[..., tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
+    qkv: torch.Tensor,
+    q_gain: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    *,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+) -> torch.Tensor:
+    """Run the custom-op prep path followed by flash attention."""
+    q, k, v = op(qkv, q_gain, cos, sin, num_heads, num_kv_heads, head_dim)
     if num_heads != num_kv_heads and sdpa_enable_gqa_available():
         return F.scaled_dot_product_attention(
             q,
@@ -376,6 +761,105 @@ def max_diff(ref: torch.Tensor, out: torch.Tensor) -> tuple[float, float]:
     return float(max_abs), float(max_rel)
 
 
+def loss_reference_prep(
+    qkv: torch.Tensor,
+    q_gain: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    grad_q: torch.Tensor,
+    grad_k: torch.Tensor,
+    grad_v: torch.Tensor,
+    *,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+) -> torch.Tensor:
+    """Return a scalar loss that exercises prep-only backward."""
+    q, k, v = attention_prep_reference(
+        qkv,
+        q_gain,
+        cos,
+        sin,
+        num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+    )
+    return (q * grad_q).sum() + (k * grad_k).sum() + (v * grad_v).sum()
+
+
+def loss_custom_prep(
+    op: Callable[..., tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
+    qkv: torch.Tensor,
+    q_gain: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    grad_q: torch.Tensor,
+    grad_k: torch.Tensor,
+    grad_v: torch.Tensor,
+    *,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+) -> torch.Tensor:
+    """Return a scalar loss that exercises custom prep backward."""
+    q, k, v = op(qkv, q_gain, cos, sin, num_heads, num_kv_heads, head_dim)
+    return (q * grad_q).sum() + (k * grad_k).sum() + (v * grad_v).sum()
+
+
+def loss_reference_flash(
+    qkv: torch.Tensor,
+    q_gain: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    grad_out: torch.Tensor,
+    *,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+) -> torch.Tensor:
+    """Return a scalar loss that exercises flash-attention through prep."""
+    return (
+        attention_forward_reference(
+            qkv,
+            q_gain,
+            cos,
+            sin,
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+        )
+        * grad_out
+    ).sum()
+
+
+def loss_custom_flash(
+    op: Callable[..., tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
+    qkv: torch.Tensor,
+    q_gain: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    grad_out: torch.Tensor,
+    *,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+) -> torch.Tensor:
+    """Return a scalar loss that exercises custom prep plus flash backward."""
+    return (
+        attention_forward_custom(
+            op,
+            qkv,
+            q_gain,
+            cos,
+            sin,
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+        )
+        * grad_out
+    ).sum()
+
+
 def main() -> None:
     """Run the standalone attention-prep benchmark."""
     args = parse_args()
@@ -384,6 +868,7 @@ def main() -> None:
 
     device = torch.device("cuda")
     torch.manual_seed(1337)
+    op = register_attention_prep_custom_op()
     batch = 4
     seq_len = 1024
     num_heads = 14
@@ -531,6 +1016,284 @@ def main() -> None:
         measured_iters=args.measured_iters,
     )
 
+    grad_q = torch.randn_like(ref_q)
+    grad_k = torch.randn_like(ref_k)
+    grad_v = torch.randn_like(ref_v)
+    qkv_ref = qkv.detach().clone().requires_grad_(True)
+    q_gain_ref = q_gain.detach().clone().requires_grad_(True)
+    qkv_custom = qkv.detach().clone().requires_grad_(True)
+    q_gain_custom = q_gain.detach().clone().requires_grad_(True)
+
+    ref_prep_grads = torch.autograd.grad(
+        loss_reference_prep(
+            qkv_ref,
+            q_gain_ref,
+            cos,
+            sin,
+            grad_q,
+            grad_k,
+            grad_v,
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+        ),
+        (qkv_ref, q_gain_ref),
+    )
+    custom_prep_grads = torch.autograd.grad(
+        loss_custom_prep(
+            op,
+            qkv_custom,
+            q_gain_custom,
+            cos,
+            sin,
+            grad_q,
+            grad_k,
+            grad_v,
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+        ),
+        (qkv_custom, q_gain_custom),
+    )
+    prep_backward_abs = max(
+        (ref_grad.float() - custom_grad.float()).abs().max().item()
+        for ref_grad, custom_grad in zip(ref_prep_grads, custom_prep_grads, strict=True)
+    )
+    prep_backward_rel = max(
+        (
+            (ref_grad.float() - custom_grad.float()).abs().max()
+            / ref_grad.float().abs().max().clamp_min(1e-6)
+        ).item()
+        for ref_grad, custom_grad in zip(ref_prep_grads, custom_prep_grads, strict=True)
+    )
+
+    ref_prep_backward_ms = measure_ms(
+        lambda: torch.autograd.grad(
+            loss_reference_prep(
+                qkv_ref,
+                q_gain_ref,
+                cos,
+                sin,
+                grad_q,
+                grad_k,
+                grad_v,
+                num_heads=num_heads,
+                num_kv_heads=num_kv_heads,
+                head_dim=head_dim,
+            ),
+            (qkv_ref, q_gain_ref),
+        ),
+        warmup_iters=args.warmup_iters,
+        measured_iters=args.measured_iters,
+    )
+    compiled_ref_prep_loss = torch.compile(
+        loss_reference_prep, dynamic=False, fullgraph=True
+    )
+    compiled_ref_prep_backward_ms = measure_ms(
+        lambda: torch.autograd.grad(
+            compiled_ref_prep_loss(
+                qkv_ref,
+                q_gain_ref,
+                cos,
+                sin,
+                grad_q,
+                grad_k,
+                grad_v,
+                num_heads=num_heads,
+                num_kv_heads=num_kv_heads,
+                head_dim=head_dim,
+            ),
+            (qkv_ref, q_gain_ref),
+        ),
+        warmup_iters=args.warmup_iters,
+        measured_iters=args.measured_iters,
+    )
+    compiled_custom_prep_loss = torch.compile(
+        lambda qkv_, q_gain_, cos_, sin_, grad_q_, grad_k_, grad_v_: loss_custom_prep(
+            op,
+            qkv_,
+            q_gain_,
+            cos_,
+            sin_,
+            grad_q_,
+            grad_k_,
+            grad_v_,
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+        ),
+        dynamic=False,
+        fullgraph=True,
+    )
+    custom_prep_backward_ms = measure_ms(
+        lambda: torch.autograd.grad(
+            loss_custom_prep(
+                op,
+                qkv_custom,
+                q_gain_custom,
+                cos,
+                sin,
+                grad_q,
+                grad_k,
+                grad_v,
+                num_heads=num_heads,
+                num_kv_heads=num_kv_heads,
+                head_dim=head_dim,
+            ),
+            (qkv_custom, q_gain_custom),
+        ),
+        warmup_iters=args.warmup_iters,
+        measured_iters=args.measured_iters,
+    )
+    compiled_custom_prep_backward_ms = measure_ms(
+        lambda: torch.autograd.grad(
+            compiled_custom_prep_loss(
+                qkv_custom,
+                q_gain_custom,
+                cos,
+                sin,
+                grad_q,
+                grad_k,
+                grad_v,
+            ),
+            (qkv_custom, q_gain_custom),
+        ),
+        warmup_iters=args.warmup_iters,
+        measured_iters=args.measured_iters,
+    )
+
+    grad_out = torch.randn_like(ref_attn)
+    qkv_ref_flash = qkv.detach().clone().requires_grad_(True)
+    q_gain_ref_flash = q_gain.detach().clone().requires_grad_(True)
+    qkv_custom_flash = qkv.detach().clone().requires_grad_(True)
+    q_gain_custom_flash = q_gain.detach().clone().requires_grad_(True)
+    ref_flash_grads = torch.autograd.grad(
+        loss_reference_flash(
+            qkv_ref_flash,
+            q_gain_ref_flash,
+            cos,
+            sin,
+            grad_out,
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+        ),
+        (qkv_ref_flash, q_gain_ref_flash),
+    )
+    custom_flash_grads = torch.autograd.grad(
+        loss_custom_flash(
+            op,
+            qkv_custom_flash,
+            q_gain_custom_flash,
+            cos,
+            sin,
+            grad_out,
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+        ),
+        (qkv_custom_flash, q_gain_custom_flash),
+    )
+    flash_backward_abs = max(
+        (ref_grad.float() - custom_grad.float()).abs().max().item()
+        for ref_grad, custom_grad in zip(
+            ref_flash_grads, custom_flash_grads, strict=True
+        )
+    )
+    flash_backward_rel = max(
+        (
+            (ref_grad.float() - custom_grad.float()).abs().max()
+            / ref_grad.float().abs().max().clamp_min(1e-6)
+        ).item()
+        for ref_grad, custom_grad in zip(
+            ref_flash_grads, custom_flash_grads, strict=True
+        )
+    )
+    ref_flash_backward_ms = measure_ms(
+        lambda: torch.autograd.grad(
+            loss_reference_flash(
+                qkv_ref_flash,
+                q_gain_ref_flash,
+                cos,
+                sin,
+                grad_out,
+                num_heads=num_heads,
+                num_kv_heads=num_kv_heads,
+                head_dim=head_dim,
+            ),
+            (qkv_ref_flash, q_gain_ref_flash),
+        ),
+        warmup_iters=args.warmup_iters,
+        measured_iters=args.measured_iters,
+    )
+    compiled_ref_flash = torch.compile(
+        loss_reference_flash, dynamic=False, fullgraph=True
+    )
+    compiled_ref_flash_backward_ms = measure_ms(
+        lambda: torch.autograd.grad(
+            compiled_ref_flash(
+                qkv_ref_flash,
+                q_gain_ref_flash,
+                cos,
+                sin,
+                grad_out,
+                num_heads=num_heads,
+                num_kv_heads=num_kv_heads,
+                head_dim=head_dim,
+            ),
+            (qkv_ref_flash, q_gain_ref_flash),
+        ),
+        warmup_iters=args.warmup_iters,
+        measured_iters=args.measured_iters,
+    )
+    compiled_custom_flash = torch.compile(
+        lambda qkv_, q_gain_, cos_, sin_, grad_out_: loss_custom_flash(
+            op,
+            qkv_,
+            q_gain_,
+            cos_,
+            sin_,
+            grad_out_,
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+        ),
+        dynamic=False,
+        fullgraph=True,
+    )
+    custom_flash_backward_ms = measure_ms(
+        lambda: torch.autograd.grad(
+            loss_custom_flash(
+                op,
+                qkv_custom_flash,
+                q_gain_custom_flash,
+                cos,
+                sin,
+                grad_out,
+                num_heads=num_heads,
+                num_kv_heads=num_kv_heads,
+                head_dim=head_dim,
+            ),
+            (qkv_custom_flash, q_gain_custom_flash),
+        ),
+        warmup_iters=args.warmup_iters,
+        measured_iters=args.measured_iters,
+    )
+    compiled_custom_flash_backward_ms = measure_ms(
+        lambda: torch.autograd.grad(
+            compiled_custom_flash(
+                qkv_custom_flash,
+                q_gain_custom_flash,
+                cos,
+                sin,
+                grad_out,
+            ),
+            (qkv_custom_flash, q_gain_custom_flash),
+        ),
+        warmup_iters=args.warmup_iters,
+        measured_iters=args.measured_iters,
+    )
+
     summary = {
         "shape": [batch, seq_len, qkv_dim],
         "heads": {
@@ -556,6 +1319,19 @@ def main() -> None:
                 "max_rel": prep_rel,
             },
             {
+                "case": "attention_prep_backward",
+                "reference_ms": float(ref_prep_backward_ms),
+                "compiled_reference_ms": float(compiled_ref_prep_backward_ms),
+                "triton_ms": float(custom_prep_backward_ms),
+                "compiled_triton_ms": float(compiled_custom_prep_backward_ms),
+                "speedup": float(ref_prep_backward_ms / custom_prep_backward_ms),
+                "speedup_vs_compiled": float(
+                    compiled_ref_prep_backward_ms / compiled_custom_prep_backward_ms
+                ),
+                "max_abs": prep_backward_abs,
+                "max_rel": prep_backward_rel,
+            },
+            {
                 "case": "attention_prep_plus_flash_fwd",
                 "reference_ms": float(ref_attn_ms),
                 "compiled_reference_ms": float(compiled_ref_attn_ms),
@@ -564,6 +1340,19 @@ def main() -> None:
                 "speedup_vs_compiled": float(compiled_ref_attn_ms / triton_attn_ms),
                 "max_abs": attn_abs,
                 "max_rel": attn_rel,
+            },
+            {
+                "case": "attention_prep_plus_flash_bwd",
+                "reference_ms": float(ref_flash_backward_ms),
+                "compiled_reference_ms": float(compiled_ref_flash_backward_ms),
+                "triton_ms": float(custom_flash_backward_ms),
+                "compiled_triton_ms": float(compiled_custom_flash_backward_ms),
+                "speedup": float(ref_flash_backward_ms / custom_flash_backward_ms),
+                "speedup_vs_compiled": float(
+                    compiled_ref_flash_backward_ms / compiled_custom_flash_backward_ms
+                ),
+                "max_abs": flash_backward_abs,
+                "max_rel": flash_backward_rel,
             },
         ],
     }

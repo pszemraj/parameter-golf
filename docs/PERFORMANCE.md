@@ -688,3 +688,37 @@ Latest harness smoke check:
   - a larger attention integration boundary that absorbs more launch overhead
   - a better backward-side reduction in the MLP path so the current `+2%` class
     win can become something materially larger
+
+## Pre-Flash Attention Prep Candidate
+
+- Extended `scripts/benchmark_allama_attention_prep.py` with a real Triton
+  backward path for the pre-flash boundary:
+  - backward through q RMSNorm + RoPE + `q_gain`
+  - backward through k RMSNorm + RoPE
+  - direct v-gradient writeback into the packed `qkv` tensor
+- Current representative result in
+  `runs_allama_validation/attention_prep_v2/summary.json`:
+  - prep-only forward:
+    - compiled reference: `0.03962 ms`
+    - Triton: `0.03695 ms`
+  - prep-only backward:
+    - compiled reference: `0.23278 ms`
+    - compiled Triton: `0.31218 ms`
+  - prep + flash forward:
+    - compiled reference: `0.08915 ms`
+    - Triton: `0.11287 ms`
+  - prep + flash backward:
+    - compiled reference: `0.36928 ms`
+    - compiled Triton: `0.42685 ms`
+  - relevant end-to-end numerical drift stayed reasonable on the flash-backed
+    case:
+    - forward `max_rel=0.01031`
+    - backward `max_rel=0.01064`
+- Conclusion:
+  - the fully fused pre-flash backward path is working, but it still does not
+    survive the real flash-attention contract under `torch.compile`
+  - this boundary is currently worse than the MLP gate-up path and not ready
+    for model integration
+  - attention-side kernel work should continue only on larger boundaries or
+    after a clearer hypothesis about why Inductor still wins once flash is in
+    the loop
