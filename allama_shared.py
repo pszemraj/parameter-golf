@@ -352,6 +352,13 @@ def mix_x0(
 
 
 _ALLAMA_MLP_GATEUP_OP: Optional[Any] = None
+_ALLAMA_ATTN_PREP_OP: Optional[Any] = None
+_ALLAMA_ATTN_OUTPROJ_RESIDUAL_OP: Optional[Any] = None
+
+
+def next_power_of_2(value: int) -> int:
+    """Return the next power-of-two integer greater than or equal to ``value``."""
+    return 1 if value <= 1 else 1 << (value - 1).bit_length()
 
 
 if triton is not None:
@@ -772,6 +779,1197 @@ def register_allama_mlp_gateup_custom_op() -> Optional[Any]:
     return _ALLAMA_MLP_GATEUP_OP
 
 
+if triton is not None:
+
+    @triton.jit
+    def attention_prep_bshd_kernel(
+        qkv_ptr,
+        q_gain_ptr,
+        cos_ptr,
+        sin_ptr,
+        q_ptr,
+        k_ptr,
+        v_ptr,
+        batch_size,
+        seq_len,
+        num_heads,
+        num_kv_heads,
+        head_dim,
+        q_dim,
+        kv_dim,
+        qkv_stride_b,
+        qkv_stride_t,
+        q_stride_b,
+        q_stride_t,
+        q_stride_h,
+        q_stride_d,
+        kv_stride_b,
+        kv_stride_t,
+        kv_stride_h,
+        kv_stride_d,
+        BLOCK_D: tl.constexpr,
+    ):
+        """Fuse qkv split, q/k RMSNorm, RoPE, and q-gain for FA2 BSHD tensors."""
+        token_idx = tl.program_id(0)
+        head_idx = tl.program_id(1)
+        b = token_idx // seq_len
+        t = token_idx % seq_len
+        cols = tl.arange(0, BLOCK_D)
+        mask = cols < head_dim
+        half = head_dim // 2
+        half_cols = tl.arange(0, BLOCK_D // 2)
+        half_mask = half_cols < half
+
+        qkv_base = qkv_ptr + b * qkv_stride_b + t * qkv_stride_t
+        cos_ptrs = cos_ptr + t * half + half_cols
+        sin_ptrs = sin_ptr + t * half + half_cols
+        cos_vals = tl.load(cos_ptrs, mask=half_mask, other=0.0).to(tl.float32)
+        sin_vals = tl.load(sin_ptrs, mask=half_mask, other=0.0).to(tl.float32)
+
+        if head_idx < num_heads:
+            q_head_base = qkv_base + head_idx * head_dim
+            q1 = tl.load(q_head_base + half_cols, mask=half_mask, other=0.0).to(
+                tl.float32
+            )
+            q2 = tl.load(q_head_base + half + half_cols, mask=half_mask, other=0.0).to(
+                tl.float32
+            )
+            rms = tl.sqrt(
+                (tl.sum(q1 * q1, axis=0) + tl.sum(q2 * q2, axis=0)) / head_dim + 1e-5
+            )
+            q1 = q1 / rms
+            q2 = q2 / rms
+            rot_first = q1 * cos_vals + q2 * sin_vals
+            rot_second = q2 * cos_vals - q1 * sin_vals
+            gain = tl.load(q_gain_ptr + head_idx).to(tl.float32)
+            q_out_base = q_ptr + b * q_stride_b + t * q_stride_t + head_idx * q_stride_h
+            tl.store(
+                q_out_base + half_cols * q_stride_d,
+                (rot_first * gain).to(tl.bfloat16),
+                mask=half_mask,
+            )
+            tl.store(
+                q_out_base + (half + half_cols) * q_stride_d,
+                (rot_second * gain).to(tl.bfloat16),
+                mask=half_mask,
+            )
+            return
+
+        kv_head = head_idx - num_heads
+        if kv_head >= num_kv_heads:
+            return
+
+        k_head_base = qkv_base + q_dim + kv_head * head_dim
+        v_head_base = qkv_base + q_dim + kv_dim + kv_head * head_dim
+        k1 = tl.load(k_head_base + half_cols, mask=half_mask, other=0.0).to(tl.float32)
+        k2 = tl.load(k_head_base + half + half_cols, mask=half_mask, other=0.0).to(
+            tl.float32
+        )
+        v_vals = tl.load(v_head_base + cols, mask=mask, other=0.0)
+        rms = tl.sqrt(
+            (tl.sum(k1 * k1, axis=0) + tl.sum(k2 * k2, axis=0)) / head_dim + 1e-5
+        )
+        k1 = k1 / rms
+        k2 = k2 / rms
+        rot_first = k1 * cos_vals + k2 * sin_vals
+        rot_second = k2 * cos_vals - k1 * sin_vals
+        k_out_base = k_ptr + b * kv_stride_b + t * kv_stride_t + kv_head * kv_stride_h
+        v_out_ptrs = (
+            v_ptr
+            + b * kv_stride_b
+            + t * kv_stride_t
+            + kv_head * kv_stride_h
+            + cols * kv_stride_d
+        )
+        tl.store(
+            k_out_base + half_cols * kv_stride_d,
+            rot_first.to(tl.bfloat16),
+            mask=half_mask,
+        )
+        tl.store(
+            k_out_base + (half + half_cols) * kv_stride_d,
+            rot_second.to(tl.bfloat16),
+            mask=half_mask,
+        )
+        tl.store(v_out_ptrs, v_vals.to(tl.bfloat16), mask=mask)
+
+    @triton.jit
+    def attention_prep_bshd_backward_kernel(
+        qkv_ptr,
+        q_gain_ptr,
+        cos_ptr,
+        sin_ptr,
+        grad_q_ptr,
+        grad_k_ptr,
+        grad_v_ptr,
+        grad_qkv_ptr,
+        grad_q_gain_ptr,
+        batch_size,
+        seq_len,
+        num_heads,
+        num_kv_heads,
+        head_dim,
+        q_dim,
+        kv_dim,
+        qkv_stride_b,
+        qkv_stride_t,
+        grad_q_stride_b,
+        grad_q_stride_t,
+        grad_q_stride_h,
+        grad_q_stride_d,
+        grad_k_stride_b,
+        grad_k_stride_t,
+        grad_k_stride_h,
+        grad_k_stride_d,
+        grad_qkv_stride_b,
+        grad_qkv_stride_t,
+        BLOCK_D: tl.constexpr,
+    ):
+        """Backward for the fused FA2 prep kernel on BSHD tensors."""
+        token_idx = tl.program_id(0)
+        head_idx = tl.program_id(1)
+        b = token_idx // seq_len
+        t = token_idx % seq_len
+        cols = tl.arange(0, BLOCK_D)
+        mask = cols < head_dim
+        half = head_dim // 2
+        half_cols = tl.arange(0, BLOCK_D // 2)
+        half_mask = half_cols < half
+
+        qkv_base = qkv_ptr + b * qkv_stride_b + t * qkv_stride_t
+        grad_qkv_base = grad_qkv_ptr + b * grad_qkv_stride_b + t * grad_qkv_stride_t
+        cos_ptrs = cos_ptr + t * half + half_cols
+        sin_ptrs = sin_ptr + t * half + half_cols
+        cos_vals = tl.load(cos_ptrs, mask=half_mask, other=0.0).to(tl.float32)
+        sin_vals = tl.load(sin_ptrs, mask=half_mask, other=0.0).to(tl.float32)
+
+        if head_idx < num_heads:
+            q_head_base = qkv_base + head_idx * head_dim
+            q1 = tl.load(q_head_base + half_cols, mask=half_mask, other=0.0).to(
+                tl.float32
+            )
+            q2 = tl.load(q_head_base + half + half_cols, mask=half_mask, other=0.0).to(
+                tl.float32
+            )
+            rms = tl.sqrt(
+                (tl.sum(q1 * q1, axis=0) + tl.sum(q2 * q2, axis=0)) / head_dim + 1e-5
+            )
+            q1_norm = q1 / rms
+            q2_norm = q2 / rms
+            rot_first = q1_norm * cos_vals + q2_norm * sin_vals
+            rot_second = q2_norm * cos_vals - q1_norm * sin_vals
+            gain = tl.load(q_gain_ptr + head_idx).to(tl.float32)
+
+            grad_q_base = (
+                grad_q_ptr
+                + b * grad_q_stride_b
+                + t * grad_q_stride_t
+                + head_idx * grad_q_stride_h
+            )
+            grad_q1 = tl.load(
+                grad_q_base + half_cols * grad_q_stride_d,
+                mask=half_mask,
+                other=0.0,
+            ).to(tl.float32)
+            grad_q2 = tl.load(
+                grad_q_base + (half + half_cols) * grad_q_stride_d,
+                mask=half_mask,
+                other=0.0,
+            ).to(tl.float32)
+            grad_rot_first = grad_q1 * gain
+            grad_rot_second = grad_q2 * gain
+            grad_q1_norm = grad_rot_first * cos_vals - grad_rot_second * sin_vals
+            grad_q2_norm = grad_rot_first * sin_vals + grad_rot_second * cos_vals
+            dot = (
+                tl.sum(grad_q1_norm * q1_norm, axis=0)
+                + tl.sum(grad_q2_norm * q2_norm, axis=0)
+            ) / head_dim
+            grad_q1_orig = (grad_q1_norm - q1_norm * dot) / rms
+            grad_q2_orig = (grad_q2_norm - q2_norm * dot) / rms
+            grad_qkv_q_base = grad_qkv_base + head_idx * head_dim
+            tl.store(
+                grad_qkv_q_base + half_cols,
+                grad_q1_orig.to(tl.bfloat16),
+                mask=half_mask,
+            )
+            tl.store(
+                grad_qkv_q_base + half + half_cols,
+                grad_q2_orig.to(tl.bfloat16),
+                mask=half_mask,
+            )
+            grad_gain = tl.sum(grad_q1 * rot_first + grad_q2 * rot_second, axis=0)
+            tl.atomic_add(grad_q_gain_ptr + head_idx, grad_gain)
+            return
+
+        kv_head = head_idx - num_heads
+        if kv_head >= num_kv_heads:
+            return
+
+        k_head_base = qkv_base + q_dim + kv_head * head_dim
+        k1 = tl.load(k_head_base + half_cols, mask=half_mask, other=0.0).to(tl.float32)
+        k2 = tl.load(k_head_base + half + half_cols, mask=half_mask, other=0.0).to(
+            tl.float32
+        )
+        rms = tl.sqrt(
+            (tl.sum(k1 * k1, axis=0) + tl.sum(k2 * k2, axis=0)) / head_dim + 1e-5
+        )
+        k1_norm = k1 / rms
+        k2_norm = k2 / rms
+
+        grad_k_base = (
+            grad_k_ptr
+            + b * grad_k_stride_b
+            + t * grad_k_stride_t
+            + kv_head * grad_k_stride_h
+        )
+        grad_k1 = tl.load(
+            grad_k_base + half_cols * grad_k_stride_d,
+            mask=half_mask,
+            other=0.0,
+        ).to(tl.float32)
+        grad_k2 = tl.load(
+            grad_k_base + (half + half_cols) * grad_k_stride_d,
+            mask=half_mask,
+            other=0.0,
+        ).to(tl.float32)
+        grad_k1_norm = grad_k1 * cos_vals - grad_k2 * sin_vals
+        grad_k2_norm = grad_k1 * sin_vals + grad_k2 * cos_vals
+        dot = (
+            tl.sum(grad_k1_norm * k1_norm, axis=0)
+            + tl.sum(grad_k2_norm * k2_norm, axis=0)
+        ) / head_dim
+        grad_k1_orig = (grad_k1_norm - k1_norm * dot) / rms
+        grad_k2_orig = (grad_k2_norm - k2_norm * dot) / rms
+        grad_qkv_k_base = grad_qkv_base + q_dim + kv_head * head_dim
+        tl.store(
+            grad_qkv_k_base + half_cols,
+            grad_k1_orig.to(tl.bfloat16),
+            mask=half_mask,
+        )
+        tl.store(
+            grad_qkv_k_base + half + half_cols,
+            grad_k2_orig.to(tl.bfloat16),
+            mask=half_mask,
+        )
+
+        grad_v_ptrs = (
+            grad_v_ptr
+            + b * grad_k_stride_b
+            + t * grad_k_stride_t
+            + kv_head * grad_k_stride_h
+            + cols * grad_k_stride_d
+        )
+        grad_v_vals = tl.load(grad_v_ptrs, mask=mask, other=0.0)
+        grad_qkv_v_ptrs = grad_qkv_base + q_dim + kv_dim + kv_head * head_dim + cols
+        tl.store(grad_qkv_v_ptrs, grad_v_vals.to(tl.bfloat16), mask=mask)
+
+
+def attention_prep_bshd_triton(
+    qkv: Tensor,
+    q_gain: Tensor,
+    cos: Tensor,
+    sin: Tensor,
+    *,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+) -> tuple[Tensor, Tensor, Tensor]:
+    """Run the fused Triton FA2 prep kernel on ``[B, S, *]`` qkv tensors."""
+    if triton is None:
+        raise RuntimeError("Triton is unavailable")
+    batch_size, seq_len, _ = qkv.shape
+    q = torch.empty(
+        (batch_size, seq_len, num_heads, head_dim), device=qkv.device, dtype=qkv.dtype
+    )
+    k = torch.empty(
+        (batch_size, seq_len, num_kv_heads, head_dim),
+        device=qkv.device,
+        dtype=qkv.dtype,
+    )
+    v = torch.empty_like(k)
+    q_dim = num_heads * head_dim
+    kv_dim = num_kv_heads * head_dim
+    grid = (batch_size * seq_len, num_heads + num_kv_heads)
+    attention_prep_bshd_kernel[grid](
+        qkv,
+        q_gain,
+        cos,
+        sin,
+        q,
+        k,
+        v,
+        batch_size,
+        seq_len,
+        num_heads,
+        num_kv_heads,
+        head_dim,
+        q_dim,
+        kv_dim,
+        qkv.stride(0),
+        qkv.stride(1),
+        q.stride(0),
+        q.stride(1),
+        q.stride(2),
+        q.stride(3),
+        k.stride(0),
+        k.stride(1),
+        k.stride(2),
+        k.stride(3),
+        BLOCK_D=next_power_of_2(head_dim),
+        num_warps=2 if head_dim <= 64 else 4,
+    )
+    return q, k, v
+
+
+def attention_prep_bshd_backward_triton(
+    qkv: Tensor,
+    q_gain: Tensor,
+    cos: Tensor,
+    sin: Tensor,
+    grad_q: Tensor,
+    grad_k: Tensor,
+    grad_v: Tensor,
+    *,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+) -> tuple[Tensor, Tensor]:
+    """Backward for the fused Triton FA2 prep kernel."""
+    if triton is None:
+        raise RuntimeError("Triton is unavailable")
+    batch_size, seq_len, qkv_dim = qkv.shape
+    q_dim = num_heads * head_dim
+    kv_dim = num_kv_heads * head_dim
+    if qkv_dim != q_dim + 2 * kv_dim:
+        raise ValueError("qkv shape does not match the requested head layout")
+    grad_qkv = torch.empty_like(qkv)
+    grad_q_gain = torch.zeros_like(q_gain, dtype=torch.float32)
+    grid = (batch_size * seq_len, num_heads + num_kv_heads)
+    attention_prep_bshd_backward_kernel[grid](
+        qkv,
+        q_gain,
+        cos,
+        sin,
+        grad_q,
+        grad_k,
+        grad_v,
+        grad_qkv,
+        grad_q_gain,
+        batch_size,
+        seq_len,
+        num_heads,
+        num_kv_heads,
+        head_dim,
+        q_dim,
+        kv_dim,
+        qkv.stride(0),
+        qkv.stride(1),
+        grad_q.stride(0),
+        grad_q.stride(1),
+        grad_q.stride(2),
+        grad_q.stride(3),
+        grad_k.stride(0),
+        grad_k.stride(1),
+        grad_k.stride(2),
+        grad_k.stride(3),
+        grad_qkv.stride(0),
+        grad_qkv.stride(1),
+        BLOCK_D=next_power_of_2(head_dim),
+        num_warps=2 if head_dim <= 64 else 4,
+    )
+    return grad_qkv, grad_q_gain
+
+
+def register_allama_attention_prep_custom_op() -> Optional[Any]:
+    """Register the optional Triton FA2 prep custom op once."""
+    global _ALLAMA_ATTN_PREP_OP
+    if _ALLAMA_ATTN_PREP_OP is not None:
+        return _ALLAMA_ATTN_PREP_OP
+    if triton is None:
+        return None
+
+    @torch.library.custom_op(
+        "allama_triton::attention_prep_bshd_backward",
+        mutates_args=(),
+    )
+    def attention_prep_bshd_backward_op(
+        qkv: Tensor,
+        q_gain: Tensor,
+        cos: Tensor,
+        sin: Tensor,
+        grad_q: Tensor,
+        grad_k: Tensor,
+        grad_v: Tensor,
+        num_heads: int,
+        num_kv_heads: int,
+        head_dim: int,
+    ) -> tuple[Tensor, Tensor]:
+        return attention_prep_bshd_backward_triton(
+            qkv,
+            q_gain,
+            cos,
+            sin,
+            grad_q,
+            grad_k,
+            grad_v,
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+        )
+
+    @attention_prep_bshd_backward_op.register_fake
+    def _attention_prep_bshd_backward_op_fake(
+        qkv: Tensor,
+        q_gain: Tensor,
+        cos: Tensor,
+        sin: Tensor,
+        grad_q: Tensor,
+        grad_k: Tensor,
+        grad_v: Tensor,
+        num_heads: int,
+        num_kv_heads: int,
+        head_dim: int,
+    ) -> tuple[Tensor, Tensor]:
+        del cos, sin, grad_q, grad_k, grad_v, num_heads, num_kv_heads, head_dim
+        return qkv.new_empty(qkv.shape), q_gain.new_empty(
+            q_gain.shape, dtype=torch.float32
+        )
+
+    @torch.library.custom_op(
+        "allama_triton::attention_prep_bshd",
+        mutates_args=(),
+    )
+    def attention_prep_bshd_op(
+        qkv: Tensor,
+        q_gain: Tensor,
+        cos: Tensor,
+        sin: Tensor,
+        num_heads: int,
+        num_kv_heads: int,
+        head_dim: int,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        return attention_prep_bshd_triton(
+            qkv,
+            q_gain,
+            cos,
+            sin,
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+        )
+
+    @attention_prep_bshd_op.register_fake
+    def _attention_prep_bshd_op_fake(
+        qkv: Tensor,
+        q_gain: Tensor,
+        cos: Tensor,
+        sin: Tensor,
+        num_heads: int,
+        num_kv_heads: int,
+        head_dim: int,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        del q_gain, cos, sin
+        batch_size, seq_len, _ = qkv.shape
+        q = qkv.new_empty((batch_size, seq_len, num_heads, head_dim))
+        k = qkv.new_empty((batch_size, seq_len, num_kv_heads, head_dim))
+        v = qkv.new_empty((batch_size, seq_len, num_kv_heads, head_dim))
+        return q, k, v
+
+    def setup_context(
+        ctx: Any,
+        inputs: tuple[Tensor, Tensor, Tensor, Tensor, int, int, int],
+        output: tuple[Tensor, Tensor, Tensor],
+    ) -> None:
+        del output
+        qkv, q_gain, cos, sin, num_heads, num_kv_heads, head_dim = inputs
+        ctx.save_for_backward(qkv, q_gain, cos, sin)
+        ctx.num_heads = int(num_heads)
+        ctx.num_kv_heads = int(num_kv_heads)
+        ctx.head_dim = int(head_dim)
+
+    def backward(
+        ctx: Any,
+        grad_q: Tensor,
+        grad_k: Tensor,
+        grad_v: Tensor,
+    ) -> tuple[Tensor, Tensor, None, None, None, None, None]:
+        qkv, q_gain, cos, sin = ctx.saved_tensors
+        grad_qkv, grad_q_gain = attention_prep_bshd_backward_op(
+            qkv,
+            q_gain,
+            cos,
+            sin,
+            grad_q,
+            grad_k,
+            grad_v,
+            ctx.num_heads,
+            ctx.num_kv_heads,
+            ctx.head_dim,
+        )
+        return grad_qkv, grad_q_gain, None, None, None, None, None
+
+    torch.library.register_autograd(
+        "allama_triton::attention_prep_bshd",
+        backward,
+        setup_context=setup_context,
+    )
+    _ALLAMA_ATTN_PREP_OP = attention_prep_bshd_op
+    return _ALLAMA_ATTN_PREP_OP
+
+
+if triton is not None:
+
+    @triton.autotune(
+        configs=[
+            triton.Config({"BLOCK_M": 32, "BLOCK_N": 64, "BLOCK_K": 32}, num_warps=4),
+            triton.Config({"BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 32}, num_warps=4),
+            triton.Config({"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 32}, num_warps=8),
+            triton.Config({"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 64}, num_warps=8),
+        ],
+        key=["M", "N", "K"],
+    )
+    @triton.jit
+    def attn_outproj_residual_bshd_kernel(
+        attn_y_ptr,
+        proj_weight_t_ptr,
+        residual_x_ptr,
+        scale_ptr,
+        out_ptr,
+        M,
+        N,
+        K,
+        seq_len,
+        head_dim,
+        attn_stride_b,
+        attn_stride_t,
+        attn_stride_h,
+        attn_stride_d,
+        proj_stride_k,
+        proj_stride_n,
+        residual_stride_m,
+        residual_stride_n,
+        out_stride_m,
+        out_stride_n,
+        BLOCK_M: tl.constexpr,
+        BLOCK_N: tl.constexpr,
+        BLOCK_K: tl.constexpr,
+    ):
+        """Fuse FA2 BSHD attention output projection with residual add and scale."""
+        pid_m = tl.program_id(0)
+        pid_n = tl.program_id(1)
+
+        offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+        offs_k = tl.arange(0, BLOCK_K)
+        mask_m = offs_m < M
+        mask_n = offs_n < N
+        acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+
+        b_idx = offs_m // seq_len
+        t_idx = offs_m % seq_len
+
+        for k_base in range(0, K, BLOCK_K):
+            k_idx = k_base + offs_k
+            mask_k = k_idx < K
+            h_idx = k_idx // head_dim
+            d_idx = k_idx % head_dim
+            attn_ptrs = (
+                attn_y_ptr
+                + b_idx[:, None] * attn_stride_b
+                + t_idx[:, None] * attn_stride_t
+                + h_idx[None, :] * attn_stride_h
+                + d_idx[None, :] * attn_stride_d
+            )
+            attn_vals = tl.load(
+                attn_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0
+            )
+            weight_ptrs = (
+                proj_weight_t_ptr
+                + k_idx[:, None] * proj_stride_k
+                + offs_n[None, :] * proj_stride_n
+            )
+            weight = tl.load(
+                weight_ptrs, mask=mask_k[:, None] & mask_n[None, :], other=0.0
+            )
+            acc += tl.dot(attn_vals, weight)
+
+        residual_ptrs = (
+            residual_x_ptr
+            + offs_m[:, None] * residual_stride_m
+            + offs_n[None, :] * residual_stride_n
+        )
+        residual = tl.load(
+            residual_ptrs, mask=mask_m[:, None] & mask_n[None, :], other=0.0
+        ).to(tl.float32)
+        scale = tl.load(scale_ptr + offs_n, mask=mask_n, other=0.0).to(tl.float32)
+        out = residual + acc * scale[None, :]
+        out_ptrs = (
+            out_ptr + offs_m[:, None] * out_stride_m + offs_n[None, :] * out_stride_n
+        )
+        tl.store(out_ptrs, out.to(tl.bfloat16), mask=mask_m[:, None] & mask_n[None, :])
+
+    @triton.autotune(
+        configs=[
+            triton.Config({"BLOCK_M": 32, "BLOCK_N": 64, "BLOCK_K": 32}, num_warps=4),
+            triton.Config({"BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 32}, num_warps=4),
+            triton.Config({"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 32}, num_warps=8),
+            triton.Config({"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 64}, num_warps=8),
+        ],
+        key=["M", "N", "K"],
+        reset_to_zero=["grad_scale_ptr"],
+    )
+    @triton.jit
+    def attn_grad_scale_bshd_kernel(
+        attn_y_ptr,
+        proj_weight_t_ptr,
+        grad_out_ptr,
+        grad_scale_ptr,
+        M,
+        N,
+        K,
+        seq_len,
+        head_dim,
+        attn_stride_b,
+        attn_stride_t,
+        attn_stride_h,
+        attn_stride_d,
+        proj_stride_k,
+        proj_stride_n,
+        grad_out_stride_m,
+        grad_out_stride_n,
+        BLOCK_M: tl.constexpr,
+        BLOCK_N: tl.constexpr,
+        BLOCK_K: tl.constexpr,
+    ):
+        """Fuse branch recompute with the reduction for ``grad_scale``."""
+        pid_m = tl.program_id(0)
+        pid_n = tl.program_id(1)
+
+        offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+        offs_k = tl.arange(0, BLOCK_K)
+        mask_m = offs_m < M
+        mask_n = offs_n < N
+        acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+
+        b_idx = offs_m // seq_len
+        t_idx = offs_m % seq_len
+
+        for k_base in range(0, K, BLOCK_K):
+            k_idx = k_base + offs_k
+            mask_k = k_idx < K
+            h_idx = k_idx // head_dim
+            d_idx = k_idx % head_dim
+            attn_ptrs = (
+                attn_y_ptr
+                + b_idx[:, None] * attn_stride_b
+                + t_idx[:, None] * attn_stride_t
+                + h_idx[None, :] * attn_stride_h
+                + d_idx[None, :] * attn_stride_d
+            )
+            attn_vals = tl.load(
+                attn_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0
+            )
+            weight_ptrs = (
+                proj_weight_t_ptr
+                + k_idx[:, None] * proj_stride_k
+                + offs_n[None, :] * proj_stride_n
+            )
+            weight = tl.load(
+                weight_ptrs, mask=mask_k[:, None] & mask_n[None, :], other=0.0
+            )
+            acc += tl.dot(attn_vals, weight)
+
+        grad_out_ptrs = (
+            grad_out_ptr
+            + offs_m[:, None] * grad_out_stride_m
+            + offs_n[None, :] * grad_out_stride_n
+        )
+        grad_out = tl.load(
+            grad_out_ptrs, mask=mask_m[:, None] & mask_n[None, :], other=0.0
+        ).to(tl.float32)
+        partial = tl.sum(acc * grad_out, axis=0)
+        tl.atomic_add(grad_scale_ptr + offs_n, partial, mask=mask_n)
+
+    @triton.autotune(
+        configs=[
+            triton.Config({"BLOCK_M": 32, "BLOCK_N": 64, "BLOCK_K": 32}, num_warps=4),
+            triton.Config({"BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 32}, num_warps=4),
+            triton.Config({"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 32}, num_warps=8),
+            triton.Config({"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 64}, num_warps=8),
+        ],
+        key=["M", "N", "K"],
+    )
+    @triton.jit
+    def attn_grad_attn_y_bshd_kernel(
+        grad_branch_ptr,
+        proj_weight_t_ptr,
+        grad_attn_y_ptr,
+        M,
+        N,
+        K,
+        seq_len,
+        head_dim,
+        grad_branch_stride_m,
+        grad_branch_stride_n,
+        proj_stride_k,
+        proj_stride_n,
+        grad_attn_stride_b,
+        grad_attn_stride_t,
+        grad_attn_stride_h,
+        grad_attn_stride_d,
+        BLOCK_M: tl.constexpr,
+        BLOCK_N: tl.constexpr,
+        BLOCK_K: tl.constexpr,
+    ):
+        """Compute ``grad_attn_y`` directly into FA2 BSHD layout."""
+        pid_m = tl.program_id(0)
+        pid_k = tl.program_id(1)
+
+        offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        offs_k = pid_k * BLOCK_K + tl.arange(0, BLOCK_K)
+        offs_n = tl.arange(0, BLOCK_N)
+        mask_m = offs_m < M
+        mask_k = offs_k < K
+        acc = tl.zeros((BLOCK_M, BLOCK_K), dtype=tl.float32)
+
+        for n_base in range(0, N, BLOCK_N):
+            n_idx = n_base + offs_n
+            mask_n = n_idx < N
+            grad_branch_ptrs = (
+                grad_branch_ptr
+                + offs_m[:, None] * grad_branch_stride_m
+                + n_idx[None, :] * grad_branch_stride_n
+            )
+            grad_branch_vals = tl.load(
+                grad_branch_ptrs, mask=mask_m[:, None] & mask_n[None, :], other=0.0
+            )
+            weight_ptrs = (
+                proj_weight_t_ptr
+                + offs_k[:, None] * proj_stride_k
+                + n_idx[None, :] * proj_stride_n
+            )
+            weight = tl.load(
+                weight_ptrs, mask=mask_k[:, None] & mask_n[None, :], other=0.0
+            )
+            acc += tl.dot(grad_branch_vals, tl.trans(weight))
+
+        b_idx = offs_m // seq_len
+        t_idx = offs_m % seq_len
+        h_idx = offs_k // head_dim
+        d_idx = offs_k % head_dim
+        out_ptrs = (
+            grad_attn_y_ptr
+            + b_idx[:, None] * grad_attn_stride_b
+            + t_idx[:, None] * grad_attn_stride_t
+            + h_idx[None, :] * grad_attn_stride_h
+            + d_idx[None, :] * grad_attn_stride_d
+        )
+        tl.store(out_ptrs, acc.to(tl.bfloat16), mask=mask_m[:, None] & mask_k[None, :])
+
+    @triton.autotune(
+        configs=[
+            triton.Config({"BLOCK_M": 32, "BLOCK_N": 64, "BLOCK_K": 32}, num_warps=4),
+            triton.Config({"BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 32}, num_warps=4),
+            triton.Config({"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 32}, num_warps=8),
+            triton.Config({"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 64}, num_warps=8),
+        ],
+        key=["M", "N", "K"],
+    )
+    @triton.jit
+    def attn_grad_proj_weight_t_bshd_kernel(
+        attn_y_ptr,
+        grad_branch_ptr,
+        grad_proj_weight_t_ptr,
+        M,
+        N,
+        K,
+        seq_len,
+        head_dim,
+        attn_stride_b,
+        attn_stride_t,
+        attn_stride_h,
+        attn_stride_d,
+        grad_branch_stride_m,
+        grad_branch_stride_n,
+        grad_proj_stride_k,
+        grad_proj_stride_n,
+        BLOCK_M: tl.constexpr,
+        BLOCK_N: tl.constexpr,
+        BLOCK_K: tl.constexpr,
+    ):
+        """Compute ``grad_proj_weight_t`` without flattening the FA2 BSHD input."""
+        pid_k = tl.program_id(0)
+        pid_n = tl.program_id(1)
+
+        offs_k = pid_k * BLOCK_K + tl.arange(0, BLOCK_K)
+        offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+        offs_m = tl.arange(0, BLOCK_M)
+        mask_k = offs_k < K
+        mask_n = offs_n < N
+        acc = tl.zeros((BLOCK_K, BLOCK_N), dtype=tl.float32)
+
+        h_idx = offs_k // head_dim
+        d_idx = offs_k % head_dim
+
+        for m_base in range(0, M, BLOCK_M):
+            m_idx = m_base + offs_m
+            mask_m = m_idx < M
+            b_idx = m_idx // seq_len
+            t_idx = m_idx % seq_len
+            attn_ptrs = (
+                attn_y_ptr
+                + b_idx[None, :] * attn_stride_b
+                + t_idx[None, :] * attn_stride_t
+                + h_idx[:, None] * attn_stride_h
+                + d_idx[:, None] * attn_stride_d
+            )
+            attn_vals = tl.load(
+                attn_ptrs, mask=mask_k[:, None] & mask_m[None, :], other=0.0
+            )
+            grad_branch_ptrs = (
+                grad_branch_ptr
+                + m_idx[:, None] * grad_branch_stride_m
+                + offs_n[None, :] * grad_branch_stride_n
+            )
+            grad_branch_vals = tl.load(
+                grad_branch_ptrs, mask=mask_m[:, None] & mask_n[None, :], other=0.0
+            )
+            acc += tl.dot(attn_vals, grad_branch_vals)
+
+        out_ptrs = (
+            grad_proj_weight_t_ptr
+            + offs_k[:, None] * grad_proj_stride_k
+            + offs_n[None, :] * grad_proj_stride_n
+        )
+        tl.store(out_ptrs, acc.to(tl.bfloat16), mask=mask_k[:, None] & mask_n[None, :])
+
+
+def attn_outproj_residual_bshd_triton(
+    residual_x: Tensor,
+    attn_y: Tensor,
+    proj_weight_t: Tensor,
+    scale: Tensor,
+) -> Tensor:
+    """Run the fused FA2 BSHD output projection and residual kernel."""
+    if triton is None:
+        raise RuntimeError("Triton is unavailable")
+    if residual_x.dtype != torch.bfloat16 or attn_y.dtype != torch.bfloat16:
+        raise TypeError("this kernel currently targets bfloat16 tensors")
+    if residual_x.dim() != 2 or attn_y.dim() != 4 or proj_weight_t.dim() != 2:
+        raise ValueError(
+            "expected residual_x=[M,D], attn_y=[B,S,H,Dh], proj_weight_t=[D,D]"
+        )
+    batch, seq_len, num_heads, head_dim = attn_y.shape
+    model_dim = num_heads * head_dim
+    if residual_x.shape != (batch * seq_len, model_dim):
+        raise ValueError("residual_x shape must match the flattened attention output")
+    if proj_weight_t.shape != (model_dim, model_dim):
+        raise ValueError("proj_weight_t shape must be [model_dim, model_dim]")
+    out = torch.empty_like(residual_x)
+
+    def grid(meta: dict[str, int]) -> tuple[int, int]:
+        return (
+            triton.cdiv(residual_x.size(0), meta["BLOCK_M"]),
+            triton.cdiv(residual_x.size(1), meta["BLOCK_N"]),
+        )
+
+    attn_outproj_residual_bshd_kernel[grid](
+        attn_y,
+        proj_weight_t,
+        residual_x,
+        scale,
+        out,
+        residual_x.size(0),
+        residual_x.size(1),
+        model_dim,
+        seq_len,
+        head_dim,
+        attn_y.stride(0),
+        attn_y.stride(1),
+        attn_y.stride(2),
+        attn_y.stride(3),
+        proj_weight_t.stride(0),
+        proj_weight_t.stride(1),
+        residual_x.stride(0),
+        residual_x.stride(1),
+        out.stride(0),
+        out.stride(1),
+    )
+    return out
+
+
+def attn_grad_scale_bshd_triton(
+    attn_y: Tensor,
+    proj_weight_t: Tensor,
+    grad_out: Tensor,
+) -> Tensor:
+    """Run the fused branch-recompute reduction for ``grad_scale``."""
+    if triton is None:
+        raise RuntimeError("Triton is unavailable")
+    _, seq_len, num_heads, head_dim = attn_y.shape
+    model_dim = num_heads * head_dim
+    grad_scale = torch.zeros(model_dim, device=grad_out.device, dtype=torch.float32)
+
+    def grid(meta: dict[str, int]) -> tuple[int, int]:
+        return (
+            triton.cdiv(grad_out.size(0), meta["BLOCK_M"]),
+            triton.cdiv(grad_out.size(1), meta["BLOCK_N"]),
+        )
+
+    attn_grad_scale_bshd_kernel[grid](
+        attn_y,
+        proj_weight_t,
+        grad_out,
+        grad_scale,
+        grad_out.size(0),
+        grad_out.size(1),
+        model_dim,
+        seq_len,
+        head_dim,
+        attn_y.stride(0),
+        attn_y.stride(1),
+        attn_y.stride(2),
+        attn_y.stride(3),
+        proj_weight_t.stride(0),
+        proj_weight_t.stride(1),
+        grad_out.stride(0),
+        grad_out.stride(1),
+    )
+    return grad_scale
+
+
+def attn_grad_attn_y_bshd_triton(
+    grad_branch: Tensor,
+    proj_weight_t: Tensor,
+    seq_len: int,
+    head_dim: int,
+) -> Tensor:
+    """Run the Triton backward kernel for ``grad_attn_y``."""
+    if triton is None:
+        raise RuntimeError("Triton is unavailable")
+    model_dim = proj_weight_t.size(0)
+    batch = grad_branch.size(0) // seq_len
+    num_heads = model_dim // head_dim
+    grad_attn_y = torch.empty(
+        batch,
+        seq_len,
+        num_heads,
+        head_dim,
+        device=grad_branch.device,
+        dtype=grad_branch.dtype,
+    )
+
+    def grid(meta: dict[str, int]) -> tuple[int, int]:
+        return (
+            triton.cdiv(grad_branch.size(0), meta["BLOCK_M"]),
+            triton.cdiv(model_dim, meta["BLOCK_K"]),
+        )
+
+    attn_grad_attn_y_bshd_kernel[grid](
+        grad_branch,
+        proj_weight_t,
+        grad_attn_y,
+        grad_branch.size(0),
+        grad_branch.size(1),
+        model_dim,
+        seq_len,
+        head_dim,
+        grad_branch.stride(0),
+        grad_branch.stride(1),
+        proj_weight_t.stride(0),
+        proj_weight_t.stride(1),
+        grad_attn_y.stride(0),
+        grad_attn_y.stride(1),
+        grad_attn_y.stride(2),
+        grad_attn_y.stride(3),
+    )
+    return grad_attn_y
+
+
+def attn_grad_proj_weight_t_bshd_triton(
+    attn_y: Tensor,
+    grad_branch: Tensor,
+) -> Tensor:
+    """Run the Triton backward kernel for ``grad_proj_weight_t``."""
+    if triton is None:
+        raise RuntimeError("Triton is unavailable")
+    _, seq_len, num_heads, head_dim = attn_y.shape
+    model_dim = num_heads * head_dim
+    grad_proj_weight_t = torch.empty(
+        model_dim,
+        grad_branch.size(1),
+        device=grad_branch.device,
+        dtype=grad_branch.dtype,
+    )
+
+    def grid(meta: dict[str, int]) -> tuple[int, int]:
+        return (
+            triton.cdiv(model_dim, meta["BLOCK_K"]),
+            triton.cdiv(grad_branch.size(1), meta["BLOCK_N"]),
+        )
+
+    attn_grad_proj_weight_t_bshd_kernel[grid](
+        attn_y,
+        grad_branch,
+        grad_proj_weight_t,
+        grad_branch.size(0),
+        grad_branch.size(1),
+        model_dim,
+        seq_len,
+        head_dim,
+        attn_y.stride(0),
+        attn_y.stride(1),
+        attn_y.stride(2),
+        attn_y.stride(3),
+        grad_branch.stride(0),
+        grad_branch.stride(1),
+        grad_proj_weight_t.stride(0),
+        grad_proj_weight_t.stride(1),
+    )
+    return grad_proj_weight_t
+
+
+def register_allama_attention_outproj_custom_op() -> Optional[Any]:
+    """Register the optional Triton FA2 out-proj residual custom op once."""
+    global _ALLAMA_ATTN_OUTPROJ_RESIDUAL_OP
+    if _ALLAMA_ATTN_OUTPROJ_RESIDUAL_OP is not None:
+        return _ALLAMA_ATTN_OUTPROJ_RESIDUAL_OP
+    if triton is None:
+        return None
+
+    @torch.library.custom_op(
+        "allama_triton::attn_grad_scale_bshd",
+        mutates_args=(),
+    )
+    def attn_grad_scale_bshd_op(
+        attn_y: Tensor,
+        proj_weight_t: Tensor,
+        grad_out: Tensor,
+    ) -> Tensor:
+        return attn_grad_scale_bshd_triton(attn_y, proj_weight_t, grad_out)
+
+    @attn_grad_scale_bshd_op.register_fake
+    def _attn_grad_scale_bshd_op_fake(
+        attn_y: Tensor,
+        proj_weight_t: Tensor,
+        grad_out: Tensor,
+    ) -> Tensor:
+        del attn_y, proj_weight_t
+        return grad_out.new_empty((grad_out.size(1),), dtype=torch.float32)
+
+    @torch.library.custom_op(
+        "allama_triton::attn_grad_attn_y_bshd",
+        mutates_args=(),
+    )
+    def attn_grad_attn_y_bshd_op(
+        grad_branch: Tensor,
+        proj_weight_t: Tensor,
+        seq_len: int,
+        head_dim: int,
+    ) -> Tensor:
+        return attn_grad_attn_y_bshd_triton(
+            grad_branch,
+            proj_weight_t,
+            seq_len,
+            head_dim,
+        )
+
+    @attn_grad_attn_y_bshd_op.register_fake
+    def _attn_grad_attn_y_bshd_op_fake(
+        grad_branch: Tensor,
+        proj_weight_t: Tensor,
+        seq_len: int,
+        head_dim: int,
+    ) -> Tensor:
+        model_dim = proj_weight_t.size(0)
+        batch = grad_branch.size(0) // seq_len
+        num_heads = model_dim // head_dim
+        return grad_branch.new_empty((batch, seq_len, num_heads, head_dim))
+
+    @torch.library.custom_op(
+        "allama_triton::attn_grad_proj_weight_t_bshd",
+        mutates_args=(),
+    )
+    def attn_grad_proj_weight_t_bshd_op(
+        attn_y: Tensor,
+        grad_branch: Tensor,
+    ) -> Tensor:
+        return attn_grad_proj_weight_t_bshd_triton(attn_y, grad_branch)
+
+    @attn_grad_proj_weight_t_bshd_op.register_fake
+    def _attn_grad_proj_weight_t_bshd_op_fake(
+        attn_y: Tensor,
+        grad_branch: Tensor,
+    ) -> Tensor:
+        model_dim = attn_y.size(2) * attn_y.size(3)
+        return grad_branch.new_empty((model_dim, grad_branch.size(1)))
+
+    @torch.library.custom_op(
+        "allama_triton::attn_outproj_residual_bshd",
+        mutates_args=(),
+    )
+    def attn_outproj_residual_bshd_op(
+        residual_x: Tensor,
+        attn_y: Tensor,
+        proj_weight_t: Tensor,
+        scale: Tensor,
+    ) -> Tensor:
+        return attn_outproj_residual_bshd_triton(
+            residual_x,
+            attn_y,
+            proj_weight_t,
+            scale,
+        )
+
+    @attn_outproj_residual_bshd_op.register_fake
+    def _attn_outproj_residual_bshd_op_fake(
+        residual_x: Tensor,
+        attn_y: Tensor,
+        proj_weight_t: Tensor,
+        scale: Tensor,
+    ) -> Tensor:
+        del attn_y, proj_weight_t, scale
+        return residual_x.new_empty(residual_x.shape)
+
+    def setup_context(
+        ctx: Any,
+        inputs: tuple[Tensor, Tensor, Tensor, Tensor],
+        output: Tensor,
+    ) -> None:
+        residual_x, attn_y, proj_weight_t, scale = inputs
+        del residual_x, output
+        ctx.save_for_backward(attn_y, proj_weight_t, scale)
+
+    def backward(
+        ctx: Any,
+        grad_out: Tensor,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        attn_y, proj_weight_t, scale = ctx.saved_tensors
+        scale_cast = scale.to(dtype=grad_out.dtype)[None, :]
+        grad_x = grad_out
+        grad_scale = attn_grad_scale_bshd_op(attn_y, proj_weight_t, grad_out).to(
+            dtype=scale.dtype
+        )
+        grad_branch = grad_out * scale_cast
+        grad_proj_weight_t = attn_grad_proj_weight_t_bshd_op(attn_y, grad_branch)
+        grad_attn_y = attn_grad_attn_y_bshd_op(
+            grad_branch,
+            proj_weight_t,
+            attn_y.size(1),
+            attn_y.size(3),
+        )
+        return grad_x, grad_attn_y, grad_proj_weight_t, grad_scale
+
+    torch.library.register_autograd(
+        "allama_triton::attn_outproj_residual_bshd",
+        backward,
+        setup_context=setup_context,
+    )
+    _ALLAMA_ATTN_OUTPROJ_RESIDUAL_OP = attn_outproj_residual_bshd_op
+    return _ALLAMA_ATTN_OUTPROJ_RESIDUAL_OP
+
+
 # -----------------------------------------------------------------------------
 # MODEL CONFIG
 # -----------------------------------------------------------------------------
@@ -809,6 +2007,8 @@ class HyperSharedConfig:
     use_bias: bool = False
     cast_linears: bool = True
     attn_impl: str = "sdpa"
+    attn_prep_kernel: str = "pytorch"
+    attn_outproj_kernel: str = "pytorch"
     mlp_kernel: str = "pytorch"
 
 
@@ -835,9 +2035,20 @@ class HyperSharedAttention(nn.Module):
         self.qk_norm = bool(cfg.qk_norm)
         self.attn_dropout = float(cfg.attn_dropout)
         self.attn_impl = cfg.attn_impl.strip().lower()
+        self.attn_prep_kernel = cfg.attn_prep_kernel.strip().lower()
+        self.attn_outproj_kernel = cfg.attn_outproj_kernel.strip().lower()
         if self.attn_impl not in {"sdpa", "fa2", "fa2_kvpacked"}:
             raise ValueError(
                 f"Unsupported attn_impl={cfg.attn_impl!r}; expected sdpa, fa2, or fa2_kvpacked."
+            )
+        if self.attn_prep_kernel not in {"pytorch", "triton"}:
+            raise ValueError(
+                f"Unsupported attn_prep_kernel={cfg.attn_prep_kernel!r}; expected pytorch or triton."
+            )
+        if self.attn_outproj_kernel not in {"pytorch", "triton"}:
+            raise ValueError(
+                "Unsupported attn_outproj_kernel="
+                f"{cfg.attn_outproj_kernel!r}; expected pytorch or triton."
             )
         if self.attn_impl == "fa2" and flash_attn_func is None:
             raise ValueError("attn_impl='fa2' requires flash-attn to be installed")
@@ -858,6 +2069,26 @@ class HyperSharedAttention(nn.Module):
         self.proj = linear_cls(cfg.model_dim, cfg.model_dim, bias=cfg.use_bias)
         self.proj._zero_init = True
         self.rotary = Rotary(self.head_dim, base=cfg.rope_base)
+        self.prep_op = (
+            register_allama_attention_prep_custom_op()
+            if self.attn_prep_kernel == "triton"
+            else None
+        )
+        self.outproj_residual_op = (
+            register_allama_attention_outproj_custom_op()
+            if self.attn_outproj_kernel == "triton"
+            else None
+        )
+
+    def _rotary_tables_2d(
+        self,
+        seq_len: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> tuple[Tensor, Tensor]:
+        """Return 2D ``[S, D/2]`` rotary tables for the FA2-native path."""
+        cos, sin = self.rotary(seq_len, device, dtype)
+        return cos[0, 0], sin[0, 0]
 
     def _apply_qk_norm_and_rope_bshd(
         self,
@@ -877,6 +2108,41 @@ class HyperSharedAttention(nn.Module):
         k = apply_rotary_emb(k, cos, sin)
         q = q * q_gain.to(dtype=q.dtype)[None, None, :, None]
         return q, k
+
+    def _prep_bshd(
+        self,
+        qkv: Tensor,
+        q_gain: Tensor,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        """Prepare Q/K/V in FA2-native BSHD layout."""
+        bsz, seqlen, qkv_dim = qkv.shape
+        q_dim = self.num_heads * self.head_dim
+        expected = q_dim + 2 * self.kv_dim
+        if qkv_dim != expected:
+            raise ValueError("qkv shape does not match the requested head layout")
+        if (
+            self.attn_prep_kernel == "triton"
+            and qkv.is_cuda
+            and qkv.dtype == torch.bfloat16
+            and self.prep_op is not None
+            and self.qkv.bias is None
+        ):
+            cos, sin = self._rotary_tables_2d(seqlen, qkv.device, qkv.dtype)
+            return self.prep_op(
+                qkv,
+                q_gain,
+                cos,
+                sin,
+                self.num_heads,
+                self.num_kv_heads,
+                self.head_dim,
+            )
+        q, k, v = qkv.split((q_dim, self.kv_dim, self.kv_dim), dim=-1)
+        q = q.view(bsz, seqlen, self.num_heads, self.head_dim)
+        k = k.view(bsz, seqlen, self.num_kv_heads, self.head_dim)
+        v = v.view(bsz, seqlen, self.num_kv_heads, self.head_dim)
+        q, k = self._apply_qk_norm_and_rope_bshd(q, k, q_gain)
+        return q, k, v
 
     def _forward_sdpa(self, q: Tensor, k: Tensor, v: Tensor) -> Tensor:
         """Run the SDPA attention path on head-major tensors."""
@@ -925,57 +2191,83 @@ class HyperSharedAttention(nn.Module):
             causal=True,
         )
 
+    def _project_branch(self, y_flat: Tensor) -> Tensor:
+        """Project a flattened attention output back to model dimension."""
+        return self.resid_dropout(self.proj(y_flat))
+
+    def _project_with_residual(
+        self,
+        residual_x: Tensor,
+        attn_y: Tensor,
+        residual_scale: Tensor,
+    ) -> Tensor:
+        """Project FA2 attention output and apply the residual epilogue."""
+        bsz, seqlen, dim = residual_x.shape
+        if (
+            self.attn_outproj_kernel == "triton"
+            and attn_y.is_cuda
+            and attn_y.dtype == torch.bfloat16
+            and self.outproj_residual_op is not None
+            and self.proj.bias is None
+            and self.resid_dropout.p == 0.0
+        ):
+            proj_weight_t = self.proj.weight.to(dtype=attn_y.dtype).t()
+            out = self.outproj_residual_op(
+                residual_x.reshape(-1, dim),
+                attn_y,
+                proj_weight_t,
+                residual_scale,
+            )
+            return out.view(bsz, seqlen, dim)
+        branch = self._project_branch(attn_y.contiguous().view(bsz, seqlen, dim))
+        scale = residual_scale.to(dtype=branch.dtype)[None, None, :]
+        return residual_x + scale * branch
+
     def forward(
         self,
         x: Tensor,
         q_gain: Tensor,
+        residual_x: Optional[Tensor] = None,
+        residual_scale: Optional[Tensor] = None,
     ) -> Tensor:
         bsz, seqlen, dim = x.shape
         qkv = self.qkv(x)
-        q, k, v = qkv.split((dim, self.kv_dim, self.kv_dim), dim=-1)
 
         if (
-            self.attn_impl == "fa2"
+            self.attn_impl in {"fa2", "fa2_kvpacked"}
             and x.is_cuda
             and x.dtype == torch.bfloat16
-            and flash_attn_func is not None
         ):
-            q = q.view(bsz, seqlen, self.num_heads, self.head_dim)
-            k = k.view(bsz, seqlen, self.num_kv_heads, self.head_dim)
-            v = v.view(bsz, seqlen, self.num_kv_heads, self.head_dim)
-            q, k = self._apply_qk_norm_and_rope_bshd(q, k, q_gain)
-            y = self._forward_fa2(q, k, v)
-            y = y.contiguous().view(bsz, seqlen, dim)
-        elif (
-            self.attn_impl == "fa2_kvpacked"
-            and x.is_cuda
-            and x.dtype == torch.bfloat16
-            and flash_attn_kvpacked_func is not None
-        ):
-            q = qkv[..., :dim].view(bsz, seqlen, self.num_heads, self.head_dim)
-            kv = qkv[..., dim:].view(bsz, seqlen, 2, self.num_kv_heads, self.head_dim)
-            k = kv[:, :, 0]
-            v = kv[:, :, 1]
-            q, k = self._apply_qk_norm_and_rope_bshd(q, k, q_gain)
-            kv = torch.stack((k, v), dim=2)
-            y = self._forward_fa2_kvpacked(q, kv)
-            y = y.contiguous().view(bsz, seqlen, dim)
-        else:
-            q = q.view(bsz, seqlen, self.num_heads, self.head_dim).transpose(1, 2)
-            k = k.view(bsz, seqlen, self.num_kv_heads, self.head_dim).transpose(1, 2)
-            v = v.view(bsz, seqlen, self.num_kv_heads, self.head_dim).transpose(1, 2)
+            q, k, v = self._prep_bshd(qkv, q_gain)
+            if self.attn_impl == "fa2":
+                y = self._forward_fa2(q, k, v)
+            else:
+                kv = torch.stack((k, v), dim=2)
+                y = self._forward_fa2_kvpacked(q, kv)
+            if residual_x is not None and residual_scale is not None:
+                return self._project_with_residual(residual_x, y, residual_scale)
+            return self._project_branch(y.contiguous().view(bsz, seqlen, dim))
 
-            if self.qk_norm:
-                q = F.rms_norm(q, (self.head_dim,))
-                k = F.rms_norm(k, (self.head_dim,))
+        q, k, v = qkv.split((dim, self.kv_dim, self.kv_dim), dim=-1)
+        q = q.view(bsz, seqlen, self.num_heads, self.head_dim).transpose(1, 2)
+        k = k.view(bsz, seqlen, self.num_kv_heads, self.head_dim).transpose(1, 2)
+        v = v.view(bsz, seqlen, self.num_kv_heads, self.head_dim).transpose(1, 2)
 
-            cos, sin = self.rotary(seqlen, x.device, q.dtype)
-            q = apply_rotary_emb(q, cos, sin)
-            k = apply_rotary_emb(k, cos, sin)
-            q = q * q_gain.to(dtype=q.dtype)[None, :, None, None]
-            y = self._forward_sdpa(q, k, v)
-            y = y.transpose(1, 2).contiguous().view(bsz, seqlen, dim)
-        return self.resid_dropout(self.proj(y))
+        if self.qk_norm:
+            q = F.rms_norm(q, (self.head_dim,))
+            k = F.rms_norm(k, (self.head_dim,))
+
+        cos, sin = self.rotary(seqlen, x.device, q.dtype)
+        q = apply_rotary_emb(q, cos, sin)
+        k = apply_rotary_emb(k, cos, sin)
+        q = q * q_gain.to(dtype=q.dtype)[None, :, None, None]
+        y = self._forward_sdpa(q, k, v)
+        y = y.transpose(1, 2).contiguous().view(bsz, seqlen, dim)
+        branch = self._project_branch(y)
+        if residual_x is not None and residual_scale is not None:
+            scale = residual_scale.to(dtype=branch.dtype)[None, None, :]
+            return residual_x + scale * branch
+        return branch
 
 
 class HyperSharedSwiGLU(nn.Module):
@@ -1057,15 +2349,24 @@ class HyperSharedBlock(nn.Module):
 
         if self.norm_layout == "prenorm":
             attn_in = self.attn_norm(mix_x0(x, x0, x0_gate))
-            attn_out = self.attn(attn_in, q_gain=q_gain)
-            x = x + attn_scale * attn_out
+            x = self.attn(
+                attn_in,
+                q_gain=q_gain,
+                residual_x=x,
+                residual_scale=attn_scale.squeeze(0).squeeze(0),
+            )
             mlp_out = self.mlp(self.mlp_norm(x))
             x = x + mlp_scale * mlp_out
             return x
 
         attn_in = mix_x0(x, x0, x0_gate)
-        attn_out = self.attn(attn_in, q_gain=q_gain)
-        x = self.attn_norm(x + attn_scale * attn_out)
+        x = self.attn(
+            attn_in,
+            q_gain=q_gain,
+            residual_x=x,
+            residual_scale=attn_scale.squeeze(0).squeeze(0),
+        )
+        x = self.attn_norm(x)
         mlp_out = self.mlp(x)
         x = self.mlp_norm(x + mlp_scale * mlp_out)
         return x
@@ -1548,6 +2849,8 @@ def build_hyper_shared_model_from_args(
         use_bias=bool(getattr(args, "use_bias", False)),
         cast_linears=bool(getattr(args, "cast_linears", True)),
         attn_impl=str(getattr(args, "attn_impl", "sdpa")),
+        attn_prep_kernel=str(getattr(args, "attn_prep_kernel", "pytorch")),
+        attn_outproj_kernel=str(getattr(args, "attn_outproj_kernel", "pytorch")),
         mlp_kernel=str(getattr(args, "mlp_kernel", "pytorch")),
     )
 

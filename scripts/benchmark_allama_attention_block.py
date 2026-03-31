@@ -935,7 +935,6 @@ def main() -> None:
         max_abs=forward_max_abs,
         max_rel=forward_max_rel,
     )
-
     residual_x_ref = residual_x.detach().clone().requires_grad_(True)
     attn_y_ref = attn_y.detach().clone().requires_grad_(True)
     proj_weight_t_ref = proj_weight_t.detach().clone().requires_grad_(True)
@@ -1068,7 +1067,6 @@ def main() -> None:
         max_abs=backward_max_abs,
         max_rel=backward_max_rel,
     )
-
     args.out_dir.mkdir(parents=True, exist_ok=True)
     summary = {
         "shape": {

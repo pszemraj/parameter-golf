@@ -7,7 +7,7 @@ materially improved or clarified it over time.
 
 Timestamp:
 
-- `2026-03-30T23:25:00-04:00`
+- `2026-03-30T23:48:20-04:00`
 
 Current best ALlama quality run:
 
@@ -52,6 +52,11 @@ Current read on the project:
 - A proper FA2-native model-path adaptation now exists behind
   `ATTN_IMPL=fa2`, and unlike the raw backend swap, it does produce a real
   end-to-end gain on the anchor harness.
+- Two additional live FA2-side Triton kernel paths now exist behind
+  `ATTN_PREP_KERNEL=triton` and `ATTN_OUTPROJ_KERNEL=triton`, but as separate
+  opaque boundaries they still regress end to end on the local compiled anchor.
+- The next attention-side target should therefore be a larger whole-branch FA2
+  boundary, not more polish on these two kernels in isolation.
 - `wide` is no longer the best-model quality path. It remains useful only if the
   goal is an explicit speed/quality tradeoff study.
 - `layernorm` is not part of the active search space. It lost to `rmsnorm` in
@@ -497,6 +502,41 @@ Latest harness smoke check:
   - the first serious custom kernels should be larger block-level boundaries,
     not more polish on attention prep alone
 
+### 2026-03-30
+
+- Ported the FA2-only Triton attention kernels into the live model path behind:
+  - `ATTN_PREP_KERNEL=triton`
+  - `ATTN_OUTPROJ_KERNEL=triton`
+- These are deliberately scoped to the real FA2 `BSHD` path in
+  `allama_shared.py`, not the older benchmark-only multi-layout helpers.
+- Real compiled anchor-harness results at
+  `runs_allama_validation/perf_fa2_live_kernels`:
+  - baseline `ATTN_IMPL=fa2` + `MLP_KERNEL=triton_gateup`:
+    - `135,039.70 tok/s`
+    - `1.9412 s/step`
+    - `2.219 GB` peak CUDA memory
+  - prep kernel only:
+    - `130,278.68 tok/s`
+    - `2.0122 s/step`
+    - `2.088 GB` peak CUDA memory
+  - out-proj residual kernel only:
+    - `131,933.52 tok/s`
+    - `1.9869 s/step`
+    - `2.081 GB` peak CUDA memory
+  - both kernels enabled:
+    - `125,238.82 tok/s`
+    - `2.0932 s/step`
+    - `1.950 GB` peak CUDA memory
+- Interpretation:
+  - both live kernels are structurally correct and reduce memory
+  - but as separate opaque boundaries they still lose to the current shipped
+    FA2 path on throughput
+  - the likely problem is boundary granularity, not total irrelevance of the
+    custom work
+  - the next serious attention-side target should be a larger whole-branch FA2
+    custom boundary rather than more local tuning of prep and post-proj in
+    isolation
+
 ## Next Work
 
 - Keep `frontier_v1_shortfat_s4_ff15_pre_rms_gate005` as the quality anchor.
@@ -508,9 +548,9 @@ Latest harness smoke check:
   - first priority: a larger MLP-block kernel path that absorbs enough of the
     forward and backward structure around `gate_up`, `silu*up`, `down`, and the
     residual epilogue to matter beyond microbenchmarks
-  - second priority: an attention-block boundary larger than prep alone,
-    likely something that meaningfully reduces the qkv-to-flash-to-proj glue
-    around the repeated shared block instead of just replacing q/k transforms
+  - second priority: a larger FA2 attention-branch boundary that subsumes the
+    current prep and post-proj kernels into one whole-branch custom path, since
+    the separate live kernels both regress as standalone opaque boundaries
   - CUDA graphs are worth keeping available, but they are a secondary systems
     optimization, not the main answer
 
