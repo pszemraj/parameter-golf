@@ -223,8 +223,8 @@ run_target() {
     local eval_mode="$6"
     local val_batch_size="$7"
     local val_batches="$8"
-    local val_loss_every="$9"
-    local val_first_step="${10}"
+    local val_first_step="$9"
+    local val_loss_every="${10}"
     local train_log_every="${11}"
     local warmup_steps="${12}"
     shift 12
