@@ -47,6 +47,15 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from torch import Tensor, nn
 from torch.nn.parallel import DistributedDataParallel as DDP
+from wandb_support import (
+    add_wandb_args,
+    build_wandb_config,
+    finish_wandb,
+    maybe_init_wandb,
+    maybe_watch_wandb,
+    wandb_log,
+    wandb_summary_update,
+)
 
 # =============================================================================
 # HYPERPARAMETERS
@@ -265,6 +274,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--grad-clip-norm", type=float, default=Hyperparameters.grad_clip_norm
     )
+    add_wandb_args(parser, default_project="pg-hconv-ablations")
     return parser
 
 
@@ -282,6 +292,7 @@ def parse_args() -> Hyperparameters:
     args.squared_gate = bool(args.squared_gate)
     args.dilated_conv = bool(args.dilated_conv)
     args.hippo_init = bool(args.hippo_init)
+    args.wandb = bool(args.wandb)
     args.train_files = os.path.join(args.data_path, "fineweb_train_*.bin")
     args.val_files = os.path.join(args.data_path, "fineweb_val_*.bin")
     args.eval_mode = args.eval_mode.strip().lower()
@@ -1359,7 +1370,48 @@ def main() -> None:
         f"val_batches:{args.val_batches} local_eval_batch_seqs:{eval_local_batch_seqs}"
     )
     log0(f"compile_enabled:{not args.compile_disable} output_dir:{output_dir}")
+    log0(
+        f"wandb_enabled:{args.wandb} project:{args.wandb_project} "
+        f"group:{args.wandb_group or '-'} mode:{args.wandb_mode} "
+        f"watch:{args.wandb_watch_log}@{args.wandb_watch_log_freq}"
+    )
     log0(f"seed:{args.seed}")
+
+    local_batch_size = args.train_batch_tokens // (
+        world_size * grad_accum_steps * args.train_seq_len
+    )
+    planned_train_tokens = args.train_batch_tokens * args.iterations
+    wandb_run = maybe_init_wandb(
+        args,
+        master_process=master_process,
+        output_dir=output_dir,
+        config=build_wandb_config(
+            args,
+            {
+                "trainer_name": "train_hconv.py",
+                "world_size": world_size,
+                "grad_accum_steps": grad_accum_steps,
+                "effective_sdpa_backend": effective_sdpa_backend,
+                "model_params": n_params,
+                "effective_layers": n_effective_layers,
+                "conv_layers": n_conv_layers,
+                "attn_layers": n_attn_layers,
+                "local_batch_size": local_batch_size,
+                "planned_train_tokens": planned_train_tokens,
+            },
+        ),
+    )
+    wandb_summary_update(
+        wandb_run,
+        {
+            "model_params": n_params,
+            "effective_layers": n_effective_layers,
+            "conv_layers": n_conv_layers,
+            "attn_layers": n_attn_layers,
+            "planned_train_tokens": planned_train_tokens,
+            "local_batch_size": local_batch_size,
+        },
+    )
 
     # ── Data loader & model warmup ──
     train_loader = DistributedTokenLoader(args.train_files, rank, world_size, device)
@@ -1444,6 +1496,13 @@ def main() -> None:
             args.train_files, rank, world_size, device
         )
 
+    maybe_watch_wandb(
+        wandb_run,
+        base_model,
+        log=args.wandb_watch_log,
+        log_freq=args.wandb_watch_log_freq,
+    )
+
     # ── Main training loop ──
     training_time_ms = 0.0
     stop_after_step: int | None = None
@@ -1477,6 +1536,22 @@ def main() -> None:
             log0(
                 f"step:{step}/{args.iterations} val_loss:{val_loss:.4f} val_bpb:{val_bpb:.4f} "
                 f"train_time:{training_time_ms:.0f}ms step_avg:{training_time_ms / max(step, 1):.2f}ms"
+            )
+            step_avg_ms = training_time_ms / max(step, 1)
+            throughput_steps_per_s = 1000.0 / step_avg_ms if step > 0 else 0.0
+            wandb_log(
+                wandb_run,
+                {
+                    "val/loss": val_loss,
+                    "val/bpb": val_bpb,
+                    "train/elapsed_ms": training_time_ms,
+                    "train/step_avg_ms": step_avg_ms,
+                    "train/steps_per_s": throughput_steps_per_s,
+                    "train/tokens_per_s": args.train_batch_tokens
+                    * throughput_steps_per_s,
+                    "train/tokens_seen": step * args.train_batch_tokens,
+                },
+                step=step,
             )
             torch.cuda.synchronize()
             t0 = time.perf_counter()
@@ -1539,6 +1614,26 @@ def main() -> None:
                 f"step:{step}/{args.iterations} train_loss:{train_loss.item():.4f} "
                 f"train_time:{approx_training_time_ms:.0f}ms step_avg:{approx_training_time_ms / step:.2f}ms"
             )
+            step_avg_ms = approx_training_time_ms / step
+            wandb_log(
+                wandb_run,
+                {
+                    "train/loss": train_loss.item(),
+                    "train/elapsed_ms": approx_training_time_ms,
+                    "train/step_avg_ms": step_avg_ms,
+                    "train/steps_per_s": 1000.0 / step_avg_ms,
+                    "train/tokens_per_s": args.train_batch_tokens
+                    * 1000.0
+                    / step_avg_ms,
+                    "train/tokens_seen": step * args.train_batch_tokens,
+                    "opt/lr_scale": scale,
+                    "opt/muon_momentum": muon_momentum,
+                    "opt/lr_tok": optimizer_tok.param_groups[0]["lr"],
+                    "opt/lr_muon": optimizer_muon.param_groups[0]["lr"],
+                    "opt/lr_scalar": optimizer_scalar.param_groups[0]["lr"],
+                },
+                step=step,
+            )
 
         reached_cap = (
             max_wallclock_ms is not None and approx_training_time_ms >= max_wallclock_ms
@@ -1550,20 +1645,33 @@ def main() -> None:
         if stop_after_step is None and reached_cap:
             stop_after_step = step
 
+    peak_alloc_mib = torch.cuda.max_memory_allocated() // 1024 // 1024
+    peak_reserved_mib = torch.cuda.max_memory_reserved() // 1024 // 1024
     log0(
-        f"peak memory allocated: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB "
-        f"reserved: {torch.cuda.max_memory_reserved() // 1024 // 1024} MiB"
+        f"peak memory allocated: {peak_alloc_mib} MiB reserved: {peak_reserved_mib} MiB"
+    )
+    wandb_summary_update(
+        wandb_run,
+        {
+            "system/peak_mem_alloc_mib": peak_alloc_mib,
+            "system/peak_mem_reserved_mib": peak_reserved_mib,
+        },
     )
 
     # ── Serialization + roundtrip validation ──
+    model_bytes = 0
+    code_bytes = len(code.encode("utf-8"))
+    total_submission_bytes = 0
+    quant_file_bytes = 0
+    total_submission_int8_zlib_bytes = 0
     if master_process:
         final_model_path = output_dir / "final_model.pt"
         torch.save(base_model.state_dict(), final_model_path)
         model_bytes = final_model_path.stat().st_size
-        code_bytes = len(code.encode("utf-8"))
+        total_submission_bytes = model_bytes + code_bytes
         log0(f"Serialized model: {model_bytes} bytes")
         log0(f"Code size: {code_bytes} bytes")
-        log0(f"Total submission size: {model_bytes + code_bytes} bytes")
+        log0(f"Total submission size: {total_submission_bytes} bytes")
 
     quant_obj, quant_stats = quantize_state_dict_int8(base_model.state_dict())
     quant_buf = io.BytesIO()
@@ -1576,7 +1684,7 @@ def main() -> None:
         with quant_path.open("wb") as f:
             f.write(quant_blob)
         quant_file_bytes = quant_path.stat().st_size
-        code_bytes = len(code.encode("utf-8"))
+        total_submission_int8_zlib_bytes = quant_file_bytes + code_bytes
         ratio = quant_stats["baseline_tensor_bytes"] / max(
             quant_stats["int8_payload_bytes"], 1
         )
@@ -1584,7 +1692,9 @@ def main() -> None:
             f"Serialized model int8+zlib: {quant_file_bytes} bytes "
             f"(payload:{quant_stats['int8_payload_bytes']} raw_torch:{quant_raw_bytes} payload_ratio:{ratio:.2f}x)"
         )
-        log0(f"Total submission size int8+zlib: {quant_file_bytes + code_bytes} bytes")
+        log0(
+            f"Total submission size int8+zlib: {total_submission_int8_zlib_bytes} bytes"
+        )
 
     if distributed:
         dist.barrier()
@@ -1609,13 +1719,41 @@ def main() -> None:
         is_boundary_token_lut,
     )
     torch.cuda.synchronize()
+    q_eval_time_ms = 1000.0 * (time.perf_counter() - t_qeval)
     log0(
         f"final_int8_zlib_roundtrip val_loss:{q_val_loss:.4f} val_bpb:{q_val_bpb:.4f} "
-        f"eval_time:{1000.0 * (time.perf_counter() - t_qeval):.0f}ms"
+        f"eval_time:{q_eval_time_ms:.0f}ms"
     )
     log0(
         f"final_int8_zlib_roundtrip_exact val_loss:{q_val_loss:.8f} val_bpb:{q_val_bpb:.8f}"
     )
+    wandb_log(
+        wandb_run,
+        {
+            "final/roundtrip_val_loss": q_val_loss,
+            "final/roundtrip_val_bpb": q_val_bpb,
+            "final/roundtrip_eval_time_ms": q_eval_time_ms,
+            "artifact/model_bytes": model_bytes,
+            "artifact/code_bytes": code_bytes,
+            "artifact/total_submission_bytes": total_submission_bytes,
+            "artifact/int8_zlib_bytes": quant_file_bytes,
+            "artifact/total_submission_int8_zlib_bytes": total_submission_int8_zlib_bytes,
+        },
+        step=step,
+    )
+    wandb_summary_update(
+        wandb_run,
+        {
+            "final/roundtrip_val_loss": q_val_loss,
+            "final/roundtrip_val_bpb": q_val_bpb,
+            "artifact/model_bytes": model_bytes,
+            "artifact/code_bytes": code_bytes,
+            "artifact/total_submission_bytes": total_submission_bytes,
+            "artifact/int8_zlib_bytes": quant_file_bytes,
+            "artifact/total_submission_int8_zlib_bytes": total_submission_int8_zlib_bytes,
+        },
+    )
+    finish_wandb(wandb_run)
 
     if distributed:
         dist.destroy_process_group()

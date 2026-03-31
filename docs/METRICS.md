@@ -1,6 +1,6 @@
 # Metrics
 
-Last updated: 2026-03-31 03:00 EDT
+Last updated: 2026-03-31 03:10 EDT
 
 This file tracks model-quality results from local 5090 runs in [`runs_hconv_quality_5090/`](../runs_hconv_quality_5090/).
 
@@ -10,7 +10,7 @@ This file tracks model-quality results from local 5090 runs in [`runs_hconv_qual
 - For quality-comparison runs, `val_bpb` is taken from the final scheduled validation line, e.g. `step:750/750 val_loss:... val_bpb:...`.
 - `roundtrip_val_bpb` is taken from `final_int8_zlib_roundtrip_exact ... val_bpb:...` after int8+zlib serialization and reload.
 - `int8+zlib_bytes` is taken from `Serialized model int8+zlib: ... bytes`.
-- The quality-comparison contract here is the AGENTS-compliant fixed-token setup:
+- The quality-comparison contract recorded here is the current local sweep-harness setup:
   - `TRAIN_SEQ_LEN=1024`
   - `TRAIN_BATCH_TOKENS=262144`
   - `MAX_STEPS=750`
@@ -23,6 +23,10 @@ This file tracks model-quality results from local 5090 runs in [`runs_hconv_qual
   - `MAX_WALLCLOCK_SECONDS=0`
   - `SDPA_BACKEND=auto`
   - `TORCH_BLAS_PREFER_CUBLASLT=1`
+- Important discrepancy:
+  - The current trainer path still fixes `grad_accum_steps=8` at `WORLD_SIZE=1`.
+  - Current `AGENTS.md` guidance for this kind of 1x5090 quality comparison says `GRAD_ACCUM_STEPS=64`, but that guidance came from an earlier parameter-sharing setup that could use more memory than the current hconv family.
+  - That means the runs below are internally comparable to each other, while the accumulation mismatch versus the older guidance remains a protocol note rather than automatic evidence that the hconv harness is wrong.
 
 ## Quality Runs
 

@@ -17,6 +17,14 @@ TOKENIZER_PATH="${TOKENIZER_PATH:-${ROOT_DIR}/data/tokenizers/fineweb_1024_bpe.m
 SDPA_BACKEND="${SDPA_BACKEND:-auto}"
 COMPILE_DISABLE="${COMPILE_DISABLE:-0}"
 TORCH_BLAS_PREFER_CUBLASLT="${TORCH_BLAS_PREFER_CUBLASLT:-1}"
+WANDB_ENABLE="${WANDB_ENABLE:-1}"
+WANDB_PROJECT="${WANDB_PROJECT:-pg-hconv-ablations}"
+WANDB_ENTITY="${WANDB_ENTITY:-}"
+WANDB_GROUP="${WANDB_GROUP:-hconv_quality_5090}"
+WANDB_MODE="${WANDB_MODE:-online}"
+WANDB_WATCH_LOG="${WANDB_WATCH_LOG:-gradients}"
+WANDB_WATCH_LOG_FREQ="${WANDB_WATCH_LOG_FREQ:-25}"
+WANDB_TAGS="${WANDB_TAGS:-5090,quality,hconv}"
 
 QUALITY_MAX_STEPS=750
 QUALITY_TRAIN_BATCH_TOKENS=262144
@@ -66,6 +74,14 @@ Optional launcher env overrides:
   SDPA_BACKEND=auto|flash|cudnn|mem_efficient|math
   COMPILE_DISABLE=0|1
   TORCH_BLAS_PREFER_CUBLASLT=0|1
+  WANDB_ENABLE=0|1
+  WANDB_PROJECT=pg-hconv-ablations
+  WANDB_ENTITY=<optional>
+  WANDB_GROUP=hconv_quality_5090
+  WANDB_MODE=online|offline|disabled
+  WANDB_WATCH_LOG=gradients|all
+  WANDB_WATCH_LOG_FREQ=25
+  WANDB_TAGS=comma,separated,tags
 EOF
 }
 
@@ -142,6 +158,14 @@ warmup_steps=${warmup_steps}
 sdpa_backend=${SDPA_BACKEND}
 compile_disable=${COMPILE_DISABLE}
 TORCH_BLAS_PREFER_CUBLASLT=${TORCH_BLAS_PREFER_CUBLASLT}
+wandb_enable=${WANDB_ENABLE}
+wandb_project=${WANDB_PROJECT}
+wandb_entity=${WANDB_ENTITY}
+wandb_group=${WANDB_GROUP}
+wandb_mode=${WANDB_MODE}
+wandb_watch_log=${WANDB_WATCH_LOG}
+wandb_watch_log_freq=${WANDB_WATCH_LOG_FREQ}
+wandb_tags=${WANDB_TAGS}
 EOF
 }
 
@@ -194,6 +218,8 @@ run_target() {
     echo "val_loss_every=${val_loss_every} train_log_every=${train_log_every}"
     echo "sdpa_backend=${SDPA_BACKEND} compile_disable=${COMPILE_DISABLE}"
     echo "TORCH_BLAS_PREFER_CUBLASLT=${TORCH_BLAS_PREFER_CUBLASLT}"
+    echo "wandb_enable=${WANDB_ENABLE} wandb_project=${WANDB_PROJECT} wandb_group=${WANDB_GROUP}"
+    echo "wandb_mode=${WANDB_MODE} watch=${WANDB_WATCH_LOG}@${WANDB_WATCH_LOG_FREQ}"
     echo "================================================================"
 
     env TORCH_BLAS_PREFER_CUBLASLT="${TORCH_BLAS_PREFER_CUBLASLT}" \
@@ -219,6 +245,15 @@ run_target() {
         --warmup-steps "${warmup_steps}" \
         --sdpa-backend "${SDPA_BACKEND}" \
         --compile-disable "${COMPILE_DISABLE}" \
+        --wandb "${WANDB_ENABLE}" \
+        --wandb-project "${WANDB_PROJECT}" \
+        --wandb-entity "${WANDB_ENTITY}" \
+        --wandb-group "${WANDB_GROUP}" \
+        --wandb-run-name "${target}" \
+        --wandb-tags "${WANDB_TAGS},${target}" \
+        --wandb-mode "${WANDB_MODE}" \
+        --wandb-watch-log "${WANDB_WATCH_LOG}" \
+        --wandb-watch-log-freq "${WANDB_WATCH_LOG_FREQ}" \
         "${trainer_args[@]}" \
         2>&1 | tee "${stdout_log}"
 

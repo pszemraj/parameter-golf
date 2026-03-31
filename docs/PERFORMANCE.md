@@ -1,6 +1,6 @@
 # Performance
 
-Last updated: 2026-03-31 03:00 EDT
+Last updated: 2026-03-31 03:10 EDT
 
 This file tracks local training-speed measurements from runs in [`runs_hconv_quality_5090/`](../runs_hconv_quality_5090/).
 
@@ -11,6 +11,10 @@ This file tracks local training-speed measurements from runs in [`runs_hconv_qua
 - `tok/s = TRAIN_BATCH_TOKENS * steps/s`.
 - For the quality runs below, `warmup_steps=20`, so the reported `step_avg_ms` excludes compile/warmup time and is appropriate for comparing steady-state training speed.
 - For `SMOKE_HCONV_COMPILE`, `warmup_steps=0`, so the reported average includes the one-time cold compile cost and should be read as a bring-up measurement, not a steady-state throughput number.
+- Important discrepancy:
+  - The current trainer path uses `grad_accum_steps=8` on `WORLD_SIZE=1`.
+  - Current `AGENTS.md` guidance for 1x5090 quality comparisons says `GRAD_ACCUM_STEPS=64`, but that guidance came from an earlier parameter-sharing setup that could use more memory than the current hconv family.
+  - So the quality-run speed numbers below are valid for this current harness, with the accumulation mismatch noted as context rather than treated as an automatic protocol failure.
 
 ## Quality-Comparison Speed
 
