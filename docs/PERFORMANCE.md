@@ -1,6 +1,6 @@
 # Performance
 
-Last updated: 2026-03-31 04:46 EDT
+Last updated: 2026-03-31 05:01 EDT
 
 This file tracks local training-speed measurements from runs in [`runs_hconv_quality_5090/`](../runs_hconv_quality_5090/).
 
@@ -28,6 +28,8 @@ This file tracks local training-speed measurements from runs in [`runs_hconv_qua
 | 2026-03-31 04:12:52 EDT | `T3` | 262144 | 518.02 | 1.9304 | 506050 | 7941 | [train.log](../runs_hconv_quality_5090/T3/train.log) |
 | 2026-03-31 04:38:41 EDT | `I1` | 262144 | 539.22 | 1.8545 | 486154 | 8223 | [train.log](../runs_hconv_quality_5090/I1/train.log) |
 | 2026-03-31 04:46:04 EDT | `I2` | 262144 | 513.64 | 1.9469 | 510365 | 8189 | [train.log](../runs_hconv_quality_5090/I2/train.log) |
+| 2026-03-31 04:54:17 EDT | `I4` | 262144 | 516.11 | 1.9376 | 507923 | 8223 | [train.log](../runs_hconv_quality_5090/I4/train.log) |
+| 2026-03-31 05:01:22 EDT | `I4H` | 262144 | 516.35 | 1.9367 | 507687 | 8223 | [train.log](../runs_hconv_quality_5090/I4H/train.log) |
 
 Current read:
 
@@ -38,6 +40,7 @@ Current read:
 - The speed trade for phase 2 is now cleaner than before: `T3` is the faster tied-depth variant, while `T2` keeps the compressed-size edge.
 - `I1` is essentially the same speed as `T2` and uses slightly more memory, so its quality regression is not buying meaningful throughput.
 - `I2` is about `1.0474x` faster than `T2`, but that speed gain comes with a much larger quality hit.
+- `I4` and `I4H` sit in the same speed band as `I2`, but both keep the worse quality profile, so neither looks attractive as a trade.
 
 ## Smoke / Compile Behavior
 

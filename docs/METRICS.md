@@ -1,6 +1,6 @@
 # Metrics
 
-Last updated: 2026-03-31 04:46 EDT
+Last updated: 2026-03-31 05:01 EDT
 
 This file tracks model-quality results from local 5090 runs in [`runs_hconv_quality_5090/`](../runs_hconv_quality_5090/).
 
@@ -40,6 +40,8 @@ This file tracks model-quality results from local 5090 runs in [`runs_hconv_qual
 | 2026-03-31 04:12:52 EDT | `T3` | `train_hconv.py` | Tied-depth variant: `4` unique conv, `5` unique attn, `16` effective conv, `mlp_mult=3` | 1.3693 | 1.36937905 | 15288128 | [train.log](../runs_hconv_quality_5090/T3/train.log) |
 | 2026-03-31 04:38:41 EDT | `I1` | `train_hconv.py` | T2 + dilated conv | 1.3726 | 1.37247236 | 14898621 | [train.log](../runs_hconv_quality_5090/I1/train.log) |
 | 2026-03-31 04:46:04 EDT | `I2` | `train_hconv.py` | T2 + squared gate | 1.3930 | 1.39314138 | 14897734 | [train.log](../runs_hconv_quality_5090/I2/train.log) |
+| 2026-03-31 04:54:17 EDT | `I4` | `train_hconv.py` | T2 + dilated conv + squared gate | 1.4023 | 1.40250911 | 14905386 | [train.log](../runs_hconv_quality_5090/I4/train.log) |
+| 2026-03-31 05:01:22 EDT | `I4H` | `train_hconv.py` | T2 + dilated conv + squared gate + hippo init | 1.4313 | 1.43114624 | 14896389 | [train.log](../runs_hconv_quality_5090/I4H/train.log) |
 
 Current read:
 
@@ -53,6 +55,9 @@ Current read:
 - Relative to `B1`, both tied-depth variants improve the final scheduled `val_bpb` by about `0.0089`.
 - `I1` regresses against `T2` by about `0.0033` bpb, so the dilated variant is not helping so far.
 - `I2` regresses much harder, by about `0.0237` bpb versus `T2`, so squared gating looks actively harmful on this setup.
+- `I4` is even worse than `I2`, landing about `0.0330` bpb behind `T2`.
+- `I4H` is the worst of the tested innovation set, about `0.0620` bpb behind `T2`.
+- None of the phase-3 innovations beat the plain tied-depth base; the best quality remains the `T2` / `T3` pair.
 
 ## Smoke / Bring-Up Runs
 
