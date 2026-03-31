@@ -1213,3 +1213,58 @@ Latest harness smoke check:
   - the forward kernel is good enough to matter
   - the remaining blocker is still backward and compiled custom-op integration,
     not raw kernel math
+
+### 2026-03-31
+
+- Reworked the FA2 attention-branch benchmark to use:
+  - `torch.library.triton_op` for the transparent FA2-side Triton kernels
+  - the direct FA2 forward/backward entrypoints from the installed
+    `flash-attn` wheel rather than re-entering Python autograd around
+    `flash_attn_func`
+- Benchmarks:
+  - whole-branch v6:
+    `runs_allama_validation/attention_branch_fa2_v6/summary.json`
+    - compiled forward: custom `0.21360 ms` vs reference `0.19207 ms`
+    - compiled backward: custom `1.05685 ms` vs reference `0.69585 ms`
+  - attention-core v1:
+    `runs_allama_validation/attention_core_fa2_v1/summary.json`
+    - this boundary is only:
+      - qkv projection
+      - FA2 prep
+      - FA2
+    - compiled forward: custom `0.16582 ms` vs reference `0.13454 ms`
+    - compiled backward: custom `0.78984 ms` vs reference `0.47957 ms`
+- Interpretation:
+  - larger attention-side boundaries are now benchmarked in a realistic way
+  - on this local stack they still lose once compiled backward is part of the
+    contract
+  - the result is narrower than before:
+    - forward math is no longer the main blocker
+    - compiled backward integration remains the blocker
+
+- Split the FA2 prep backward into separate Triton kernels for:
+  - Q-side backward with q-gain reduction
+  - KV-side backward with RoPE/RMSNorm inversion plus V copy-through
+- This removes mixed Q/KV branching from one kernel launch.
+- Isolated branch breakdown rerun with the live kernels:
+  - `prep_bwd`: `0.09899 ms -> 0.09083 ms`
+  - about `+8.2%`
+- Real compiled anchor compare on the local 5090 after the split:
+  - baseline FA2 path:
+    `runs_allama_validation/perf_fa2_prep_split_compare_seq/baseline/allama_anchor/baseline/run_summary.json`
+    - `141,200.69 tok/s`
+    - `1.85653 s/step`
+    - `2.2189 GB` peak CUDA memory
+  - FA2 + Triton prep path:
+    `runs_allama_validation/perf_fa2_prep_split_compare_seq/prep_triton/allama_anchor/baseline/run_summary.json`
+    - `133,682.44 tok/s`
+    - `1.96095 s/step`
+    - `2.2766 GB` peak CUDA memory
+- Interpretation:
+  - the split prep backward is a real kernel improvement
+  - it is not enough to make the live prep path positive end to end
+  - the shipped local attention path therefore still stays:
+    - `ATTN_IMPL=fa2`
+    - `ATTN_PREP_KERNEL=pytorch`
+    - `ATTN_OUTPROJ_KERNEL=pytorch`
+    - `MLP_KERNEL=triton_gateup`

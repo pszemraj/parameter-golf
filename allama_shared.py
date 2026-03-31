@@ -894,29 +894,117 @@ if triton is not None:
         tl.store(v_out_ptrs, v_vals.to(tl.bfloat16), mask=mask)
 
     @triton.jit
-    def attention_prep_bshd_backward_kernel(
+    def attention_prep_bshd_backward_q_kernel(
         qkv_ptr,
         q_gain_ptr,
         cos_ptr,
         sin_ptr,
         grad_q_ptr,
-        grad_k_ptr,
-        grad_v_ptr,
         grad_qkv_ptr,
         grad_q_gain_ptr,
         batch_size,
         seq_len,
         num_heads,
-        num_kv_heads,
         head_dim,
-        q_dim,
-        kv_dim,
         qkv_stride_b,
         qkv_stride_t,
         grad_q_stride_b,
         grad_q_stride_t,
         grad_q_stride_h,
         grad_q_stride_d,
+        grad_qkv_stride_b,
+        grad_qkv_stride_t,
+        BLOCK_D: tl.constexpr,
+    ):
+        """Backward for the Q-side of the fused FA2 prep kernel."""
+        token_idx = tl.program_id(0)
+        head_idx = tl.program_id(1)
+        b = token_idx // seq_len
+        t = token_idx % seq_len
+        if b >= batch_size or head_idx >= num_heads:
+            return
+
+        half = head_dim // 2
+        half_cols = tl.arange(0, BLOCK_D // 2)
+        half_mask = half_cols < half
+
+        qkv_base = qkv_ptr + b * qkv_stride_b + t * qkv_stride_t
+        grad_qkv_base = grad_qkv_ptr + b * grad_qkv_stride_b + t * grad_qkv_stride_t
+        cos_ptrs = cos_ptr + t * half + half_cols
+        sin_ptrs = sin_ptr + t * half + half_cols
+        cos_vals = tl.load(cos_ptrs, mask=half_mask, other=0.0).to(tl.float32)
+        sin_vals = tl.load(sin_ptrs, mask=half_mask, other=0.0).to(tl.float32)
+
+        q_head_base = qkv_base + head_idx * head_dim
+        q1 = tl.load(q_head_base + half_cols, mask=half_mask, other=0.0).to(tl.float32)
+        q2 = tl.load(q_head_base + half + half_cols, mask=half_mask, other=0.0).to(
+            tl.float32
+        )
+        rms = tl.sqrt(
+            (tl.sum(q1 * q1, axis=0) + tl.sum(q2 * q2, axis=0)) / head_dim + 1e-5
+        )
+        q1_norm = q1 / rms
+        q2_norm = q2 / rms
+        rot_first = q1_norm * cos_vals + q2_norm * sin_vals
+        rot_second = q2_norm * cos_vals - q1_norm * sin_vals
+        gain = tl.load(q_gain_ptr + head_idx).to(tl.float32)
+
+        grad_q_base = (
+            grad_q_ptr
+            + b * grad_q_stride_b
+            + t * grad_q_stride_t
+            + head_idx * grad_q_stride_h
+        )
+        grad_q1 = tl.load(
+            grad_q_base + half_cols * grad_q_stride_d,
+            mask=half_mask,
+            other=0.0,
+        ).to(tl.float32)
+        grad_q2 = tl.load(
+            grad_q_base + (half + half_cols) * grad_q_stride_d,
+            mask=half_mask,
+            other=0.0,
+        ).to(tl.float32)
+        grad_rot_first = grad_q1 * gain
+        grad_rot_second = grad_q2 * gain
+        grad_q1_norm = grad_rot_first * cos_vals - grad_rot_second * sin_vals
+        grad_q2_norm = grad_rot_first * sin_vals + grad_rot_second * cos_vals
+        dot = (
+            tl.sum(grad_q1_norm * q1_norm, axis=0)
+            + tl.sum(grad_q2_norm * q2_norm, axis=0)
+        ) / head_dim
+        grad_q1_orig = (grad_q1_norm - q1_norm * dot) / rms
+        grad_q2_orig = (grad_q2_norm - q2_norm * dot) / rms
+        grad_qkv_q_base = grad_qkv_base + head_idx * head_dim
+        tl.store(
+            grad_qkv_q_base + half_cols,
+            grad_q1_orig.to(tl.bfloat16),
+            mask=half_mask,
+        )
+        tl.store(
+            grad_qkv_q_base + half + half_cols,
+            grad_q2_orig.to(tl.bfloat16),
+            mask=half_mask,
+        )
+        grad_gain = tl.sum(grad_q1 * rot_first + grad_q2 * rot_second, axis=0)
+        tl.atomic_add(grad_q_gain_ptr + head_idx, grad_gain)
+
+    @triton.jit
+    def attention_prep_bshd_backward_kv_kernel(
+        qkv_ptr,
+        cos_ptr,
+        sin_ptr,
+        grad_k_ptr,
+        grad_v_ptr,
+        grad_qkv_ptr,
+        batch_size,
+        seq_len,
+        num_kv_heads,
+        head_dim,
+        q_dim,
+        kv_dim,
+        qkv_stride_b,
+        qkv_stride_t,
         grad_k_stride_b,
         grad_k_stride_t,
         grad_k_stride_h,
@@ -925,11 +1013,14 @@ if triton is not None:
         grad_qkv_stride_t,
         BLOCK_D: tl.constexpr,
     ):
-        """Backward for the fused FA2 prep kernel on BSHD tensors."""
+        """Backward for the KV-side of the fused FA2 prep kernel."""
         token_idx = tl.program_id(0)
-        head_idx = tl.program_id(1)
+        kv_head = tl.program_id(1)
         b = token_idx // seq_len
         t = token_idx % seq_len
+        if b >= batch_size or kv_head >= num_kv_heads:
+            return
+
         cols = tl.arange(0, BLOCK_D)
         mask = cols < head_dim
         half = head_dim // 2
@@ -942,68 +1033,6 @@ if triton is not None:
         sin_ptrs = sin_ptr + t * half + half_cols
         cos_vals = tl.load(cos_ptrs, mask=half_mask, other=0.0).to(tl.float32)
         sin_vals = tl.load(sin_ptrs, mask=half_mask, other=0.0).to(tl.float32)
-
-        if head_idx < num_heads:
-            q_head_base = qkv_base + head_idx * head_dim
-            q1 = tl.load(q_head_base + half_cols, mask=half_mask, other=0.0).to(
-                tl.float32
-            )
-            q2 = tl.load(q_head_base + half + half_cols, mask=half_mask, other=0.0).to(
-                tl.float32
-            )
-            rms = tl.sqrt(
-                (tl.sum(q1 * q1, axis=0) + tl.sum(q2 * q2, axis=0)) / head_dim + 1e-5
-            )
-            q1_norm = q1 / rms
-            q2_norm = q2 / rms
-            rot_first = q1_norm * cos_vals + q2_norm * sin_vals
-            rot_second = q2_norm * cos_vals - q1_norm * sin_vals
-            gain = tl.load(q_gain_ptr + head_idx).to(tl.float32)
-
-            grad_q_base = (
-                grad_q_ptr
-                + b * grad_q_stride_b
-                + t * grad_q_stride_t
-                + head_idx * grad_q_stride_h
-            )
-            grad_q1 = tl.load(
-                grad_q_base + half_cols * grad_q_stride_d,
-                mask=half_mask,
-                other=0.0,
-            ).to(tl.float32)
-            grad_q2 = tl.load(
-                grad_q_base + (half + half_cols) * grad_q_stride_d,
-                mask=half_mask,
-                other=0.0,
-            ).to(tl.float32)
-            grad_rot_first = grad_q1 * gain
-            grad_rot_second = grad_q2 * gain
-            grad_q1_norm = grad_rot_first * cos_vals - grad_rot_second * sin_vals
-            grad_q2_norm = grad_rot_first * sin_vals + grad_rot_second * cos_vals
-            dot = (
-                tl.sum(grad_q1_norm * q1_norm, axis=0)
-                + tl.sum(grad_q2_norm * q2_norm, axis=0)
-            ) / head_dim
-            grad_q1_orig = (grad_q1_norm - q1_norm * dot) / rms
-            grad_q2_orig = (grad_q2_norm - q2_norm * dot) / rms
-            grad_qkv_q_base = grad_qkv_base + head_idx * head_dim
-            tl.store(
-                grad_qkv_q_base + half_cols,
-                grad_q1_orig.to(tl.bfloat16),
-                mask=half_mask,
-            )
-            tl.store(
-                grad_qkv_q_base + half + half_cols,
-                grad_q2_orig.to(tl.bfloat16),
-                mask=half_mask,
-            )
-            grad_gain = tl.sum(grad_q1 * rot_first + grad_q2 * rot_second, axis=0)
-            tl.atomic_add(grad_q_gain_ptr + head_idx, grad_gain)
-            return
-
-        kv_head = head_idx - num_heads
-        if kv_head >= num_kv_heads:
-            return
 
         k_head_base = qkv_base + q_dim + kv_head * head_dim
         k1 = tl.load(k_head_base + half_cols, mask=half_mask, other=0.0).to(tl.float32)
@@ -1144,30 +1173,46 @@ def attention_prep_bshd_backward_triton(
         raise ValueError("qkv shape does not match the requested head layout")
     grad_qkv = torch.empty_like(qkv)
     grad_q_gain = torch.zeros_like(q_gain, dtype=torch.float32)
-    grid = (batch_size * seq_len, num_heads + num_kv_heads)
-    torch.library.wrap_triton(attention_prep_bshd_backward_kernel)[grid](
+    q_grid = (batch_size * seq_len, num_heads)
+    torch.library.wrap_triton(attention_prep_bshd_backward_q_kernel)[q_grid](
         qkv,
         q_gain,
         cos,
         sin,
         grad_q,
-        grad_k,
-        grad_v,
         grad_qkv,
         grad_q_gain,
         batch_size,
         seq_len,
         num_heads,
-        num_kv_heads,
         head_dim,
-        q_dim,
-        kv_dim,
         qkv.stride(0),
         qkv.stride(1),
         grad_q.stride(0),
         grad_q.stride(1),
         grad_q.stride(2),
         grad_q.stride(3),
+        grad_qkv.stride(0),
+        grad_qkv.stride(1),
+        BLOCK_D=next_power_of_2(head_dim),
+        num_warps=2 if head_dim <= 64 else 4,
+    )
+    kv_grid = (batch_size * seq_len, num_kv_heads)
+    torch.library.wrap_triton(attention_prep_bshd_backward_kv_kernel)[kv_grid](
+        qkv,
+        cos,
+        sin,
+        grad_k,
+        grad_v,
+        grad_qkv,
+        batch_size,
+        seq_len,
+        num_kv_heads,
+        head_dim,
+        q_dim,
+        kv_dim,
+        qkv.stride(0),
+        qkv.stride(1),
         grad_k.stride(0),
         grad_k.stride(1),
         grad_k.stride(2),
