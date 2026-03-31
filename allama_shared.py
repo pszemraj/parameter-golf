@@ -236,27 +236,55 @@ def apply_rotary_emb(x: Tensor, cos: Tensor, sin: Tensor) -> Tensor:
     return torch.cat((x1 * cos + x2 * sin, x2 * cos - x1 * sin), dim=-1)
 
 
+def _compiler_disable(fn):
+    """Return a callable excluded from Dynamo/Inductor capture."""
+    if hasattr(torch, "compiler") and hasattr(torch.compiler, "disable"):
+        return torch.compiler.disable(fn)
+    return torch._dynamo.disable(fn)
+
+
+@_compiler_disable
 def _probe_sdpa_enable_gqa() -> bool:
-    """Probe whether the current PyTorch build accepts ``enable_gqa=True``."""
+    """Probe whether the current runtime backend accepts ``enable_gqa=True``."""
     try:
-        q = torch.randn(1, 4, 2, 8)
-        k = torch.randn(1, 2, 2, 8)
-        v = torch.randn(1, 2, 2, 8)
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
+        q = torch.randn(1, 4, 2, 8, device=device, dtype=dtype)
+        k = torch.randn(1, 2, 2, 8, device=device, dtype=dtype)
+        v = torch.randn(1, 2, 2, 8, device=device, dtype=dtype)
         _ = F.scaled_dot_product_attention(q, k, v, is_causal=True, enable_gqa=True)
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
         return True
     except Exception:
         return False
 
 
-_SDPA_ENABLE_GQA: Optional[bool] = None
+_SDPA_ENABLE_GQA: dict[tuple[bool, bool, bool, bool, bool], bool] = {}
 
 
+def _sdpa_backend_signature() -> tuple[bool, bool, bool, bool, bool]:
+    """Return a cache key for the active SDPA backend configuration."""
+    if not torch.cuda.is_available():
+        return (False, False, False, False, False)
+    return (
+        True,
+        bool(torch.backends.cuda.flash_sdp_enabled()),
+        bool(torch.backends.cuda.mem_efficient_sdp_enabled()),
+        bool(torch.backends.cuda.math_sdp_enabled()),
+        bool(torch.backends.cuda.cudnn_sdp_enabled()),
+    )
+
+
+@_compiler_disable
 def sdpa_enable_gqa_available() -> bool:
     """Return whether the current runtime supports ``enable_gqa=True`` in SDPA."""
-    global _SDPA_ENABLE_GQA
-    if _SDPA_ENABLE_GQA is None:
-        _SDPA_ENABLE_GQA = _probe_sdpa_enable_gqa()
-    return _SDPA_ENABLE_GQA
+    signature = _sdpa_backend_signature()
+    cached = _SDPA_ENABLE_GQA.get(signature)
+    if cached is None:
+        cached = _probe_sdpa_enable_gqa()
+        _SDPA_ENABLE_GQA[signature] = cached
+    return cached
 
 
 def parse_share_pattern(pattern: str) -> tuple[str, int]:
@@ -797,6 +825,9 @@ class HyperSharedAttention(nn.Module):
         self.kv_dim = self.num_kv_heads * self.head_dim
         self.qk_norm = bool(cfg.qk_norm)
         self.attn_dropout = float(cfg.attn_dropout)
+        self.use_sdpa_gqa = (
+            self.num_kv_heads != self.num_heads and sdpa_enable_gqa_available()
+        )
         self.resid_dropout = nn.Dropout(float(cfg.resid_dropout))
         linear_cls = CastedLinear if cfg.cast_linears else nn.Linear
         self.qkv = linear_cls(
@@ -830,7 +861,7 @@ class HyperSharedAttention(nn.Module):
         k = apply_rotary_emb(k, cos, sin)
         q = q * q_gain.to(dtype=q.dtype)[None, :, None, None]
 
-        if self.num_kv_heads != self.num_heads and sdpa_enable_gqa_available():
+        if self.use_sdpa_gqa:
             y = F.scaled_dot_product_attention(
                 q,
                 k,

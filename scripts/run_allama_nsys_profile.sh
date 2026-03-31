@@ -2,8 +2,6 @@
 set -euo pipefail
 # run this from the repo root
 
-export TORCH_BLAS_PREFER_CUBLASLT=1
-
 MODEL="${1:-allama_anchor}"
 STAMP="$(date +%Y%m%d_%H%M%S)"
 OUT_ROOT="${OUT_ROOT:-./runs_allama_validation/nsight_systems}"

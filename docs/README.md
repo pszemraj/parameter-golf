@@ -398,8 +398,8 @@ that capped plan, but it still does not alias an uncapped or longer plan with
 a different run spec. This only affects explicitly capped runs; the default
 ablation contract remains uncapped.
 
-It also exports `TORCH_BLAS_PREFER_CUBLASLT=1` for 5090-friendly CUDA BLAS selection.
-The trainer now supports `SDPA_BACKEND=auto|flash|efficient|math|cudnn` for explicit SDPA backend experiments.
+The active torch 2.11+ scripts no longer force the old 5090 `cublaslt` workaround.
+The trainer supports `SDPA_BACKEND=auto|flash|efficient|math|cudnn` for explicit SDPA backend experiments.
 
 The sweep exports W&B watch knobs:
 

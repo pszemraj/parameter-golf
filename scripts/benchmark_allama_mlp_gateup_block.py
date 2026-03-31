@@ -18,13 +18,10 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 import time
 from pathlib import Path
 from typing import Any, Callable
-
-os.environ.setdefault("TORCH_BLAS_PREFER_CUBLASLT", "1")
 
 import torch
 import torch.nn.functional as F

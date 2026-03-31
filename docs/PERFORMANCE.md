@@ -29,9 +29,15 @@ Current read on the project:
   too slow relative to GPT for comfortable search velocity.
 - The quality winner is currently `shortfat_s4_ff15 + prenorm + rmsnorm +
   shortcut_gate005`.
-- The best current kernel path is now `MLP_KERNEL=triton_gateup` on the ALlama
-  anchor. It is a modest but real local throughput win and lowers peak CUDA
-  memory materially.
+- On torch 2.11, no shipped custom kernel path currently beats the compiled
+  PyTorch baseline end to end on the ALlama anchor.
+- The strongest surviving kernel evidence is now benchmark-only:
+  - the MLP gate/up boundary still beats compiled PyTorch in isolation
+  - the attention out-proj boundary now wins strongly on forward-only under
+    torch 2.11, but still loses badly once backward is included
+- FlexAttention is only interesting for this project if the FA4/CuTe
+  `BACKEND="FLASH"` path is installed. The built-in Triton flex backend does
+  not beat SDPA on the dense causal GQA ALlama shape.
 - `wide` is no longer the best-model quality path. It remains useful only if the
   goal is an explicit speed/quality tradeoff study.
 - `layernorm` is not part of the active search space. It lost to `rmsnorm` in
@@ -84,10 +90,9 @@ Checked-in scripts now exist for repeatable local performance work:
 - Nsight Compute on the representative hot kernels:
   - `bash scripts/run_allama_ncu_profile.sh`
 
-These scripts assume the current local 5090 contract:
+These scripts assume the current local single-GPU benchmark contract:
 
-- `TORCH_BLAS_PREFER_CUBLASLT=1`
-- single-GPU `4 x 1024 x 64` accumulation semantics
+- `4 x 1024 x 64` accumulation semantics
 - compiled steady-state training on the frozen ALlama anchor or GPT reference
 
 The harness owns the model contracts directly:
@@ -648,6 +653,94 @@ Latest harness smoke check:
   - the win is modest, so this is not the end state, but it is finally a real
     step in the right direction
 
+### Torch 2.11 Recheck
+
+- Rechecked the active backend and kernel picture after the local upgrade to
+  `torch 2.11.0+cu128`.
+- Fixed the lazy SDPA `enable_gqa` probe in `allama_shared.py` so it:
+  - runs outside Dynamo/Inductor capture
+  - probes on the real active device/backend instead of CPU only
+  - resolves once during attention-module construction instead of inside the
+    compiled forward path
+- Removed the old active `TORCH_BLAS_PREFER_CUBLASLT=1` workaround from the
+  maintained scripts. That was a 2.10-era 5090 guardrail, not part of the new
+  2.11 baseline.
+- Current whole-model backend compare in
+  `runs_allama_validation/perf_torch211_backend_compare/`:
+  - flash + PyTorch MLP:
+    - `mean_step_s=2.25897`
+    - `tokens_per_s=116045.98`
+  - cuDNN + PyTorch MLP:
+    - `mean_step_s=2.25389`
+    - `tokens_per_s=116307.61`
+  - flash + `MLP_KERNEL=triton_gateup`:
+    - `mean_step_s=2.62756`
+    - `tokens_per_s=99767.01`
+  - cuDNN + `MLP_KERNEL=triton_gateup`:
+    - `mean_step_s=2.61470`
+    - `tokens_per_s=100257.74`
+- Conclusion:
+  - on torch 2.11, `flash` and `cudnn` SDPA are effectively tied on the ALlama
+    anchor
+  - the previously kept integrated `triton_gateup` path is now a real
+    regression and should not be treated as the preferred live path
+
+### Torch 2.11 Larger-Boundary Recheck
+
+- Re-ran the larger-boundary benchmark scripts on torch 2.11:
+  - `runs_allama_validation/mlp_gateup_block_torch211/summary.json`
+  - `runs_allama_validation/attention_block_torch211/summary.json`
+- MLP gate/up boundary:
+  - forward:
+    - compiled reference: `0.40363 ms`
+    - compiled custom: `0.36098 ms`
+  - backward:
+    - compiled reference: `1.34379 ms`
+    - compiled custom: `1.03681 ms`
+- Attention out-proj boundary:
+  - forward:
+    - compiled reference: `0.09545 ms`
+    - compiled custom: `0.05880 ms`
+  - backward:
+    - compiled reference: `0.25580 ms`
+    - compiled custom: `0.46556 ms`
+- Conclusion:
+  - torch 2.11 materially improved the standalone larger-boundary picture
+  - the MLP gate/up boundary still wins in isolation, including backward
+  - the attention out-proj boundary is now a strong forward win, but its
+    backward path is still nowhere near acceptable
+  - the remaining problem is integration, not the existence of a useful
+    larger-boundary kernel candidate
+  - a native packed-weight MLP integration was attempted and then removed again;
+    it still landed only `112.2k-112.9k tok/s`, below the plain torch 2.11
+    baseline
+
+### FlexAttention Torch 2.11 Check
+
+- Added `scripts/benchmark_allama_flex_attention.py` and ran it on the dense
+  causal GQA ALlama attention shape.
+- Current representative result in
+  `runs_allama_validation/flex_attention_torch211/summary.json`:
+  - `sdpa_flash`:
+    - forward: `0.06802 ms`
+    - forward+backward: `0.30628 ms`
+  - `sdpa_cudnn`:
+    - forward: `0.06859 ms`
+    - forward+backward: `0.29532 ms`
+  - `flex_triton_auto`:
+    - forward: `0.07009 ms`
+    - forward+backward: `0.43847 ms`
+  - `flex_triton_tuned_tma`:
+    - forward: `0.07695 ms`
+    - forward+backward: `0.42711 ms`
+  - `flex_flash_backend`:
+    - fails because the CuTe flash-attention library is not installed in the
+      current env
+- Conclusion:
+  - the built-in Triton flex backend is not a win for dense causal GQA here
+  - the only flex path worth revisiting for this project is the FA4/CuTe
+    `BACKEND="FLASH"` path after the matching FlashAttention install exists
+
 ### Attention Out-Proj Integration Check
 
 - Added real backward kernels for the current post-flash attention boundary
@@ -675,19 +768,18 @@ Latest harness smoke check:
 ### Updated State
 
 - Keep the larger-boundary benchmark scripts.
-- Keep the MLP gate-up kernel path in `allama_shared.py` behind
-  `MLP_KERNEL=triton_gateup`.
+- Keep the model default on plain compiled PyTorch for now.
 - Do not integrate the attention output boundary into `allama_shared.py` yet.
 - The benchmark evidence is still useful:
-  - MLP gate-up fusion is the first boundary with a real integrated train-step
-    win
+  - MLP gate-up fusion is still the best larger-boundary MLP candidate in
+    standalone benchmarks
   - attention out-proj remains the best current attention benchmark, but it is
     still missing enough backward-side efficiency to matter end-to-end
 - The next time these come back into the model path, they need either:
   - a stronger custom backward path for the attention boundary
   - a larger attention integration boundary that absorbs more launch overhead
-  - a better backward-side reduction in the MLP path so the current `+2%` class
-    win can become something materially larger
+  - a better integration story for the MLP boundary so its standalone win
+    survives the full compiled training step
 
 ## Pre-Flash Attention Prep Candidate
 
