@@ -1436,3 +1436,26 @@ Latest harness smoke check:
     compiled forward, and still clearly behind compiled reference overall
   - the next serious attention-side C++/CUDA attempt needs a deeper integration
     than the current prep or post-proj wrapper boundaries
+
+## Handoff Note
+
+Timestamp:
+
+- `2026-03-31T01:05:43-04:00`
+
+If work pauses here and resumes in another branch, the defensible state is:
+
+- keep the best-model anchor at `shortfat_s4_ff15 + prenorm + rmsnorm +
+  shortcut_gate005`
+- keep `wide_s4_e384_ff10` as the second required family for performance
+  validation
+- treat `ATTN_IMPL=fa2` as the only currently measured attention/path change
+  that generalizes positively across both sweep-scale families
+- treat `MLP_KERNEL=triton_gateup` as shortfat-specific, not global
+- treat both Triton and first-pass C++ FA2 prep/post-proj wrappers as ruled out
+  for now
+
+That makes it reasonable to stop this line of kernel work here and try other
+ideas in a different branch. The next attention-side kernel attempt should be a
+deeper integration than the current wrapper boundaries, likely direct FA2/C++
+or cublasLt/CUTLASS-level branch work.

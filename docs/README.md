@@ -865,3 +865,40 @@ Sorted ALlama runs from this sweep:
 - drop `shortcut_no_x0` from the quality search space
 - use the remaining artifact headroom on the shortfat winner instead of
   spending more runs on clearly dominated combinations
+
+## Branch handoff
+
+Timestamp:
+
+- `2026-03-31T01:05:43-04:00`
+
+It is reasonable to pause this kernel-optimization line here and try different
+ideas in another branch.
+
+What is worth keeping from this branch:
+
+- best quality anchor remains `shortfat_s4_ff15 + prenorm + rmsnorm +
+  shortcut_gate005`
+- `wide_s4_e384_ff10` remains the right second family for performance sanity
+  checks so kernel work does not overfit to only one architecture
+- `ATTN_IMPL=fa2` is the only attention/path change that produced a positive
+  live uplift on both measured sweep-scale families
+
+What this branch ruled out:
+
+- `MLP_KERNEL=triton_gateup` is not a global win; it helps shortfat but hurts
+  wide
+- FA2 prep wrappers do not currently pay off live, whether written in Triton or
+  in the first C++/CUDA attempt
+- the first larger post-FA2 branch wrapper also lost, so simply moving opaque
+  wrapper boundaries from Triton to C++ did not rescue the approach
+
+Practical conclusion:
+
+- the current best local training path is still quality-first, not speed-first
+- catching back up toward the GPT baseline throughput target will likely require
+  a deeper integration than the current prep/post-proj wrapper strategy
+- if this line is resumed later, start from the evidence in
+  [PERFORMANCE.md](/home/pszemraj/workspace/projects/parameter-golf/docs/PERFORMANCE.md)
+  and assume the next serious target is direct FA2/C++ integration or
+  cublasLt/CUTLASS-level branch work, not more small wrapper kernels
