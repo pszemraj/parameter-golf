@@ -1,6 +1,6 @@
 # Performance
 
-Last updated: 2026-03-31 05:01 EDT
+Last updated: 2026-03-31 06:10 EDT
 
 This file tracks local training-speed measurements from runs in [`runs_hconv_quality_5090/`](../runs_hconv_quality_5090/).
 
@@ -22,6 +22,7 @@ This file tracks local training-speed measurements from runs in [`runs_hconv_qua
 | Timestamp | Config | Train batch tokens | Final step_avg_ms | steps/s | tok/s | Peak alloc MiB | Log |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
 | 2026-03-31 04:20:52 EDT | `GPT_REF` | 262144 | 353.91 | 2.8256 | 740708 | 5284 | [train.log](../runs_hconv_quality_5090/GPT_REF/train.log) |
+| 2026-03-31 06:10:27 EDT | `GPT_12L` | 262144 | 497.06 | 2.0118 | 527389 | 6907 | [train.log](../runs_hconv_quality_5090/GPT_12L/train.log) |
 | 2026-03-31 04:24:45 EDT | `B1` | 262144 | 307.84 | 3.2484 | 851559 | 4901 | [train.log](../runs_hconv_quality_5090/B1/train.log) |
 | 2026-03-31 04:28:30 EDT | `C2` | 262144 | 298.75 | 3.3473 | 877469 | 4715 | [train.log](../runs_hconv_quality_5090/C2/train.log) |
 | 2026-03-31 04:05:45 EDT | `T2` | 262144 | 537.99 | 1.8588 | 487266 | 8189 | [train.log](../runs_hconv_quality_5090/T2/train.log) |
@@ -33,6 +34,9 @@ This file tracks local training-speed measurements from runs in [`runs_hconv_qua
 
 Current read:
 
+- `GPT_12L` runs at `497.06 ms` per step, which is about `1.0823x` faster than `T2` and about `1.0422x` faster than `T3`.
+- That speed result matters because the size-matched GPT also wins on quality, so the hybrid family is not just losing on bytes; it is also not recovering the loss through better steady-state throughput here.
+- `GPT_12L` does cost more memory than `GPT_REF`, but it remains comfortably below the local 5090 limits at `6907 MiB` peak allocated.
 - `B1` is about `1.1495x` faster than `GPT_REF` by both `steps/s` and `tok/s` under the same fixed-token contract.
 - `B1` also used less peak allocated memory in this local run (`4901 MiB` vs `5284 MiB`).
 - `C2` is faster again than `B1` locally, but the quality hit is severe enough that this is not a useful trade on the current comparison protocol.

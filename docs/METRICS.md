@@ -1,6 +1,6 @@
 # Metrics
 
-Last updated: 2026-03-31 05:01 EDT
+Last updated: 2026-03-31 06:10 EDT
 
 This file tracks model-quality results from local 5090 runs in [`runs_hconv_quality_5090/`](../runs_hconv_quality_5090/).
 
@@ -34,6 +34,7 @@ This file tracks model-quality results from local 5090 runs in [`runs_hconv_qual
 | Timestamp | Config | Trainer | Summary | Final val_bpb | Roundtrip val_bpb | int8+zlib_bytes | Log |
 | --- | --- | --- | --- | ---: | ---: | ---: | --- |
 | 2026-03-31 04:20:52 EDT | `GPT_REF` | `train_gpt.py` | 9-layer GPT reference, tied embeddings, `mlp_mult=2` | 1.3774 | 1.37948790 | 11315671 | [train.log](../runs_hconv_quality_5090/GPT_REF/train.log) |
+| 2026-03-31 06:10:27 EDT | `GPT_12L` | `train_gpt.py` | Size-matched GPT gate: 12-layer GPT, tied embeddings, `mlp_mult=2` | 1.3605 | 1.36351803 | 14959016 | [train.log](../runs_hconv_quality_5090/GPT_12L/train.log) |
 | 2026-03-31 04:24:45 EDT | `B1` | `train_hconv.py` | Vanilla hybrid: 10 conv + 3 attn, no dilation, no squared gate, no hippo init | 1.3782 | 1.37821319 | 15423044 | [train.log](../runs_hconv_quality_5090/B1/train.log) |
 | 2026-03-31 04:28:30 EDT | `C2` | `train_hconv.py` | Pure conv: 15 conv, 0 attn, no dilation, no squared gate, no hippo init | 1.5756 | 1.57559083 | 15233455 | [train.log](../runs_hconv_quality_5090/C2/train.log) |
 | 2026-03-31 04:05:45 EDT | `T2` | `train_hconv.py` | Tied-depth main bet: `6` unique conv, `5` unique attn, `18` effective conv, `mlp_mult=2` | 1.3693 | 1.36955833 | 14896112 | [train.log](../runs_hconv_quality_5090/T2/train.log) |
@@ -45,6 +46,11 @@ This file tracks model-quality results from local 5090 runs in [`runs_hconv_qual
 
 Current read:
 
+- `GPT_12L` is the critical size-matched gate, and it beats both `T2` and `T3` on final scheduled `val_bpb`: `1.3605` vs `1.3693`.
+- The size gap is effectively closed for that gate. `GPT_12L` finishes at `15,025,592` total submission bytes versus `14,962,841` for `T2`, a difference of only `62,751` bytes.
+- Relative to `T2`, the size-matched GPT improves the final scheduled `val_bpb` by about `0.0088`, which is enough to fail the hybrid continuation gate from the current experiment plan.
+- Relative to `GPT_REF`, the size-matched GPT improves the final scheduled `val_bpb` by about `0.0169`, so extra bytes are buying quality in the all-attention family without needing the hybrid blocks.
+- Under the current decision rule, the hybrid path is not earning its bytes; `T2_eager`, `T5`, and `T6` are therefore tabled rather than promoted to official follow-up runs.
 - `GPT_REF` currently edges `B1` by `0.0008` bpb on the cleaned official protocol.
 - `B1` is still under the 16,000,000-byte compressed-model limit with `15,423,044` compressed model bytes.
 - `C2` is much worse than `B1` here by `0.1999` bpb, so the pure-conv variant does not look competitive on this protocol.
