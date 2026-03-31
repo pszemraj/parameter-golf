@@ -11,7 +11,7 @@ Key choices in this version:
 - simple learned per-layer modulation tensors instead of a controller network
 - fixed layer-to-block assignment computed once at init
 - Muon + Adam optimizer split retained from the v3 work
-- optional Triton gate/up SwiGLU kernel behind `MLP_KERNEL=triton_gateup`
+- optional larger Triton block kernels behind `ATTN_KERNEL` / `MLP_KERNEL`
 """
 
 from __future__ import annotations
@@ -343,7 +343,50 @@ def mix_x0(
     return x
 
 
+def rms_norm_backward_total(
+    mixed: Tensor,
+    weight: Tensor,
+    grad_normed_out: Optional[Tensor],
+    grad_mixed_out: Optional[Tensor],
+    eps: float,
+) -> tuple[Tensor, Tensor]:
+    """Combine direct residual grads with RMSNorm backward.
+
+    :param Tensor mixed: Mixed residual activation ``[M, D]``.
+    :param Tensor weight: RMSNorm weight vector ``[D]``.
+    :param Optional[Tensor] grad_normed_out: Gradient on the normalized output.
+    :param Optional[Tensor] grad_mixed_out: Direct gradient on the mixed output.
+    :param float eps: RMSNorm epsilon.
+    :return tuple[Tensor, Tensor]: Total gradient on ``mixed`` and grad on ``weight``.
+    """
+    grad_total_f = (
+        torch.zeros_like(mixed, dtype=torch.float32)
+        if grad_mixed_out is None
+        else grad_mixed_out.float()
+    )
+    grad_weight = torch.zeros_like(weight, dtype=torch.float32)
+    if grad_normed_out is None:
+        return grad_total_f.to(dtype=mixed.dtype), grad_weight.to(dtype=weight.dtype)
+
+    mixed_f = mixed.float()
+    weight_f = weight.float()[None, :]
+    grad_normed_f = grad_normed_out.float()
+    inv_rms = (mixed_f.square().mean(dim=-1, keepdim=True) + eps).rsqrt()
+    grad_h = grad_normed_f * weight_f
+    dot = (grad_h * mixed_f).sum(dim=-1, keepdim=True)
+    grad_total_f = (
+        grad_total_f
+        + inv_rms * grad_h
+        - inv_rms.pow(3) * mixed_f * dot / float(mixed.size(-1))
+    )
+    grad_weight = (grad_normed_f * mixed_f * inv_rms).sum(dim=0)
+    return grad_total_f.to(dtype=mixed.dtype), grad_weight.to(dtype=weight.dtype)
+
+
 _ALLAMA_MLP_GATEUP_OP: Optional[Any] = None
+_ALLAMA_MLP_GATEUP_BACKWARD_PARTS_OP: Optional[Any] = None
+_ALLAMA_ATTN_RMS_BRIDGE_OP: Optional[Any] = None
+_ALLAMA_MLP_FULL_OP: Optional[Any] = None
 
 
 if triton is not None:
@@ -681,9 +724,514 @@ def gateup_swiglu_backward_parts_triton(
     return grad_gate, grad_up
 
 
+if triton is not None:
+
+    @triton.autotune(
+        configs=[
+            triton.Config({"BLOCK_M": 32, "BLOCK_N": 64, "BLOCK_K": 32}, num_warps=4),
+            triton.Config({"BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 32}, num_warps=4),
+            triton.Config({"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 32}, num_warps=8),
+            triton.Config({"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 64}, num_warps=8),
+        ],
+        key=["M", "N", "K"],
+    )
+    @triton.jit
+    def attn_outproj_residual_kernel(
+        attn_y_ptr,
+        proj_weight_t_ptr,
+        residual_x_ptr,
+        scale_ptr,
+        out_ptr,
+        M,
+        N,
+        K,
+        seq_len,
+        head_dim,
+        attn_stride_b,
+        attn_stride_h,
+        attn_stride_t,
+        attn_stride_d,
+        proj_stride_k,
+        proj_stride_n,
+        residual_stride_m,
+        residual_stride_n,
+        out_stride_m,
+        out_stride_n,
+        BLOCK_M: tl.constexpr,
+        BLOCK_N: tl.constexpr,
+        BLOCK_K: tl.constexpr,
+    ):
+        """Fuse head-major attention output projection and residual add."""
+        pid_m = tl.program_id(0)
+        pid_n = tl.program_id(1)
+
+        offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+        offs_k = tl.arange(0, BLOCK_K)
+        mask_m = offs_m < M
+        mask_n = offs_n < N
+        acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+
+        b_idx = offs_m // seq_len
+        t_idx = offs_m % seq_len
+
+        for k_base in range(0, K, BLOCK_K):
+            k_idx = k_base + offs_k
+            mask_k = k_idx < K
+            h_idx = k_idx // head_dim
+            d_idx = k_idx % head_dim
+
+            attn_ptrs = (
+                attn_y_ptr
+                + b_idx[:, None] * attn_stride_b
+                + h_idx[None, :] * attn_stride_h
+                + t_idx[:, None] * attn_stride_t
+                + d_idx[None, :] * attn_stride_d
+            )
+            attn_vals = tl.load(
+                attn_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0
+            )
+            weight_ptrs = (
+                proj_weight_t_ptr
+                + k_idx[:, None] * proj_stride_k
+                + offs_n[None, :] * proj_stride_n
+            )
+            weight = tl.load(
+                weight_ptrs, mask=mask_k[:, None] & mask_n[None, :], other=0.0
+            )
+            acc += tl.dot(attn_vals, weight)
+
+        residual_ptrs = (
+            residual_x_ptr
+            + offs_m[:, None] * residual_stride_m
+            + offs_n[None, :] * residual_stride_n
+        )
+        residual = tl.load(
+            residual_ptrs, mask=mask_m[:, None] & mask_n[None, :], other=0.0
+        ).to(tl.float32)
+        scale = tl.load(scale_ptr + offs_n, mask=mask_n, other=0.0).to(tl.float32)
+        out = residual + acc * scale[None, :]
+        out_ptrs = (
+            out_ptr + offs_m[:, None] * out_stride_m + offs_n[None, :] * out_stride_n
+        )
+        tl.store(out_ptrs, out.to(tl.bfloat16), mask=mask_m[:, None] & mask_n[None, :])
+
+    @triton.autotune(
+        configs=[
+            triton.Config({"BLOCK_M": 32, "BLOCK_N": 64, "BLOCK_K": 32}, num_warps=4),
+            triton.Config({"BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 32}, num_warps=4),
+            triton.Config({"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 32}, num_warps=8),
+            triton.Config({"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 64}, num_warps=8),
+        ],
+        key=["M", "N", "K"],
+        reset_to_zero=["grad_scale_ptr"],
+    )
+    @triton.jit
+    def attn_grad_scale_kernel(
+        attn_y_ptr,
+        proj_weight_t_ptr,
+        grad_out_ptr,
+        grad_scale_ptr,
+        M,
+        N,
+        K,
+        seq_len,
+        head_dim,
+        attn_stride_b,
+        attn_stride_h,
+        attn_stride_t,
+        attn_stride_d,
+        proj_stride_k,
+        proj_stride_n,
+        grad_out_stride_m,
+        grad_out_stride_n,
+        BLOCK_M: tl.constexpr,
+        BLOCK_N: tl.constexpr,
+        BLOCK_K: tl.constexpr,
+    ):
+        """Fuse branch recompute with the reduction for ``grad_scale``."""
+        pid_m = tl.program_id(0)
+        pid_n = tl.program_id(1)
+
+        offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+        offs_k = tl.arange(0, BLOCK_K)
+        mask_m = offs_m < M
+        mask_n = offs_n < N
+        acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+
+        b_idx = offs_m // seq_len
+        t_idx = offs_m % seq_len
+
+        for k_base in range(0, K, BLOCK_K):
+            k_idx = k_base + offs_k
+            mask_k = k_idx < K
+            h_idx = k_idx // head_dim
+            d_idx = k_idx % head_dim
+
+            attn_ptrs = (
+                attn_y_ptr
+                + b_idx[:, None] * attn_stride_b
+                + h_idx[None, :] * attn_stride_h
+                + t_idx[:, None] * attn_stride_t
+                + d_idx[None, :] * attn_stride_d
+            )
+            attn_vals = tl.load(
+                attn_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0
+            )
+            weight_ptrs = (
+                proj_weight_t_ptr
+                + k_idx[:, None] * proj_stride_k
+                + offs_n[None, :] * proj_stride_n
+            )
+            weight = tl.load(
+                weight_ptrs, mask=mask_k[:, None] & mask_n[None, :], other=0.0
+            )
+            acc += tl.dot(attn_vals, weight)
+
+        grad_out_ptrs = (
+            grad_out_ptr
+            + offs_m[:, None] * grad_out_stride_m
+            + offs_n[None, :] * grad_out_stride_n
+        )
+        grad_out = tl.load(
+            grad_out_ptrs, mask=mask_m[:, None] & mask_n[None, :], other=0.0
+        ).to(tl.float32)
+        partial = tl.sum(acc * grad_out, axis=0)
+        tl.atomic_add(grad_scale_ptr + offs_n, partial, mask=mask_n)
+
+    @triton.autotune(
+        configs=[
+            triton.Config({"BLOCK_M": 32, "BLOCK_N": 64, "BLOCK_K": 32}, num_warps=4),
+            triton.Config({"BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 32}, num_warps=4),
+            triton.Config({"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 32}, num_warps=8),
+            triton.Config({"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 64}, num_warps=8),
+        ],
+        key=["M", "N", "K"],
+    )
+    @triton.jit
+    def attn_grad_attn_y_kernel(
+        grad_branch_ptr,
+        proj_weight_t_ptr,
+        grad_attn_y_ptr,
+        M,
+        N,
+        K,
+        seq_len,
+        head_dim,
+        grad_branch_stride_m,
+        grad_branch_stride_n,
+        proj_stride_k,
+        proj_stride_n,
+        grad_attn_stride_b,
+        grad_attn_stride_h,
+        grad_attn_stride_t,
+        grad_attn_stride_d,
+        BLOCK_M: tl.constexpr,
+        BLOCK_N: tl.constexpr,
+        BLOCK_K: tl.constexpr,
+    ):
+        """Compute ``grad_attn_y`` directly into head-major layout."""
+        pid_m = tl.program_id(0)
+        pid_k = tl.program_id(1)
+
+        offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        offs_k = pid_k * BLOCK_K + tl.arange(0, BLOCK_K)
+        offs_n = tl.arange(0, BLOCK_N)
+        mask_m = offs_m < M
+        mask_k = offs_k < K
+        acc = tl.zeros((BLOCK_M, BLOCK_K), dtype=tl.float32)
+
+        for n_base in range(0, N, BLOCK_N):
+            n_idx = n_base + offs_n
+            mask_n = n_idx < N
+            grad_branch_ptrs = (
+                grad_branch_ptr
+                + offs_m[:, None] * grad_branch_stride_m
+                + n_idx[None, :] * grad_branch_stride_n
+            )
+            grad_branch_vals = tl.load(
+                grad_branch_ptrs, mask=mask_m[:, None] & mask_n[None, :], other=0.0
+            )
+            weight_ptrs = (
+                proj_weight_t_ptr
+                + offs_k[:, None] * proj_stride_k
+                + n_idx[None, :] * proj_stride_n
+            )
+            weight = tl.load(
+                weight_ptrs, mask=mask_k[:, None] & mask_n[None, :], other=0.0
+            )
+            acc += tl.dot(grad_branch_vals, tl.trans(weight))
+
+        b_idx = offs_m // seq_len
+        t_idx = offs_m % seq_len
+        h_idx = offs_k // head_dim
+        d_idx = offs_k % head_dim
+        out_ptrs = (
+            grad_attn_y_ptr
+            + b_idx[:, None] * grad_attn_stride_b
+            + h_idx[None, :] * grad_attn_stride_h
+            + t_idx[:, None] * grad_attn_stride_t
+            + d_idx[None, :] * grad_attn_stride_d
+        )
+        tl.store(out_ptrs, acc.to(tl.bfloat16), mask=mask_m[:, None] & mask_k[None, :])
+
+    @triton.autotune(
+        configs=[
+            triton.Config({"BLOCK_M": 32, "BLOCK_N": 64, "BLOCK_K": 32}, num_warps=4),
+            triton.Config({"BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 32}, num_warps=4),
+            triton.Config({"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 32}, num_warps=8),
+            triton.Config({"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 64}, num_warps=8),
+        ],
+        key=["M", "N", "K"],
+    )
+    @triton.jit
+    def attn_grad_proj_weight_t_kernel(
+        attn_y_ptr,
+        grad_branch_ptr,
+        grad_proj_weight_t_ptr,
+        M,
+        N,
+        K,
+        seq_len,
+        head_dim,
+        attn_stride_b,
+        attn_stride_h,
+        attn_stride_t,
+        attn_stride_d,
+        grad_branch_stride_m,
+        grad_branch_stride_n,
+        grad_proj_stride_k,
+        grad_proj_stride_n,
+        BLOCK_M: tl.constexpr,
+        BLOCK_N: tl.constexpr,
+        BLOCK_K: tl.constexpr,
+    ):
+        """Compute ``grad_proj_weight_t`` without flattening the head-major input."""
+        pid_k = tl.program_id(0)
+        pid_n = tl.program_id(1)
+
+        offs_k = pid_k * BLOCK_K + tl.arange(0, BLOCK_K)
+        offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+        offs_m = tl.arange(0, BLOCK_M)
+        mask_k = offs_k < K
+        mask_n = offs_n < N
+        acc = tl.zeros((BLOCK_K, BLOCK_N), dtype=tl.float32)
+
+        h_idx = offs_k // head_dim
+        d_idx = offs_k % head_dim
+
+        for m_base in range(0, M, BLOCK_M):
+            m_idx = m_base + offs_m
+            mask_m = m_idx < M
+            b_idx = m_idx // seq_len
+            t_idx = m_idx % seq_len
+            attn_ptrs = (
+                attn_y_ptr
+                + b_idx[None, :] * attn_stride_b
+                + h_idx[:, None] * attn_stride_h
+                + t_idx[None, :] * attn_stride_t
+                + d_idx[:, None] * attn_stride_d
+            )
+            attn_vals = tl.load(
+                attn_ptrs, mask=mask_k[:, None] & mask_m[None, :], other=0.0
+            )
+            grad_branch_ptrs = (
+                grad_branch_ptr
+                + m_idx[:, None] * grad_branch_stride_m
+                + offs_n[None, :] * grad_branch_stride_n
+            )
+            grad_branch_vals = tl.load(
+                grad_branch_ptrs, mask=mask_m[:, None] & mask_n[None, :], other=0.0
+            )
+            acc += tl.dot(attn_vals, grad_branch_vals)
+
+        out_ptrs = (
+            grad_proj_weight_t_ptr
+            + offs_k[:, None] * grad_proj_stride_k
+            + offs_n[None, :] * grad_proj_stride_n
+        )
+        tl.store(out_ptrs, acc.to(tl.bfloat16), mask=mask_k[:, None] & mask_n[None, :])
+
+
+def attn_outproj_residual_triton(
+    residual_x: Tensor,
+    attn_y: Tensor,
+    proj_weight_t: Tensor,
+    scale: Tensor,
+) -> Tensor:
+    """Run the fused Triton attention-outproj-residual kernel."""
+    if triton is None:
+        raise RuntimeError("Triton is unavailable")
+    batch, num_heads, seq_len, head_dim = attn_y.shape
+    model_dim = num_heads * head_dim
+    out = torch.empty_like(residual_x)
+
+    def grid(meta: dict[str, int]) -> tuple[int, int]:
+        return (
+            triton.cdiv(residual_x.size(0), meta["BLOCK_M"]),
+            triton.cdiv(residual_x.size(1), meta["BLOCK_N"]),
+        )
+
+    attn_outproj_residual_kernel[grid](
+        attn_y,
+        proj_weight_t,
+        residual_x,
+        scale,
+        out,
+        residual_x.size(0),
+        residual_x.size(1),
+        model_dim,
+        seq_len,
+        head_dim,
+        attn_y.stride(0),
+        attn_y.stride(1),
+        attn_y.stride(2),
+        attn_y.stride(3),
+        proj_weight_t.stride(0),
+        proj_weight_t.stride(1),
+        residual_x.stride(0),
+        residual_x.stride(1),
+        out.stride(0),
+        out.stride(1),
+    )
+    return out
+
+
+def attn_grad_scale_triton(
+    attn_y: Tensor,
+    proj_weight_t: Tensor,
+    grad_out: Tensor,
+) -> Tensor:
+    """Run the fused branch-recompute reduction for ``grad_scale``."""
+    if triton is None:
+        raise RuntimeError("Triton is unavailable")
+    batch, num_heads, seq_len, head_dim = attn_y.shape
+    model_dim = num_heads * head_dim
+    grad_scale = torch.zeros(model_dim, device=grad_out.device, dtype=torch.float32)
+
+    def grid(meta: dict[str, int]) -> tuple[int, int]:
+        return (
+            triton.cdiv(grad_out.size(0), meta["BLOCK_M"]),
+            triton.cdiv(grad_out.size(1), meta["BLOCK_N"]),
+        )
+
+    attn_grad_scale_kernel[grid](
+        attn_y,
+        proj_weight_t,
+        grad_out,
+        grad_scale,
+        grad_out.size(0),
+        grad_out.size(1),
+        model_dim,
+        seq_len,
+        head_dim,
+        attn_y.stride(0),
+        attn_y.stride(1),
+        attn_y.stride(2),
+        attn_y.stride(3),
+        proj_weight_t.stride(0),
+        proj_weight_t.stride(1),
+        grad_out.stride(0),
+        grad_out.stride(1),
+    )
+    return grad_scale
+
+
+def attn_grad_attn_y_triton(
+    grad_branch: Tensor,
+    proj_weight_t: Tensor,
+    seq_len: int,
+    head_dim: int,
+) -> Tensor:
+    """Run the Triton backward kernel for ``grad_attn_y``."""
+    if triton is None:
+        raise RuntimeError("Triton is unavailable")
+    model_dim = proj_weight_t.size(0)
+    batch = grad_branch.size(0) // seq_len
+    num_heads = model_dim // head_dim
+    grad_attn_y = torch.empty(
+        batch,
+        num_heads,
+        seq_len,
+        head_dim,
+        device=grad_branch.device,
+        dtype=grad_branch.dtype,
+    )
+
+    def grid(meta: dict[str, int]) -> tuple[int, int]:
+        return (
+            triton.cdiv(grad_branch.size(0), meta["BLOCK_M"]),
+            triton.cdiv(model_dim, meta["BLOCK_K"]),
+        )
+
+    attn_grad_attn_y_kernel[grid](
+        grad_branch,
+        proj_weight_t,
+        grad_attn_y,
+        grad_branch.size(0),
+        grad_branch.size(1),
+        model_dim,
+        seq_len,
+        head_dim,
+        grad_branch.stride(0),
+        grad_branch.stride(1),
+        proj_weight_t.stride(0),
+        proj_weight_t.stride(1),
+        grad_attn_y.stride(0),
+        grad_attn_y.stride(1),
+        grad_attn_y.stride(2),
+        grad_attn_y.stride(3),
+    )
+    return grad_attn_y
+
+
+def attn_grad_proj_weight_t_triton(
+    attn_y: Tensor,
+    grad_branch: Tensor,
+) -> Tensor:
+    """Run the Triton backward kernel for ``grad_proj_weight_t``."""
+    if triton is None:
+        raise RuntimeError("Triton is unavailable")
+    batch, num_heads, seq_len, head_dim = attn_y.shape
+    model_dim = num_heads * head_dim
+    grad_proj_weight_t = torch.empty(
+        model_dim,
+        grad_branch.size(1),
+        device=grad_branch.device,
+        dtype=grad_branch.dtype,
+    )
+
+    def grid(meta: dict[str, int]) -> tuple[int, int]:
+        return (
+            triton.cdiv(model_dim, meta["BLOCK_K"]),
+            triton.cdiv(grad_branch.size(1), meta["BLOCK_N"]),
+        )
+
+    attn_grad_proj_weight_t_kernel[grid](
+        attn_y,
+        grad_branch,
+        grad_proj_weight_t,
+        grad_branch.size(0),
+        grad_branch.size(1),
+        model_dim,
+        seq_len,
+        head_dim,
+        attn_y.stride(0),
+        attn_y.stride(1),
+        attn_y.stride(2),
+        attn_y.stride(3),
+        grad_branch.stride(0),
+        grad_branch.stride(1),
+        grad_proj_weight_t.stride(0),
+        grad_proj_weight_t.stride(1),
+    )
+    return grad_proj_weight_t
+
+
 def register_allama_mlp_gateup_custom_op() -> Optional[Any]:
     """Register the optional Triton gate/up custom op once."""
-    global _ALLAMA_MLP_GATEUP_OP
+    global _ALLAMA_MLP_GATEUP_OP, _ALLAMA_MLP_GATEUP_BACKWARD_PARTS_OP
     if _ALLAMA_MLP_GATEUP_OP is not None:
         return _ALLAMA_MLP_GATEUP_OP
     if triton is None:
@@ -760,8 +1308,256 @@ def register_allama_mlp_gateup_custom_op() -> Optional[Any]:
         backward,
         setup_context=setup_context,
     )
+    _ALLAMA_MLP_GATEUP_BACKWARD_PARTS_OP = gateup_swiglu_backward_parts_op
     _ALLAMA_MLP_GATEUP_OP = gateup_swiglu_op
     return _ALLAMA_MLP_GATEUP_OP
+
+
+def register_allama_attn_rms_bridge_custom_op() -> Optional[Any]:
+    """Register the fused attention out-proj plus next-RMSNorm bridge op."""
+    global _ALLAMA_ATTN_RMS_BRIDGE_OP
+    if _ALLAMA_ATTN_RMS_BRIDGE_OP is not None:
+        return _ALLAMA_ATTN_RMS_BRIDGE_OP
+    if triton is None:
+        return None
+
+    @torch.library.custom_op(
+        "allama_triton::attn_grad_scale",
+        mutates_args=(),
+    )
+    def attn_grad_scale_op(
+        attn_y: Tensor,
+        proj_weight_t: Tensor,
+        grad_out: Tensor,
+    ) -> Tensor:
+        return attn_grad_scale_triton(attn_y, proj_weight_t, grad_out)
+
+    @attn_grad_scale_op.register_fake
+    def _attn_grad_scale_op_fake(
+        attn_y: Tensor,
+        proj_weight_t: Tensor,
+        grad_out: Tensor,
+    ) -> Tensor:
+        del attn_y, proj_weight_t
+        return grad_out.new_empty((grad_out.size(1),), dtype=torch.float32)
+
+    @torch.library.custom_op(
+        "allama_triton::attn_grad_attn_y",
+        mutates_args=(),
+    )
+    def attn_grad_attn_y_op(
+        grad_branch: Tensor,
+        proj_weight_t: Tensor,
+        seq_len: int,
+        head_dim: int,
+    ) -> Tensor:
+        return attn_grad_attn_y_triton(grad_branch, proj_weight_t, seq_len, head_dim)
+
+    @attn_grad_attn_y_op.register_fake
+    def _attn_grad_attn_y_op_fake(
+        grad_branch: Tensor,
+        proj_weight_t: Tensor,
+        seq_len: int,
+        head_dim: int,
+    ) -> Tensor:
+        model_dim = proj_weight_t.size(0)
+        batch = grad_branch.size(0) // seq_len
+        num_heads = model_dim // head_dim
+        return grad_branch.new_empty((batch, num_heads, seq_len, head_dim))
+
+    @torch.library.custom_op(
+        "allama_triton::attn_grad_proj_weight_t",
+        mutates_args=(),
+    )
+    def attn_grad_proj_weight_t_op(
+        attn_y: Tensor,
+        grad_branch: Tensor,
+    ) -> Tensor:
+        return attn_grad_proj_weight_t_triton(attn_y, grad_branch)
+
+    @attn_grad_proj_weight_t_op.register_fake
+    def _attn_grad_proj_weight_t_op_fake(
+        attn_y: Tensor,
+        grad_branch: Tensor,
+    ) -> Tensor:
+        model_dim = attn_y.size(1) * attn_y.size(3)
+        return grad_branch.new_empty((model_dim, grad_branch.size(1)))
+
+    @torch.library.custom_op(
+        "allama_triton::attn_rms_bridge",
+        mutates_args=(),
+    )
+    def attn_rms_bridge_op(
+        residual_x: Tensor,
+        attn_y: Tensor,
+        proj_weight_t: Tensor,
+        scale: Tensor,
+        norm_weight: Tensor,
+        eps: float,
+    ) -> tuple[Tensor, Tensor]:
+        mixed = attn_outproj_residual_triton(residual_x, attn_y, proj_weight_t, scale)
+        normed = F.rms_norm(
+            mixed,
+            (mixed.size(-1),),
+            norm_weight.to(dtype=mixed.dtype),
+            eps=eps,
+        )
+        return mixed, normed
+
+    @attn_rms_bridge_op.register_fake
+    def _attn_rms_bridge_op_fake(
+        residual_x: Tensor,
+        attn_y: Tensor,
+        proj_weight_t: Tensor,
+        scale: Tensor,
+        norm_weight: Tensor,
+        eps: float,
+    ) -> tuple[Tensor, Tensor]:
+        del attn_y, proj_weight_t, scale, norm_weight, eps
+        return residual_x.new_empty(residual_x.shape), residual_x.new_empty(
+            residual_x.shape
+        )
+
+    def setup_context(
+        ctx: Any,
+        inputs: tuple[Tensor, Tensor, Tensor, Tensor, Tensor, float],
+        output: tuple[Tensor, Tensor],
+    ) -> None:
+        residual_x, attn_y, proj_weight_t, scale, norm_weight, eps = inputs
+        del residual_x
+        mixed, _ = output
+        ctx.save_for_backward(mixed, attn_y, proj_weight_t, scale, norm_weight)
+        ctx.eps = float(eps)
+
+    def backward(
+        ctx: Any,
+        grad_mixed_out: Optional[Tensor],
+        grad_normed_out: Optional[Tensor],
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, None]:
+        mixed, attn_y, proj_weight_t, scale, norm_weight = ctx.saved_tensors
+        grad_total, grad_norm_weight = rms_norm_backward_total(
+            mixed,
+            norm_weight,
+            grad_normed_out,
+            grad_mixed_out,
+            ctx.eps,
+        )
+        scale_cast = scale.to(dtype=grad_total.dtype)[None, :]
+        grad_x = grad_total
+        grad_scale = attn_grad_scale_op(attn_y, proj_weight_t, grad_total).to(
+            dtype=scale.dtype
+        )
+        grad_branch = grad_total * scale_cast
+        grad_proj_weight_t = attn_grad_proj_weight_t_op(attn_y, grad_branch)
+        grad_attn_y = attn_grad_attn_y_op(
+            grad_branch,
+            proj_weight_t,
+            attn_y.size(2),
+            attn_y.size(3),
+        )
+        return (
+            grad_x,
+            grad_attn_y,
+            grad_proj_weight_t,
+            grad_scale,
+            grad_norm_weight,
+            None,
+        )
+
+    torch.library.register_autograd(
+        "allama_triton::attn_rms_bridge",
+        backward,
+        setup_context=setup_context,
+    )
+    _ALLAMA_ATTN_RMS_BRIDGE_OP = attn_rms_bridge_op
+    return _ALLAMA_ATTN_RMS_BRIDGE_OP
+
+
+def register_allama_mlp_full_custom_op() -> Optional[Any]:
+    """Register the larger MLP block custom op once."""
+    global _ALLAMA_MLP_FULL_OP
+    if _ALLAMA_MLP_FULL_OP is not None:
+        return _ALLAMA_MLP_FULL_OP
+    gateup_op = register_allama_mlp_gateup_custom_op()
+    backward_parts_op = _ALLAMA_MLP_GATEUP_BACKWARD_PARTS_OP
+    if gateup_op is None or backward_parts_op is None:
+        return None
+
+    @torch.library.custom_op(
+        "allama_triton::mlp_full",
+        mutates_args=(),
+    )
+    def mlp_full_op(
+        residual_x: Tensor,
+        x_norm: Tensor,
+        gate_weight_t: Tensor,
+        up_weight_t: Tensor,
+        down_weight_t: Tensor,
+        scale: Tensor,
+    ) -> Tensor:
+        hidden = gateup_op(x_norm, gate_weight_t, up_weight_t)
+        branch = hidden @ down_weight_t
+        return residual_x + branch * scale.to(dtype=residual_x.dtype)[None, :]
+
+    @mlp_full_op.register_fake
+    def _mlp_full_op_fake(
+        residual_x: Tensor,
+        x_norm: Tensor,
+        gate_weight_t: Tensor,
+        up_weight_t: Tensor,
+        down_weight_t: Tensor,
+        scale: Tensor,
+    ) -> Tensor:
+        del x_norm, gate_weight_t, up_weight_t, down_weight_t, scale
+        return residual_x.new_empty(residual_x.shape)
+
+    def setup_context(
+        ctx: Any,
+        inputs: tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor],
+        output: Tensor,
+    ) -> None:
+        del output
+        residual_x, x_norm, gate_weight_t, up_weight_t, down_weight_t, scale = inputs
+        del residual_x
+        ctx.save_for_backward(x_norm, gate_weight_t, up_weight_t, down_weight_t, scale)
+
+    def backward(
+        ctx: Any, grad_out: Tensor
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+        x_norm, gate_weight_t, up_weight_t, down_weight_t, scale = ctx.saved_tensors
+        hidden = gateup_op(x_norm, gate_weight_t, up_weight_t)
+        scale_cast = scale.to(dtype=grad_out.dtype)[None, :]
+        grad_residual_x = grad_out
+        grad_branch = grad_out * scale_cast
+        branch = hidden @ down_weight_t
+        grad_scale = (
+            (grad_out.float() * branch.float()).sum(dim=0).to(dtype=scale.dtype)
+        )
+        grad_down_weight_t = hidden.transpose(0, 1) @ grad_branch
+        grad_hidden = grad_branch @ down_weight_t.transpose(0, 1)
+        grad_gate, grad_up = backward_parts_op(
+            x_norm, gate_weight_t, up_weight_t, grad_hidden
+        )
+        grad_x_norm = grad_gate @ gate_weight_t.transpose(0, 1)
+        grad_x_norm = grad_x_norm + grad_up @ up_weight_t.transpose(0, 1)
+        grad_gate_weight_t = x_norm.transpose(0, 1) @ grad_gate
+        grad_up_weight_t = x_norm.transpose(0, 1) @ grad_up
+        return (
+            grad_residual_x,
+            grad_x_norm,
+            grad_gate_weight_t,
+            grad_up_weight_t,
+            grad_down_weight_t,
+            grad_scale,
+        )
+
+    torch.library.register_autograd(
+        "allama_triton::mlp_full",
+        backward,
+        setup_context=setup_context,
+    )
+    _ALLAMA_MLP_FULL_OP = mlp_full_op
+    return _ALLAMA_MLP_FULL_OP
 
 
 # -----------------------------------------------------------------------------
@@ -800,6 +1596,7 @@ class HyperSharedConfig:
     resid_dropout: float = 0.0
     use_bias: bool = False
     cast_linears: bool = True
+    attn_kernel: str = "pytorch"
     mlp_kernel: str = "pytorch"
 
 
@@ -839,7 +1636,7 @@ class HyperSharedAttention(nn.Module):
         self.proj._zero_init = True
         self.rotary = Rotary(self.head_dim, base=cfg.rope_base)
 
-    def forward(
+    def forward_heads(
         self,
         x: Tensor,
         q_gain: Tensor,
@@ -884,6 +1681,15 @@ class HyperSharedAttention(nn.Module):
                 is_causal=True,
                 dropout_p=self.attn_dropout if self.training else 0.0,
             )
+        return y
+
+    def forward(
+        self,
+        x: Tensor,
+        q_gain: Tensor,
+    ) -> Tensor:
+        bsz, seqlen, dim = x.shape
+        y = self.forward_heads(x, q_gain=q_gain)
         y = y.transpose(1, 2).contiguous().view(bsz, seqlen, dim)
         return self.resid_dropout(self.proj(y))
 
@@ -899,13 +1705,18 @@ class HyperSharedSwiGLU(nn.Module):
         )
         self.hidden = hidden
         self.mlp_kernel = cfg.mlp_kernel.strip().lower()
-        if self.mlp_kernel not in {"pytorch", "triton_gateup"}:
+        if self.mlp_kernel not in {"pytorch", "triton_gateup", "triton_full"}:
             raise ValueError(
-                f"Unsupported mlp_kernel={cfg.mlp_kernel!r}; expected pytorch or triton_gateup."
+                f"Unsupported mlp_kernel={cfg.mlp_kernel!r}; expected pytorch, triton_gateup, or triton_full."
             )
         self.gateup_op = (
             register_allama_mlp_gateup_custom_op()
-            if self.mlp_kernel == "triton_gateup"
+            if self.mlp_kernel in {"triton_gateup", "triton_full"}
+            else None
+        )
+        self.full_op = (
+            register_allama_mlp_full_custom_op()
+            if self.mlp_kernel == "triton_full"
             else None
         )
         self.resid_dropout = nn.Dropout(float(cfg.resid_dropout))
@@ -914,23 +1725,56 @@ class HyperSharedSwiGLU(nn.Module):
         self.down = linear_cls(hidden, cfg.model_dim, bias=cfg.use_bias)
         self.down._zero_init = True
 
-    def forward(self, x: Tensor) -> Tensor:
+    def project_hidden(self, x: Tensor) -> Tensor:
+        """Return the hidden SwiGLU activation before the down projection."""
         if (
-            self.mlp_kernel == "triton_gateup"
+            self.gateup_op is not None
             and x.is_cuda
             and x.dtype == torch.bfloat16
             and self.gate_up.bias is None
         ):
-            if self.gateup_op is not None:
-                weight_t = self.gate_up.weight.to(dtype=x.dtype).t()
-                hidden = self.gateup_op(
-                    x.reshape(-1, x.size(-1)),
-                    weight_t[:, : self.hidden],
-                    weight_t[:, self.hidden :],
-                ).view(*x.shape[:-1], self.hidden)
-                return self.resid_dropout(self.down(hidden))
+            weight_t = self.gate_up.weight.to(dtype=x.dtype).t()
+            return self.gateup_op(
+                x.reshape(-1, x.size(-1)),
+                weight_t[:, : self.hidden],
+                weight_t[:, self.hidden :],
+            ).view(*x.shape[:-1], self.hidden)
         gate, up = self.gate_up(x).chunk(2, dim=-1)
-        return self.resid_dropout(self.down(F.silu(gate) * up))
+        return F.silu(gate) * up
+
+    def forward_full(self, residual_x: Tensor, x_norm: Tensor, scale: Tensor) -> Tensor:
+        """Run the larger MLP boundary that includes down-proj and residual add."""
+        if (
+            self.mlp_kernel == "triton_full"
+            and self.full_op is not None
+            and residual_x.is_cuda
+            and residual_x.dtype == torch.bfloat16
+            and self.gate_up.bias is None
+            and self.down.bias is None
+            and self.resid_dropout.p == 0.0
+        ):
+            gate_weight_t = (
+                self.gate_up.weight[: self.hidden].to(dtype=x_norm.dtype).t()
+            )
+            up_weight_t = self.gate_up.weight[self.hidden :].to(dtype=x_norm.dtype).t()
+            down_weight_t = self.down.weight.to(dtype=x_norm.dtype).t()
+            out = self.full_op(
+                residual_x.reshape(-1, residual_x.size(-1)),
+                x_norm.reshape(-1, x_norm.size(-1)),
+                gate_weight_t,
+                up_weight_t,
+                down_weight_t,
+                scale,
+            )
+            return out.view_as(residual_x)
+
+        hidden = self.project_hidden(x_norm)
+        branch = self.resid_dropout(self.down(hidden))
+        return residual_x + scale.to(dtype=residual_x.dtype)[None, None, :] * branch
+
+    def forward(self, x: Tensor) -> Tensor:
+        hidden = self.project_hidden(x)
+        return self.resid_dropout(self.down(hidden))
 
 
 class HyperSharedBlock(nn.Module):
@@ -948,8 +1792,18 @@ class HyperSharedBlock(nn.Module):
             raise ValueError(
                 f"v4 shared model expects prenorm or postnorm layout; got {cfg.norm_layout!r}"
             )
+        self.attn_kernel = cfg.attn_kernel.strip().lower()
+        if self.attn_kernel not in {"pytorch", "triton_bridge"}:
+            raise ValueError(
+                f"Unsupported attn_kernel={cfg.attn_kernel!r}; expected pytorch or triton_bridge."
+            )
         self.attn_norm = build_norm(cfg.model_dim, cfg.norm_kind, cfg.norm_eps)
         self.mlp_norm = build_norm(cfg.model_dim, cfg.norm_kind, cfg.norm_eps)
+        self.attn_bridge_op = (
+            register_allama_attn_rms_bridge_custom_op()
+            if self.attn_kernel == "triton_bridge"
+            else None
+        )
         self.attn = HyperSharedAttention(cfg)
         self.mlp = HyperSharedSwiGLU(cfg)
 
@@ -967,10 +1821,36 @@ class HyperSharedBlock(nn.Module):
 
         if self.norm_layout == "prenorm":
             attn_in = self.attn_norm(mix_x0(x, x0, x0_gate))
-            attn_out = self.attn(attn_in, q_gain=q_gain)
-            x = x + attn_scale * attn_out
-            mlp_out = self.mlp(self.mlp_norm(x))
-            x = x + mlp_scale * mlp_out
+            if (
+                self.attn_kernel == "triton_bridge"
+                and self.attn_bridge_op is not None
+                and x.is_cuda
+                and x.dtype == torch.bfloat16
+                and self.norm_kind == "rmsnorm"
+                and isinstance(self.mlp_norm, RMSNormWeight)
+                and self.attn.proj.bias is None
+                and self.attn.resid_dropout.p == 0.0
+            ):
+                attn_y = self.attn.forward_heads(attn_in, q_gain=q_gain)
+                mixed, mlp_in = self.attn_bridge_op(
+                    x.reshape(-1, x.size(-1)),
+                    attn_y,
+                    self.attn.proj.weight.to(dtype=x.dtype).t(),
+                    attn_scale.reshape(-1),
+                    self.mlp_norm.weight,
+                    float(self.mlp_norm.eps),
+                )
+                x = mixed.view_as(x)
+                mlp_in = mlp_in.view_as(x)
+            else:
+                attn_out = self.attn(attn_in, q_gain=q_gain)
+                x = x + attn_scale * attn_out
+                mlp_in = self.mlp_norm(x)
+            if self.mlp.mlp_kernel == "triton_full":
+                x = self.mlp.forward_full(x, mlp_in, mlp_scale.reshape(-1))
+            else:
+                mlp_out = self.mlp(mlp_in)
+                x = x + mlp_scale * mlp_out
             return x
 
         attn_in = mix_x0(x, x0, x0_gate)
@@ -1457,6 +2337,7 @@ def build_hyper_shared_model_from_args(
         resid_dropout=float(getattr(args, "resid_dropout", 0.0)),
         use_bias=bool(getattr(args, "use_bias", False)),
         cast_linears=bool(getattr(args, "cast_linears", True)),
+        attn_kernel=str(getattr(args, "attn_kernel", "pytorch")),
         mlp_kernel=str(getattr(args, "mlp_kernel", "pytorch")),
     )
 
