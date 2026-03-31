@@ -90,6 +90,29 @@ void check_attention_prep_backward_inputs(
       "grad_v must match grad_k shape");
 }
 
+void check_attn_outproj_inputs(
+    const torch::Tensor& residual_x,
+    const torch::Tensor& attn_y,
+    const torch::Tensor& proj_weight_t,
+    const torch::Tensor& scale) {
+  TORCH_CHECK(residual_x.dim() == 2, "residual_x must be [M, N]");
+  TORCH_CHECK(attn_y.dim() == 4, "attn_y must be [B, S, H, D]");
+  TORCH_CHECK(proj_weight_t.dim() == 2, "proj_weight_t must be [K, N]");
+  TORCH_CHECK(scale.dim() == 1, "scale must be 1D");
+  TORCH_CHECK(
+      attn_y.size(0) * attn_y.size(1) == residual_x.size(0),
+      "attn_y flattened rows must match residual_x rows");
+  TORCH_CHECK(
+      attn_y.size(2) * attn_y.size(3) == residual_x.size(1),
+      "attn_y flattened cols must match residual_x cols");
+  TORCH_CHECK(
+      proj_weight_t.size(0) == residual_x.size(1) && proj_weight_t.size(1) == residual_x.size(1),
+      "proj_weight_t must match flattened model dim");
+  TORCH_CHECK(
+      scale.numel() == residual_x.size(1),
+      "scale length must match model dim");
+}
+
 torch::Tensor residual_scale_rms_norm_cpu(
     const torch::Tensor& x,
     const torch::Tensor& branch,
@@ -200,6 +223,36 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> attention_prep_bshd_cpu(
       k_rot.to(qkv.scalar_type()),
       v.to(qkv.scalar_type()),
   };
+}
+
+torch::Tensor attn_outproj_residual_cpu(
+    const torch::Tensor& residual_x,
+    const torch::Tensor& attn_y,
+    const torch::Tensor& proj_weight_t,
+    const torch::Tensor& scale) {
+  auto model_dim = residual_x.size(1);
+  auto attn_flat = attn_y.contiguous().view({-1, model_dim});
+  auto branch = torch::matmul(attn_flat, proj_weight_t);
+  auto scale_cast = scale.to(branch.scalar_type()).view({1, model_dim});
+  return residual_x + branch * scale_cast;
+}
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> attn_outproj_residual_backward_cpu(
+    const torch::Tensor& attn_y,
+    const torch::Tensor& proj_weight_t,
+    const torch::Tensor& scale,
+    const torch::Tensor& grad_out) {
+  auto model_dim = grad_out.size(1);
+  auto attn_flat = attn_y.contiguous().view({-1, model_dim});
+  auto branch = torch::matmul(attn_flat, proj_weight_t);
+  auto scale_cast = scale.to(grad_out.scalar_type()).view({1, model_dim});
+  auto grad_branch = grad_out * scale_cast;
+  auto grad_proj_weight_t = torch::matmul(attn_flat.transpose(0, 1), grad_branch);
+  auto grad_attn_y =
+      torch::matmul(grad_branch, proj_weight_t.transpose(0, 1)).view_as(attn_y);
+  auto grad_scale =
+      (grad_out.to(torch::kFloat32) * branch.to(torch::kFloat32)).sum(0).to(scale.scalar_type());
+  return {grad_attn_y, grad_proj_weight_t, grad_scale};
 }
 
 }  // namespace
@@ -343,6 +396,42 @@ std::tuple<torch::Tensor, torch::Tensor> attention_prep_bshd_backward(
       qkv, q_gain, cos, sin, grad_q, grad_k, grad_v, num_heads, num_kv_heads, head_dim);
 }
 
+torch::Tensor attn_outproj_residual(
+    const torch::Tensor& residual_x,
+    const torch::Tensor& attn_y,
+    const torch::Tensor& proj_weight_t,
+    const torch::Tensor& scale) {
+  check_attn_outproj_inputs(residual_x, attn_y, proj_weight_t, scale);
+  if (residual_x.is_cuda()) {
+    TORCH_CHECK(
+        attn_y.is_cuda() && proj_weight_t.is_cuda() && scale.is_cuda(),
+        "attn_outproj_residual inputs must all be CUDA tensors");
+  }
+  return attn_outproj_residual_cpu(residual_x, attn_y, proj_weight_t, scale);
+}
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> attn_outproj_residual_backward(
+    const torch::Tensor& attn_y,
+    const torch::Tensor& proj_weight_t,
+    const torch::Tensor& scale,
+    const torch::Tensor& grad_out) {
+  auto model_dim = grad_out.size(1);
+  TORCH_CHECK(attn_y.dim() == 4, "attn_y must be [B, S, H, D]");
+  TORCH_CHECK(proj_weight_t.dim() == 2, "proj_weight_t must be 2D");
+  TORCH_CHECK(scale.dim() == 1, "scale must be 1D");
+  TORCH_CHECK(scale.numel() == model_dim, "scale length must match model dim");
+  TORCH_CHECK(
+      attn_y.size(0) * attn_y.size(1) == grad_out.size(0)
+          && attn_y.size(2) * attn_y.size(3) == model_dim,
+      "attn_y shape must flatten to grad_out");
+  if (attn_y.is_cuda()) {
+    TORCH_CHECK(
+        proj_weight_t.is_cuda() && scale.is_cuda() && grad_out.is_cuda(),
+        "attn_outproj_residual_backward inputs must all be CUDA tensors");
+  }
+  return attn_outproj_residual_backward_cpu(attn_y, proj_weight_t, scale, grad_out);
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def(
       "residual_scale_rms_norm",
@@ -364,4 +453,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       "attention_prep_bshd_backward",
       &attention_prep_bshd_backward,
       "C++/CUDA fused FA2 attention prep backward");
+  m.def(
+      "attn_outproj_residual",
+      &attn_outproj_residual,
+      "C++ benchmark boundary for attention output projection plus residual");
+  m.def(
+      "attn_outproj_residual_backward",
+      &attn_outproj_residual_backward,
+      "Backward for the C++ attention output projection plus residual boundary");
 }

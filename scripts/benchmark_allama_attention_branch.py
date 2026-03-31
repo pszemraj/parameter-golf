@@ -38,6 +38,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from allama_cpp_extension import load_allama_cpp_extension  # noqa: E402
 from allama_shared import (  # noqa: E402
     apply_rotary_emb,
     register_allama_attention_outproj_custom_op,
@@ -65,6 +66,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=50,
         help="Measured iterations for timing.",
+    )
+    parser.add_argument(
+        "--outproj-kernel",
+        choices=("triton", "cpp"),
+        default="triton",
+        help="Output projection/residual boundary to benchmark inside the FA2 branch.",
     )
     return parser.parse_args()
 
@@ -255,6 +262,10 @@ def fa2_backward_direct(
 def register_attention_branch_custom_op(
     prep_op: Callable[..., tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
     outproj_op: Callable[..., torch.Tensor],
+    outproj_backward_op: Callable[
+        [torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    ],
 ) -> Callable[..., torch.Tensor]:
     """Register a benchmark-local whole FA2 attention-branch custom op."""
 
@@ -453,22 +464,13 @@ def register_attention_branch_custom_op(
             ctx.num_kv_heads,
             ctx.head_dim,
         )
-        grad_scale = torch.ops.allama_triton.attn_grad_scale_bshd(
+        grad_attn_y, grad_proj_weight_t, grad_scale = outproj_backward_op(
             y,
             proj_weight_t,
+            attn_scale,
             grad_out_flat,
-        ).to(dtype=attn_scale.dtype)
-        grad_branch = grad_out_flat * attn_scale.to(dtype=grad_out.dtype)[None, :]
-        grad_proj_weight_t = torch.ops.allama_triton.attn_grad_proj_weight_t_bshd(
-            y,
-            grad_branch,
         )
-        grad_attn_y = torch.ops.allama_triton.attn_grad_attn_y_bshd(
-            grad_branch,
-            proj_weight_t,
-            y.size(1),
-            y.size(3),
-        )
+        grad_scale = grad_scale.to(dtype=attn_scale.dtype)
         grad_q, grad_k, grad_v = fa2_backward_direct(
             grad_attn_y,
             q,
@@ -519,6 +521,78 @@ def register_attention_branch_custom_op(
     return attention_branch_residual_op
 
 
+def build_outproj_ops(
+    outproj_kernel: str,
+) -> tuple[
+    Callable[..., torch.Tensor],
+    Callable[
+        [torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    ],
+]:
+    """Build forward/backward helpers for the post-FA2 outproj boundary."""
+    if outproj_kernel == "triton":
+        outproj_op = register_allama_attention_outproj_custom_op()
+        if outproj_op is None:
+            raise RuntimeError("expected Triton attention outproj op to be available")
+
+        def outproj_backward_op(
+            attn_y: torch.Tensor,
+            proj_weight_t: torch.Tensor,
+            scale: torch.Tensor,
+            grad_out_flat: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            grad_scale = torch.ops.allama_triton.attn_grad_scale_bshd(
+                attn_y,
+                proj_weight_t,
+                grad_out_flat,
+            )
+            grad_branch = grad_out_flat * scale.to(dtype=grad_out_flat.dtype)[None, :]
+            grad_proj_weight_t = torch.ops.allama_triton.attn_grad_proj_weight_t_bshd(
+                attn_y,
+                grad_branch,
+            )
+            grad_attn_y = torch.ops.allama_triton.attn_grad_attn_y_bshd(
+                grad_branch,
+                proj_weight_t,
+                attn_y.size(1),
+                attn_y.size(3),
+            )
+            return grad_attn_y, grad_proj_weight_t, grad_scale
+
+        return outproj_op, outproj_backward_op
+
+    ext = load_allama_cpp_extension()
+
+    def outproj_op(
+        residual_x: torch.Tensor,
+        attn_y: torch.Tensor,
+        proj_weight_t: torch.Tensor,
+        scale: torch.Tensor,
+    ) -> torch.Tensor:
+        return ext.attn_outproj_residual(
+            residual_x,
+            attn_y,
+            proj_weight_t,
+            scale,
+        )
+
+    def outproj_backward_op(
+        attn_y: torch.Tensor,
+        proj_weight_t: torch.Tensor,
+        scale: torch.Tensor,
+        grad_out_flat: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        return ext.attn_outproj_residual_backward(
+            attn_y,
+            proj_weight_t,
+            scale,
+            grad_out_flat,
+        )
+
+    return outproj_op, outproj_backward_op
+
+
 def summarize_case(
     *,
     case: str,
@@ -562,10 +636,14 @@ def main() -> None:
     device = torch.device("cuda")
     torch.manual_seed(1337)
     prep_op = register_allama_attention_prep_custom_op()
-    outproj_op = register_allama_attention_outproj_custom_op()
-    if prep_op is None or outproj_op is None:
-        raise RuntimeError("expected Triton attention ops to be available")
-    branch_op = register_attention_branch_custom_op(prep_op, outproj_op)
+    outproj_op, outproj_backward_op = build_outproj_ops(args.outproj_kernel)
+    if prep_op is None:
+        raise RuntimeError("expected Triton attention prep op to be available")
+    branch_op = register_attention_branch_custom_op(
+        prep_op,
+        outproj_op,
+        outproj_backward_op,
+    )
 
     batch = 4
     seq_len = 1024
@@ -947,6 +1025,7 @@ def main() -> None:
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     summary = {
+        "outproj_kernel": args.outproj_kernel,
         "shape": {
             "batch": batch,
             "seq_len": seq_len,

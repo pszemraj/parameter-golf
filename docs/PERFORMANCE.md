@@ -7,7 +7,7 @@ materially improved or clarified it over time.
 
 Timestamp:
 
-- `2026-03-31T01:02:12-04:00`
+- `2026-03-31T01:05:43-04:00`
 
 Current best ALlama quality run:
 
@@ -147,6 +147,9 @@ Current read on the project:
 - The first C++/CUDA FA2 prep kernel path now exists behind
   `ATTN_PREP_KERNEL=cpp`, but it also regresses end to end on both measured
   sweep-scale families and is currently worse than the Triton prep path.
+- The first larger C++ post-FA2 branch probe also still loses in benchmark-only
+  form, so moving from Triton to C++ at that boundary did not rescue the opaque
+  branch approach by itself.
 - Switching those attention-side kernels from opaque `custom_op` wrappers to
   `torch.library.triton_op` improved benchmark-side behavior materially, but it
   still did not make the live model path positive.
@@ -1412,3 +1415,24 @@ Latest harness smoke check:
   - it also loses to the current Triton prep path on both measured families
   - the next attention-side C++/CUDA target needs to be a larger boundary than
     prep alone
+
+- Added a larger benchmark-only C++ post-FA2 branch probe by swapping the
+  output-projection/residual boundary in
+  `scripts/benchmark_allama_attention_branch.py` to a C++ helper backed by the
+  shared extension.
+- Benchmark compare on the same short timing settings:
+  - C++ outproj branch:
+    `runs_allama_validation/attention_branch_cpp_outproj_smoke/summary.json`
+    - compiled forward: custom `0.23278 ms` vs reference `0.19720 ms`
+    - compiled backward: custom `1.06791 ms` vs reference `0.77783 ms`
+  - Triton outproj branch:
+    `runs_allama_validation/attention_branch_triton_outproj_smoke/summary.json`
+    - compiled forward: custom `0.21899 ms` vs reference `0.19601 ms`
+    - compiled backward: custom `1.09086 ms` vs reference `0.75926 ms`
+- Practical conclusion:
+  - moving the post-FA2 boundary from Triton to a C++ custom op did not make
+    the opaque branch path viable
+  - C++ was slightly better than Triton on compiled backward here, but worse on
+    compiled forward, and still clearly behind compiled reference overall
+  - the next serious attention-side C++/CUDA attempt needs a deeper integration
+    than the current prep or post-proj wrapper boundaries
