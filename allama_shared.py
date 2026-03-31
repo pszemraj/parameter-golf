@@ -11,7 +11,8 @@ Key choices in this version:
 - simple learned per-layer modulation tensors instead of a controller network
 - fixed layer-to-block assignment computed once at init
 - Muon + Adam optimizer split retained from the v3 work
-- optional FA2-native attention path behind `ATTN_IMPL=fa2`
+- optional FA2-native attention paths behind `ATTN_IMPL=fa2` and
+  `ATTN_IMPL=fa2_kvpacked`
 - optional Triton gate/up SwiGLU kernel behind `MLP_KERNEL=triton_gateup`
 """
 
@@ -33,9 +34,10 @@ except Exception:  # pragma: no cover
     tl = None
 
 try:
-    from flash_attn import flash_attn_func
+    from flash_attn import flash_attn_func, flash_attn_kvpacked_func
 except Exception:  # pragma: no cover
     flash_attn_func = None
+    flash_attn_kvpacked_func = None
 
 
 # -----------------------------------------------------------------------------
@@ -833,12 +835,16 @@ class HyperSharedAttention(nn.Module):
         self.qk_norm = bool(cfg.qk_norm)
         self.attn_dropout = float(cfg.attn_dropout)
         self.attn_impl = cfg.attn_impl.strip().lower()
-        if self.attn_impl not in {"sdpa", "fa2"}:
+        if self.attn_impl not in {"sdpa", "fa2", "fa2_kvpacked"}:
             raise ValueError(
-                f"Unsupported attn_impl={cfg.attn_impl!r}; expected sdpa or fa2."
+                f"Unsupported attn_impl={cfg.attn_impl!r}; expected sdpa, fa2, or fa2_kvpacked."
             )
         if self.attn_impl == "fa2" and flash_attn_func is None:
             raise ValueError("attn_impl='fa2' requires flash-attn to be installed")
+        if self.attn_impl == "fa2_kvpacked" and flash_attn_kvpacked_func is None:
+            raise ValueError(
+                "attn_impl='fa2_kvpacked' requires flash-attn with kvpacked support"
+            )
         self.use_sdpa_gqa = (
             self.num_kv_heads != self.num_heads and sdpa_enable_gqa_available()
         )
@@ -909,6 +915,16 @@ class HyperSharedAttention(nn.Module):
             causal=True,
         )
 
+    def _forward_fa2_kvpacked(self, q: Tensor, kv: Tensor) -> Tensor:
+        """Run the FA2 KV-packed path on ``[B, S, *, H, D]`` tensors."""
+        assert flash_attn_kvpacked_func is not None
+        return flash_attn_kvpacked_func(
+            q,
+            kv,
+            dropout_p=self.attn_dropout if self.training else 0.0,
+            causal=True,
+        )
+
     def forward(
         self,
         x: Tensor,
@@ -929,6 +945,20 @@ class HyperSharedAttention(nn.Module):
             v = v.view(bsz, seqlen, self.num_kv_heads, self.head_dim)
             q, k = self._apply_qk_norm_and_rope_bshd(q, k, q_gain)
             y = self._forward_fa2(q, k, v)
+            y = y.contiguous().view(bsz, seqlen, dim)
+        elif (
+            self.attn_impl == "fa2_kvpacked"
+            and x.is_cuda
+            and x.dtype == torch.bfloat16
+            and flash_attn_kvpacked_func is not None
+        ):
+            q = qkv[..., :dim].view(bsz, seqlen, self.num_heads, self.head_dim)
+            kv = qkv[..., dim:].view(bsz, seqlen, 2, self.num_kv_heads, self.head_dim)
+            k = kv[:, :, 0]
+            v = kv[:, :, 1]
+            q, k = self._apply_qk_norm_and_rope_bshd(q, k, q_gain)
+            kv = torch.stack((k, v), dim=2)
+            y = self._forward_fa2_kvpacked(q, kv)
             y = y.contiguous().view(bsz, seqlen, dim)
         else:
             q = q.view(bsz, seqlen, self.num_heads, self.head_dim).transpose(1, 2)

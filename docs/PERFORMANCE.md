@@ -982,3 +982,36 @@ Latest harness smoke check:
   - keep `ATTN_IMPL=fa2` as an opt-in path for continued work
   - this does not prove FA2 is globally better than SDPA, but it does prove the
     right model-side adaptation can beat the naïve FA2 backend result
+
+- Added a second FA2-native model path behind `ATTN_IMPL=fa2_kvpacked`.
+- What changed in that path:
+  - the `qkv` projection tail is viewed directly as packed KV with shape
+    `[B, S, 2, H_kv, D]`
+  - qk-norm, RoPE, and `q_gain` stay in the same `BSHD` attention layout
+  - the model calls `flash_attn_kvpacked_func` directly instead of unpacked
+    `flash_attn_func`
+- Sequential real-anchor compare on the same local contract:
+  - shipped path (`ATTN_IMPL=sdpa`, `MLP_KERNEL=triton_gateup`):
+    `runs_allama_validation/perf_fa2_kvpacked_compare_seq/shipped/allama_anchor/baseline/run_summary.json`
+    - `134,181.15 tok/s`
+    - `1.95366 s/step`
+    - `2.1947 GB` peak CUDA memory
+  - FA2-native path (`ATTN_IMPL=fa2`, `MLP_KERNEL=triton_gateup`):
+    `runs_allama_validation/perf_fa2_kvpacked_compare_seq/fa2_native/allama_anchor/baseline/run_summary.json`
+    - `137,055.71 tok/s`
+    - `1.91268 s/step`
+    - `2.2189 GB` peak CUDA memory
+  - FA2 KV-packed path (`ATTN_IMPL=fa2_kvpacked`, `MLP_KERNEL=triton_gateup`):
+    `runs_allama_validation/perf_fa2_kvpacked_compare_seq/fa2_kvpacked/allama_anchor/baseline/run_summary.json`
+    - `135,765.15 tok/s`
+    - `1.93086 s/step`
+    - `2.2399 GB` peak CUDA memory
+- Interpretation:
+  - `fa2_kvpacked` is a real positive model-path adaptation over shipped SDPA
+  - it does not beat the simpler `fa2` path on the local 5090; it trails by
+    about `0.9%`
+  - the packed path remains worth keeping as an H100-facing reference because it
+    is architecturally closer to how FA2 wants to consume GQA KV tensors
+  - a short profiler compare did not show a dominant explicit packing tax; the
+    extra `select/slice/stack` work is tiny, so the local gap appears to come
+    from the FA2 kernel path itself rather than the model-side packing glue
