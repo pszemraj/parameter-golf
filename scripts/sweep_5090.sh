@@ -60,6 +60,7 @@ Usage: bash scripts/sweep_5090.sh TARGET
 Targets:
   SMOKE_HCONV   quick trainer smoke test
   GPT_REF       matched GPT baseline under the quality contract
+  GPT_12L       size-matched GPT gate against T2/T3 budget
   B1            vanilla hybrid (10 conv, 3 attn)
   C2            pure conv
   T2            tied-deep main bet
@@ -71,6 +72,7 @@ Targets:
 
 Requested quality-comparison order:
   GPT_REF, B1, C2, T2, T3, I1, I2, I4, I4H
+  Size-match gate: GPT_12L
 
 Optional launcher env overrides:
   DATA_PATH=/abs/path/to/fineweb10B_sp1024
@@ -132,6 +134,7 @@ resolve_wandb_run_name() {
     case "${target}" in
         SMOKE_HCONV) base_name="SMOKE_hconv_attn5_uconv6_conv18_mlp2" ;;
         GPT_REF) base_name="GPT_REF_gpt_layers9_dim512_mlp2_tiedemb" ;;
+        GPT_12L) base_name="GPT_12L_gpt_layers12_dim512_mlp2_tiedemb" ;;
         B1) base_name="B1_hconv_hybrid_attn3_uconv10_conv10_mlp2" ;;
         C2) base_name="C2_hconv_pureconv_attn0_uconv15_conv15_mlp2" ;;
         T2) base_name="T2_hconv_tieddepth_attn5_uconv6_conv18_mlp2" ;;
@@ -377,6 +380,25 @@ run_gpt_ref() {
         --tie-embeddings 1
 }
 
+run_gpt_12l() {
+    run_target \
+        "GPT_12L" \
+        "${GPT_TRAINER}" \
+        "${QUALITY_MAX_STEPS}" \
+        "${QUALITY_TRAIN_BATCH_TOKENS}" \
+        "${QUALITY_SEQ_LEN}" \
+        "sampled" \
+        "${QUALITY_VAL_BATCH_SIZE}" \
+        "${QUALITY_VAL_BATCHES}" \
+        "${QUALITY_VAL_FIRST_STEP}" \
+        "${QUALITY_VAL_LOSS_EVERY}" \
+        "${QUALITY_TRAIN_LOG_EVERY}" \
+        "${QUALITY_WARMUP_STEPS}" \
+        --num-layers 12 \
+        --mlp-mult 2 \
+        --tie-embeddings 1
+}
+
 run_b1() {
     run_target \
         "B1" \
@@ -571,6 +593,7 @@ require_data
 case "${TARGET}" in
     SMOKE_HCONV) run_smoke_hconv ;;
     GPT_REF) run_gpt_ref ;;
+    GPT_12L) run_gpt_12l ;;
     B1) run_b1 ;;
     C2) run_c2 ;;
     T2) run_t2 ;;
