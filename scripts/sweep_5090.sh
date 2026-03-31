@@ -25,26 +25,28 @@ WANDB_MODE="${WANDB_MODE:-online}"
 WANDB_WATCH_LOG="${WANDB_WATCH_LOG:-gradients}"
 WANDB_WATCH_LOG_FREQ="${WANDB_WATCH_LOG_FREQ:-25}"
 WANDB_TAGS="${WANDB_TAGS:-5090,quality,hconv}"
+RUN_ID_SUFFIX="${RUN_ID_SUFFIX:-}"
+WANDB_RUN_SUFFIX="${WANDB_RUN_SUFFIX:-${RUN_ID_SUFFIX}}"
 
-QUALITY_MAX_STEPS=750
-QUALITY_TRAIN_BATCH_TOKENS=262144
-QUALITY_SEQ_LEN=1024
-QUALITY_VAL_BATCH_SIZE=8192
-QUALITY_VAL_BATCHES=8
-QUALITY_VAL_FIRST_STEP=100
-QUALITY_VAL_LOSS_EVERY=250
-QUALITY_TRAIN_LOG_EVERY=25
-QUALITY_WALLCLOCK_SECONDS=0
-QUALITY_WARMUP_STEPS=20
+QUALITY_MAX_STEPS="${QUALITY_MAX_STEPS:-750}"
+QUALITY_TRAIN_BATCH_TOKENS="${QUALITY_TRAIN_BATCH_TOKENS:-262144}"
+QUALITY_SEQ_LEN="${QUALITY_SEQ_LEN:-1024}"
+QUALITY_VAL_BATCH_SIZE="${QUALITY_VAL_BATCH_SIZE:-8192}"
+QUALITY_VAL_BATCHES="${QUALITY_VAL_BATCHES:-8}"
+QUALITY_VAL_FIRST_STEP="${QUALITY_VAL_FIRST_STEP:-100}"
+QUALITY_VAL_LOSS_EVERY="${QUALITY_VAL_LOSS_EVERY:-250}"
+QUALITY_TRAIN_LOG_EVERY="${QUALITY_TRAIN_LOG_EVERY:-25}"
+QUALITY_WALLCLOCK_SECONDS="${QUALITY_WALLCLOCK_SECONDS:-0}"
+QUALITY_WARMUP_STEPS="${QUALITY_WARMUP_STEPS:-20}"
 
-SMOKE_MAX_STEPS=10
-SMOKE_TRAIN_BATCH_TOKENS=32768
-SMOKE_VAL_BATCH_SIZE=8192
-SMOKE_VAL_BATCHES=1
-SMOKE_VAL_FIRST_STEP=0
-SMOKE_VAL_LOSS_EVERY=0
-SMOKE_TRAIN_LOG_EVERY=5
-SMOKE_WARMUP_STEPS=0
+SMOKE_MAX_STEPS="${SMOKE_MAX_STEPS:-10}"
+SMOKE_TRAIN_BATCH_TOKENS="${SMOKE_TRAIN_BATCH_TOKENS:-32768}"
+SMOKE_VAL_BATCH_SIZE="${SMOKE_VAL_BATCH_SIZE:-8192}"
+SMOKE_VAL_BATCHES="${SMOKE_VAL_BATCHES:-1}"
+SMOKE_VAL_FIRST_STEP="${SMOKE_VAL_FIRST_STEP:-0}"
+SMOKE_VAL_LOSS_EVERY="${SMOKE_VAL_LOSS_EVERY:-0}"
+SMOKE_TRAIN_LOG_EVERY="${SMOKE_TRAIN_LOG_EVERY:-5}"
+SMOKE_WARMUP_STEPS="${SMOKE_WARMUP_STEPS:-0}"
 
 TARGET="${1:-}"
 
@@ -84,6 +86,10 @@ Optional launcher env overrides:
   WANDB_WATCH_LOG=gradients|all
   WANDB_WATCH_LOG_FREQ=25
   WANDB_TAGS=comma,separated,tags
+  RUN_ID_SUFFIX=_3K
+  WANDB_RUN_SUFFIX=_3k
+  QUALITY_MAX_STEPS=3000
+  QUALITY_WARMUP_STEPS=80
 EOF
 }
 
@@ -115,21 +121,28 @@ resolve_wandb_tags() {
     echo "${base_tags},${target}"
 }
 
+resolve_target_id() {
+    local target="$1"
+    echo "${target}${RUN_ID_SUFFIX}"
+}
+
 resolve_wandb_run_name() {
     local target="$1"
+    local base_name
     case "${target}" in
-        SMOKE_HCONV) echo "SMOKE_hconv_attn5_uconv6_conv18_mlp2" ;;
-        GPT_REF) echo "GPT_REF_gpt_layers9_dim512_mlp2_tiedemb" ;;
-        B1) echo "B1_hconv_hybrid_attn3_uconv10_conv10_mlp2" ;;
-        C2) echo "C2_hconv_pureconv_attn0_uconv15_conv15_mlp2" ;;
-        T2) echo "T2_hconv_tieddepth_attn5_uconv6_conv18_mlp2" ;;
-        T3) echo "T3_hconv_tieddepth_attn5_uconv4_conv16_mlp3" ;;
-        I1) echo "I1_hconv_dilated_attn5_uconv6_conv18_mlp2" ;;
-        I2) echo "I2_hconv_sqgate_attn5_uconv6_conv18_mlp2" ;;
-        I4) echo "I4_hconv_dilated_sqgate_attn5_uconv6_conv18_mlp2" ;;
-        I4H) echo "I4H_hconv_dilated_sqgate_hippo_attn5_uconv6_conv18_mlp2" ;;
-        *) echo "${target}" ;;
+        SMOKE_HCONV) base_name="SMOKE_hconv_attn5_uconv6_conv18_mlp2" ;;
+        GPT_REF) base_name="GPT_REF_gpt_layers9_dim512_mlp2_tiedemb" ;;
+        B1) base_name="B1_hconv_hybrid_attn3_uconv10_conv10_mlp2" ;;
+        C2) base_name="C2_hconv_pureconv_attn0_uconv15_conv15_mlp2" ;;
+        T2) base_name="T2_hconv_tieddepth_attn5_uconv6_conv18_mlp2" ;;
+        T3) base_name="T3_hconv_tieddepth_attn5_uconv4_conv16_mlp3" ;;
+        I1) base_name="I1_hconv_dilated_attn5_uconv6_conv18_mlp2" ;;
+        I2) base_name="I2_hconv_sqgate_attn5_uconv6_conv18_mlp2" ;;
+        I4) base_name="I4_hconv_dilated_sqgate_attn5_uconv6_conv18_mlp2" ;;
+        I4H) base_name="I4H_hconv_dilated_sqgate_hippo_attn5_uconv6_conv18_mlp2" ;;
+        *) base_name="${target}" ;;
     esac
+    echo "${base_name}${WANDB_RUN_SUFFIX}"
 }
 
 run_complete() {
@@ -229,7 +242,9 @@ run_target() {
     local warmup_steps="${12}"
     shift 12
     local -a trainer_args=("$@")
-    local run_dir="${RUNS_ROOT}/${target}"
+    local target_id
+    target_id="$(resolve_target_id "${target}")"
+    local run_dir="${RUNS_ROOT}/${target_id}"
     local stdout_log="${run_dir}/stdout.log"
     local summary_file="${run_dir}/launch_summary.txt"
     local planned_train_tokens=$(( train_batch_tokens * max_steps ))
@@ -247,7 +262,7 @@ run_target() {
     mkdir -p "${run_dir}"
     write_launch_summary \
         "${summary_file}" \
-        "${target}" \
+        "${target_id}" \
         "${trainer}" \
         "${run_dir}" \
         "${wandb_project}" \
@@ -268,6 +283,7 @@ run_target() {
     echo
     echo "================================================================"
     echo "TARGET: ${target}"
+    echo "TARGET_ID: ${target_id}"
     echo "TRAINER: ${trainer}"
     echo "RUN_DIR: ${run_dir}"
     echo "planned_train_tokens=${planned_train_tokens}"
@@ -286,7 +302,7 @@ run_target() {
         torchrun --standalone --nproc_per_node=1 "${trainer}" \
         --data-path "${DATA_PATH}" \
         --tokenizer-path "${TOKENIZER_PATH}" \
-        --run-id "${target}" \
+        --run-id "${target_id}" \
         --output-dir "${run_dir}" \
         --vocab-size 1024 \
         --model-dim 512 \
