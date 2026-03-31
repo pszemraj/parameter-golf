@@ -1015,3 +1015,21 @@ Latest harness smoke check:
   - a short profiler compare did not show a dominant explicit packing tax; the
     extra `select/slice/stack` work is tiny, so the local gap appears to come
     from the FA2 kernel path itself rather than the model-side packing glue
+
+- Ran a short Nsight Systems compare for shipped SDPA vs the integrated FA2
+  path:
+  - shipped capture:
+    `runs_allama_validation/nsight_systems_fa2_compare/20260330_232111_allama_anchor`
+  - FA2 capture:
+    `runs_allama_validation/nsight_systems_fa2_compare/20260330_232135_allama_anchor`
+- What changed:
+  - `cuLaunchKernel` calls fell from `46,960` to `43,120` (`-8.2%`)
+  - `cudaLaunchKernel` calls fell from `11,642` to `10,362` (`-11.0%`)
+  - `cudaMemcpyAsync` calls fell from `3,152` to `3,088`
+  - the top GPU kernels stayed the same family: large CUTLASS bf16 GEMMs, FA2
+    flash backward, FA2 flash forward, and the Triton gate/up kernels
+- Interpretation:
+  - the FA2-native model-path win is mostly a launch-volume / glue-path win
+  - it does not materially change the dominant compute stack yet
+  - that makes the next real attention-side kernel target clearer: the FA2
+    prologue/epilogue around the QKV path, not the flash kernel itself
