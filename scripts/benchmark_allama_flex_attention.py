@@ -5,6 +5,7 @@ This script compares the current raw attention options that matter for ALlama:
 
 - SDPA flash
 - SDPA cuDNN
+- FlashAttention 2 direct kernels
 - FlexAttention Triton backends
 - FlexAttention FLASH backend when CuTe/FA4 is installed
 
@@ -23,6 +24,12 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 from torch.nn.attention.flex_attention import create_block_mask, flex_attention
+
+try:
+    from flash_attn import flash_attn_func, flash_attn_kvpacked_func
+except Exception:  # pragma: no cover
+    flash_attn_func = None
+    flash_attn_kvpacked_func = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -109,6 +116,22 @@ def clone_qkv(
         k.detach().clone().requires_grad_(True),
         v.detach().clone().requires_grad_(True),
     )
+
+
+def make_qkv_flash_layout(
+    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Convert head-major tensors into the FA2 ``[B, S, H, D]`` layout."""
+    return (
+        q.transpose(1, 2).contiguous(),
+        k.transpose(1, 2).contiguous(),
+        v.transpose(1, 2).contiguous(),
+    )
+
+
+def make_kv_packed(k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+    """Pack FA2 KV tensors into ``[B, S, 2, H_kv, D]``."""
+    return torch.stack((k, v), dim=2)
 
 
 def run_forward_backward(
@@ -225,6 +248,97 @@ def main() -> None:
             args.measured_iters,
         )
     )
+
+    if flash_attn_func is not None:
+        q_flash, k_flash, v_flash = make_qkv_flash_layout(q, k, v)
+        kv_flash = make_kv_packed(k_flash, v_flash)
+        results.append(
+            benchmark_case(
+                "flash_attn2_pretransposed",
+                lambda: torch.compile(
+                    lambda q_, k_, v_: flash_attn_func(
+                        q_,
+                        k_,
+                        v_,
+                        dropout_p=0.0,
+                        causal=True,
+                    ),
+                    dynamic=False,
+                    fullgraph=True,
+                ),
+                q_flash,
+                k_flash,
+                v_flash,
+                args.warmup_iters,
+                args.measured_iters,
+            )
+        )
+        if flash_attn_kvpacked_func is not None:
+            results.append(
+                benchmark_case(
+                    "flash_attn2_kvpacked_pretransposed",
+                    lambda: torch.compile(
+                        lambda q_, kv_, _: flash_attn_kvpacked_func(
+                            q_,
+                            kv_,
+                            dropout_p=0.0,
+                            causal=True,
+                        ),
+                        dynamic=False,
+                        fullgraph=True,
+                    ),
+                    q_flash,
+                    kv_flash,
+                    kv_flash,
+                    args.warmup_iters,
+                    args.measured_iters,
+                )
+            )
+        results.append(
+            benchmark_case(
+                "flash_attn2_with_transpose",
+                lambda: torch.compile(
+                    lambda q_, k_, v_: flash_attn_func(
+                        q_.transpose(1, 2).contiguous(),
+                        k_.transpose(1, 2).contiguous(),
+                        v_.transpose(1, 2).contiguous(),
+                        dropout_p=0.0,
+                        causal=True,
+                    ),
+                    dynamic=False,
+                    fullgraph=True,
+                ),
+                q,
+                k,
+                v,
+                args.warmup_iters,
+                args.measured_iters,
+            )
+        )
+        if flash_attn_kvpacked_func is not None:
+            results.append(
+                benchmark_case(
+                    "flash_attn2_kvpacked_with_transpose",
+                    lambda: torch.compile(
+                        lambda q_, k_, v_: flash_attn_kvpacked_func(
+                            q_.transpose(1, 2).contiguous(),
+                            make_kv_packed(
+                                k_.transpose(1, 2).contiguous(),
+                                v_.transpose(1, 2).contiguous(),
+                            ),
+                            dropout_p=0.0,
+                            causal=True,
+                        ),
+                        dynamic=False,
+                        fullgraph=True,
+                    ),
+                    q,
+                    k,
+                    v,
+                    args.warmup_iters,
+                    args.measured_iters,
+                )
+            )
 
     flex_cases = [
         ("flex_triton_auto", None),

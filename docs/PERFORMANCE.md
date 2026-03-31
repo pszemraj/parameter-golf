@@ -7,7 +7,7 @@ materially improved or clarified it over time.
 
 Timestamp:
 
-- `2026-03-30T22:36:42-04:00`
+- `2026-03-30T23:00:00-04:00`
 
 Current best ALlama quality run:
 
@@ -45,6 +45,10 @@ Current read on the project:
 - FlexAttention is only interesting for this project if the FA4/CuTe
   `BACKEND="FLASH"` path is installed. The built-in Triton flex backend does
   not beat SDPA on the dense causal GQA ALlama shape.
+- `flash-attn 2.8.3` is now installed in the local `train` env, but the first
+  direct FA2 benchmarks on the exact ALlama shape still lost to SDPA on the
+  local 5090. That makes FA2 useful for research and possible H100 follow-up,
+  but not an automatic model-path integration win.
 - `wide` is no longer the best-model quality path. It remains useful only if the
   goal is an explicit speed/quality tradeoff study.
 - `layernorm` is not part of the active search space. It lost to `rmsnorm` in
@@ -875,3 +879,43 @@ Latest harness smoke check:
   - installing `flash-attn` in the train env is now justified so the project
     can test FA2-style direct kernels, packed-QKV paths, and the newer Flex
     `BACKEND="FLASH"` route once compatible pieces are available
+
+### 2026-03-30
+
+- Installed `flash-attn 2.8.3` into the real `train` env and extended
+  `scripts/benchmark_allama_flex_attention.py` to cover:
+  - `flash_attn_func` on pretransposed `BSHD` tensors
+  - `flash_attn_kvpacked_func` on prepacked KV tensors
+  - both direct-layout and current-layout-plus-transpose cases
+- Current representative result in
+  `runs_allama_validation/flex_attention_fa2/summary.json` on the exact ALlama
+  attention shape `B=4, H=14, H_kv=2, S=1024, D=64`:
+  - `sdpa_flash`:
+    - forward: `0.06876 ms`
+    - forward+backward: `0.29398 ms`
+  - `sdpa_cudnn`:
+    - forward: `0.06864 ms`
+    - forward+backward: `0.30139 ms`
+  - `flash_attn2_pretransposed`:
+    - forward: `0.07527 ms`
+    - forward+backward: `0.33002 ms`
+  - `flash_attn2_kvpacked_pretransposed`:
+    - forward: `0.07773 ms`
+    - forward+backward: `0.35318 ms`
+  - `flash_attn2_with_transpose`:
+    - forward: `0.10023 ms`
+    - forward+backward: `0.37807 ms`
+  - `flash_attn2_kvpacked_with_transpose`:
+    - forward: `0.09858 ms`
+    - forward+backward: `0.35442 ms`
+- Conclusion:
+  - FA2 is working and benchmarkable in the project env
+  - on the local 5090 and this exact dense causal GQA shape, FA2 does not beat
+    compiled SDPA flash or cuDNN
+  - because the raw kernel is already slower locally, there is not yet a case
+    for wiring FA2 into the model path on this machine
+  - the result is still useful because:
+    - it rules out “just switch to FA2” as an immediate local fix
+    - it leaves open an H100-specific revisit, since official eval is on H100
+    - it does not unblock Flex `BACKEND=\"FLASH\"`, which still needs the
+      separate CuTe/FA4-capable FlashAttention stack rather than standard FA2
