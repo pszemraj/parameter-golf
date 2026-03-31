@@ -5,6 +5,7 @@ export WANDB=1
 export WANDB_PROJECT=param-golf-ablations
 export WANDB_GROUP="${WANDB_GROUP:-allama-size-probes-v4}"
 export WANDB_TAGS="${WANDB_TAGS:-5090,allama,size-probe,nearcap,v4}"
+export TORCH_BLAS_PREFER_CUBLASLT=1
 
 BASE_ENV=(
   OUT_DIR=./runs_allama

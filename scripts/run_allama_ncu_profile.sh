@@ -2,6 +2,8 @@
 set -euo pipefail
 # run this from the repo root
 
+export TORCH_BLAS_PREFER_CUBLASLT=1
+
 OUT_ROOT="${OUT_ROOT:-./runs_allama_validation/nsight_compute}"
 STAMP="$(date +%Y%m%d_%H%M%S)"
 RUN_DIR="${OUT_ROOT}/${STAMP}"

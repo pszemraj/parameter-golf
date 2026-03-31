@@ -29,9 +29,11 @@ Current read on the project:
   too slow relative to GPT for comfortable search velocity.
 - The quality winner is currently `shortfat_s4_ff15 + prenorm + rmsnorm +
   shortcut_gate005`.
-- On torch 2.11, no shipped custom kernel path currently beats the compiled
-  PyTorch baseline end to end on the ALlama anchor.
-- The strongest surviving kernel evidence is now benchmark-only:
+- On the active local 5090 contract with `TORCH_BLAS_PREFER_CUBLASLT=1`, the
+  best shipped kernel path is again `MLP_KERNEL=triton_gateup` on the ALlama
+  anchor.
+- Beyond the live MLP gate-up path, the strongest surviving kernel evidence is
+  now benchmark-only:
   - the MLP gate/up boundary still beats compiled PyTorch in isolation
   - the attention out-proj boundary now wins strongly on forward-only under
     torch 2.11, but still loses badly once backward is included
@@ -92,6 +94,7 @@ Checked-in scripts now exist for repeatable local performance work:
 
 These scripts assume the current local single-GPU benchmark contract:
 
+- `TORCH_BLAS_PREFER_CUBLASLT=1` on the local 5090
 - `4 x 1024 x 64` accumulation semantics
 - compiled steady-state training on the frozen ALlama anchor or GPT reference
 
@@ -662,28 +665,31 @@ Latest harness smoke check:
   - probes on the real active device/backend instead of CPU only
   - resolves once during attention-module construction instead of inside the
     compiled forward path
-- Removed the old active `TORCH_BLAS_PREFER_CUBLASLT=1` workaround from the
-  maintained scripts. That was a 2.10-era 5090 guardrail, not part of the new
-  2.11 baseline.
+- Rechecked the old `TORCH_BLAS_PREFER_CUBLASLT=1` workaround on torch 2.11.
+  It is no longer needed to avoid the older 2.10 failure mode, but it still
+  materially improves local 5090 throughput and remains part of the active
+  local-script contract.
 - Current whole-model backend compare in
   `runs_allama_validation/perf_torch211_backend_compare/`:
-  - flash + PyTorch MLP:
+  - flash + PyTorch MLP, no local BLAS override:
     - `mean_step_s=2.25897`
     - `tokens_per_s=116045.98`
-  - cuDNN + PyTorch MLP:
+  - cuDNN + PyTorch MLP, no local BLAS override:
     - `mean_step_s=2.25389`
     - `tokens_per_s=116307.61`
-  - flash + `MLP_KERNEL=triton_gateup`:
-    - `mean_step_s=2.62756`
-    - `tokens_per_s=99767.01`
-  - cuDNN + `MLP_KERNEL=triton_gateup`:
-    - `mean_step_s=2.61470`
-    - `tokens_per_s=100257.74`
+  - flash + PyTorch MLP, with `TORCH_BLAS_PREFER_CUBLASLT=1`:
+    - `mean_step_s=1.93177`
+    - `tokens_per_s=135701.29`
+  - flash + `MLP_KERNEL=triton_gateup`, with `TORCH_BLAS_PREFER_CUBLASLT=1`:
+    - `mean_step_s=1.88445`
+    - `tokens_per_s=139108.77`
 - Conclusion:
-  - on torch 2.11, `flash` and `cudnn` SDPA are effectively tied on the ALlama
-    anchor
-  - the previously kept integrated `triton_gateup` path is now a real
-    regression and should not be treated as the preferred live path
+  - on torch 2.11, `flash` and `cudnn` SDPA are effectively tied if the local
+    BLAS override is removed
+  - the old 5090 `cublaslt` knob is no longer a correctness guardrail, but it
+    is still a very real local throughput knob on this machine
+  - with the active local 5090 BLAS override restored, `MLP_KERNEL=triton_gateup`
+    again beats the plain compiled PyTorch baseline by about `2.5%`
 
 ### Torch 2.11 Larger-Boundary Recheck
 

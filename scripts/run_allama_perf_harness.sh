@@ -2,6 +2,8 @@
 set -euo pipefail
 # run this from the repo root
 
+export TORCH_BLAS_PREFER_CUBLASLT=1
+
 OUT_DIR="${OUT_DIR:-./runs_allama_validation/perf_harness}"
 MODE="${MODE:-benchmark}"
 WARMUP_STEPS="${WARMUP_STEPS:-3}"
