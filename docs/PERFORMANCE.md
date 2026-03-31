@@ -7,7 +7,7 @@ materially improved or clarified it over time.
 
 Timestamp:
 
-- `2026-03-30T21:10:00-04:00`
+- `2026-03-30T22:36:42-04:00`
 
 Current best ALlama quality run:
 
@@ -37,6 +37,11 @@ Current read on the project:
   - the MLP gate/up boundary still beats compiled PyTorch in isolation
   - the attention out-proj boundary now wins strongly on forward-only under
     torch 2.11, but still loses badly once backward is included
+- The first real block-scale integrations beyond `triton_gateup` have now been
+  tested and rejected:
+  - the attention bridge (`out-proj + residual + next RMSNorm`) regressed
+  - the larger full MLP op (`gateup + down + residual`) also regressed
+  - the current shipped path is still `MLP_KERNEL=triton_gateup`
 - FlexAttention is only interesting for this project if the FA4/CuTe
   `BACKEND="FLASH"` path is installed. The built-in Triton flex backend does
   not beat SDPA on the dense causal GQA ALlama shape.
@@ -824,7 +829,49 @@ Latest harness smoke check:
   - the fully fused pre-flash backward path is working, but it still does not
     survive the real flash-attention contract under `torch.compile`
   - this boundary is currently worse than the MLP gate-up path and not ready
-    for model integration
+  for model integration
   - attention-side kernel work should continue only on larger boundaries or
     after a clearer hypothesis about why Inductor still wins once flash is in
     the loop
+
+### 2026-03-30
+
+- Prototyped two real block-scale model integrations in `allama_shared.py`:
+  - attention bridge:
+    `head-major attn out-proj + residual add/scale + next RMSNorm`
+  - full MLP op:
+    `gateup + down-proj + residual add/scale`
+- These were measured on the real compiled ALlama anchor harness under the
+  active local 5090 flash contract:
+  - current shipped path, `MLP_KERNEL=triton_gateup`:
+    `runs_allama_validation/perf_blockkernels_compare/shipped/allama_anchor/baseline/run_summary.json`
+    - `136,838.94 tok/s`
+    - `1.91571 s/step`
+  - attention bridge + shipped gateup:
+    `runs_allama_validation/perf_blockkernels_compare/bridge_gateup/allama_anchor/baseline/run_summary.json`
+    - `130,259.74 tok/s`
+    - `2.01247 s/step`
+    - about `4.8%` slower than shipped
+  - full MLP op only:
+    `runs_allama_validation/perf_blockkernels_compare/full_only/allama_anchor/baseline/run_summary.json`
+    - `121,042.36 tok/s`
+    - `2.16572 s/step`
+    - about `11.5%` slower than shipped
+  - attention bridge + full MLP op:
+    `runs_allama_validation/perf_blockkernels_compare/bridge_full/allama_anchor/baseline/run_summary.json`
+    - `117,385.70 tok/s`
+    - `2.23319 s/step`
+    - about `14.2%` slower than shipped
+- Interpretation:
+  - these are no longer toy kernels; they are real block-scale boundaries in
+    the live model path, and they still lost
+  - the attention bridge does reduce peak memory materially, but not enough to
+    compensate for the step-time regression
+  - the branch should not keep these integrations; the clean shipped path
+    remains `MLP_KERNEL=triton_gateup`
+- Next action:
+  - if attention-side performance work continues, the next serious move is to
+    use a real FlashAttention package path rather than only SDPA-side wrappers
+  - installing `flash-attn` in the train env is now justified so the project
+    can test FA2-style direct kernels, packed-QKV paths, and the newer Flex
+    `BACKEND="FLASH"` route once compatible pieces are available
