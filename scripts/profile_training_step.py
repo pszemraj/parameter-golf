@@ -328,7 +328,6 @@ def build_allama_anchor(device: torch.device) -> tuple[nn.Module, OptimizerBundl
         resid_dropout=0.0,
         use_bias=False,
         cast_linears=True,
-        attn_kernel=os.environ.get("ATTN_KERNEL", "pytorch"),
         mlp_kernel=os.environ.get("MLP_KERNEL", "pytorch"),
     )
     model = HyperSharedALlama(cfg).to(device).bfloat16()
