@@ -1,6 +1,6 @@
 # Performance
 
-Last updated: 2026-03-31 04:13 EDT
+Last updated: 2026-03-31 04:29 EDT
 
 This file tracks local training-speed measurements from runs in [`runs_hconv_quality_5090/`](../runs_hconv_quality_5090/).
 
@@ -21,15 +21,15 @@ This file tracks local training-speed measurements from runs in [`runs_hconv_qua
 
 | Timestamp | Config | Train batch tokens | Final step_avg_ms | steps/s | tok/s | Peak alloc MiB | Log |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
-| 2026-03-31 02:47:40 EDT | `GPT_REF` | 262144 | 367.98 | 2.7175 | 712387 | 5284 | [train.log](../runs_hconv_quality_5090/GPT_REF/train.log) |
-| 2026-03-31 02:52:13 EDT | `B1` | 262144 | 305.21 | 3.2764 | 858897 | 4901 | [train.log](../runs_hconv_quality_5090/B1/train.log) |
-| 2026-03-31 03:00:05 EDT | `C2` | 262144 | 281.35 | 3.5543 | 931736 | 4715 | [train.log](../runs_hconv_quality_5090/C2/train.log) |
+| 2026-03-31 04:20:52 EDT | `GPT_REF` | 262144 | 353.91 | 2.8256 | 740708 | 5284 | [train.log](../runs_hconv_quality_5090/GPT_REF/train.log) |
+| 2026-03-31 04:24:45 EDT | `B1` | 262144 | 307.84 | 3.2484 | 851559 | 4901 | [train.log](../runs_hconv_quality_5090/B1/train.log) |
+| 2026-03-31 04:28:30 EDT | `C2` | 262144 | 298.75 | 3.3473 | 877469 | 4715 | [train.log](../runs_hconv_quality_5090/C2/train.log) |
 | 2026-03-31 04:05:45 EDT | `T2` | 262144 | 537.99 | 1.8588 | 487266 | 8189 | [train.log](../runs_hconv_quality_5090/T2/train.log) |
 | 2026-03-31 04:12:52 EDT | `T3` | 262144 | 518.02 | 1.9304 | 506050 | 7941 | [train.log](../runs_hconv_quality_5090/T3/train.log) |
 
 Current read:
 
-- `B1` is about `1.206x` faster than `GPT_REF` by both `steps/s` and `tok/s` under the same fixed-token contract.
+- `B1` is about `1.1495x` faster than `GPT_REF` by both `steps/s` and `tok/s` under the same fixed-token contract.
 - `B1` also used less peak allocated memory in this local run (`4901 MiB` vs `5284 MiB`).
 - `C2` is faster again than `B1` locally, but the quality hit is severe enough that this is not a useful trade on the current comparison protocol.
 - `T3` is about `1.0385x` faster than `T2` on both `steps/s` and `tok/s`, and it used slightly less peak allocated memory (`7941 MiB` vs `8189 MiB`).

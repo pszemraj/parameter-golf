@@ -1,6 +1,6 @@
 # W&B Logging
 
-Last updated: 2026-03-31 04:13 EDT
+Last updated: 2026-03-31 04:29 EDT
 
 This branch now has optional Weights & Biases logging in both [`train_hconv.py`](../train_hconv.py) and [`train_gpt.py`](../train_gpt.py), with the 5090 sweep harness enabling it by default.
 
@@ -31,9 +31,17 @@ The harness now resolves stable W&B run names instead of logging shorthand-only 
 
 The default quality sweep also no longer logs random-init validation. Scheduled eval now starts at `step 100`, then runs every `250` steps, with the terminal step always evaluated.
 
-Current canonical reruns in `pg-hconv-ablations`:
+Smoke policy:
 
-- `SMOKE_HCONV` -> `https://wandb.ai/pszemraj/pg-hconv-ablations/runs/dgp3ok8q`
+- Official ablations stay in `pg-hconv-ablations`.
+- Smoke tests should use `WANDB_MODE=offline` or a separate smoke-only project.
+- The earlier smoke run was removed from the official project to keep that history clean.
+
+Current canonical official runs in `pg-hconv-ablations`:
+
+- `GPT_REF_gpt_layers9_dim512_mlp2_tiedemb` -> `https://wandb.ai/pszemraj/pg-hconv-ablations/runs/bgi8sbro`
+- `B1_hconv_hybrid_attn3_uconv10_conv10_mlp2` -> `https://wandb.ai/pszemraj/pg-hconv-ablations/runs/s9wwrmss`
+- `C2_hconv_pureconv_attn0_uconv15_conv15_mlp2` -> `https://wandb.ai/pszemraj/pg-hconv-ablations/runs/d3rq9t9u`
 - `T2_hconv_tieddepth_attn5_uconv6_conv18_mlp2` -> `https://wandb.ai/pszemraj/pg-hconv-ablations/runs/i7arhr9q`
 - `T3_hconv_tieddepth_attn5_uconv4_conv16_mlp3` -> `https://wandb.ai/pszemraj/pg-hconv-ablations/runs/78dhj40z`
 

@@ -1,6 +1,6 @@
 # Metrics
 
-Last updated: 2026-03-31 04:13 EDT
+Last updated: 2026-03-31 04:29 EDT
 
 This file tracks model-quality results from local 5090 runs in [`runs_hconv_quality_5090/`](../runs_hconv_quality_5090/).
 
@@ -24,9 +24,6 @@ This file tracks model-quality results from local 5090 runs in [`runs_hconv_qual
   - `MAX_WALLCLOCK_SECONDS=0`
   - `SDPA_BACKEND=auto`
   - `TORCH_BLAS_PREFER_CUBLASLT=1`
-- Historical note:
-  - The earlier `GPT_REF`, `B1`, and `C2` rows below were collected before the eval-cadence cleanup and therefore used the older `step 0, then every 100, then final` schedule.
-  - The current canonical reruns use `first eval at step 100`, then every `250`, plus the forced final eval.
 - Important discrepancy:
   - The current trainer path still fixes `grad_accum_steps=8` at `WORLD_SIZE=1`.
   - Current `AGENTS.md` guidance for this kind of 1x5090 quality comparison says `GRAD_ACCUM_STEPS=64`, but that guidance came from an earlier parameter-sharing setup that could use more memory than the current hconv family.
@@ -36,21 +33,22 @@ This file tracks model-quality results from local 5090 runs in [`runs_hconv_qual
 
 | Timestamp | Config | Trainer | Summary | Final val_bpb | Roundtrip val_bpb | int8+zlib_bytes | Log |
 | --- | --- | --- | --- | ---: | ---: | ---: | --- |
-| 2026-03-31 02:47:40 EDT | `GPT_REF` | `train_gpt.py` | 9-layer GPT reference, tied embeddings, `mlp_mult=2` | 1.3802 | 1.38262331 | 11316588 | [train.log](../runs_hconv_quality_5090/GPT_REF/train.log) |
-| 2026-03-31 02:52:13 EDT | `B1` | `train_hconv.py` | Vanilla hybrid: 10 conv + 3 attn, no dilation, no squared gate, no hippo init | 1.3726 | 1.37255835 | 15415397 | [train.log](../runs_hconv_quality_5090/B1/train.log) |
-| 2026-03-31 03:00:05 EDT | `C2` | `train_hconv.py` | Pure conv: 15 conv, 0 attn, no dilation, no squared gate, no hippo init | 1.5725 | 1.57226136 | 15235472 | [train.log](../runs_hconv_quality_5090/C2/train.log) |
+| 2026-03-31 04:20:52 EDT | `GPT_REF` | `train_gpt.py` | 9-layer GPT reference, tied embeddings, `mlp_mult=2` | 1.3774 | 1.37948790 | 11315671 | [train.log](../runs_hconv_quality_5090/GPT_REF/train.log) |
+| 2026-03-31 04:24:45 EDT | `B1` | `train_hconv.py` | Vanilla hybrid: 10 conv + 3 attn, no dilation, no squared gate, no hippo init | 1.3782 | 1.37821319 | 15423044 | [train.log](../runs_hconv_quality_5090/B1/train.log) |
+| 2026-03-31 04:28:30 EDT | `C2` | `train_hconv.py` | Pure conv: 15 conv, 0 attn, no dilation, no squared gate, no hippo init | 1.5756 | 1.57559083 | 15233455 | [train.log](../runs_hconv_quality_5090/C2/train.log) |
 | 2026-03-31 04:05:45 EDT | `T2` | `train_hconv.py` | Tied-depth main bet: `6` unique conv, `5` unique attn, `18` effective conv, `mlp_mult=2` | 1.3693 | 1.36955833 | 14896112 | [train.log](../runs_hconv_quality_5090/T2/train.log) |
 | 2026-03-31 04:12:52 EDT | `T3` | `train_hconv.py` | Tied-depth variant: `4` unique conv, `5` unique attn, `16` effective conv, `mlp_mult=3` | 1.3693 | 1.36937905 | 15288128 | [train.log](../runs_hconv_quality_5090/T3/train.log) |
 
 Current read:
 
-- `B1` beat `GPT_REF` by `0.0076` bpb on this sampled-validation comparison protocol.
-- `B1` is currently under the 16,000,000-byte compressed-model limit with `15,415,397` bytes.
+- `GPT_REF` currently edges `B1` by `0.0008` bpb on the cleaned official protocol.
+- `B1` is still under the 16,000,000-byte compressed-model limit with `15,423,044` compressed model bytes.
 - `C2` is much worse than `B1` here by `0.1999` bpb, so the pure-conv variant does not look competitive on this protocol.
 - Phase 2 reruns under the cleaned cadence ended in a tie to four decimals on final `val_bpb`: both `T2` and `T3` finished at `1.3693`.
 - `T2` is still smaller than `T3` by `392,016` compressed bytes, while both remain under the 16 MB cap.
 - `T3` holds the tiny roundtrip edge after export and reload: `1.36937905` vs `1.36955833`.
-- Relative to `B1`, both tied-depth variants now improve the final scheduled `val_bpb` by about `0.0033`.
+- Relative to `GPT_REF`, both tied-depth variants improve the final scheduled `val_bpb` by about `0.0081`.
+- Relative to `B1`, both tied-depth variants improve the final scheduled `val_bpb` by about `0.0089`.
 
 ## Smoke / Bring-Up Runs
 
@@ -58,9 +56,9 @@ These are sanity checks, not comparable quality runs.
 
 | Timestamp | Config | Purpose | Contract | Final val_bpb | Roundtrip val_bpb | int8+zlib_bytes | Log |
 | --- | --- | --- | --- | ---: | ---: | ---: | --- |
-| 2026-03-31 03:48:49 EDT | `SMOKE_HCONV` | Compile-enabled sweep-harness smoke with the cleaned W&B naming | `10` steps, `32768` train tokens/step, no periodic eval, final eval only | 3.7165 | 3.71649312 | 15592083 | [train.log](../runs_hconv_quality_5090/SMOKE_HCONV/train.log) |
+| 2026-03-31 03:48:49 EDT | `SMOKE_HCONV` | Compile-enabled sweep-harness smoke | `10` steps, `32768` train tokens/step, no periodic eval, final eval only | 3.7165 | 3.71649312 | 15592083 | [train.log](../runs_hconv_quality_5090/SMOKE_HCONV/train.log) |
 
 Notes:
 
-- The canonical smoke row above is the current sweep-harness rerun that also seeded the cleaned W&B project.
+- The canonical smoke row above is kept only as a local bring-up record; smoke runs are no longer kept in the official W&B project.
 - It remains useful for bring-up and compile-behavior checks, but not for architecture quality comparison.
