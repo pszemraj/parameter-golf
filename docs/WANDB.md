@@ -1,6 +1,6 @@
 # W&B Logging
 
-Last updated: 2026-03-31 03:58 EDT
+Last updated: 2026-03-31 04:13 EDT
 
 This branch now has optional Weights & Biases logging in both [`train_hconv.py`](../train_hconv.py) and [`train_gpt.py`](../train_gpt.py), with the 5090 sweep harness enabling it by default.
 
@@ -30,6 +30,12 @@ The harness now resolves stable W&B run names instead of logging shorthand-only 
 - `I4H` -> `I4H_hconv_dilated_sqgate_hippo_attn5_uconv6_conv18_mlp2`
 
 The default quality sweep also no longer logs random-init validation. Scheduled eval now starts at `step 100`, then runs every `250` steps, with the terminal step always evaluated.
+
+Current canonical reruns in `pg-hconv-ablations`:
+
+- `SMOKE_HCONV` -> `https://wandb.ai/pszemraj/pg-hconv-ablations/runs/dgp3ok8q`
+- `T2_hconv_tieddepth_attn5_uconv6_conv18_mlp2` -> `https://wandb.ai/pszemraj/pg-hconv-ablations/runs/i7arhr9q`
+- `T3_hconv_tieddepth_attn5_uconv4_conv16_mlp3` -> `https://wandb.ai/pszemraj/pg-hconv-ablations/runs/78dhj40z`
 
 ## Watch Behavior
 

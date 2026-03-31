@@ -1,6 +1,6 @@
 # Performance
 
-Last updated: 2026-03-31 03:58 EDT
+Last updated: 2026-03-31 04:13 EDT
 
 This file tracks local training-speed measurements from runs in [`runs_hconv_quality_5090/`](../runs_hconv_quality_5090/).
 
@@ -24,25 +24,24 @@ This file tracks local training-speed measurements from runs in [`runs_hconv_qua
 | 2026-03-31 02:47:40 EDT | `GPT_REF` | 262144 | 367.98 | 2.7175 | 712387 | 5284 | [train.log](../runs_hconv_quality_5090/GPT_REF/train.log) |
 | 2026-03-31 02:52:13 EDT | `B1` | 262144 | 305.21 | 3.2764 | 858897 | 4901 | [train.log](../runs_hconv_quality_5090/B1/train.log) |
 | 2026-03-31 03:00:05 EDT | `C2` | 262144 | 281.35 | 3.5543 | 931736 | 4715 | [train.log](../runs_hconv_quality_5090/C2/train.log) |
-| 2026-03-31 03:20:00 EDT | `T2` | 262144 | 535.67 | 1.8668 | 489376 | 8189 | [train.log](../runs_hconv_quality_5090/T2/train.log) |
-| 2026-03-31 03:27:17 EDT | `T3` | 262144 | 511.45 | 1.9552 | 512551 | 7941 | [train.log](../runs_hconv_quality_5090/T3/train.log) |
+| 2026-03-31 04:05:45 EDT | `T2` | 262144 | 537.99 | 1.8588 | 487266 | 8189 | [train.log](../runs_hconv_quality_5090/T2/train.log) |
+| 2026-03-31 04:12:52 EDT | `T3` | 262144 | 518.02 | 1.9304 | 506050 | 7941 | [train.log](../runs_hconv_quality_5090/T3/train.log) |
 
 Current read:
 
 - `B1` is about `1.206x` faster than `GPT_REF` by both `steps/s` and `tok/s` under the same fixed-token contract.
 - `B1` also used less peak allocated memory in this local run (`4901 MiB` vs `5284 MiB`).
 - `C2` is faster again than `B1` locally, but the quality hit is severe enough that this is not a useful trade on the current comparison protocol.
-- `T3` is about `1.047x` faster than `T2` on both `steps/s` and `tok/s`, and it used slightly less peak allocated memory (`7941 MiB` vs `8189 MiB`).
-- The speed trade for phase 2 is therefore clear: `T3` is the faster tied-depth variant, while `T2` is the slightly better and smaller one on quality/artifact size.
+- `T3` is about `1.0385x` faster than `T2` on both `steps/s` and `tok/s`, and it used slightly less peak allocated memory (`7941 MiB` vs `8189 MiB`).
+- The speed trade for phase 2 is now cleaner than before: `T3` is the faster tied-depth variant, while `T2` keeps the compressed-size edge.
 
 ## Smoke / Compile Behavior
 
 | Timestamp | Config | Train batch tokens | Final step_avg_ms | steps/s | tok/s | Notes | Log |
 | --- | --- | ---: | ---: | ---: | ---: | --- | --- |
-| 2026-03-31 02:36:03 EDT | `SMOKE_HCONV` | 32768 | 187.83 | 5.3240 | 174456 | No-compile smoke; useful as a bring-up baseline only | [train.log](../runs_hconv_quality_5090/SMOKE_HCONV/train.log) |
-| 2026-03-31 02:40:02 EDT | `SMOKE_HCONV_COMPILE` | 32768 | 1038.45 | 0.9630 | 31555 | Includes cold compile overhead because `warmup_steps=0`; first step was `9329.90 ms` | [train.log](../runs_hconv_quality_5090/SMOKE_HCONV_COMPILE/train.log) |
+| 2026-03-31 03:48:49 EDT | `SMOKE_HCONV` | 32768 | 1054.45 | 0.9484 | 31076 | Compile-enabled harness smoke; includes cold compile overhead because `warmup_steps=0`; first step was `9314.41 ms` | [train.log](../runs_hconv_quality_5090/SMOKE_HCONV/train.log) |
 
 Takeaway:
 
 - Compile can be expensive up front on this machine, but the warmed quality runs are the numbers that matter for architecture speed comparison.
-- The smoke compile run is useful to remember that a short no-warmup benchmark can make the compile path look much worse than the actual steady-state quality protocol.
+- The canonical smoke run is still useful to remember that a short no-warmup benchmark can make the compile path look much worse than the actual steady-state quality protocol.
