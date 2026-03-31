@@ -9,9 +9,9 @@ This targets the other obvious MLP-side fusion boundary:
 - vendor residual add/scale
 
 The forward kernel avoids materializing the larger ``[M, 2H]`` gate-up tensor.
-Backward intentionally recomputes the gate and up projections with PyTorch so we
-can judge whether this boundary survives a compiled training-style contract
-before any model integration work.
+Backward now uses a real fused Triton derivative kernel for the gate/up
+recompute plus SwiGLU epilogue, while still leaving the larger weight-gradient
+and input-gradient matmuls to vendor kernels.
 """
 
 from __future__ import annotations

@@ -7,7 +7,7 @@ materially improved or clarified it over time.
 
 Timestamp:
 
-- `2026-03-30T02:20:00-04:00`
+- `2026-03-30T21:10:00-04:00`
 
 Current best ALlama quality run:
 
@@ -29,6 +29,9 @@ Current read on the project:
   too slow relative to GPT for comfortable search velocity.
 - The quality winner is currently `shortfat_s4_ff15 + prenorm + rmsnorm +
   shortcut_gate005`.
+- The best current kernel path is now `MLP_KERNEL=triton_gateup` on the ALlama
+  anchor. It is a modest but real local throughput win and lowers peak CUDA
+  memory materially.
 - `wide` is no longer the best-model quality path. It remains useful only if the
   goal is an explicit speed/quality tradeoff study.
 - `layernorm` is not part of the active search space. It lost to `rmsnorm` in
@@ -582,35 +585,31 @@ Latest harness smoke check:
   - vendor residual add/scale
 - This kernel avoids materializing the larger `[M, 2H]` gate-up activation
   tensor and instead emits the hidden `[M, H]` activation directly.
-- Backward is intentionally straightforward PyTorch:
-  - recompute `gate = x_norm @ W_gate` and `up = x_norm @ W_up`
-  - `grad_gate = grad_hidden * up * silu'(gate)`
-  - `grad_up = grad_hidden * silu(gate)`
-  - `grad_x = grad_gate @ W_gate^T + grad_up @ W_up^T`
-  - `grad_W_gate = x_norm^T @ grad_gate`
-  - `grad_W_up = x_norm^T @ grad_up`
-- Representative anchor-shape result in
-  `runs_allama_validation/mlp_gateup_block_v1/summary.json`:
+- Backward now includes a real Triton derivative kernel that recomputes the
+  gate and up activations and emits `grad_gate` and `grad_up` directly, while
+  the larger input-gradient and weight-gradient matmuls still use vendor paths.
+- Current representative anchor-shape result in
+  `runs_allama_validation/mlp_gateup_block_v2/summary.json`:
   - shape: `batch=4`, `seq_len=1024`, `dim=896`, `hidden=1408`
   - forward:
-    - eager reference: `0.25838 ms`
-    - eager custom: `0.21456 ms`
-    - compiled reference: `0.23551 ms`
-    - compiled custom: `0.20559 ms`
+    - eager reference: `0.24228 ms`
+    - eager custom: `0.20073 ms`
+    - compiled reference: `0.22528 ms`
+    - compiled custom: `0.19599 ms`
   - backward:
-    - eager reference: `0.77249 ms`
-    - eager custom: `0.95725 ms`
-    - compiled reference: `0.69488 ms`
-    - compiled custom: `0.79333 ms`
+    - eager reference: `0.74162 ms`
+    - eager custom: `0.90162 ms`
+    - compiled reference: `0.66785 ms`
+    - compiled custom: `0.77036 ms`
   - numerical drift stayed within a reasonable bf16 range:
     - forward `max_rel=0.00575`
-    - backward `max_rel=0.01087`
+    - backward `max_rel=0.01090`
 - Conclusion:
   - this is the strongest MLP-side candidate so far
-  - compiled custom forward is about `14.6%` faster than compiled PyTorch,
-    which is materially better than the earlier down-side fusion
-  - it is still not ready for training integration because compiled backward is
-    about `14.2%` slower than the compiled reference
+  - compiled custom forward remains about `14.9%` faster than compiled PyTorch
+  - standalone compiled backward is still about `15.4%` slower than the
+    compiled reference, so the matmul-heavy remainder of backward is still the
+    limiting piece
   - the evidence now points to these two forward kernels as the best initial
     directions:
     - MLP: fused gate-up projection + `SwiGLU`
@@ -618,61 +617,74 @@ Latest harness smoke check:
 
 ## End-to-End Harness Checks
 
-- Tried opt-in model-path integration of the strongest benchmark candidates on
-  the real compiled ALlama anchor harness.
+- Measured the strongest benchmark candidates on the real compiled ALlama
+  anchor harness.
 - Result:
-  - neither candidate is ready to stay in the model path yet
-  - both train-step integrations were removed after measurement so the main code
-    stays clean and baseline-stable
+  - the MLP gate-up path is now the first candidate that survives full model
+    integration and still helps throughput
+  - the current attention output boundary still does not survive its backward
+    path, so it remains benchmark-only
 
 ### MLP Gate-Up Integration Check
 
-- Integrated the fused gate-up `SwiGLU` kernel into the shared MLP path behind a
-  temporary harness-only flag, then measured the real compiled anchor step with
+- Integrated the fused gate-up `SwiGLU` kernel into the shared MLP path behind
+  `MLP_KERNEL=triton_gateup`, then measured the real compiled anchor step with
   the standard local accumulation contract.
-- Representative rerun in
-  `runs_allama_validation/perf_gateup_compare_rerun/`:
+- Current representative compare in
+  `runs_allama_validation/perf_integrated_mlp/`:
   - baseline:
-    - `mean_step_s=2.03157`
-    - `tokens_per_s=129035.49`
-  - Triton gate-up path:
-    - `mean_step_s=2.07339`
-    - `tokens_per_s=126432.65`
+    - `mean_step_s=2.00143`
+    - `tokens_per_s=130978.12`
+    - `peak_cuda_mem_bytes=2648702464`
+  - `MLP_KERNEL=triton_gateup`:
+    - `mean_step_s=1.96022`
+    - `tokens_per_s=133732.06`
+    - `peak_cuda_mem_bytes=2194671104`
 - Conclusion:
-  - despite the standalone compiled forward win, the real train step regressed
-    by about `2.0%`
-  - an earlier one-off compare showed a small positive delta, but the
-    back-to-back rerun did not reproduce it, so that earlier result was not
-    treated as reliable
-  - the model-path integration was removed
+  - the integrated path improves the compiled anchor by about `2.1%`
+  - it also cuts peak CUDA memory by about `453 MB`
+  - this is the first custom-kernel path worth keeping in `allama_shared.py`
+    instead of only in a benchmark script
+  - the win is modest, so this is not the end state, but it is finally a real
+    step in the right direction
 
 ### Attention Out-Proj Integration Check
 
-- Integrated the fused post-flash output-projection kernel behind a temporary
-  harness-only flag and measured the same compiled anchor contract.
-- Representative compare in
-  `runs_allama_validation/perf_attn_compare/`:
-  - baseline:
-    - `mean_step_s=2.00584`
-    - `tokens_per_s=130690.36`
-  - Triton attention out-proj path:
-    - `mean_step_s=2.15642`
-    - `tokens_per_s=121564.50`
+- Added real backward kernels for the current post-flash attention boundary
+  benchmark:
+  - fused branch recompute + reduction for `grad_scale`
+  - direct `grad_attn_y` writeback in head-major layout
+  - direct `grad_proj_weight_t` without flattening the attention input
+- Current representative result in
+  `runs_allama_validation/attention_block_v2/summary.json`:
+  - forward:
+    - compiled reference: `0.05358 ms`
+    - compiled custom: `0.05324 ms`
+  - backward:
+    - compiled reference: `0.24955 ms`
+    - compiled custom: `0.31215 ms`
+  - numerical drift:
+    - forward `max_rel=0.00442`
+    - backward `max_rel=0.00338`
 - Conclusion:
-  - the real train step regressed by about `7.0%`
-  - this confirms the standalone forward win is not enough when the current
-    backward and integration shape are included
-  - the model-path integration was removed
+  - the backward numerics are now fine, so the benchmark is honest
+  - compiled forward is essentially tied with compiled PyTorch
+  - compiled backward is still about `20.1%` slower
+  - this boundary is not ready for model integration yet
 
 ### Updated State
 
 - Keep the larger-boundary benchmark scripts.
-- Do not keep the experimental kernels in `allama_shared.py` until an end-to-end
-  harness compare is consistently positive.
+- Keep the MLP gate-up kernel path in `allama_shared.py` behind
+  `MLP_KERNEL=triton_gateup`.
+- Do not integrate the attention output boundary into `allama_shared.py` yet.
 - The benchmark evidence is still useful:
-  - MLP gate-up fusion remains the strongest forward-only MLP candidate
-  - attention out-proj remains a plausible forward-only attention candidate
+  - MLP gate-up fusion is the first boundary with a real integrated train-step
+    win
+  - attention out-proj remains the best current attention benchmark, but it is
+    still missing enough backward-side efficiency to matter end-to-end
 - The next time these come back into the model path, they need either:
-  - a stronger custom backward path
-  - a different integration boundary that avoids giving the forward win back
-    during training
+  - a stronger custom backward path for the attention boundary
+  - a larger attention integration boundary that absorbs more launch overhead
+  - a better backward-side reduction in the MLP path so the current `+2%` class
+    win can become something materially larger

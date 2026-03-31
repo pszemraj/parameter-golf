@@ -7,9 +7,12 @@ This targets the boundary after flash attention:
 - Triton fused output projection + residual add/scale
 
 The kernel avoids materializing the transposed ``[B, T, D]`` attention output
-before the projection matmul. Backward intentionally uses straightforward
-PyTorch matmuls and reshapes so we can judge whether the forward boundary is
-strong enough to survive a compiled training-style contract.
+before the projection matmul. Backward now uses Triton kernels for the
+post-flash boundary as well:
+
+- fused branch recompute + reduction for ``grad_scale``
+- direct ``grad_attn_y`` writeback in head-major layout
+- direct ``grad_proj_weight_t`` without flattening the attention input
 """
 
 from __future__ import annotations
@@ -166,6 +169,242 @@ def attn_outproj_residual_kernel(
     tl.store(out_ptrs, out.to(tl.bfloat16), mask=mask_m[:, None] & mask_n[None, :])
 
 
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_M": 32, "BLOCK_N": 64, "BLOCK_K": 32}, num_warps=4),
+        triton.Config({"BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 32}, num_warps=4),
+        triton.Config({"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 32}, num_warps=8),
+        triton.Config({"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 64}, num_warps=8),
+    ],
+    key=["M", "N", "K"],
+    reset_to_zero=["grad_scale_ptr"],
+)
+@triton.jit
+def attn_grad_scale_kernel(
+    attn_y_ptr,
+    proj_weight_t_ptr,
+    grad_out_ptr,
+    grad_scale_ptr,
+    M,
+    N,
+    K,
+    seq_len,
+    head_dim,
+    attn_stride_b,
+    attn_stride_h,
+    attn_stride_t,
+    attn_stride_d,
+    proj_stride_k,
+    proj_stride_n,
+    grad_out_stride_m,
+    grad_out_stride_n,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    """Fuse branch recompute with the reduction for ``grad_scale``."""
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_k = tl.arange(0, BLOCK_K)
+    mask_m = offs_m < M
+    mask_n = offs_n < N
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+
+    b_idx = offs_m // seq_len
+    t_idx = offs_m % seq_len
+
+    for k_base in range(0, K, BLOCK_K):
+        k_idx = k_base + offs_k
+        mask_k = k_idx < K
+        h_idx = k_idx // head_dim
+        d_idx = k_idx % head_dim
+
+        attn_ptrs = (
+            attn_y_ptr
+            + b_idx[:, None] * attn_stride_b
+            + h_idx[None, :] * attn_stride_h
+            + t_idx[:, None] * attn_stride_t
+            + d_idx[None, :] * attn_stride_d
+        )
+        attn_vals = tl.load(
+            attn_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0
+        )
+        weight_ptrs = (
+            proj_weight_t_ptr
+            + k_idx[:, None] * proj_stride_k
+            + offs_n[None, :] * proj_stride_n
+        )
+        weight = tl.load(weight_ptrs, mask=mask_k[:, None] & mask_n[None, :], other=0.0)
+        acc += tl.dot(attn_vals, weight)
+
+    grad_out_ptrs = (
+        grad_out_ptr
+        + offs_m[:, None] * grad_out_stride_m
+        + offs_n[None, :] * grad_out_stride_n
+    )
+    grad_out = tl.load(
+        grad_out_ptrs, mask=mask_m[:, None] & mask_n[None, :], other=0.0
+    ).to(tl.float32)
+    partial = tl.sum(acc * grad_out, axis=0)
+    tl.atomic_add(grad_scale_ptr + offs_n, partial, mask=mask_n)
+
+
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_M": 32, "BLOCK_N": 64, "BLOCK_K": 32}, num_warps=4),
+        triton.Config({"BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 32}, num_warps=4),
+        triton.Config({"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 32}, num_warps=8),
+        triton.Config({"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 64}, num_warps=8),
+    ],
+    key=["M", "N", "K"],
+)
+@triton.jit
+def attn_grad_attn_y_kernel(
+    grad_branch_ptr,
+    proj_weight_t_ptr,
+    grad_attn_y_ptr,
+    M,
+    N,
+    K,
+    seq_len,
+    head_dim,
+    grad_branch_stride_m,
+    grad_branch_stride_n,
+    proj_stride_k,
+    proj_stride_n,
+    grad_attn_stride_b,
+    grad_attn_stride_h,
+    grad_attn_stride_t,
+    grad_attn_stride_d,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    """Compute ``grad_attn_y`` directly into head-major layout."""
+    pid_m = tl.program_id(0)
+    pid_k = tl.program_id(1)
+
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_k = pid_k * BLOCK_K + tl.arange(0, BLOCK_K)
+    offs_n = tl.arange(0, BLOCK_N)
+    mask_m = offs_m < M
+    mask_k = offs_k < K
+    acc = tl.zeros((BLOCK_M, BLOCK_K), dtype=tl.float32)
+
+    for n_base in range(0, N, BLOCK_N):
+        n_idx = n_base + offs_n
+        mask_n = n_idx < N
+        grad_branch_ptrs = (
+            grad_branch_ptr
+            + offs_m[:, None] * grad_branch_stride_m
+            + n_idx[None, :] * grad_branch_stride_n
+        )
+        grad_branch_vals = tl.load(
+            grad_branch_ptrs, mask=mask_m[:, None] & mask_n[None, :], other=0.0
+        )
+        weight_ptrs = (
+            proj_weight_t_ptr
+            + offs_k[:, None] * proj_stride_k
+            + n_idx[None, :] * proj_stride_n
+        )
+        weight = tl.load(weight_ptrs, mask=mask_k[:, None] & mask_n[None, :], other=0.0)
+        acc += tl.dot(grad_branch_vals, tl.trans(weight))
+
+    b_idx = offs_m // seq_len
+    t_idx = offs_m % seq_len
+    h_idx = offs_k // head_dim
+    d_idx = offs_k % head_dim
+    out_ptrs = (
+        grad_attn_y_ptr
+        + b_idx[:, None] * grad_attn_stride_b
+        + h_idx[None, :] * grad_attn_stride_h
+        + t_idx[:, None] * grad_attn_stride_t
+        + d_idx[None, :] * grad_attn_stride_d
+    )
+    tl.store(out_ptrs, acc.to(tl.bfloat16), mask=mask_m[:, None] & mask_k[None, :])
+
+
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_M": 32, "BLOCK_N": 64, "BLOCK_K": 32}, num_warps=4),
+        triton.Config({"BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 32}, num_warps=4),
+        triton.Config({"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 32}, num_warps=8),
+        triton.Config({"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 64}, num_warps=8),
+    ],
+    key=["M", "N", "K"],
+)
+@triton.jit
+def attn_grad_proj_weight_t_kernel(
+    attn_y_ptr,
+    grad_branch_ptr,
+    grad_proj_weight_t_ptr,
+    M,
+    N,
+    K,
+    seq_len,
+    head_dim,
+    attn_stride_b,
+    attn_stride_h,
+    attn_stride_t,
+    attn_stride_d,
+    grad_branch_stride_m,
+    grad_branch_stride_n,
+    grad_proj_stride_k,
+    grad_proj_stride_n,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    """Compute ``grad_proj_weight_t`` without flattening the head-major input."""
+    pid_k = tl.program_id(0)
+    pid_n = tl.program_id(1)
+
+    offs_k = pid_k * BLOCK_K + tl.arange(0, BLOCK_K)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_m = tl.arange(0, BLOCK_M)
+    mask_k = offs_k < K
+    mask_n = offs_n < N
+    acc = tl.zeros((BLOCK_K, BLOCK_N), dtype=tl.float32)
+
+    h_idx = offs_k // head_dim
+    d_idx = offs_k % head_dim
+
+    for m_base in range(0, M, BLOCK_M):
+        m_idx = m_base + offs_m
+        mask_m = m_idx < M
+        b_idx = m_idx // seq_len
+        t_idx = m_idx % seq_len
+        attn_ptrs = (
+            attn_y_ptr
+            + b_idx[None, :] * attn_stride_b
+            + h_idx[:, None] * attn_stride_h
+            + t_idx[None, :] * attn_stride_t
+            + d_idx[:, None] * attn_stride_d
+        )
+        attn_vals = tl.load(
+            attn_ptrs, mask=mask_k[:, None] & mask_m[None, :], other=0.0
+        )
+        grad_branch_ptrs = (
+            grad_branch_ptr
+            + m_idx[:, None] * grad_branch_stride_m
+            + offs_n[None, :] * grad_branch_stride_n
+        )
+        grad_branch_vals = tl.load(
+            grad_branch_ptrs, mask=mask_m[:, None] & mask_n[None, :], other=0.0
+        )
+        acc += tl.dot(attn_vals, grad_branch_vals)
+
+    out_ptrs = (
+        grad_proj_weight_t_ptr
+        + offs_k[:, None] * grad_proj_stride_k
+        + offs_n[None, :] * grad_proj_stride_n
+    )
+    tl.store(out_ptrs, acc.to(tl.bfloat16), mask=mask_k[:, None] & mask_n[None, :])
+
+
 def attn_outproj_residual_triton(
     residual_x: torch.Tensor,
     attn_y: torch.Tensor,
@@ -225,6 +464,131 @@ def attn_outproj_residual_triton(
     return out
 
 
+def attn_grad_scale_triton(
+    attn_y: torch.Tensor,
+    proj_weight_t: torch.Tensor,
+    grad_out: torch.Tensor,
+) -> torch.Tensor:
+    """Run the fused branch-recompute reduction for ``grad_scale``."""
+    batch, num_heads, seq_len, head_dim = attn_y.shape
+    model_dim = num_heads * head_dim
+    grad_scale = torch.zeros(model_dim, device=grad_out.device, dtype=torch.float32)
+
+    def grid(meta: dict[str, int]) -> tuple[int, int]:
+        return (
+            triton.cdiv(grad_out.size(0), meta["BLOCK_M"]),
+            triton.cdiv(grad_out.size(1), meta["BLOCK_N"]),
+        )
+
+    attn_grad_scale_kernel[grid](
+        attn_y,
+        proj_weight_t,
+        grad_out,
+        grad_scale,
+        grad_out.size(0),
+        grad_out.size(1),
+        model_dim,
+        seq_len,
+        head_dim,
+        attn_y.stride(0),
+        attn_y.stride(1),
+        attn_y.stride(2),
+        attn_y.stride(3),
+        proj_weight_t.stride(0),
+        proj_weight_t.stride(1),
+        grad_out.stride(0),
+        grad_out.stride(1),
+    )
+    return grad_scale
+
+
+def attn_grad_attn_y_triton(
+    grad_branch: torch.Tensor,
+    proj_weight_t: torch.Tensor,
+    seq_len: int,
+    head_dim: int,
+) -> torch.Tensor:
+    """Run the Triton backward kernel for ``grad_attn_y``."""
+    model_dim = proj_weight_t.size(0)
+    batch = grad_branch.size(0) // seq_len
+    num_heads = model_dim // head_dim
+    grad_attn_y = torch.empty(
+        batch,
+        num_heads,
+        seq_len,
+        head_dim,
+        device=grad_branch.device,
+        dtype=grad_branch.dtype,
+    )
+
+    def grid(meta: dict[str, int]) -> tuple[int, int]:
+        return (
+            triton.cdiv(grad_branch.size(0), meta["BLOCK_M"]),
+            triton.cdiv(model_dim, meta["BLOCK_K"]),
+        )
+
+    attn_grad_attn_y_kernel[grid](
+        grad_branch,
+        proj_weight_t,
+        grad_attn_y,
+        grad_branch.size(0),
+        grad_branch.size(1),
+        model_dim,
+        seq_len,
+        head_dim,
+        grad_branch.stride(0),
+        grad_branch.stride(1),
+        proj_weight_t.stride(0),
+        proj_weight_t.stride(1),
+        grad_attn_y.stride(0),
+        grad_attn_y.stride(1),
+        grad_attn_y.stride(2),
+        grad_attn_y.stride(3),
+    )
+    return grad_attn_y
+
+
+def attn_grad_proj_weight_t_triton(
+    attn_y: torch.Tensor,
+    grad_branch: torch.Tensor,
+) -> torch.Tensor:
+    """Run the Triton backward kernel for ``grad_proj_weight_t``."""
+    batch, num_heads, seq_len, head_dim = attn_y.shape
+    model_dim = num_heads * head_dim
+    grad_proj_weight_t = torch.empty(
+        model_dim,
+        grad_branch.size(1),
+        device=grad_branch.device,
+        dtype=grad_branch.dtype,
+    )
+
+    def grid(meta: dict[str, int]) -> tuple[int, int]:
+        return (
+            triton.cdiv(model_dim, meta["BLOCK_K"]),
+            triton.cdiv(grad_branch.size(1), meta["BLOCK_N"]),
+        )
+
+    attn_grad_proj_weight_t_kernel[grid](
+        attn_y,
+        grad_branch,
+        grad_proj_weight_t,
+        grad_branch.size(0),
+        grad_branch.size(1),
+        model_dim,
+        seq_len,
+        head_dim,
+        attn_y.stride(0),
+        attn_y.stride(1),
+        attn_y.stride(2),
+        attn_y.stride(3),
+        grad_branch.stride(0),
+        grad_branch.stride(1),
+        grad_proj_weight_t.stride(0),
+        grad_proj_weight_t.stride(1),
+    )
+    return grad_proj_weight_t
+
+
 def attn_outproj_residual_reference(
     residual_x: torch.Tensor,
     attn_y: torch.Tensor,
@@ -239,6 +603,68 @@ def attn_outproj_residual_reference(
 
 def register_attention_block_custom_op() -> Any:
     """Register a benchmark-local custom op for the attention output boundary."""
+
+    @torch.library.custom_op(
+        "allama_triton_bench::attn_grad_scale",
+        mutates_args=(),
+    )
+    def attn_grad_scale_op(
+        attn_y: torch.Tensor,
+        proj_weight_t: torch.Tensor,
+        grad_out: torch.Tensor,
+    ) -> torch.Tensor:
+        return attn_grad_scale_triton(attn_y, proj_weight_t, grad_out)
+
+    @attn_grad_scale_op.register_fake
+    def _attn_grad_scale_op_fake(
+        attn_y: torch.Tensor,
+        proj_weight_t: torch.Tensor,
+        grad_out: torch.Tensor,
+    ) -> torch.Tensor:
+        del attn_y, proj_weight_t
+        return grad_out.new_empty((grad_out.size(1),), dtype=torch.float32)
+
+    @torch.library.custom_op(
+        "allama_triton_bench::attn_grad_attn_y",
+        mutates_args=(),
+    )
+    def attn_grad_attn_y_op(
+        grad_branch: torch.Tensor,
+        proj_weight_t: torch.Tensor,
+        seq_len: int,
+        head_dim: int,
+    ) -> torch.Tensor:
+        return attn_grad_attn_y_triton(grad_branch, proj_weight_t, seq_len, head_dim)
+
+    @attn_grad_attn_y_op.register_fake
+    def _attn_grad_attn_y_op_fake(
+        grad_branch: torch.Tensor,
+        proj_weight_t: torch.Tensor,
+        seq_len: int,
+        head_dim: int,
+    ) -> torch.Tensor:
+        model_dim = proj_weight_t.size(0)
+        batch = grad_branch.size(0) // seq_len
+        num_heads = model_dim // head_dim
+        return grad_branch.new_empty((batch, num_heads, seq_len, head_dim))
+
+    @torch.library.custom_op(
+        "allama_triton_bench::attn_grad_proj_weight_t",
+        mutates_args=(),
+    )
+    def attn_grad_proj_weight_t_op(
+        attn_y: torch.Tensor,
+        grad_branch: torch.Tensor,
+    ) -> torch.Tensor:
+        return attn_grad_proj_weight_t_triton(attn_y, grad_branch)
+
+    @attn_grad_proj_weight_t_op.register_fake
+    def _attn_grad_proj_weight_t_op_fake(
+        attn_y: torch.Tensor,
+        grad_branch: torch.Tensor,
+    ) -> torch.Tensor:
+        model_dim = attn_y.size(1) * attn_y.size(3)
+        return grad_branch.new_empty((model_dim, grad_branch.size(1)))
 
     @torch.library.custom_op(
         "allama_triton_bench::attn_outproj_residual",
@@ -275,22 +701,18 @@ def register_attention_block_custom_op() -> Any:
         ctx: Any, grad_out: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         attn_y, proj_weight_t, scale = ctx.saved_tensors
-        batch, num_heads, seq_len, head_dim = attn_y.shape
-        model_dim = num_heads * head_dim
-        attn_flat = (
-            attn_y.permute(0, 2, 1, 3).contiguous().view(batch * seq_len, model_dim)
-        )
-        branch = attn_flat @ proj_weight_t
         scale_cast = scale.to(dtype=grad_out.dtype)[None, :]
         grad_x = grad_out
-        grad_scale = (grad_out * branch).sum(dim=0).to(dtype=scale.dtype)
+        grad_scale = attn_grad_scale_op(attn_y, proj_weight_t, grad_out).to(
+            dtype=scale.dtype
+        )
         grad_branch = grad_out * scale_cast
-        grad_proj_weight_t = attn_flat.transpose(0, 1) @ grad_branch
-        grad_attn_flat = grad_branch @ proj_weight_t.transpose(0, 1)
-        grad_attn_y = (
-            grad_attn_flat.view(batch, seq_len, num_heads, head_dim)
-            .permute(0, 2, 1, 3)
-            .contiguous()
+        grad_proj_weight_t = attn_grad_proj_weight_t_op(attn_y, grad_branch)
+        grad_attn_y = attn_grad_attn_y_op(
+            grad_branch,
+            proj_weight_t,
+            attn_y.size(2),
+            attn_y.size(3),
         )
         return grad_x, grad_attn_y, grad_proj_weight_t, grad_scale
 

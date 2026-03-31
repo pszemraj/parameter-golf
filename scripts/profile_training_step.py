@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from dataclasses import asdict, dataclass
@@ -327,6 +328,7 @@ def build_allama_anchor(device: torch.device) -> tuple[nn.Module, OptimizerBundl
         resid_dropout=0.0,
         use_bias=False,
         cast_linears=True,
+        mlp_kernel=os.environ.get("MLP_KERNEL", "pytorch"),
     )
     model = HyperSharedALlama(cfg).to(device).bfloat16()
     from allama_shared import restore_low_dim_params_to_fp32

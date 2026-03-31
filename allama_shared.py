@@ -11,6 +11,7 @@ Key choices in this version:
 - simple learned per-layer modulation tensors instead of a controller network
 - fixed layer-to-block assignment computed once at init
 - Muon + Adam optimizer split retained from the v3 work
+- optional Triton gate/up SwiGLU kernel behind `MLP_KERNEL=triton_gateup`
 """
 
 from __future__ import annotations
@@ -22,6 +23,13 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 from torch import Tensor, nn
+
+try:
+    import triton
+    import triton.language as tl
+except Exception:  # pragma: no cover
+    triton = None
+    tl = None
 
 
 # -----------------------------------------------------------------------------
@@ -307,6 +315,427 @@ def mix_x0(
     return x
 
 
+_ALLAMA_MLP_GATEUP_OP: Optional[Any] = None
+
+
+if triton is not None:
+
+    @triton.autotune(
+        configs=[
+            triton.Config(
+                {"BLOCK_M": 32, "BLOCK_N": 64, "BLOCK_K": 32, "GROUP_M": 8},
+                num_warps=4,
+                num_stages=3,
+            ),
+            triton.Config(
+                {"BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 32, "GROUP_M": 8},
+                num_warps=4,
+                num_stages=4,
+            ),
+            triton.Config(
+                {"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 32, "GROUP_M": 8},
+                num_warps=8,
+                num_stages=4,
+            ),
+            triton.Config(
+                {"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 64, "GROUP_M": 8},
+                num_warps=8,
+                num_stages=4,
+            ),
+            triton.Config(
+                {"BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 32, "GROUP_M": 4},
+                num_warps=8,
+                num_stages=5,
+            ),
+        ],
+        key=["M", "N", "K"],
+    )
+    @triton.jit
+    def gateup_swiglu_kernel(
+        x_ptr,
+        gate_weight_t_ptr,
+        up_weight_t_ptr,
+        hidden_ptr,
+        M,
+        N,
+        K,
+        x_stride_m,
+        x_stride_k,
+        gate_stride_k,
+        gate_stride_n,
+        up_stride_k,
+        up_stride_n,
+        hidden_stride_m,
+        hidden_stride_n,
+        BLOCK_M: tl.constexpr,
+        BLOCK_N: tl.constexpr,
+        BLOCK_K: tl.constexpr,
+        GROUP_M: tl.constexpr,
+    ):
+        """Fuse gate/up projections with the SwiGLU epilogue."""
+        pid = tl.program_id(axis=0)
+        num_pid_m = tl.cdiv(M, BLOCK_M)
+        num_pid_n = tl.cdiv(N, BLOCK_N)
+        num_pid_in_group = GROUP_M * num_pid_n
+        group_id = pid // num_pid_in_group
+        first_pid_m = group_id * GROUP_M
+        group_size_m = tl.minimum(num_pid_m - first_pid_m, GROUP_M)
+        pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
+        pid_n = (pid % num_pid_in_group) // group_size_m
+
+        offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+        offs_k = tl.arange(0, BLOCK_K)
+        mask_m = offs_m < M
+        mask_n = offs_n < N
+
+        acc_gate = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+        acc_up = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+
+        for k_base in range(0, K, BLOCK_K):
+            k_idx = k_base + offs_k
+            mask_k = k_idx < K
+            x_ptrs = x_ptr + offs_m[:, None] * x_stride_m + k_idx[None, :] * x_stride_k
+            x_vals = tl.load(x_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0)
+
+            gate_ptrs = (
+                gate_weight_t_ptr
+                + k_idx[:, None] * gate_stride_k
+                + offs_n[None, :] * gate_stride_n
+            )
+            up_ptrs = (
+                up_weight_t_ptr
+                + k_idx[:, None] * up_stride_k
+                + offs_n[None, :] * up_stride_n
+            )
+            gate_weight = tl.load(
+                gate_ptrs, mask=mask_k[:, None] & mask_n[None, :], other=0.0
+            )
+            up_weight = tl.load(
+                up_ptrs, mask=mask_k[:, None] & mask_n[None, :], other=0.0
+            )
+            acc_gate += tl.dot(x_vals, gate_weight)
+            acc_up += tl.dot(x_vals, up_weight)
+
+        hidden = acc_gate * tl.sigmoid(acc_gate) * acc_up
+        hidden_ptrs = (
+            hidden_ptr
+            + offs_m[:, None] * hidden_stride_m
+            + offs_n[None, :] * hidden_stride_n
+        )
+        tl.store(
+            hidden_ptrs,
+            hidden.to(tl.bfloat16),
+            mask=mask_m[:, None] & mask_n[None, :],
+        )
+
+    @triton.autotune(
+        configs=[
+            triton.Config(
+                {"BLOCK_M": 32, "BLOCK_N": 64, "BLOCK_K": 32, "GROUP_M": 8},
+                num_warps=4,
+                num_stages=3,
+            ),
+            triton.Config(
+                {"BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 32, "GROUP_M": 8},
+                num_warps=4,
+                num_stages=4,
+            ),
+            triton.Config(
+                {"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 32, "GROUP_M": 8},
+                num_warps=8,
+                num_stages=4,
+            ),
+            triton.Config(
+                {"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 64, "GROUP_M": 8},
+                num_warps=8,
+                num_stages=4,
+            ),
+            triton.Config(
+                {"BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 32, "GROUP_M": 4},
+                num_warps=8,
+                num_stages=5,
+            ),
+        ],
+        key=["M", "N", "K"],
+    )
+    @triton.jit
+    def gateup_swiglu_backward_parts_kernel(
+        x_ptr,
+        gate_weight_t_ptr,
+        up_weight_t_ptr,
+        grad_hidden_ptr,
+        grad_gate_ptr,
+        grad_up_ptr,
+        M,
+        N,
+        K,
+        x_stride_m,
+        x_stride_k,
+        gate_stride_k,
+        gate_stride_n,
+        up_stride_k,
+        up_stride_n,
+        grad_hidden_stride_m,
+        grad_hidden_stride_n,
+        grad_gate_stride_m,
+        grad_gate_stride_n,
+        grad_up_stride_m,
+        grad_up_stride_n,
+        BLOCK_M: tl.constexpr,
+        BLOCK_N: tl.constexpr,
+        BLOCK_K: tl.constexpr,
+        GROUP_M: tl.constexpr,
+    ):
+        """Fuse gate/up recompute with the SwiGLU derivative epilogue."""
+        pid = tl.program_id(axis=0)
+        num_pid_m = tl.cdiv(M, BLOCK_M)
+        num_pid_n = tl.cdiv(N, BLOCK_N)
+        num_pid_in_group = GROUP_M * num_pid_n
+        group_id = pid // num_pid_in_group
+        first_pid_m = group_id * GROUP_M
+        group_size_m = tl.minimum(num_pid_m - first_pid_m, GROUP_M)
+        pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
+        pid_n = (pid % num_pid_in_group) // group_size_m
+
+        offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+        offs_k = tl.arange(0, BLOCK_K)
+        mask_m = offs_m < M
+        mask_n = offs_n < N
+
+        acc_gate = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+        acc_up = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+
+        for k_base in range(0, K, BLOCK_K):
+            k_idx = k_base + offs_k
+            mask_k = k_idx < K
+            x_ptrs = x_ptr + offs_m[:, None] * x_stride_m + k_idx[None, :] * x_stride_k
+            x_vals = tl.load(x_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0)
+
+            gate_ptrs = (
+                gate_weight_t_ptr
+                + k_idx[:, None] * gate_stride_k
+                + offs_n[None, :] * gate_stride_n
+            )
+            up_ptrs = (
+                up_weight_t_ptr
+                + k_idx[:, None] * up_stride_k
+                + offs_n[None, :] * up_stride_n
+            )
+            gate_weight = tl.load(
+                gate_ptrs, mask=mask_k[:, None] & mask_n[None, :], other=0.0
+            )
+            up_weight = tl.load(
+                up_ptrs, mask=mask_k[:, None] & mask_n[None, :], other=0.0
+            )
+            acc_gate += tl.dot(x_vals, gate_weight)
+            acc_up += tl.dot(x_vals, up_weight)
+
+        grad_hidden_ptrs = (
+            grad_hidden_ptr
+            + offs_m[:, None] * grad_hidden_stride_m
+            + offs_n[None, :] * grad_hidden_stride_n
+        )
+        grad_hidden = tl.load(
+            grad_hidden_ptrs, mask=mask_m[:, None] & mask_n[None, :], other=0.0
+        ).to(tl.float32)
+        sigmoid_gate = tl.sigmoid(acc_gate)
+        silu_gate = acc_gate * sigmoid_gate
+        silu_prime = sigmoid_gate * (1.0 + acc_gate * (1.0 - sigmoid_gate))
+        grad_gate = grad_hidden * acc_up * silu_prime
+        grad_up = grad_hidden * silu_gate
+
+        grad_gate_ptrs = (
+            grad_gate_ptr
+            + offs_m[:, None] * grad_gate_stride_m
+            + offs_n[None, :] * grad_gate_stride_n
+        )
+        grad_up_ptrs = (
+            grad_up_ptr
+            + offs_m[:, None] * grad_up_stride_m
+            + offs_n[None, :] * grad_up_stride_n
+        )
+        tl.store(
+            grad_gate_ptrs,
+            grad_gate.to(tl.bfloat16),
+            mask=mask_m[:, None] & mask_n[None, :],
+        )
+        tl.store(
+            grad_up_ptrs,
+            grad_up.to(tl.bfloat16),
+            mask=mask_m[:, None] & mask_n[None, :],
+        )
+
+
+def gateup_swiglu_triton(
+    x_norm: Tensor,
+    gate_weight_t: Tensor,
+    up_weight_t: Tensor,
+) -> Tensor:
+    """Run the fused Triton gate/up projection and SwiGLU kernel."""
+    if triton is None:
+        raise RuntimeError("Triton is unavailable")
+    hidden = torch.empty(
+        x_norm.size(0),
+        gate_weight_t.size(1),
+        device=x_norm.device,
+        dtype=x_norm.dtype,
+    )
+
+    def grid(meta: dict[str, int]) -> tuple[int]:
+        return (
+            triton.cdiv(x_norm.size(0), meta["BLOCK_M"])
+            * triton.cdiv(gate_weight_t.size(1), meta["BLOCK_N"]),
+        )
+
+    gateup_swiglu_kernel[grid](
+        x_norm,
+        gate_weight_t,
+        up_weight_t,
+        hidden,
+        x_norm.size(0),
+        gate_weight_t.size(1),
+        x_norm.size(1),
+        x_norm.stride(0),
+        x_norm.stride(1),
+        gate_weight_t.stride(0),
+        gate_weight_t.stride(1),
+        up_weight_t.stride(0),
+        up_weight_t.stride(1),
+        hidden.stride(0),
+        hidden.stride(1),
+    )
+    return hidden
+
+
+def gateup_swiglu_backward_parts_triton(
+    x_norm: Tensor,
+    gate_weight_t: Tensor,
+    up_weight_t: Tensor,
+    grad_hidden: Tensor,
+) -> tuple[Tensor, Tensor]:
+    """Run the Triton fused gate/up derivative kernel."""
+    if triton is None:
+        raise RuntimeError("Triton is unavailable")
+    grad_gate = torch.empty_like(grad_hidden)
+    grad_up = torch.empty_like(grad_hidden)
+
+    def grid(meta: dict[str, int]) -> tuple[int]:
+        return (
+            triton.cdiv(x_norm.size(0), meta["BLOCK_M"])
+            * triton.cdiv(gate_weight_t.size(1), meta["BLOCK_N"]),
+        )
+
+    gateup_swiglu_backward_parts_kernel[grid](
+        x_norm,
+        gate_weight_t,
+        up_weight_t,
+        grad_hidden,
+        grad_gate,
+        grad_up,
+        x_norm.size(0),
+        gate_weight_t.size(1),
+        x_norm.size(1),
+        x_norm.stride(0),
+        x_norm.stride(1),
+        gate_weight_t.stride(0),
+        gate_weight_t.stride(1),
+        up_weight_t.stride(0),
+        up_weight_t.stride(1),
+        grad_hidden.stride(0),
+        grad_hidden.stride(1),
+        grad_gate.stride(0),
+        grad_gate.stride(1),
+        grad_up.stride(0),
+        grad_up.stride(1),
+    )
+    return grad_gate, grad_up
+
+
+def register_allama_mlp_gateup_custom_op() -> Optional[Any]:
+    """Register the optional Triton gate/up custom op once."""
+    global _ALLAMA_MLP_GATEUP_OP
+    if _ALLAMA_MLP_GATEUP_OP is not None:
+        return _ALLAMA_MLP_GATEUP_OP
+    if triton is None:
+        return None
+
+    @torch.library.custom_op(
+        "allama_triton::gateup_swiglu_backward_parts",
+        mutates_args=(),
+    )
+    def gateup_swiglu_backward_parts_op(
+        x_norm: Tensor,
+        gate_weight_t: Tensor,
+        up_weight_t: Tensor,
+        grad_hidden: Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        return gateup_swiglu_backward_parts_triton(
+            x_norm, gate_weight_t, up_weight_t, grad_hidden
+        )
+
+    @gateup_swiglu_backward_parts_op.register_fake
+    def _gateup_swiglu_backward_parts_op_fake(
+        x_norm: Tensor,
+        gate_weight_t: Tensor,
+        up_weight_t: Tensor,
+        grad_hidden: Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        del x_norm, gate_weight_t, up_weight_t
+        return grad_hidden.new_empty(grad_hidden.shape), grad_hidden.new_empty(
+            grad_hidden.shape
+        )
+
+    @torch.library.custom_op(
+        "allama_triton::gateup_swiglu",
+        mutates_args=(),
+    )
+    def gateup_swiglu_op(
+        x_norm: Tensor,
+        gate_weight_t: Tensor,
+        up_weight_t: Tensor,
+    ) -> Tensor:
+        return gateup_swiglu_triton(x_norm, gate_weight_t, up_weight_t)
+
+    @gateup_swiglu_op.register_fake
+    def _gateup_swiglu_op_fake(
+        x_norm: Tensor,
+        gate_weight_t: Tensor,
+        up_weight_t: Tensor,
+    ) -> Tensor:
+        del up_weight_t
+        return x_norm.new_empty((x_norm.size(0), gate_weight_t.size(1)))
+
+    def setup_context(
+        ctx: Any,
+        inputs: tuple[Tensor, Tensor, Tensor],
+        output: Tensor,
+    ) -> None:
+        del output
+        x_norm, gate_weight_t, up_weight_t = inputs
+        ctx.save_for_backward(x_norm, gate_weight_t, up_weight_t)
+
+    def backward(ctx: Any, grad_hidden: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        x_norm, gate_weight_t, up_weight_t = ctx.saved_tensors
+        grad_gate, grad_up = gateup_swiglu_backward_parts_op(
+            x_norm, gate_weight_t, up_weight_t, grad_hidden
+        )
+        grad_x = grad_gate @ gate_weight_t.transpose(0, 1)
+        grad_x = grad_x + grad_up @ up_weight_t.transpose(0, 1)
+        grad_gate_weight_t = x_norm.transpose(0, 1) @ grad_gate
+        grad_up_weight_t = x_norm.transpose(0, 1) @ grad_up
+        return grad_x, grad_gate_weight_t, grad_up_weight_t
+
+    torch.library.register_autograd(
+        "allama_triton::gateup_swiglu",
+        backward,
+        setup_context=setup_context,
+    )
+    _ALLAMA_MLP_GATEUP_OP = gateup_swiglu_op
+    return _ALLAMA_MLP_GATEUP_OP
+
+
 # -----------------------------------------------------------------------------
 # MODEL CONFIG
 # -----------------------------------------------------------------------------
@@ -343,6 +772,7 @@ class HyperSharedConfig:
     resid_dropout: float = 0.0
     use_bias: bool = False
     cast_linears: bool = True
+    mlp_kernel: str = "pytorch"
 
 
 # -----------------------------------------------------------------------------
@@ -437,6 +867,16 @@ class HyperSharedSwiGLU(nn.Module):
             (hidden + cfg.mlp_multiple_of - 1) // cfg.mlp_multiple_of
         )
         self.hidden = hidden
+        self.mlp_kernel = cfg.mlp_kernel.strip().lower()
+        if self.mlp_kernel not in {"pytorch", "triton_gateup"}:
+            raise ValueError(
+                f"Unsupported mlp_kernel={cfg.mlp_kernel!r}; expected pytorch or triton_gateup."
+            )
+        self.gateup_op = (
+            register_allama_mlp_gateup_custom_op()
+            if self.mlp_kernel == "triton_gateup"
+            else None
+        )
         self.resid_dropout = nn.Dropout(float(cfg.resid_dropout))
         linear_cls = CastedLinear if cfg.cast_linears else nn.Linear
         self.gate_up = linear_cls(cfg.model_dim, hidden * 2, bias=cfg.use_bias)
@@ -444,6 +884,20 @@ class HyperSharedSwiGLU(nn.Module):
         self.down._zero_init = True
 
     def forward(self, x: Tensor) -> Tensor:
+        if (
+            self.mlp_kernel == "triton_gateup"
+            and x.is_cuda
+            and x.dtype == torch.bfloat16
+            and self.gate_up.bias is None
+        ):
+            if self.gateup_op is not None:
+                weight_t = self.gate_up.weight.to(dtype=x.dtype).t()
+                hidden = self.gateup_op(
+                    x.reshape(-1, x.size(-1)),
+                    weight_t[:, : self.hidden],
+                    weight_t[:, self.hidden :],
+                ).view(*x.shape[:-1], self.hidden)
+                return self.resid_dropout(self.down(hidden))
         gate, up = self.gate_up(x).chunk(2, dim=-1)
         return self.resid_dropout(self.down(F.silu(gate) * up))
 
@@ -972,6 +1426,7 @@ def build_hyper_shared_model_from_args(
         resid_dropout=float(getattr(args, "resid_dropout", 0.0)),
         use_bias=bool(getattr(args, "use_bias", False)),
         cast_linears=bool(getattr(args, "cast_linears", True)),
+        mlp_kernel=str(getattr(args, "mlp_kernel", "pytorch")),
     )
 
     model = HyperSharedALlama(cfg).to(device)
