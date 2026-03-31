@@ -173,19 +173,156 @@ def gateup_swiglu_kernel(
         gate_weight = tl.load(
             gate_ptrs, mask=mask_k[:, None] & mask_n[None, :], other=0.0
         )
-        up_weight = tl.load(
-            up_ptrs, mask=mask_k[:, None] & mask_n[None, :], other=0.0
-        )
+        up_weight = tl.load(up_ptrs, mask=mask_k[:, None] & mask_n[None, :], other=0.0)
         acc_gate += tl.dot(x_vals, gate_weight)
         acc_up += tl.dot(x_vals, up_weight)
 
     hidden = acc_gate * tl.sigmoid(acc_gate) * acc_up
     hidden_ptrs = (
-        hidden_ptr + offs_m[:, None] * hidden_stride_m + offs_n[None, :] * hidden_stride_n
+        hidden_ptr
+        + offs_m[:, None] * hidden_stride_m
+        + offs_n[None, :] * hidden_stride_n
     )
     tl.store(
         hidden_ptrs,
         hidden.to(tl.bfloat16),
+        mask=mask_m[:, None] & mask_n[None, :],
+    )
+
+
+@triton.autotune(
+    configs=[
+        triton.Config(
+            {"BLOCK_M": 32, "BLOCK_N": 64, "BLOCK_K": 32, "GROUP_M": 8},
+            num_warps=4,
+            num_stages=3,
+        ),
+        triton.Config(
+            {"BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 32, "GROUP_M": 8},
+            num_warps=4,
+            num_stages=4,
+        ),
+        triton.Config(
+            {"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 32, "GROUP_M": 8},
+            num_warps=8,
+            num_stages=4,
+        ),
+        triton.Config(
+            {"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 64, "GROUP_M": 8},
+            num_warps=8,
+            num_stages=4,
+        ),
+        triton.Config(
+            {"BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 32, "GROUP_M": 4},
+            num_warps=8,
+            num_stages=5,
+        ),
+    ],
+    key=["M", "N", "K"],
+)
+@triton.jit
+def gateup_swiglu_backward_parts_kernel(
+    x_ptr,
+    gate_weight_t_ptr,
+    up_weight_t_ptr,
+    grad_hidden_ptr,
+    grad_gate_ptr,
+    grad_up_ptr,
+    M,
+    N,
+    K,
+    x_stride_m,
+    x_stride_k,
+    gate_stride_k,
+    gate_stride_n,
+    up_stride_k,
+    up_stride_n,
+    grad_hidden_stride_m,
+    grad_hidden_stride_n,
+    grad_gate_stride_m,
+    grad_gate_stride_n,
+    grad_up_stride_m,
+    grad_up_stride_n,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    """Fuse gate/up recompute with the SwiGLU derivative epilogue."""
+    pid = tl.program_id(axis=0)
+    num_pid_m = tl.cdiv(M, BLOCK_M)
+    num_pid_n = tl.cdiv(N, BLOCK_N)
+    num_pid_in_group = GROUP_M * num_pid_n
+    group_id = pid // num_pid_in_group
+    first_pid_m = group_id * GROUP_M
+    group_size_m = tl.minimum(num_pid_m - first_pid_m, GROUP_M)
+    pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
+    pid_n = (pid % num_pid_in_group) // group_size_m
+
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_k = tl.arange(0, BLOCK_K)
+    mask_m = offs_m < M
+    mask_n = offs_n < N
+
+    acc_gate = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    acc_up = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+
+    for k_base in range(0, K, BLOCK_K):
+        k_idx = k_base + offs_k
+        mask_k = k_idx < K
+        x_ptrs = x_ptr + offs_m[:, None] * x_stride_m + k_idx[None, :] * x_stride_k
+        x_vals = tl.load(x_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0)
+
+        gate_ptrs = (
+            gate_weight_t_ptr
+            + k_idx[:, None] * gate_stride_k
+            + offs_n[None, :] * gate_stride_n
+        )
+        up_ptrs = (
+            up_weight_t_ptr
+            + k_idx[:, None] * up_stride_k
+            + offs_n[None, :] * up_stride_n
+        )
+        gate_weight = tl.load(
+            gate_ptrs, mask=mask_k[:, None] & mask_n[None, :], other=0.0
+        )
+        up_weight = tl.load(up_ptrs, mask=mask_k[:, None] & mask_n[None, :], other=0.0)
+        acc_gate += tl.dot(x_vals, gate_weight)
+        acc_up += tl.dot(x_vals, up_weight)
+
+    grad_hidden_ptrs = (
+        grad_hidden_ptr
+        + offs_m[:, None] * grad_hidden_stride_m
+        + offs_n[None, :] * grad_hidden_stride_n
+    )
+    grad_hidden = tl.load(
+        grad_hidden_ptrs, mask=mask_m[:, None] & mask_n[None, :], other=0.0
+    ).to(tl.float32)
+    sigmoid_gate = tl.sigmoid(acc_gate)
+    silu_gate = acc_gate * sigmoid_gate
+    silu_prime = sigmoid_gate * (1.0 + acc_gate * (1.0 - sigmoid_gate))
+    grad_gate = grad_hidden * acc_up * silu_prime
+    grad_up = grad_hidden * silu_gate
+
+    grad_gate_ptrs = (
+        grad_gate_ptr
+        + offs_m[:, None] * grad_gate_stride_m
+        + offs_n[None, :] * grad_gate_stride_n
+    )
+    grad_up_ptrs = (
+        grad_up_ptr
+        + offs_m[:, None] * grad_up_stride_m
+        + offs_n[None, :] * grad_up_stride_n
+    )
+    tl.store(
+        grad_gate_ptrs,
+        grad_gate.to(tl.bfloat16),
+        mask=mask_m[:, None] & mask_n[None, :],
+    )
+    tl.store(
+        grad_up_ptrs,
+        grad_up.to(tl.bfloat16),
         mask=mask_m[:, None] & mask_n[None, :],
     )
 
@@ -209,7 +346,9 @@ def gateup_swiglu_triton(
     ):
         raise TypeError("this benchmark currently targets bfloat16 tensors")
     if x_norm.dim() != 2 or gate_weight_t.dim() != 2 or up_weight_t.dim() != 2:
-        raise ValueError("expected x_norm=[M,D], gate_weight_t=[D,H], up_weight_t=[D,H]")
+        raise ValueError(
+            "expected x_norm=[M,D], gate_weight_t=[D,H], up_weight_t=[D,H]"
+        )
     if gate_weight_t.shape != up_weight_t.shape:
         raise ValueError("gate_weight_t and up_weight_t must have matching shapes")
     if gate_weight_t.size(0) != x_norm.size(1):
@@ -247,6 +386,62 @@ def gateup_swiglu_triton(
     return hidden
 
 
+def gateup_swiglu_backward_parts_triton(
+    x_norm: torch.Tensor,
+    gate_weight_t: torch.Tensor,
+    up_weight_t: torch.Tensor,
+    grad_hidden: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Run the Triton fused gate/up derivative kernel.
+
+    :param torch.Tensor x_norm: Normalized activations flattened to ``[M, D]``.
+    :param torch.Tensor gate_weight_t: Gate projection weight transposed to ``[D, H]``.
+    :param torch.Tensor up_weight_t: Up projection weight transposed to ``[D, H]``.
+    :param torch.Tensor grad_hidden: Gradient of the hidden activation ``[M, H]``.
+    :return tuple[torch.Tensor, torch.Tensor]: ``grad_gate`` and ``grad_up`` tensors.
+    """
+    if (
+        x_norm.dtype != torch.bfloat16
+        or gate_weight_t.dtype != torch.bfloat16
+        or up_weight_t.dtype != torch.bfloat16
+        or grad_hidden.dtype != torch.bfloat16
+    ):
+        raise TypeError("this benchmark currently targets bfloat16 tensors")
+    grad_gate = torch.empty_like(grad_hidden)
+    grad_up = torch.empty_like(grad_hidden)
+
+    def grid(meta: dict[str, int]) -> tuple[int]:
+        return (
+            triton.cdiv(x_norm.size(0), meta["BLOCK_M"])
+            * triton.cdiv(gate_weight_t.size(1), meta["BLOCK_N"]),
+        )
+
+    gateup_swiglu_backward_parts_kernel[grid](
+        x_norm,
+        gate_weight_t,
+        up_weight_t,
+        grad_hidden,
+        grad_gate,
+        grad_up,
+        x_norm.size(0),
+        gate_weight_t.size(1),
+        x_norm.size(1),
+        x_norm.stride(0),
+        x_norm.stride(1),
+        gate_weight_t.stride(0),
+        gate_weight_t.stride(1),
+        up_weight_t.stride(0),
+        up_weight_t.stride(1),
+        grad_hidden.stride(0),
+        grad_hidden.stride(1),
+        grad_gate.stride(0),
+        grad_gate.stride(1),
+        grad_up.stride(0),
+        grad_up.stride(1),
+    )
+    return grad_gate, grad_up
+
+
 def gateup_swiglu_reference(
     x_norm: torch.Tensor,
     gate_weight_t: torch.Tensor,
@@ -260,6 +455,32 @@ def gateup_swiglu_reference(
 
 def register_mlp_gateup_custom_op() -> Any:
     """Register a benchmark-local custom op for the gate-up boundary."""
+
+    @torch.library.custom_op(
+        "allama_triton_bench::gateup_swiglu_backward_parts",
+        mutates_args=(),
+    )
+    def gateup_swiglu_backward_parts_op(
+        x_norm: torch.Tensor,
+        gate_weight_t: torch.Tensor,
+        up_weight_t: torch.Tensor,
+        grad_hidden: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return gateup_swiglu_backward_parts_triton(
+            x_norm, gate_weight_t, up_weight_t, grad_hidden
+        )
+
+    @gateup_swiglu_backward_parts_op.register_fake
+    def _gateup_swiglu_backward_parts_op_fake(
+        x_norm: torch.Tensor,
+        gate_weight_t: torch.Tensor,
+        up_weight_t: torch.Tensor,
+        grad_hidden: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        del x_norm, gate_weight_t, up_weight_t
+        return grad_hidden.new_empty(grad_hidden.shape), grad_hidden.new_empty(
+            grad_hidden.shape
+        )
 
     @torch.library.custom_op(
         "allama_triton_bench::gateup_swiglu",
@@ -294,13 +515,9 @@ def register_mlp_gateup_custom_op() -> Any:
         ctx: Any, grad_hidden: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         x_norm, gate_weight_t, up_weight_t = ctx.saved_tensors
-        gate = x_norm @ gate_weight_t
-        up = x_norm @ up_weight_t
-        silu_gate = F.silu(gate)
-        sigmoid_gate = torch.sigmoid(gate.float()).to(dtype=gate.dtype)
-        silu_prime = sigmoid_gate * (1.0 + gate * (1.0 - sigmoid_gate))
-        grad_gate = grad_hidden * up * silu_prime
-        grad_up = grad_hidden * silu_gate
+        grad_gate, grad_up = gateup_swiglu_backward_parts_op(
+            x_norm, gate_weight_t, up_weight_t, grad_hidden
+        )
         grad_x = grad_gate @ gate_weight_t.transpose(0, 1)
         grad_x = grad_x + grad_up @ up_weight_t.transpose(0, 1)
         grad_gate_weight_t = x_norm.transpose(0, 1) @ grad_gate
@@ -453,15 +670,15 @@ def main() -> None:
     eps = 1e-5
 
     x = torch.randn(batch, seq_len, dim, device=device, dtype=torch.bfloat16)
-    gate_weight_t = torch.randn(
-        dim, hidden, device=device, dtype=torch.bfloat16
-    ) / dim**0.5
-    up_weight_t = torch.randn(
-        dim, hidden, device=device, dtype=torch.bfloat16
-    ) / dim**0.5
-    down_weight_t = torch.randn(
-        hidden, dim, device=device, dtype=torch.bfloat16
-    ) / hidden**0.5
+    gate_weight_t = (
+        torch.randn(dim, hidden, device=device, dtype=torch.bfloat16) / dim**0.5
+    )
+    up_weight_t = (
+        torch.randn(dim, hidden, device=device, dtype=torch.bfloat16) / dim**0.5
+    )
+    down_weight_t = (
+        torch.randn(hidden, dim, device=device, dtype=torch.bfloat16) / hidden**0.5
+    )
     norm_weight = torch.randn(dim, device=device, dtype=torch.float32)
     scale = torch.randn(dim, device=device, dtype=torch.float32)
     grad_out = torch.randn_like(x)
@@ -533,7 +750,13 @@ def main() -> None:
         measured_iters=args.measured_iters,
     )
     compiled_custom = torch.compile(
-        lambda x_, gate_w_t_, up_w_t_, down_w_t_, norm_w_, scale_, eps_: mlp_block_custom(
+        lambda x_,
+        gate_w_t_,
+        up_w_t_,
+        down_w_t_,
+        norm_w_,
+        scale_,
+        eps_: mlp_block_custom(
             op,
             x_,
             gate_w_t_,
@@ -686,7 +909,14 @@ def main() -> None:
         measured_iters=args.measured_iters,
     )
     compiled_custom_loss = torch.compile(
-        lambda x_, gate_w_t_, up_w_t_, down_w_t_, norm_w_, scale_, grad_out_, eps_: loss_custom(
+        lambda x_,
+        gate_w_t_,
+        up_w_t_,
+        down_w_t_,
+        norm_w_,
+        scale_,
+        grad_out_,
+        eps_: loss_custom(
             op,
             x_,
             gate_w_t_,

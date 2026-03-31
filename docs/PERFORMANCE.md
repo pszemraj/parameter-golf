@@ -120,6 +120,28 @@ Latest harness smoke check:
 
 ### 2026-03-30
 
+- Implemented a real backward-side Triton kernel for the larger MLP gate/up
+  boundary benchmark in `scripts/benchmark_allama_mlp_gateup_block.py`.
+- Result:
+  - the custom op now has a fused backward-parts kernel that recomputes the
+    gate/up activations and emits `grad_gate` and `grad_up` directly, instead
+    of delegating the whole derivative path to eager PyTorch
+  - standalone benchmark at
+    `runs_allama_validation/mlp_gateup_block_v2/summary.json`:
+    - compiled forward: `0.22528 ms -> 0.19599 ms` for about `1.15x` speedup
+    - compiled backward: `0.66785 ms -> 0.77036 ms`, still about `15.4%` slower
+      than the compiled PyTorch reference
+  - end-to-end compiled train-step probe on the real ALlama anchor was still
+    positive despite the standalone backward loss:
+    - baseline: `130,451 tok/s`, `2.010 s/step`, `2.65 GB` peak CUDA memory
+    - Triton gate/up v2 monkeypatch: `133,582 tok/s`, `1.962 s/step`,
+      `2.19 GB` peak CUDA memory
+    - net: about `+2.4%` throughput with materially lower peak memory
+- Conclusion:
+  - the MLP gate/up boundary is the first custom backward path that survives a
+    real compiled train-step contract
+  - this is the current best candidate for model integration work
+
 - Ran the frontier combination sweep focused on `shortfat` and `wide`.
 - Result:
   - new best ALlama: `shortfat_s4_ff15 + prenorm + rmsnorm + shortcut_gate005`
