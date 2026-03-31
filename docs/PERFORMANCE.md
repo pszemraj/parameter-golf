@@ -7,7 +7,7 @@ materially improved or clarified it over time.
 
 Timestamp:
 
-- `2026-03-31T00:35:00-04:00`
+- `2026-03-31T00:45:43-04:00`
 
 Current best ALlama quality run:
 
@@ -69,9 +69,31 @@ Applied live kernel/path uplift on the sweep-scale winner shape:
     - `139,660 tok/s -> 109,958 tok/s`
     - about `-21.3%`
 - Important scope note:
-  - these are the only defensible applied live kernel/path uplifts right now
-  - we do not yet have an apples-to-apples kernel-on/off harness result for the
-    `wide_s4_e384_ff10` family, only its raw sweep-scale throughput range
+  - these are only the shortfat-anchor applied live kernel/path uplifts
+
+Applied live kernel/path uplift on the sweep-scale wide family control:
+
+- The harness `allama_wide` is the real `wide_s4_e384_ff10 + pre_rms +
+  control` model shape under the same local batch contract as the sweeps.
+- Measured wide-family live path results:
+  - baseline `ATTN_IMPL=sdpa`, `MLP_KERNEL=pytorch`:
+    - `175,311 tok/s`
+  - `ATTN_IMPL=sdpa`, `MLP_KERNEL=triton_gateup`:
+    - `164,627 tok/s`
+    - about `-6.1%`
+  - `ATTN_IMPL=fa2`, `MLP_KERNEL=pytorch`:
+    - `177,556 tok/s`
+    - about `+1.3%`
+  - `ATTN_IMPL=fa2`, `MLP_KERNEL=triton_gateup`:
+    - `167,660 tok/s`
+    - about `-4.4%` versus the shipped SDPA baseline
+    - about `-5.6%` versus `ATTN_IMPL=fa2`, `MLP_KERNEL=pytorch`
+- Important cross-family read:
+  - `ATTN_IMPL=fa2` is the only currently measured attention/kernel path change
+    that survives as a positive live uplift on both the shortfat winner and the
+    wide family control
+  - `MLP_KERNEL=triton_gateup` is not a global win; it helps the shortfat
+    winner, but it is a real regression on the wide family control
 
 Current read on the project:
 
@@ -84,8 +106,11 @@ Current read on the project:
 - The quality winner is currently `shortfat_s4_ff15 + prenorm + rmsnorm +
   shortcut_gate005`.
 - On the active local 5090 contract with `TORCH_BLAS_PREFER_CUBLASLT=1`, the
-  best shipped kernel path is again `MLP_KERNEL=triton_gateup` on the ALlama
-  anchor.
+  best surviving live path is now family-specific:
+  - shortfat anchor: `ATTN_IMPL=fa2`, `MLP_KERNEL=triton_gateup`
+  - wide control: `ATTN_IMPL=fa2`, `MLP_KERNEL=pytorch`
+- That makes `ATTN_IMPL=fa2` the only positive live path change that currently
+  generalizes across both measured sweep-scale ALlama families.
 - Beyond the live MLP gate-up path, the strongest surviving kernel evidence is
   now benchmark-only:
   - the MLP gate/up boundary still beats compiled PyTorch in isolation

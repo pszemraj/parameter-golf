@@ -152,7 +152,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(allow_abbrev=False)
     parser.add_argument(
         "--model",
-        choices=("allama_anchor", "gpt_reference"),
+        choices=("allama_anchor", "allama_wide", "gpt_reference"),
         required=True,
         help="Model contract to benchmark or profile.",
     )
@@ -352,6 +352,68 @@ def build_allama_anchor(device: torch.device) -> tuple[nn.Module, OptimizerBundl
     return model, optimizers
 
 
+def build_allama_wide(device: torch.device) -> tuple[nn.Module, OptimizerBundle]:
+    """Construct the frozen ALlama wide family reference and optimizer bundle.
+
+    This matches the `wide_s4_e384_ff10 + prenorm + rmsnorm` frontier family
+    control so kernel-on/off checks are measured on a real sweep-scale wide
+    architecture, not only on the shortfat quality anchor.
+
+    :param torch.device device: CUDA device for model and optimizer state.
+    :return tuple[nn.Module, OptimizerBundle]: Model and optimizer bundle.
+    """
+    cfg = HyperSharedConfig(
+        vocab_size=1024,
+        model_dim=1024,
+        embed_dim=384,
+        num_layers=16,
+        num_shared_blocks=4,
+        share_pattern="cycle",
+        num_heads=16,
+        num_kv_heads=2,
+        mlp_mult=1.0,
+        mlp_multiple_of=128,
+        rope_base=10000.0,
+        norm_eps=1e-5,
+        norm_kind="rmsnorm",
+        norm_layout="prenorm",
+        qk_norm=True,
+        tie_embeddings=True,
+        tied_embed_init_std=0.005,
+        logit_softcap=30.0,
+        q_gain_init=1.5,
+        x0_gate_init=-6.0,
+        use_x0_shortcut=True,
+        use_final_norm=True,
+        zero_init_residual=True,
+        attn_dropout=0.0,
+        resid_dropout=0.0,
+        use_bias=False,
+        cast_linears=True,
+        attn_impl=os.environ.get("ATTN_IMPL", "sdpa"),
+        attn_prep_kernel=os.environ.get("ATTN_PREP_KERNEL", "pytorch"),
+        attn_outproj_kernel=os.environ.get("ATTN_OUTPROJ_KERNEL", "pytorch"),
+        mlp_kernel=os.environ.get("MLP_KERNEL", "pytorch"),
+    )
+    model = HyperSharedALlama(cfg).to(device).bfloat16()
+    from allama_shared import restore_low_dim_params_to_fp32
+
+    restore_low_dim_params_to_fp32(model)
+    optimizers = build_allama_optimizers(
+        model,
+        tied_embed_lr=0.03,
+        head_lr=0.01,
+        matrix_lr=0.02,
+        scalar_lr=0.04,
+        beta1=0.9,
+        beta2=0.95,
+        adam_eps=1e-8,
+        muon_momentum=0.95,
+        muon_backend_steps=5,
+    )
+    return model, optimizers
+
+
 def build_gpt_reference(device: torch.device) -> tuple[nn.Module, OptimizerAdapter]:
     """Construct the reference GPT baseline and optimizer stack.
 
@@ -436,6 +498,12 @@ def build_model_and_optimizer(
     """
     if spec.model == "allama_anchor":
         model, optimizers = build_allama_anchor(device)
+        model = compile_model_for_train(
+            model, enabled=compile_enabled, fullgraph=fullgraph
+        )
+        return model, optimizers
+    if spec.model == "allama_wide":
+        model, optimizers = build_allama_wide(device)
         model = compile_model_for_train(
             model, enabled=compile_enabled, fullgraph=fullgraph
         )
