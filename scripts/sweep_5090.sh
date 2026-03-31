@@ -31,7 +31,8 @@ QUALITY_TRAIN_BATCH_TOKENS=262144
 QUALITY_SEQ_LEN=1024
 QUALITY_VAL_BATCH_SIZE=8192
 QUALITY_VAL_BATCHES=8
-QUALITY_VAL_LOSS_EVERY=100
+QUALITY_VAL_FIRST_STEP=100
+QUALITY_VAL_LOSS_EVERY=250
 QUALITY_TRAIN_LOG_EVERY=25
 QUALITY_WALLCLOCK_SECONDS=0
 QUALITY_WARMUP_STEPS=20
@@ -40,6 +41,7 @@ SMOKE_MAX_STEPS=10
 SMOKE_TRAIN_BATCH_TOKENS=32768
 SMOKE_VAL_BATCH_SIZE=8192
 SMOKE_VAL_BATCHES=1
+SMOKE_VAL_FIRST_STEP=0
 SMOKE_VAL_LOSS_EVERY=0
 SMOKE_TRAIN_LOG_EVERY=5
 SMOKE_WARMUP_STEPS=0
@@ -171,9 +173,10 @@ write_launch_summary() {
     local eval_mode="${12}"
     local val_batch_size="${13}"
     local val_batches="${14}"
-    local val_loss_every="${15}"
-    local train_log_every="${16}"
-    local warmup_steps="${17}"
+    local val_first_step="${15}"
+    local val_loss_every="${16}"
+    local train_log_every="${17}"
+    local warmup_steps="${18}"
     local planned_train_tokens=$(( train_batch_tokens * max_steps ))
     local local_batch_size=$(( train_batch_tokens / (8 * seq_len) ))
     cat > "${summary_file}" <<EOF
@@ -191,6 +194,7 @@ planned_train_tokens=${planned_train_tokens}
 eval_mode=${eval_mode}
 val_batch_size=${val_batch_size}
 val_batches=${val_batches}
+val_first_step=${val_first_step}
 val_loss_every=${val_loss_every}
 train_log_every=${train_log_every}
 max_wallclock_seconds=${QUALITY_WALLCLOCK_SECONDS}
@@ -220,9 +224,10 @@ run_target() {
     local val_batch_size="$7"
     local val_batches="$8"
     local val_loss_every="$9"
-    local train_log_every="${10}"
-    local warmup_steps="${11}"
-    shift 11
+    local val_first_step="${10}"
+    local train_log_every="${11}"
+    local warmup_steps="${12}"
+    shift 12
     local -a trainer_args=("$@")
     local run_dir="${RUNS_ROOT}/${target}"
     local stdout_log="${run_dir}/stdout.log"
@@ -255,6 +260,7 @@ run_target() {
         "${eval_mode}" \
         "${val_batch_size}" \
         "${val_batches}" \
+        "${val_first_step}" \
         "${val_loss_every}" \
         "${train_log_every}" \
         "${warmup_steps}"
@@ -268,7 +274,7 @@ run_target() {
     echo "local_batch_size=${local_batch_size}"
     echo "train_batch_tokens=${train_batch_tokens} seq_len=${seq_len} max_steps=${max_steps}"
     echo "eval_mode=${eval_mode} val_batch_size=${val_batch_size} val_batches=${val_batches}"
-    echo "val_loss_every=${val_loss_every} train_log_every=${train_log_every}"
+    echo "val_first_step=${val_first_step} val_loss_every=${val_loss_every} train_log_every=${train_log_every}"
     echo "sdpa_backend=${SDPA_BACKEND} compile_disable=${COMPILE_DISABLE}"
     echo "TORCH_BLAS_PREFER_CUBLASLT=${TORCH_BLAS_PREFER_CUBLASLT}"
     echo "wandb_enable=${WANDB_ENABLE} wandb_project=${wandb_project} wandb_group=${wandb_group}"
@@ -290,6 +296,7 @@ run_target() {
         --train-seq-len "${seq_len}" \
         --max-steps "${max_steps}" \
         --val-batch-size "${val_batch_size}" \
+        --val-first-step "${val_first_step}" \
         --val-loss-every "${val_loss_every}" \
         --train-log-every "${train_log_every}" \
         --eval-mode "${eval_mode}" \
@@ -325,6 +332,7 @@ run_smoke_hconv() {
         "sampled" \
         "${SMOKE_VAL_BATCH_SIZE}" \
         "${SMOKE_VAL_BATCHES}" \
+        "${SMOKE_VAL_FIRST_STEP}" \
         "${SMOKE_VAL_LOSS_EVERY}" \
         "${SMOKE_TRAIN_LOG_EVERY}" \
         "${SMOKE_WARMUP_STEPS}" \
@@ -344,6 +352,7 @@ run_gpt_ref() {
         "sampled" \
         "${QUALITY_VAL_BATCH_SIZE}" \
         "${QUALITY_VAL_BATCHES}" \
+        "${QUALITY_VAL_FIRST_STEP}" \
         "${QUALITY_VAL_LOSS_EVERY}" \
         "${QUALITY_TRAIN_LOG_EVERY}" \
         "${QUALITY_WARMUP_STEPS}" \
@@ -362,6 +371,7 @@ run_b1() {
         "sampled" \
         "${QUALITY_VAL_BATCH_SIZE}" \
         "${QUALITY_VAL_BATCHES}" \
+        "${QUALITY_VAL_FIRST_STEP}" \
         "${QUALITY_VAL_LOSS_EVERY}" \
         "${QUALITY_TRAIN_LOG_EVERY}" \
         "${QUALITY_WARMUP_STEPS}" \
@@ -384,6 +394,7 @@ run_c2() {
         "sampled" \
         "${QUALITY_VAL_BATCH_SIZE}" \
         "${QUALITY_VAL_BATCHES}" \
+        "${QUALITY_VAL_FIRST_STEP}" \
         "${QUALITY_VAL_LOSS_EVERY}" \
         "${QUALITY_TRAIN_LOG_EVERY}" \
         "${QUALITY_WARMUP_STEPS}" \
@@ -406,6 +417,7 @@ run_t2() {
         "sampled" \
         "${QUALITY_VAL_BATCH_SIZE}" \
         "${QUALITY_VAL_BATCHES}" \
+        "${QUALITY_VAL_FIRST_STEP}" \
         "${QUALITY_VAL_LOSS_EVERY}" \
         "${QUALITY_TRAIN_LOG_EVERY}" \
         "${QUALITY_WARMUP_STEPS}" \
@@ -428,6 +440,7 @@ run_t3() {
         "sampled" \
         "${QUALITY_VAL_BATCH_SIZE}" \
         "${QUALITY_VAL_BATCHES}" \
+        "${QUALITY_VAL_FIRST_STEP}" \
         "${QUALITY_VAL_LOSS_EVERY}" \
         "${QUALITY_TRAIN_LOG_EVERY}" \
         "${QUALITY_WARMUP_STEPS}" \
@@ -450,6 +463,7 @@ run_i1() {
         "sampled" \
         "${QUALITY_VAL_BATCH_SIZE}" \
         "${QUALITY_VAL_BATCHES}" \
+        "${QUALITY_VAL_FIRST_STEP}" \
         "${QUALITY_VAL_LOSS_EVERY}" \
         "${QUALITY_TRAIN_LOG_EVERY}" \
         "${QUALITY_WARMUP_STEPS}" \
@@ -472,6 +486,7 @@ run_i2() {
         "sampled" \
         "${QUALITY_VAL_BATCH_SIZE}" \
         "${QUALITY_VAL_BATCHES}" \
+        "${QUALITY_VAL_FIRST_STEP}" \
         "${QUALITY_VAL_LOSS_EVERY}" \
         "${QUALITY_TRAIN_LOG_EVERY}" \
         "${QUALITY_WARMUP_STEPS}" \
@@ -494,6 +509,7 @@ run_i4() {
         "sampled" \
         "${QUALITY_VAL_BATCH_SIZE}" \
         "${QUALITY_VAL_BATCHES}" \
+        "${QUALITY_VAL_FIRST_STEP}" \
         "${QUALITY_VAL_LOSS_EVERY}" \
         "${QUALITY_TRAIN_LOG_EVERY}" \
         "${QUALITY_WARMUP_STEPS}" \
@@ -516,6 +532,7 @@ run_i4h() {
         "sampled" \
         "${QUALITY_VAL_BATCH_SIZE}" \
         "${QUALITY_VAL_BATCHES}" \
+        "${QUALITY_VAL_FIRST_STEP}" \
         "${QUALITY_VAL_LOSS_EVERY}" \
         "${QUALITY_TRAIN_LOG_EVERY}" \
         "${QUALITY_WARMUP_STEPS}" \

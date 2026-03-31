@@ -1,6 +1,6 @@
 # Metrics
 
-Last updated: 2026-03-31 03:27 EDT
+Last updated: 2026-03-31 03:58 EDT
 
 This file tracks model-quality results from local 5090 runs in [`runs_hconv_quality_5090/`](../runs_hconv_quality_5090/).
 
@@ -10,7 +10,7 @@ This file tracks model-quality results from local 5090 runs in [`runs_hconv_qual
 - For quality-comparison runs, `val_bpb` is taken from the final scheduled validation line, e.g. `step:750/750 val_loss:... val_bpb:...`.
 - `roundtrip_val_bpb` is taken from `final_int8_zlib_roundtrip_exact ... val_bpb:...` after int8+zlib serialization and reload.
 - `int8+zlib_bytes` is taken from `Serialized model int8+zlib: ... bytes`.
-- The quality-comparison contract recorded here is the current local sweep-harness setup:
+- The quality-comparison contract for new reruns is the current local sweep-harness setup:
   - `TRAIN_SEQ_LEN=1024`
   - `TRAIN_BATCH_TOKENS=262144`
   - `MAX_STEPS=750`
@@ -18,11 +18,15 @@ This file tracks model-quality results from local 5090 runs in [`runs_hconv_qual
   - `EVAL_MODE=sampled`
   - `VAL_BATCH_SIZE=8192`
   - `VAL_BATCHES=8`
-  - `VAL_LOSS_EVERY=100`
+  - `VAL_FIRST_STEP=100`
+  - `VAL_LOSS_EVERY=250`
   - `TRAIN_LOG_EVERY=25`
   - `MAX_WALLCLOCK_SECONDS=0`
   - `SDPA_BACKEND=auto`
   - `TORCH_BLAS_PREFER_CUBLASLT=1`
+- Historical note:
+  - The existing quality rows below were collected before the eval-cadence cleanup and therefore used the older `step 0, then every 100, then final` schedule.
+  - Canonical reruns after this timestamp use `first eval at step 100`, then every `250`, plus the forced final eval.
 - Important discrepancy:
   - The current trainer path still fixes `grad_accum_steps=8` at `WORLD_SIZE=1`.
   - Current `AGENTS.md` guidance for this kind of 1x5090 quality comparison says `GRAD_ACCUM_STEPS=64`, but that guidance came from an earlier parameter-sharing setup that could use more memory than the current hconv family.

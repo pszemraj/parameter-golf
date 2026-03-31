@@ -83,6 +83,7 @@ class Hyperparameters:
     # mode evaluates evenly spaced batches from that same fixed split.
     val_batch_size = int(os.environ.get("VAL_BATCH_SIZE", 524_288))
     val_loss_every = int(os.environ.get("VAL_LOSS_EVERY", 1000))
+    val_first_step = int(os.environ.get("VAL_FIRST_STEP", 0))
     val_batches = int(os.environ.get("VAL_BATCHES", 0))
     eval_batch_tokens = int(os.environ.get("EVAL_BATCH_TOKENS", 0))
     eval_mode = os.environ.get("EVAL_MODE", "full").strip().lower()
@@ -152,6 +153,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--val-loss-every", type=int, default=Hyperparameters.val_loss_every
+    )
+    parser.add_argument(
+        "--val-first-step", type=int, default=Hyperparameters.val_first_step
     )
     parser.add_argument("--val-batches", type=int, default=Hyperparameters.val_batches)
     parser.add_argument(
@@ -300,6 +304,8 @@ def parse_args() -> Hyperparameters:
     args.val_files = os.path.join(args.data_path, "fineweb_val_*.bin")
     args.eval_mode = args.eval_mode.strip().lower()
     args.sdpa_backend = args.sdpa_backend.strip().lower()
+    if args.val_first_step < 0:
+        raise ValueError("val_first_step must be non-negative")
     return args
 
 
@@ -677,6 +683,25 @@ def eval_val(
     tokens_per_byte = val_token_count.item() / val_byte_count.item()
     model.train()
     return float(val_loss.item()), float(bits_per_token * tokens_per_byte)
+
+
+def should_validate_step(
+    step: int, last_step: bool, val_loss_every: int, val_first_step: int
+) -> bool:
+    """Decide whether scheduled validation should run at the current step.
+
+    :param int step: Current optimizer step.
+    :param bool last_step: Whether this is the terminal training step.
+    :param int val_loss_every: Validation interval in steps.
+    :param int val_first_step: First non-terminal step allowed to trigger eval.
+    :return bool: ``True`` when validation should run now.
+    """
+
+    if last_step:
+        return True
+    if val_loss_every <= 0 or step < val_first_step:
+        return False
+    return (step - val_first_step) % val_loss_every == 0
 
 
 # =============================================================================
@@ -1371,7 +1396,8 @@ def main() -> None:
     )
     log0(
         f"eval_mode:{args.eval_mode} eval_tokens:{eval_tokens} "
-        f"val_batches:{args.val_batches} local_eval_batch_seqs:{eval_local_batch_seqs}"
+        f"val_batches:{args.val_batches} val_first_step:{args.val_first_step} "
+        f"local_eval_batch_seqs:{eval_local_batch_seqs}"
     )
     log0(f"compile_enabled:{not args.compile_disable} output_dir:{output_dir}")
     log0(
@@ -1396,6 +1422,7 @@ def main() -> None:
                 "compile_enabled": not args.compile_disable,
                 "resolved_eval_mode": args.eval_mode,
                 "resolved_eval_batch_tokens": eval_tokens,
+                "resolved_val_first_step": args.val_first_step,
                 "train_nominal_step_tokens": args.train_batch_tokens,
                 "train_final_step_tokens": args.train_batch_tokens,
                 "train_variable_step_tokens": False,
@@ -1518,8 +1545,11 @@ def main() -> None:
             stop_after_step is not None and step >= stop_after_step
         )
 
-        should_validate = last_step or (
-            args.val_loss_every > 0 and step % args.val_loss_every == 0
+        should_validate = should_validate_step(
+            step,
+            last_step,
+            args.val_loss_every,
+            args.val_first_step,
         )
         if should_validate:
             torch.cuda.synchronize()

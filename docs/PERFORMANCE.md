@@ -1,6 +1,6 @@
 # Performance
 
-Last updated: 2026-03-31 03:27 EDT
+Last updated: 2026-03-31 03:58 EDT
 
 This file tracks local training-speed measurements from runs in [`runs_hconv_quality_5090/`](../runs_hconv_quality_5090/).
 
@@ -10,6 +10,7 @@ This file tracks local training-speed measurements from runs in [`runs_hconv_qua
 - `steps/s = 1000 / step_avg_ms`.
 - `tok/s = TRAIN_BATCH_TOKENS * steps/s`.
 - For the quality runs below, `warmup_steps=20`, so the reported `step_avg_ms` excludes compile/warmup time and is appropriate for comparing steady-state training speed.
+- The current quality harness now skips random-init validation and schedules sampled eval at `step 100`, then every `250`, plus the forced final eval.
 - For `SMOKE_HCONV_COMPILE`, `warmup_steps=0`, so the reported average includes the one-time cold compile cost and should be read as a bring-up measurement, not a steady-state throughput number.
 - Important discrepancy:
   - The current trainer path uses `grad_accum_steps=8` on `WORLD_SIZE=1`.
