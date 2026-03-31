@@ -1,6 +1,6 @@
 # W&B Logging
 
-Last updated: 2026-03-31 04:29 EDT
+Last updated: 2026-03-31 04:46 EDT
 
 This branch now has optional Weights & Biases logging in both [`train_hconv.py`](../train_hconv.py) and [`train_gpt.py`](../train_gpt.py), with the 5090 sweep harness enabling it by default.
 
@@ -44,6 +44,8 @@ Current canonical official runs in `pg-hconv-ablations`:
 - `C2_hconv_pureconv_attn0_uconv15_conv15_mlp2` -> `https://wandb.ai/pszemraj/pg-hconv-ablations/runs/d3rq9t9u`
 - `T2_hconv_tieddepth_attn5_uconv6_conv18_mlp2` -> `https://wandb.ai/pszemraj/pg-hconv-ablations/runs/i7arhr9q`
 - `T3_hconv_tieddepth_attn5_uconv4_conv16_mlp3` -> `https://wandb.ai/pszemraj/pg-hconv-ablations/runs/78dhj40z`
+- `I1_hconv_dilated_attn5_uconv6_conv18_mlp2` -> `https://wandb.ai/pszemraj/pg-hconv-ablations/runs/x63c57n8`
+- `I2_hconv_sqgate_attn5_uconv6_conv18_mlp2` -> `https://wandb.ai/pszemraj/pg-hconv-ablations/runs/y8w5k35u`
 
 ## Watch Behavior
 

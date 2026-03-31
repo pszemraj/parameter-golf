@@ -1,6 +1,6 @@
 # Metrics
 
-Last updated: 2026-03-31 04:29 EDT
+Last updated: 2026-03-31 04:46 EDT
 
 This file tracks model-quality results from local 5090 runs in [`runs_hconv_quality_5090/`](../runs_hconv_quality_5090/).
 
@@ -38,6 +38,8 @@ This file tracks model-quality results from local 5090 runs in [`runs_hconv_qual
 | 2026-03-31 04:28:30 EDT | `C2` | `train_hconv.py` | Pure conv: 15 conv, 0 attn, no dilation, no squared gate, no hippo init | 1.5756 | 1.57559083 | 15233455 | [train.log](../runs_hconv_quality_5090/C2/train.log) |
 | 2026-03-31 04:05:45 EDT | `T2` | `train_hconv.py` | Tied-depth main bet: `6` unique conv, `5` unique attn, `18` effective conv, `mlp_mult=2` | 1.3693 | 1.36955833 | 14896112 | [train.log](../runs_hconv_quality_5090/T2/train.log) |
 | 2026-03-31 04:12:52 EDT | `T3` | `train_hconv.py` | Tied-depth variant: `4` unique conv, `5` unique attn, `16` effective conv, `mlp_mult=3` | 1.3693 | 1.36937905 | 15288128 | [train.log](../runs_hconv_quality_5090/T3/train.log) |
+| 2026-03-31 04:38:41 EDT | `I1` | `train_hconv.py` | T2 + dilated conv | 1.3726 | 1.37247236 | 14898621 | [train.log](../runs_hconv_quality_5090/I1/train.log) |
+| 2026-03-31 04:46:04 EDT | `I2` | `train_hconv.py` | T2 + squared gate | 1.3930 | 1.39314138 | 14897734 | [train.log](../runs_hconv_quality_5090/I2/train.log) |
 
 Current read:
 
@@ -49,6 +51,8 @@ Current read:
 - `T3` holds the tiny roundtrip edge after export and reload: `1.36937905` vs `1.36955833`.
 - Relative to `GPT_REF`, both tied-depth variants improve the final scheduled `val_bpb` by about `0.0081`.
 - Relative to `B1`, both tied-depth variants improve the final scheduled `val_bpb` by about `0.0089`.
+- `I1` regresses against `T2` by about `0.0033` bpb, so the dilated variant is not helping so far.
+- `I2` regresses much harder, by about `0.0237` bpb versus `T2`, so squared gating looks actively harmful on this setup.
 
 ## Smoke / Bring-Up Runs
 

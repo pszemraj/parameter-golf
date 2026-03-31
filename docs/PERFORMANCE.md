@@ -1,6 +1,6 @@
 # Performance
 
-Last updated: 2026-03-31 04:29 EDT
+Last updated: 2026-03-31 04:46 EDT
 
 This file tracks local training-speed measurements from runs in [`runs_hconv_quality_5090/`](../runs_hconv_quality_5090/).
 
@@ -26,6 +26,8 @@ This file tracks local training-speed measurements from runs in [`runs_hconv_qua
 | 2026-03-31 04:28:30 EDT | `C2` | 262144 | 298.75 | 3.3473 | 877469 | 4715 | [train.log](../runs_hconv_quality_5090/C2/train.log) |
 | 2026-03-31 04:05:45 EDT | `T2` | 262144 | 537.99 | 1.8588 | 487266 | 8189 | [train.log](../runs_hconv_quality_5090/T2/train.log) |
 | 2026-03-31 04:12:52 EDT | `T3` | 262144 | 518.02 | 1.9304 | 506050 | 7941 | [train.log](../runs_hconv_quality_5090/T3/train.log) |
+| 2026-03-31 04:38:41 EDT | `I1` | 262144 | 539.22 | 1.8545 | 486154 | 8223 | [train.log](../runs_hconv_quality_5090/I1/train.log) |
+| 2026-03-31 04:46:04 EDT | `I2` | 262144 | 513.64 | 1.9469 | 510365 | 8189 | [train.log](../runs_hconv_quality_5090/I2/train.log) |
 
 Current read:
 
@@ -34,6 +36,8 @@ Current read:
 - `C2` is faster again than `B1` locally, but the quality hit is severe enough that this is not a useful trade on the current comparison protocol.
 - `T3` is about `1.0385x` faster than `T2` on both `steps/s` and `tok/s`, and it used slightly less peak allocated memory (`7941 MiB` vs `8189 MiB`).
 - The speed trade for phase 2 is now cleaner than before: `T3` is the faster tied-depth variant, while `T2` keeps the compressed-size edge.
+- `I1` is essentially the same speed as `T2` and uses slightly more memory, so its quality regression is not buying meaningful throughput.
+- `I2` is about `1.0474x` faster than `T2`, but that speed gain comes with a much larger quality hit.
 
 ## Smoke / Compile Behavior
 
