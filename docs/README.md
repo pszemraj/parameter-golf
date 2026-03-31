@@ -11,6 +11,7 @@ This version is the one meant for actual local ablations on a 5090:
 - `x0` / `resid_mix` shortcut for deep virtual depth
 - one global RoPE cache
 - GQA via `enable_gqa=True` when the local PyTorch SDPA path supports it
+- optional FA2-native attention path via `ATTN_IMPL=fa2` when `flash-attn` is installed
 - epoch-driven training over **all available** downloaded train shards by default
 - fail-fast BPB setup for Parameter Golf: no silent `val_bpb=disabled` fallback if `sentencepiece`, `TOKENIZER_PATH`, or `VOCAB_SIZE` is wrong
 - sampled or full validation, both wired into the same trainer

@@ -11,6 +11,7 @@ Key choices in this version:
 - simple learned per-layer modulation tensors instead of a controller network
 - fixed layer-to-block assignment computed once at init
 - Muon + Adam optimizer split retained from the v3 work
+- optional FA2-native attention path behind `ATTN_IMPL=fa2`
 - optional Triton gate/up SwiGLU kernel behind `MLP_KERNEL=triton_gateup`
 """
 
@@ -30,6 +31,11 @@ try:
 except Exception:  # pragma: no cover
     triton = None
     tl = None
+
+try:
+    from flash_attn import flash_attn_func
+except Exception:  # pragma: no cover
+    flash_attn_func = None
 
 
 # -----------------------------------------------------------------------------
@@ -800,6 +806,7 @@ class HyperSharedConfig:
     resid_dropout: float = 0.0
     use_bias: bool = False
     cast_linears: bool = True
+    attn_impl: str = "sdpa"
     mlp_kernel: str = "pytorch"
 
 
@@ -825,6 +832,13 @@ class HyperSharedAttention(nn.Module):
         self.kv_dim = self.num_kv_heads * self.head_dim
         self.qk_norm = bool(cfg.qk_norm)
         self.attn_dropout = float(cfg.attn_dropout)
+        self.attn_impl = cfg.attn_impl.strip().lower()
+        if self.attn_impl not in {"sdpa", "fa2"}:
+            raise ValueError(
+                f"Unsupported attn_impl={cfg.attn_impl!r}; expected sdpa or fa2."
+            )
+        if self.attn_impl == "fa2" and flash_attn_func is None:
+            raise ValueError("attn_impl='fa2' requires flash-attn to be installed")
         self.use_sdpa_gqa = (
             self.num_kv_heads != self.num_heads and sdpa_enable_gqa_available()
         )
@@ -839,6 +853,62 @@ class HyperSharedAttention(nn.Module):
         self.proj._zero_init = True
         self.rotary = Rotary(self.head_dim, base=cfg.rope_base)
 
+    def _apply_qk_norm_and_rope_bshd(
+        self,
+        q: Tensor,
+        k: Tensor,
+        q_gain: Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        """Apply q/k RMSNorm, RoPE, and q-gain on ``[B, S, H, D]`` tensors."""
+        if self.qk_norm:
+            q = F.rms_norm(q, (self.head_dim,))
+            k = F.rms_norm(k, (self.head_dim,))
+
+        cos, sin = self.rotary(q.size(1), q.device, q.dtype)
+        cos = cos.transpose(1, 2)
+        sin = sin.transpose(1, 2)
+        q = apply_rotary_emb(q, cos, sin)
+        k = apply_rotary_emb(k, cos, sin)
+        q = q * q_gain.to(dtype=q.dtype)[None, None, :, None]
+        return q, k
+
+    def _forward_sdpa(self, q: Tensor, k: Tensor, v: Tensor) -> Tensor:
+        """Run the SDPA attention path on head-major tensors."""
+        if self.use_sdpa_gqa:
+            return F.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                attn_mask=None,
+                is_causal=True,
+                dropout_p=self.attn_dropout if self.training else 0.0,
+                enable_gqa=True,
+            )
+
+        if self.num_kv_heads != self.num_heads:
+            repeat = self.num_heads // self.num_kv_heads
+            k = k.repeat_interleave(repeat, dim=1)
+            v = v.repeat_interleave(repeat, dim=1)
+        return F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=None,
+            is_causal=True,
+            dropout_p=self.attn_dropout if self.training else 0.0,
+        )
+
+    def _forward_fa2(self, q: Tensor, k: Tensor, v: Tensor) -> Tensor:
+        """Run the FA2 attention path on ``[B, S, H, D]`` tensors."""
+        assert flash_attn_func is not None
+        return flash_attn_func(
+            q,
+            k,
+            v,
+            dropout_p=self.attn_dropout if self.training else 0.0,
+            causal=True,
+        )
+
     def forward(
         self,
         x: Tensor,
@@ -848,43 +918,33 @@ class HyperSharedAttention(nn.Module):
         qkv = self.qkv(x)
         q, k, v = qkv.split((dim, self.kv_dim, self.kv_dim), dim=-1)
 
-        q = q.view(bsz, seqlen, self.num_heads, self.head_dim).transpose(1, 2)
-        k = k.view(bsz, seqlen, self.num_kv_heads, self.head_dim).transpose(1, 2)
-        v = v.view(bsz, seqlen, self.num_kv_heads, self.head_dim).transpose(1, 2)
-
-        if self.qk_norm:
-            q = F.rms_norm(q, (self.head_dim,))
-            k = F.rms_norm(k, (self.head_dim,))
-
-        cos, sin = self.rotary(seqlen, x.device, q.dtype)
-        q = apply_rotary_emb(q, cos, sin)
-        k = apply_rotary_emb(k, cos, sin)
-        q = q * q_gain.to(dtype=q.dtype)[None, :, None, None]
-
-        if self.use_sdpa_gqa:
-            y = F.scaled_dot_product_attention(
-                q,
-                k,
-                v,
-                attn_mask=None,
-                is_causal=True,
-                dropout_p=self.attn_dropout if self.training else 0.0,
-                enable_gqa=True,
-            )
+        if (
+            self.attn_impl == "fa2"
+            and x.is_cuda
+            and x.dtype == torch.bfloat16
+            and flash_attn_func is not None
+        ):
+            q = q.view(bsz, seqlen, self.num_heads, self.head_dim)
+            k = k.view(bsz, seqlen, self.num_kv_heads, self.head_dim)
+            v = v.view(bsz, seqlen, self.num_kv_heads, self.head_dim)
+            q, k = self._apply_qk_norm_and_rope_bshd(q, k, q_gain)
+            y = self._forward_fa2(q, k, v)
+            y = y.contiguous().view(bsz, seqlen, dim)
         else:
-            if self.num_kv_heads != self.num_heads:
-                repeat = self.num_heads // self.num_kv_heads
-                k = k.repeat_interleave(repeat, dim=1)
-                v = v.repeat_interleave(repeat, dim=1)
-            y = F.scaled_dot_product_attention(
-                q,
-                k,
-                v,
-                attn_mask=None,
-                is_causal=True,
-                dropout_p=self.attn_dropout if self.training else 0.0,
-            )
-        y = y.transpose(1, 2).contiguous().view(bsz, seqlen, dim)
+            q = q.view(bsz, seqlen, self.num_heads, self.head_dim).transpose(1, 2)
+            k = k.view(bsz, seqlen, self.num_kv_heads, self.head_dim).transpose(1, 2)
+            v = v.view(bsz, seqlen, self.num_kv_heads, self.head_dim).transpose(1, 2)
+
+            if self.qk_norm:
+                q = F.rms_norm(q, (self.head_dim,))
+                k = F.rms_norm(k, (self.head_dim,))
+
+            cos, sin = self.rotary(seqlen, x.device, q.dtype)
+            q = apply_rotary_emb(q, cos, sin)
+            k = apply_rotary_emb(k, cos, sin)
+            q = q * q_gain.to(dtype=q.dtype)[None, :, None, None]
+            y = self._forward_sdpa(q, k, v)
+            y = y.transpose(1, 2).contiguous().view(bsz, seqlen, dim)
         return self.resid_dropout(self.proj(y))
 
 
@@ -1457,6 +1517,7 @@ def build_hyper_shared_model_from_args(
         resid_dropout=float(getattr(args, "resid_dropout", 0.0)),
         use_bias=bool(getattr(args, "use_bias", False)),
         cast_linears=bool(getattr(args, "cast_linears", True)),
+        attn_impl=str(getattr(args, "attn_impl", "sdpa")),
         mlp_kernel=str(getattr(args, "mlp_kernel", "pytorch")),
     )
 

@@ -7,7 +7,7 @@ materially improved or clarified it over time.
 
 Timestamp:
 
-- `2026-03-30T23:00:00-04:00`
+- `2026-03-30T23:25:00-04:00`
 
 Current best ALlama quality run:
 
@@ -48,7 +48,10 @@ Current read on the project:
 - `flash-attn 2.8.3` is now installed in the local `train` env, but the first
   direct FA2 benchmarks on the exact ALlama shape still lost to SDPA on the
   local 5090. That makes FA2 useful for research and possible H100 follow-up,
-  but not an automatic model-path integration win.
+  but not an automatic drop-in model-path integration win.
+- A proper FA2-native model-path adaptation now exists behind
+  `ATTN_IMPL=fa2`, and unlike the raw backend swap, it does produce a real
+  end-to-end gain on the anchor harness.
 - `wide` is no longer the best-model quality path. It remains useful only if the
   goal is an explicit speed/quality tradeoff study.
 - `layernorm` is not part of the active search space. It lost to `rmsnorm` in
@@ -946,3 +949,36 @@ Latest harness smoke check:
     not beat SDPA flash on this 5090 benchmark
   - if FA2 is revisited from here, it should be as a model-layout adaptation
     question, not as a naïve drop-in backend swap
+
+### 2026-03-30
+
+- Added a real FA2-native attention path to `allama_shared.py` behind
+  `ATTN_IMPL=fa2`.
+- What changed in that path:
+  - Q/K/V stay in `BSHD` layout after the `qkv` projection
+  - qk-norm, RoPE, and `q_gain` are applied in the same `BSHD` layout
+  - `flash_attn_func` is called directly on the native FA2 layout
+  - the path flattens only once for the output projection
+- This is deliberately different from the raw FA2 backend benchmark. It answers
+  the model-path question rather than the backend-swap question.
+- Sequential real-anchor compare on the local 5090 contract:
+  - shipped path (`ATTN_IMPL=sdpa`, `MLP_KERNEL=triton_gateup`):
+    `runs_allama_validation/perf_fa2_native_confirm_seq/shipped/allama_anchor/baseline/run_summary.json`
+    - `134,045.96 tok/s`
+    - `1.95563 s/step`
+    - `2.1947 GB` peak CUDA memory
+  - FA2-native path (`ATTN_IMPL=fa2`, `MLP_KERNEL=triton_gateup`):
+    `runs_allama_validation/perf_fa2_native_confirm_seq/fa2_native/allama_anchor/baseline/run_summary.json`
+    - `136,490.95 tok/s`
+    - `1.92060 s/step`
+    - `2.2189 GB` peak CUDA memory
+- Interpretation:
+  - the positive result survives a clean sequential rerun
+  - the gain is modest but real: about `+1.8%` throughput on the full anchor
+    training step
+  - this is the first attention-side model-path change that actually helps the
+    shipped stack end to end
+- Practical conclusion:
+  - keep `ATTN_IMPL=fa2` as an opt-in path for continued work
+  - this does not prove FA2 is globally better than SDPA, but it does prove the
+    right model-side adaptation can beat the naïve FA2 backend result

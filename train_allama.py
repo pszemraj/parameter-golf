@@ -244,6 +244,7 @@ class Hyperparameters:
     q_gain_init: float
     x0_gate_init: float
     cast_linears: bool
+    attn_impl: str
     mlp_kernel: str
     zero_init_residual: bool
     attn_dropout: float
@@ -375,6 +376,7 @@ class Hyperparameters:
             ),
             x0_gate_init=float(os.environ.get("X0_GATE_INIT", "-6.0")),
             cast_linears=env_bool("CAST_LINEARS", True),
+            attn_impl=os.environ.get("ATTN_IMPL", "sdpa"),
             mlp_kernel=os.environ.get("MLP_KERNEL", "pytorch"),
             zero_init_residual=env_bool("ZERO_INIT_RESIDUAL", True),
             attn_dropout=float(os.environ.get("ATTN_DROPOUT", "0.0")),
@@ -2545,7 +2547,7 @@ def main() -> None:
         )
     log(
         f"x0_shortcut={args.use_x0_shortcut} x0_gate_init={args.x0_gate_init} "
-        f"q_gain_init={args.q_gain_init} mlp_kernel={args.mlp_kernel} simple_layer_modulation=1 "
+        f"q_gain_init={args.q_gain_init} attn_impl={args.attn_impl} mlp_kernel={args.mlp_kernel} simple_layer_modulation=1 "
         f"global_rotary=1 enable_gqa_probe={int(sdpa_enable_gqa_available())}"
     )
     log(format_model_count_report("model_init", param_report))
