@@ -683,11 +683,19 @@ Latest harness smoke check:
   - flash + `MLP_KERNEL=triton_gateup`, with `TORCH_BLAS_PREFER_CUBLASLT=1`:
     - `mean_step_s=1.88445`
     - `tokens_per_s=139108.77`
+  - cuDNN + PyTorch MLP, with `TORCH_BLAS_PREFER_CUBLASLT=1`:
+    - `mean_step_s=4.20607`
+    - `tokens_per_s=62325.23`
+  - cuDNN + `MLP_KERNEL=triton_gateup`, with `TORCH_BLAS_PREFER_CUBLASLT=1`:
+    - `mean_step_s=3.92872`
+    - `tokens_per_s=66725.04`
 - Conclusion:
   - on torch 2.11, `flash` and `cudnn` SDPA are effectively tied if the local
     BLAS override is removed
   - the old 5090 `cublaslt` knob is no longer a correctness guardrail, but it
     is still a very real local throughput knob on this machine
+  - that same local BLAS override should be treated as flash-path-specific on
+    this 5090; it catastrophically hurts the local `cudnn` path
   - with the active local 5090 BLAS override restored, `MLP_KERNEL=triton_gateup`
     again beats the plain compiled PyTorch baseline by about `2.5%`
 

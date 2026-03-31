@@ -398,8 +398,9 @@ that capped plan, but it still does not alias an uncapped or longer plan with
 a different run spec. This only affects explicitly capped runs; the default
 ablation contract remains uncapped.
 
-The active local 5090 scripts still export `TORCH_BLAS_PREFER_CUBLASLT=1`.
+The active local 5090 scripts still prefer `TORCH_BLAS_PREFER_CUBLASLT=1` for the default flash/auto path.
 That is no longer needed as a torch 2.11 correctness workaround, but it is still a material local throughput win on this machine.
+Do not combine it with `SDPA_BACKEND=cudnn`; that local pairing is much slower.
 The trainer supports `SDPA_BACKEND=auto|flash|efficient|math|cudnn` for explicit SDPA backend experiments.
 
 The sweep exports W&B watch knobs:
