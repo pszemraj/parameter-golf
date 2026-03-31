@@ -10,7 +10,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 HCONV_TRAINER="${ROOT_DIR}/train_hconv.py"
 GPT_TRAINER="${ROOT_DIR}/train_gpt.py"
-RUNS_ROOT="${ROOT_DIR}/runs_hconv_quality_5090"
+RUNS_ROOT="${RUNS_ROOT:-${ROOT_DIR}/runs_hconv_quality_5090}"
 
 DATA_PATH="${DATA_PATH:-${ROOT_DIR}/data/datasets/fineweb10B_sp1024}"
 TOKENIZER_PATH="${TOKENIZER_PATH:-${ROOT_DIR}/data/tokenizers/fineweb_1024_bpe.model}"
@@ -94,6 +94,42 @@ require_data() {
     fi
 }
 
+resolve_wandb_project() {
+    local target="$1"
+    echo "${WANDB_PROJECT}"
+}
+
+resolve_wandb_group() {
+    local target="$1"
+    echo "${WANDB_GROUP}"
+}
+
+resolve_wandb_tags() {
+    local target="$1"
+    local base_tags="${WANDB_TAGS}"
+    if [[ "${target}" == "SMOKE_HCONV" && "${base_tags}" == "5090,quality,hconv" ]]; then
+        base_tags="5090,smoke,hconv"
+    fi
+    echo "${base_tags},${target}"
+}
+
+resolve_wandb_run_name() {
+    local target="$1"
+    case "${target}" in
+        SMOKE_HCONV) echo "SMOKE_hconv_attn5_uconv6_conv18_mlp2" ;;
+        GPT_REF) echo "GPT_REF_gpt_layers9_dim512_mlp2_tiedemb" ;;
+        B1) echo "B1_hconv_hybrid_attn3_uconv10_conv10_mlp2" ;;
+        C2) echo "C2_hconv_pureconv_attn0_uconv15_conv15_mlp2" ;;
+        T2) echo "T2_hconv_tieddepth_attn5_uconv6_conv18_mlp2" ;;
+        T3) echo "T3_hconv_tieddepth_attn5_uconv4_conv16_mlp3" ;;
+        I1) echo "I1_hconv_dilated_attn5_uconv6_conv18_mlp2" ;;
+        I2) echo "I2_hconv_sqgate_attn5_uconv6_conv18_mlp2" ;;
+        I4) echo "I4_hconv_dilated_sqgate_attn5_uconv6_conv18_mlp2" ;;
+        I4H) echo "I4H_hconv_dilated_sqgate_hippo_attn5_uconv6_conv18_mlp2" ;;
+        *) echo "${target}" ;;
+    esac
+}
+
 run_complete() {
     local run_dir="$1"
     local expected_steps="$2"
@@ -125,15 +161,19 @@ write_launch_summary() {
     local target="$2"
     local trainer="$3"
     local run_dir="$4"
-    local max_steps="$5"
-    local train_batch_tokens="$6"
-    local seq_len="$7"
-    local eval_mode="$8"
-    local val_batch_size="$9"
-    local val_batches="${10}"
-    local val_loss_every="${11}"
-    local train_log_every="${12}"
-    local warmup_steps="${13}"
+    local wandb_project="$5"
+    local wandb_group="$6"
+    local wandb_run_name="$7"
+    local wandb_tags="$8"
+    local max_steps="$9"
+    local train_batch_tokens="${10}"
+    local seq_len="${11}"
+    local eval_mode="${12}"
+    local val_batch_size="${13}"
+    local val_batches="${14}"
+    local val_loss_every="${15}"
+    local train_log_every="${16}"
+    local warmup_steps="${17}"
     local planned_train_tokens=$(( train_batch_tokens * max_steps ))
     local local_batch_size=$(( train_batch_tokens / (8 * seq_len) ))
     cat > "${summary_file}" <<EOF
@@ -159,13 +199,14 @@ sdpa_backend=${SDPA_BACKEND}
 compile_disable=${COMPILE_DISABLE}
 TORCH_BLAS_PREFER_CUBLASLT=${TORCH_BLAS_PREFER_CUBLASLT}
 wandb_enable=${WANDB_ENABLE}
-wandb_project=${WANDB_PROJECT}
+wandb_project=${wandb_project}
 wandb_entity=${WANDB_ENTITY}
-wandb_group=${WANDB_GROUP}
+wandb_group=${wandb_group}
+wandb_run_name=${wandb_run_name}
 wandb_mode=${WANDB_MODE}
 wandb_watch_log=${WANDB_WATCH_LOG}
 wandb_watch_log_freq=${WANDB_WATCH_LOG_FREQ}
-wandb_tags=${WANDB_TAGS}
+wandb_tags=${wandb_tags}
 EOF
 }
 
@@ -188,6 +229,14 @@ run_target() {
     local summary_file="${run_dir}/launch_summary.txt"
     local planned_train_tokens=$(( train_batch_tokens * max_steps ))
     local local_batch_size=$(( train_batch_tokens / (8 * seq_len) ))
+    local wandb_project
+    local wandb_group
+    local wandb_run_name
+    local wandb_tags
+    wandb_project="$(resolve_wandb_project "${target}")"
+    wandb_group="$(resolve_wandb_group "${target}")"
+    wandb_run_name="$(resolve_wandb_run_name "${target}")"
+    wandb_tags="$(resolve_wandb_tags "${target}")"
 
     guard_run_dir "${run_dir}" "${max_steps}"
     mkdir -p "${run_dir}"
@@ -196,6 +245,10 @@ run_target() {
         "${target}" \
         "${trainer}" \
         "${run_dir}" \
+        "${wandb_project}" \
+        "${wandb_group}" \
+        "${wandb_run_name}" \
+        "${wandb_tags}" \
         "${max_steps}" \
         "${train_batch_tokens}" \
         "${seq_len}" \
@@ -218,7 +271,8 @@ run_target() {
     echo "val_loss_every=${val_loss_every} train_log_every=${train_log_every}"
     echo "sdpa_backend=${SDPA_BACKEND} compile_disable=${COMPILE_DISABLE}"
     echo "TORCH_BLAS_PREFER_CUBLASLT=${TORCH_BLAS_PREFER_CUBLASLT}"
-    echo "wandb_enable=${WANDB_ENABLE} wandb_project=${WANDB_PROJECT} wandb_group=${WANDB_GROUP}"
+    echo "wandb_enable=${WANDB_ENABLE} wandb_project=${wandb_project} wandb_group=${wandb_group}"
+    echo "wandb_run_name=${wandb_run_name}"
     echo "wandb_mode=${WANDB_MODE} watch=${WANDB_WATCH_LOG}@${WANDB_WATCH_LOG_FREQ}"
     echo "================================================================"
 
@@ -246,11 +300,11 @@ run_target() {
         --sdpa-backend "${SDPA_BACKEND}" \
         --compile-disable "${COMPILE_DISABLE}" \
         --wandb "${WANDB_ENABLE}" \
-        --wandb-project "${WANDB_PROJECT}" \
+        --wandb-project "${wandb_project}" \
         --wandb-entity "${WANDB_ENTITY}" \
-        --wandb-group "${WANDB_GROUP}" \
-        --wandb-run-name "${target}" \
-        --wandb-tags "${WANDB_TAGS},${target}" \
+        --wandb-group "${wandb_group}" \
+        --wandb-run-name "${wandb_run_name}" \
+        --wandb-tags "${wandb_tags}" \
         --wandb-mode "${WANDB_MODE}" \
         --wandb-watch-log "${WANDB_WATCH_LOG}" \
         --wandb-watch-log-freq "${WANDB_WATCH_LOG_FREQ}" \

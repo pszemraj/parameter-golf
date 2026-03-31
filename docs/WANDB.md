@@ -1,6 +1,6 @@
 # W&B Logging
 
-Last updated: 2026-03-31 03:40 EDT
+Last updated: 2026-03-31 05:32 EDT
 
 This branch now has optional Weights & Biases logging in both [`train_hconv.py`](../train_hconv.py) and [`train_gpt.py`](../train_gpt.py), with the 5090 sweep harness enabling it by default.
 
@@ -10,9 +10,24 @@ This branch now has optional Weights & Biases logging in both [`train_hconv.py`]
 - Default group from [`scripts/sweep_5090.sh`](../scripts/sweep_5090.sh): `hconv_quality_5090`
 - Default watch mode: `gradients`
 - Default watch frequency: `25` steps
-- Default run name: the sweep target, e.g. `B1`, `C2`, `T2`
+- Default run name: a descriptive target-derived name, e.g. `T2_hconv_tieddepth_attn5_uconv6_conv18_mlp2`
 
 The sweep harness is CLI-first: it passes W&B settings as trainer flags, not trainer-specific env vars. The only runtime env var the harness still uses for training behavior is `TORCH_BLAS_PREFER_CUBLASLT`.
+
+## Default Run Names
+
+The harness now resolves stable W&B run names instead of logging shorthand-only target IDs:
+
+- `SMOKE_HCONV` -> `SMOKE_hconv_attn5_uconv6_conv18_mlp2`
+- `GPT_REF` -> `GPT_REF_gpt_layers9_dim512_mlp2_tiedemb`
+- `B1` -> `B1_hconv_hybrid_attn3_uconv10_conv10_mlp2`
+- `C2` -> `C2_hconv_pureconv_attn0_uconv15_conv15_mlp2`
+- `T2` -> `T2_hconv_tieddepth_attn5_uconv6_conv18_mlp2`
+- `T3` -> `T3_hconv_tieddepth_attn5_uconv4_conv16_mlp3`
+- `I1` -> `I1_hconv_dilated_attn5_uconv6_conv18_mlp2`
+- `I2` -> `I2_hconv_sqgate_attn5_uconv6_conv18_mlp2`
+- `I4` -> `I4_hconv_dilated_sqgate_attn5_uconv6_conv18_mlp2`
+- `I4H` -> `I4H_hconv_dilated_sqgate_hippo_attn5_uconv6_conv18_mlp2`
 
 ## Watch Behavior
 
