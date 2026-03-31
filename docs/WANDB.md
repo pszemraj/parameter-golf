@@ -1,6 +1,6 @@
 # W&B Logging
 
-Last updated: 2026-03-31 03:10 EDT
+Last updated: 2026-03-31 03:40 EDT
 
 This branch now has optional Weights & Biases logging in both [`train_hconv.py`](../train_hconv.py) and [`train_gpt.py`](../train_gpt.py), with the 5090 sweep harness enabling it by default.
 
@@ -70,12 +70,47 @@ WANDB_WATCH_LOG=all bash scripts/sweep_5090.sh T2
 
 ## Logged Metrics
 
-The trainers now send the following categories to W&B:
+The logging split is intentionally compact and follows the better schema from the `feat/allama` branch:
 
-- Training: loss, elapsed time, step average, steps/s, tokens/s, tokens seen
-- Validation: loss and bpb on each scheduled eval
-- Optimizer: LR scale, Muon momentum, per-optimizer learning rates
-- System: peak allocated and reserved CUDA memory
-- Final artifacts: raw model size, int8+zlib size, roundtrip val loss/bpb, roundtrip eval time
+- W&B history contains only moving runtime signals:
+  - `train/*`
+  - `eval/*`
+  - `watch/*`
+- W&B config holds static run descriptors:
+  - resolved hyperparameters
+  - resolved batch/eval contract
+  - model identity fields such as parameter counts, layer counts, planned train tokens, and code bytes
+- W&B summary holds final compliance and export fields:
+  - artifact-limit status
+  - headroom / over-limit warning
+  - final int8+zlib artifact bytes
+  - final roundtrip validation metrics
+  - peak CUDA memory
+
+That means single-point artifact and final-export scalars are not logged as time series, and the local text log remains the source of truth for verbose training details.
+
+## Artifact Compliance
+
+Final artifact handling now records explicit challenge-compliance summary fields:
+
+- `artifact_limit_bytes`
+- `artifact_bytes_final`
+- `artifact_headroom_bytes_final`
+- `artifact_over_limit_final`
+- `artifact_status_final`
+- `artifact_warning_final`
+- `artifact/code_bytes_final`
+- `artifact/int8_payload_zlib_bytes_final`
+
+Status behavior:
+
+- Over limit: `artifact_status_final=OVER_LIMIT`
+- Under limit: `artifact_status_final=LEFT_ON_TABLE`
+- Exact fit: `artifact_status_final=AT_LIMIT`
+
+The trainers also emit a local warning line:
+
+- `ARTIFACT_OVER_LIMIT ...` when the final export is invalid
+- `ARTIFACT_LEFT_ON_TABLE ...` when bytes were left unused under the cap
 
 This is meant to complement, not replace, the source-of-truth text logs in [`runs_hconv_quality_5090/`](../runs_hconv_quality_5090/).

@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+ARTIFACT_SIZE_LIMIT_BYTES = 16_000_000
+
 
 def add_wandb_args(parser: argparse.ArgumentParser, *, default_project: str) -> None:
     """Add shared W&B CLI flags to a trainer parser.
@@ -69,19 +71,93 @@ def parse_wandb_tags(raw_tags: str) -> list[str]:
 
 
 def build_wandb_config(
-    args: object, extra_config: dict[str, Any] | None = None
+    args: object,
+    extra_config: dict[str, Any] | None = None,
+    *,
+    hyperparameter_cls: type | None = None,
 ) -> dict[str, Any]:
     """Build a W&B config payload from parsed CLI args plus derived values.
 
     :param object args: Parsed trainer args object.
     :param dict[str, Any] | None extra_config: Additional derived config values.
+    :param type | None hyperparameter_cls: Optional class-backed hyperparameter source.
     :return dict[str, Any]: Serializable config payload.
     """
 
-    config = dict(vars(args))
+    if hyperparameter_cls is None:
+        config = dict(vars(args))
+    else:
+        config = {
+            name: getattr(args, name)
+            for name, value in hyperparameter_cls.__dict__.items()
+            if not name.startswith("_") and not callable(value)
+        }
     if extra_config:
         config.update(extra_config)
     return config
+
+
+def build_artifact_summary(
+    *, code_bytes: int, int8_payload_zlib_bytes: int, limit_bytes: int
+) -> dict[str, Any]:
+    """Build final artifact compliance summary fields for W&B.
+
+    :param int code_bytes: Serialized trainer code size in bytes.
+    :param int int8_payload_zlib_bytes: Final int8+zlib payload size in bytes.
+    :param int limit_bytes: Challenge artifact size limit in bytes.
+    :return dict[str, Any]: Summary metrics for artifact compliance.
+    """
+
+    artifact_bytes_final = code_bytes + int8_payload_zlib_bytes
+    artifact_headroom_bytes_final = limit_bytes - artifact_bytes_final
+    artifact_over_limit_final = int(artifact_bytes_final > limit_bytes)
+    if artifact_bytes_final > limit_bytes:
+        artifact_status_final = "OVER_LIMIT"
+        artifact_warning_final = f"OVER_LIMIT_BY_{-artifact_headroom_bytes_final}_BYTES"
+    elif artifact_bytes_final < limit_bytes:
+        artifact_status_final = "LEFT_ON_TABLE"
+        artifact_warning_final = f"LEFT_ON_TABLE_{artifact_headroom_bytes_final}_BYTES"
+    else:
+        artifact_status_final = "AT_LIMIT"
+        artifact_warning_final = ""
+    return {
+        "artifact_limit_bytes": int(limit_bytes),
+        "artifact_headroom_bytes_final": int(artifact_headroom_bytes_final),
+        "artifact_over_limit_final": int(artifact_over_limit_final),
+        "artifact_status_final": artifact_status_final,
+        "artifact_warning_final": artifact_warning_final,
+        "artifact/code_bytes_final": int(code_bytes),
+        "artifact/int8_payload_zlib_bytes_final": int(int8_payload_zlib_bytes),
+        "artifact_bytes_final": int(artifact_bytes_final),
+    }
+
+
+def format_artifact_warning(summary: dict[str, Any]) -> str | None:
+    """Format a human-readable artifact compliance warning line.
+
+    :param dict[str, Any] summary: Artifact summary payload.
+    :return str | None: Warning/status line for local logs, if applicable.
+    """
+
+    status = str(summary["artifact_status_final"])
+    artifact_bytes_final = int(summary["artifact_bytes_final"])
+    limit_bytes = int(summary["artifact_limit_bytes"])
+    headroom_bytes_final = int(summary["artifact_headroom_bytes_final"])
+    if status == "OVER_LIMIT":
+        return (
+            "\x1b[1;31m"
+            f"ARTIFACT_OVER_LIMIT artifact_bytes_final={artifact_bytes_final} "
+            f"limit_bytes={limit_bytes} over_by_bytes={-headroom_bytes_final}"
+            "\x1b[0m"
+        )
+    if status == "LEFT_ON_TABLE":
+        return (
+            "\x1b[1;33m"
+            f"ARTIFACT_LEFT_ON_TABLE artifact_bytes_final={artifact_bytes_final} "
+            f"limit_bytes={limit_bytes} left_on_table_bytes={headroom_bytes_final}"
+            "\x1b[0m"
+        )
+    return None
 
 
 def maybe_init_wandb(
