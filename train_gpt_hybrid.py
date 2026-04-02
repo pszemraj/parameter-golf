@@ -34,7 +34,7 @@ import torch.distributed as dist
 from torch import Tensor
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from model import SCALAR_PARAM_PATTERNS, CastedLinear, HybridGPT
+from model import _HAS_FLA, SCALAR_PARAM_PATTERNS, CastedLinear, HybridGPT
 
 # ── Optional wandb ────────────────────────────────────────────────────
 _USE_WANDB = bool(int(os.environ.get("USE_WANDB", "1")))
@@ -65,6 +65,8 @@ class Hyperparameters:
     val_batch_size = int(os.environ.get("VAL_BATCH_SIZE", 524_288))
     val_loss_every = int(os.environ.get("VAL_LOSS_EVERY", 1000))
     train_log_every = int(os.environ.get("TRAIN_LOG_EVERY", 200))
+    log_step0_eval = bool(int(os.environ.get("LOG_STEP0_EVAL", "0")))
+    wandb_watch_log_freq = int(os.environ.get("WANDB_WATCH_LOG_FREQ", 25))
 
     # Training
     iterations = int(os.environ.get("ITERATIONS", 20000))
@@ -75,6 +77,10 @@ class Hyperparameters:
         os.environ.get("TRAIN_SEQ_LEN", 2048)
     )  # 2048 default: GDN benefits from longer context
     max_wallclock_seconds = float(os.environ.get("MAX_WALLCLOCK_SECONDS", 600.0))
+    compile = bool(int(os.environ.get("COMPILE", "1"))) and not bool(
+        int(os.environ.get("TORCH_COMPILE_DISABLE", "0"))
+    )
+    artifact_limit_bytes = int(os.environ.get("ARTIFACT_LIMIT_BYTES", 16_000_000))
 
     # Model — shared
     vocab_size = int(os.environ.get("VOCAB_SIZE", 1024))
@@ -149,11 +155,23 @@ def zeropower_via_newtonschulz5(
 
 
 class Muon(torch.optim.Optimizer):
-    def __init__(self, params, lr, momentum, backend_steps, nesterov=True):
+    def __init__(
+        self,
+        params,
+        lr,
+        momentum,
+        backend_steps,
+        nesterov=True,
+        weight_decay=0.0,
+    ):
         super().__init__(
             params,
             dict(
-                lr=lr, momentum=momentum, backend_steps=backend_steps, nesterov=nesterov
+                lr=lr,
+                momentum=momentum,
+                backend_steps=backend_steps,
+                nesterov=nesterov,
+                weight_decay=weight_decay,
             ),
         )
 
@@ -192,9 +210,12 @@ class Muon(torch.optim.Optimizer):
                 curr += p.numel()
             if distributed:
                 dist.all_reduce(updates_flat, op=dist.ReduceOp.SUM)
+            wd = group.get("weight_decay", 0.0)
             curr = 0
             for p in params:
                 g = updates_flat[curr : curr + p.numel()].view_as(p).to(dtype=p.dtype)
+                if wd > 0:
+                    p.data.mul_(1.0 - lr * wd)
                 p.add_(g, alpha=-lr)
                 curr += p.numel()
         return loss
@@ -466,6 +487,14 @@ def restore_low_dim_params_to_fp32(module):
                 param.data = param.data.float()
 
 
+def maybe_compile(
+    obj, *, enabled: bool, dynamic: bool = False, fullgraph: bool = False
+):
+    if not enabled:
+        return obj
+    return torch.compile(obj, dynamic=dynamic, fullgraph=fullgraph)
+
+
 # =====================================================================
 # MAIN
 # =====================================================================
@@ -476,15 +505,30 @@ def main():
 
     code = Path(__file__).read_text(encoding="utf-8")
     args = Hyperparameters()
-    zeropower_via_newtonschulz5 = torch.compile(zeropower_via_newtonschulz5)
+    zeropower_via_newtonschulz5 = maybe_compile(
+        zeropower_via_newtonschulz5, enabled=args.compile
+    )
 
     # ── Distributed + CUDA ────────────────────────────────────────────
     distributed = "RANK" in os.environ and "WORLD_SIZE" in os.environ
     rank = int(os.environ.get("RANK", "0"))
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    if 8 % world_size != 0:
+        raise ValueError(
+            f"WORLD_SIZE must evenly divide 8, got WORLD_SIZE={world_size}"
+        )
     grad_accum_steps = 8 // world_size
     grad_scale = 1.0 / grad_accum_steps
+    batch_denom = world_size * grad_accum_steps * args.train_seq_len
+    if args.train_batch_tokens % batch_denom != 0:
+        raise ValueError(
+            "TRAIN_BATCH_TOKENS must be divisible by WORLD_SIZE * GRAD_ACCUM_STEPS * "
+            f"TRAIN_SEQ_LEN, got {args.train_batch_tokens=} {world_size=} "
+            f"{grad_accum_steps=} {args.train_seq_len=}"
+        )
+    local_batch_size = args.train_batch_tokens // batch_denom
+    planned_train_tokens = args.train_batch_tokens * args.iterations
 
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required")
@@ -508,6 +552,7 @@ def main():
     enable_flash_sdp(True)
     enable_mem_efficient_sdp(False)
     enable_math_sdp(False)
+    sdp_backend = "flash"
 
     os.makedirs("logs", exist_ok=True)
     logfile = f"logs/{args.run_id}.txt" if master_process else None
@@ -518,7 +563,7 @@ def main():
         if console:
             print(msg)
         if logfile:
-            with open(logfile, "a") as f:
+            with open(logfile, "a", encoding="utf-8") as f:
                 print(msg, file=f)
 
     # ── wandb init ────────────────────────────────────────────────────
@@ -538,6 +583,10 @@ def main():
     log0(code, console=False)
     log0(f"Python {sys.version}", console=False)
     log0(f"PyTorch {torch.__version__}", console=False)
+    log0(
+        f"compile:{int(args.compile)} sdp_backend:{sdp_backend} fla_available:{int(_HAS_FLA)}",
+        console=False,
+    )
 
     # ── Tokenizer + data ──────────────────────────────────────────────
     random.seed(args.seed)
@@ -545,11 +594,45 @@ def main():
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
 
+    if not args.tokenizer_path.endswith(".model"):
+        raise ValueError(
+            f"Script only supports SentencePiece .model tokenizers: {args.tokenizer_path}"
+        )
+    tokenizer_path = Path(args.tokenizer_path).resolve()
+    if not tokenizer_path.is_file():
+        raise FileNotFoundError(
+            "Tokenizer file not found. Download the published sp1024 assets with:\n"
+            "  python data/cached_challenge_fineweb.py --variant sp1024 --train-shards 1\n"
+            f"Expected tokenizer at: {tokenizer_path}"
+        )
+    dataset_dir = Path(args.data_path).resolve()
+    train_files = sorted(dataset_dir.glob("fineweb_train_*.bin"))
+    val_files = sorted(dataset_dir.glob("fineweb_val_*.bin"))
+    if not train_files or not val_files:
+        raise FileNotFoundError(
+            "FineWeb shards not found for the hybrid trainer. Download the published "
+            "sp1024 assets with:\n"
+            "  python data/cached_challenge_fineweb.py --variant sp1024 --train-shards 1\n"
+            f"Expected dataset under: {dataset_dir}"
+        )
+
     sp = spm.SentencePieceProcessor(model_file=args.tokenizer_path)
-    assert int(sp.vocab_size()) == args.vocab_size
+    if int(sp.vocab_size()) != args.vocab_size:
+        raise ValueError(
+            f"VOCAB_SIZE={args.vocab_size} does not match tokenizer vocab_size={int(sp.vocab_size())}"
+        )
     val_tokens = load_validation_tokens(args.val_files, args.train_seq_len)
     base_bytes_lut, has_ls_lut, is_bnd_lut = build_sentencepiece_luts(
         sp, args.vocab_size, device
+    )
+    log0(
+        f"train_loader:dataset:{dataset_dir.name} train_shards:{len(train_files)} "
+        f"val_shards:{len(val_files)}"
+    )
+    log0(
+        f"launch_contract:planned_train_tokens:{planned_train_tokens} "
+        f"train_batch_tokens:{args.train_batch_tokens} train_seq_len:{args.train_seq_len} "
+        f"grad_accum_steps:{grad_accum_steps} local_batch_size:{local_batch_size}"
     )
 
     # ── Model ─────────────────────────────────────────────────────────
@@ -582,7 +665,9 @@ def main():
         if isinstance(m, CastedLinear):
             m.float()
     restore_low_dim_params_to_fp32(base_model)
-    compiled_model = torch.compile(base_model, dynamic=False, fullgraph=True)
+    compiled_model = maybe_compile(
+        base_model, enabled=args.compile, dynamic=False, fullgraph=True
+    )
     model = (
         DDP(compiled_model, device_ids=[local_rank], broadcast_buffers=False)
         if distributed
@@ -593,13 +678,24 @@ def main():
     n_gdn = sum(1 for t in base_model.block_types if t == "gdn")
     n_attn = sum(1 for t in base_model.block_types if t == "attn")
     log0(f"model_params:{n_params} blocks:{n_gdn}G+{n_attn}A")
+    log0(
+        f"world_size:{world_size} grad_accum_steps:{grad_accum_steps} "
+        f"sdp_backends:cudnn=False flash=True mem_efficient=False math=False"
+    )
 
     if master_process and _USE_WANDB:
-        wandb.watch(
-            base_model, log="gradients", log_freq=args.train_log_every, log_graph=False
-        )
         wandb.config.update(
-            {"n_params": n_params, "n_gdn_blocks": n_gdn, "n_attn_blocks": n_attn}
+            {
+                "artifact_limit_bytes": args.artifact_limit_bytes,
+                "compile": args.compile,
+                "fla_available": _HAS_FLA,
+                "local_batch_size": local_batch_size,
+                "n_attn_blocks": n_attn,
+                "n_gdn_blocks": n_gdn,
+                "n_params": n_params,
+                "planned_train_tokens": planned_train_tokens,
+                "sdp_backend": sdp_backend,
+            }
         )
 
     # ── Optimizers ────────────────────────────────────────────────────
@@ -619,9 +715,16 @@ def main():
 
     token_lr = args.tied_embed_lr if args.tie_embeddings else args.embed_lr
     optimizer_tok = torch.optim.Adam(
-        [{"params": [base_model.tok_emb.weight], "lr": token_lr, "base_lr": token_lr}],
+        [
+            {
+                "params": [base_model.tok_emb.weight],
+                "lr": token_lr,
+                "base_lr": token_lr,
+            }
+        ],
         betas=(args.beta1, args.beta2),
         eps=args.adam_eps,
+        weight_decay=args.weight_decay,
         fused=True,
     )
     optimizer_muon = Muon(
@@ -629,6 +732,7 @@ def main():
         lr=args.matrix_lr,
         momentum=args.muon_momentum,
         backend_steps=args.muon_backend_steps,
+        weight_decay=args.weight_decay,
     )
     for g in optimizer_muon.param_groups:
         g["base_lr"] = args.matrix_lr
@@ -636,6 +740,7 @@ def main():
         [{"params": scalar_params, "lr": args.scalar_lr, "base_lr": args.scalar_lr}],
         betas=(args.beta1, args.beta2),
         eps=args.adam_eps,
+        weight_decay=args.weight_decay,
         fused=True,
     )
     optimizers = [optimizer_tok, optimizer_muon, optimizer_scalar]
@@ -650,6 +755,7 @@ def main():
             ],
             betas=(args.beta1, args.beta2),
             eps=args.adam_eps,
+            weight_decay=args.weight_decay,
             fused=True,
         )
         optimizers.insert(1, optimizer_head)
@@ -711,6 +817,13 @@ def main():
         train_loader = DistributedTokenLoader(
             args.train_files, rank, world_size, device
         )
+    if master_process and _USE_WANDB:
+        wandb.watch(
+            base_model,
+            log="gradients",
+            log_freq=args.wandb_watch_log_freq,
+            log_graph=False,
+        )
 
     # ── Training loop ─────────────────────────────────────────────────
     training_time_ms = 0.0
@@ -723,8 +836,12 @@ def main():
         last_step = step == args.iterations or (
             stop_after_step is not None and step >= stop_after_step
         )
-        should_validate = last_step or (
-            args.val_loss_every > 0 and step % args.val_loss_every == 0
+        should_validate = (
+            last_step
+            or (step == 0 and args.log_step0_eval)
+            or (
+                args.val_loss_every > 0 and step > 0 and step % args.val_loss_every == 0
+            )
         )
 
         if should_validate:
@@ -747,14 +864,7 @@ def main():
                 f"train_time:{training_time_ms:.0f}ms"
             )
             if master_process and _USE_WANDB:
-                wandb.log(
-                    {
-                        "val/loss": val_loss,
-                        "val/bpb": val_bpb,
-                        "train/time_ms": training_time_ms,
-                    },
-                    step=step,
-                )
+                wandb.log({"eval/loss": val_loss, "eval/bpb": val_bpb}, step=step)
             torch.cuda.synchronize()
             t0 = time.perf_counter()
 
@@ -803,21 +913,28 @@ def main():
 
         step += 1
         approx_ms = training_time_ms + 1000.0 * (time.perf_counter() - t0)
+        step_ms = approx_ms / step
+        tokens_per_s = args.train_batch_tokens / max(step_ms / 1000.0, 1e-9)
+        processed_tokens = step * args.train_batch_tokens
         should_log = args.train_log_every > 0 and (
-            step <= 10 or step % args.train_log_every == 0
+            step <= 10
+            or step % args.train_log_every == 0
+            or stop_after_step is not None
         )
         if should_log:
             log0(
                 f"step:{step}/{args.iterations} train_loss:{train_loss.item():.4f} "
-                f"train_time:{approx_ms:.0f}ms step_avg:{approx_ms / step:.2f}ms"
+                f"train_time:{approx_ms:.0f}ms step_avg:{step_ms:.2f}ms"
             )
             if master_process and _USE_WANDB:
                 wandb.log(
                     {
+                        "train/lr": args.matrix_lr * scale,
+                        "train/lr_scale": scale,
                         "train/loss": train_loss.item(),
-                        "train/lr_mul": scale,
-                        "train/step_ms": approx_ms / step,
-                        "train/muon_momentum": mm,
+                        "train/processed_tokens": processed_tokens,
+                        "train/step_ms": step_ms,
+                        "train/tokens_per_s": tokens_per_s,
                     },
                     step=step,
                 )
@@ -830,14 +947,20 @@ def main():
         if stop_after_step is None and reached_cap:
             stop_after_step = step
 
-    log0(f"peak_mem: {torch.cuda.max_memory_allocated() // 1024 // 1024}MiB")
+    peak_mem_alloc_mib = torch.cuda.max_memory_allocated() // 1024 // 1024
+    peak_mem_reserved_mib = torch.cuda.max_memory_reserved() // 1024 // 1024
+    log0(
+        f"peak memory allocated: {peak_mem_alloc_mib} MiB reserved: {peak_mem_reserved_mib} MiB"
+    )
 
     # ── Serialize + quantize + roundtrip ──────────────────────────────
+    qfb = None
+    code_bytes = len(code.encode("utf-8"))
     if master_process:
         torch.save(base_model.state_dict(), "final_model.pt")
         log0(f"raw_model_bytes:{os.path.getsize('final_model.pt')}")
 
-    quant_obj, qstats = quantize_state_dict_int8(base_model.state_dict())
+    quant_obj, _ = quantize_state_dict_int8(base_model.state_dict())
     quant_buf = io.BytesIO()
     torch.save(quant_obj, quant_buf)
     quant_blob = zlib.compress(quant_buf.getvalue(), level=9)
@@ -845,16 +968,7 @@ def main():
         with open("final_model.int8.ptz", "wb") as f:
             f.write(quant_blob)
         qfb = os.path.getsize("final_model.int8.ptz")
-        code_bytes = len(code.encode("utf-8"))
         log0(f"int8_zlib_bytes:{qfb} code_bytes:{code_bytes} total:{qfb + code_bytes}")
-        if _USE_WANDB:
-            wandb.log(
-                {
-                    "artifact/int8_zlib_bytes": qfb,
-                    "artifact/code_bytes": code_bytes,
-                    "artifact/total_bytes": qfb + code_bytes,
-                }
-            )
 
     if distributed:
         dist.barrier()
@@ -878,16 +992,48 @@ def main():
         is_bnd_lut,
     )
     torch.cuda.synchronize()
+    q_eval_ms = 1000 * (time.perf_counter() - t_q)
     log0(
         f"final_int8_zlib_roundtrip val_loss:{q_val_loss:.4f} val_bpb:{q_val_bpb:.4f} "
-        f"eval_time:{1000 * (time.perf_counter() - t_q):.0f}ms"
+        f"eval_time:{q_eval_ms:.0f}ms"
     )
     log0(
         f"final_int8_zlib_roundtrip_exact val_loss:{q_val_loss:.8f} val_bpb:{q_val_bpb:.8f}"
     )
 
+    artifact_bytes = None
+    artifact_headroom = None
+    artifact_status = None
+    artifact_warning = None
+    if master_process:
+        artifact_bytes = qfb + code_bytes
+        artifact_headroom = args.artifact_limit_bytes - artifact_bytes
+        if artifact_headroom < 0:
+            artifact_status = "OVER_LIMIT"
+            artifact_warning = "DISQUALIFIED"
+        elif artifact_headroom > 0:
+            artifact_status = "UNDER_LIMIT"
+            artifact_warning = "LEFT_ON_TABLE"
+        else:
+            artifact_status = "ON_BUDGET"
+            artifact_warning = ""
+        log0(
+            f"artifact_status:{artifact_status} artifact_warning:{artifact_warning or 'NONE'} "
+            f"headroom_bytes:{artifact_headroom}"
+        )
+
     if master_process and _USE_WANDB:
-        wandb.log({"final/val_loss": q_val_loss, "final/val_bpb": q_val_bpb})
+        wandb.summary["system/peak_mem_alloc_mib"] = peak_mem_alloc_mib
+        wandb.summary["system/peak_mem_reserved_mib"] = peak_mem_reserved_mib
+        wandb.summary["roundtrip_val_loss_final"] = q_val_loss
+        wandb.summary["roundtrip_val_bpb_final"] = q_val_bpb
+        wandb.summary["roundtrip_eval_time_ms_final"] = q_eval_ms
+        wandb.summary["artifact_status_final"] = artifact_status
+        wandb.summary["artifact_warning_final"] = artifact_warning
+        wandb.summary["artifact_bytes_final"] = artifact_bytes
+        wandb.summary["artifact_headroom_bytes_final"] = artifact_headroom
+        wandb.summary["artifact/code_bytes_final"] = code_bytes
+        wandb.summary["artifact/int8_payload_zlib_bytes_final"] = qfb
         wandb.finish()
 
     if distributed:

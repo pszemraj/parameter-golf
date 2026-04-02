@@ -160,6 +160,29 @@ By default, `train_gpt.py` keeps its ~10 minute wallclock cap. If you want a lon
 
 By default, this command prints `train_loss` step logs during training and prints `val_loss`, `val_bpb`, and compressed model size in the final `final_int8_zlib_roundtrip` lines at the end. If you want periodic validation logs during the run, set `VAL_LOSS_EVERY`, for example `VAL_LOSS_EVERY=200`. For the baseline config, the final `val_bpb` should land around ~1.2 with a compressed model size under 16MB.
 
+### Hybrid HGDN Workflow
+
+The hybrid Gated DeltaNet trainer lives at the repo root as `train_gpt_hybrid.py`, and the helper launch scripts live under `scripts/`.
+
+If you cloned fresh and do not yet have the tokenizer or dataset locally, download the published `sp1024` assets first:
+
+```bash
+python3 data/cached_challenge_fineweb.py --variant sp1024 --train-shards 1
+```
+
+Once those files exist at `./data/datasets/fineweb10B_sp1024/` and `./data/tokenizers/fineweb_1024_bpe.model`, you can run the hybrid smoke and matched comparison helpers from the repo root:
+
+```bash
+scripts/sweep.sh quick
+scripts/sweep.sh single
+scripts/sweep.sh baseline
+scripts/sweep.sh depth
+```
+
+These helpers accept `DATA_PATH` and `TOKENIZER_PATH` overrides if you want to point at a different local export, and they now emit their launch contract up front so matched comparisons are explicit.
+
+For W&B-backed hybrid runs, per-step metrics stay under the shared `train/*` and `eval/*` namespaces, while one-shot roundtrip and artifact-compliance results are written to run summary fields such as `roundtrip_val_bpb_final`.
+
 For dataset export, tokenizer export, and docs-cache rebuild instructions, see [data/README.md](data/README.md).
 
 Evaluation will be in the RunPod environment with all packages installed. `requirements.txt` is provided as a reference if you want to self-setup.

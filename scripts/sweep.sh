@@ -1,55 +1,131 @@
 #!/bin/bash
 set -euo pipefail
-cd "$(dirname "$0")"
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "$script_dir/.." && pwd)"
+cd "$repo_root"
+
 NGPU="${NGPU:-1}"
+if (( 8 % NGPU != 0 )); then
+    echo "NGPU must evenly divide 8 so grad accumulation stays valid: NGPU=$NGPU" >&2
+    exit 1
+fi
+
+trainer_path="$repo_root/train_gpt_hybrid.py"
+sweep_agent_path="$repo_root/scripts/sweep_agent.sh"
+sweep_config_path="$repo_root/scripts/sweep_config.yaml"
+
 export WANDB_PROJECT="${WANDB_PROJECT:-param-golf-hybrid}"
-export DATA_PATH="${DATA_PATH:-./data/datasets/fineweb10B_sp1024}"
-export TOKENIZER_PATH="${TOKENIZER_PATH:-./data/tokenizers/fineweb_1024_bpe.model}"
-export USE_WANDB="${USE_WANDB:-1}" VOCAB_SIZE=1024
-chmod +x sweep_agent.sh
+export DATA_PATH="${DATA_PATH:-$repo_root/data/datasets/fineweb10B_sp1024}"
+export TOKENIZER_PATH="${TOKENIZER_PATH:-$repo_root/data/tokenizers/fineweb_1024_bpe.model}"
+export USE_WANDB="${USE_WANDB:-1}"
+export VOCAB_SIZE="${VOCAB_SIZE:-1024}"
+chmod +x "$sweep_agent_path"
+
+print_launch_summary() {
+    local label="$1"
+    local grad_accum_steps=$((8 / NGPU))
+    local planned_train_tokens=$((TRAIN_BATCH_TOKENS * ITERATIONS))
+    local local_batch_size=$((TRAIN_BATCH_TOKENS / (NGPU * grad_accum_steps * TRAIN_SEQ_LEN)))
+    local wallclock="${MAX_WALLCLOCK_SECONDS:-600.0}"
+
+    echo "=== $label: $RUN_ID ==="
+    echo "planned_train_tokens=$planned_train_tokens train_batch_tokens=$TRAIN_BATCH_TOKENS train_seq_len=$TRAIN_SEQ_LEN"
+    echo "ngpu=$NGPU grad_accum_steps=$grad_accum_steps local_batch_size=$local_batch_size iterations=$ITERATIONS max_wallclock_seconds=$wallclock"
+    echo "data_path=$DATA_PATH"
+    echo "tokenizer_path=$TOKENIZER_PATH"
+}
+
+launch_train() {
+    print_launch_summary "$1"
+    torchrun --standalone --nproc_per_node="$NGPU" "$trainer_path"
+}
+
+export_default() {
+    local name="$1"
+    local value="$2"
+    export "$name=${!name:-$value}"
+}
 
 case "${1:-single}" in
 # ── hybrid_tight: 8h Dk48 Dv48 mlp3.0 r3 (15.8MB, 1.1% HR) ──
 single)
-    export RUN_ID="hybrid_${NGPU}gpu_$(date +%Y%m%d_%H%M%S)"
-    export NUM_LAYERS=16 MODEL_DIM=384 NUM_HEADS=8 NUM_KV_HEADS=4
-    export GDN_N_HEADS=8 GDN_HEAD_K_DIM=48 GDN_EXPAND_V=1.0 GDN_RATIO=3
-    export GDN_ALLOW_NEG_EIGVAL=1 GDN_CONV_SIZE=4
-    export MLP_MULT=3.0 LEAKY_SLOPE=0.5 TRAIN_SEQ_LEN=2048
-    export MATRIX_LR=0.04 SCALAR_LR=0.04 TIED_EMBED_LR=0.05
-    export MUON_MOMENTUM=0.95 WEIGHT_DECAY=0.04 WARMDOWN_ITERS=1200
-    export TRAIN_BATCH_TOKENS=524288 ITERATIONS=20000
-    export VAL_LOSS_EVERY=1000 TRAIN_LOG_EVERY=200
-    echo "=== Hybrid tight: $RUN_ID (16L×384d 12G+4A 8h Dk48 Dv48 mlp3.0) ==="
-    torchrun --standalone --nproc_per_node="$NGPU" train_gpt_hybrid.py ;;
+    export_default RUN_ID "hybrid_${NGPU}gpu_$(date +%Y%m%d_%H%M%S)"
+    export_default NUM_LAYERS 16
+    export_default MODEL_DIM 384
+    export_default NUM_HEADS 8
+    export_default NUM_KV_HEADS 4
+    export_default GDN_N_HEADS 8
+    export_default GDN_HEAD_K_DIM 48
+    export_default GDN_EXPAND_V 1.0
+    export_default GDN_RATIO 3
+    export_default GDN_ALLOW_NEG_EIGVAL 1
+    export_default GDN_CONV_SIZE 4
+    export_default MLP_MULT 3.0
+    export_default LEAKY_SLOPE 0.5
+    export_default TRAIN_SEQ_LEN 2048
+    export_default MATRIX_LR 0.04
+    export_default SCALAR_LR 0.04
+    export_default TIED_EMBED_LR 0.05
+    export_default MUON_MOMENTUM 0.95
+    export_default WEIGHT_DECAY 0.04
+    export_default WARMDOWN_ITERS 1200
+    export_default TRAIN_BATCH_TOKENS 524288
+    export_default ITERATIONS 20000
+    export_default VAL_LOSS_EVERY 1000
+    export_default TRAIN_LOG_EVERY 200
+    launch_train "Hybrid tight (16Lx384d 12G+4A 8h Dk48 Dv48 mlp3.0)" ;;
 
 # ── baseline_fill: 11L×512d mlp2.75 attn (15.4MB, 3.2% HR) ──
 baseline)
-    export RUN_ID="baseline_${NGPU}gpu_$(date +%Y%m%d_%H%M%S)"
-    export NUM_LAYERS=11 MODEL_DIM=512 NUM_HEADS=8 NUM_KV_HEADS=4
-    export GDN_RATIO=0 MLP_MULT=2.75 LEAKY_SLOPE=0.5 TRAIN_SEQ_LEN=2048
-    export MATRIX_LR=0.04 SCALAR_LR=0.04 TIED_EMBED_LR=0.05
-    export MUON_MOMENTUM=0.95 WEIGHT_DECAY=0.04 WARMDOWN_ITERS=1200
-    export TRAIN_BATCH_TOKENS=524288 ITERATIONS=20000
-    export VAL_LOSS_EVERY=1000 TRAIN_LOG_EVERY=200
-    echo "=== Baseline fill: $RUN_ID (11L×512d 0G+11A mlp2.75) ==="
-    torchrun --standalone --nproc_per_node="$NGPU" train_gpt_hybrid.py ;;
+    export_default RUN_ID "baseline_${NGPU}gpu_$(date +%Y%m%d_%H%M%S)"
+    export_default NUM_LAYERS 11
+    export_default MODEL_DIM 512
+    export_default NUM_HEADS 8
+    export_default NUM_KV_HEADS 4
+    export_default GDN_RATIO 0
+    export_default MLP_MULT 2.75
+    export_default LEAKY_SLOPE 0.5
+    export_default TRAIN_SEQ_LEN 2048
+    export_default MATRIX_LR 0.04
+    export_default SCALAR_LR 0.04
+    export_default TIED_EMBED_LR 0.05
+    export_default MUON_MOMENTUM 0.95
+    export_default WEIGHT_DECAY 0.04
+    export_default WARMDOWN_ITERS 1200
+    export_default TRAIN_BATCH_TOKENS 524288
+    export_default ITERATIONS 20000
+    export_default VAL_LOSS_EVERY 1000
+    export_default TRAIN_LOG_EVERY 200
+    launch_train "Baseline fill (11Lx512d 0G+11A mlp2.75)" ;;
 
 # ── depth_control: 16L×384d mlp3.75 attn (15.5MB, 2.7% HR) ──
 depth)
-    export RUN_ID="depth_ctrl_${NGPU}gpu_$(date +%Y%m%d_%H%M%S)"
-    export NUM_LAYERS=16 MODEL_DIM=384 NUM_HEADS=8 NUM_KV_HEADS=4
-    export GDN_RATIO=0 MLP_MULT=3.75 LEAKY_SLOPE=0.5 TRAIN_SEQ_LEN=2048
-    export MATRIX_LR=0.04 SCALAR_LR=0.04 TIED_EMBED_LR=0.05
-    export MUON_MOMENTUM=0.95 WEIGHT_DECAY=0.04 WARMDOWN_ITERS=1200
-    export TRAIN_BATCH_TOKENS=524288 ITERATIONS=20000
-    export VAL_LOSS_EVERY=1000 TRAIN_LOG_EVERY=200
-    echo "=== Depth control: $RUN_ID (16L×384d 0G+16A mlp3.75) ==="
-    torchrun --standalone --nproc_per_node="$NGPU" train_gpt_hybrid.py ;;
+    export_default RUN_ID "depth_ctrl_${NGPU}gpu_$(date +%Y%m%d_%H%M%S)"
+    export_default NUM_LAYERS 16
+    export_default MODEL_DIM 384
+    export_default NUM_HEADS 8
+    export_default NUM_KV_HEADS 4
+    export_default GDN_RATIO 0
+    export_default MLP_MULT 3.75
+    export_default LEAKY_SLOPE 0.5
+    export_default TRAIN_SEQ_LEN 2048
+    export_default MATRIX_LR 0.04
+    export_default SCALAR_LR 0.04
+    export_default TIED_EMBED_LR 0.05
+    export_default MUON_MOMENTUM 0.95
+    export_default WEIGHT_DECAY 0.04
+    export_default WARMDOWN_ITERS 1200
+    export_default TRAIN_BATCH_TOKENS 524288
+    export_default ITERATIONS 20000
+    export_default VAL_LOSS_EVERY 1000
+    export_default TRAIN_LOG_EVERY 200
+    launch_train "Depth control (16Lx384d 0G+16A mlp3.75)" ;;
 
 # ── A/B/C: reviewer-recommended 3-way comparison ──
 abc)
     echo "=== 3-way A/B/C: hybrid vs baseline vs depth_control ==="
+    echo "Runs execute sequentially with the current env overrides."
     "$0" single   # hybrid
     "$0" baseline  # width baseline
     "$0" depth     # depth control
@@ -57,21 +133,34 @@ abc)
 
 sweep)
     export NGPU
-    SWEEP_ID=$(wandb sweep --project "$WANDB_PROJECT" sweep_config.yaml 2>&1 | grep -oP 'wandb agent \K\S+')
+    SWEEP_ID=$(wandb sweep --project "$WANDB_PROJECT" "$sweep_config_path" 2>&1 | grep -oP 'wandb agent \K\S+')
     echo "Sweep: $SWEEP_ID"
     wandb agent --count "${SWEEP_COUNT:-10}" "$SWEEP_ID" ;;
 
 quick)
-    export RUN_ID="quick_$(date +%s)" USE_WANDB=0
-    export NUM_LAYERS=4 MODEL_DIM=128 NUM_HEADS=4 NUM_KV_HEADS=2
-    export GDN_N_HEADS=4 GDN_HEAD_K_DIM=16 GDN_EXPAND_V=2.0
-    export GDN_RATIO=3 GDN_ALLOW_NEG_EIGVAL=1 GDN_CONV_SIZE=4
-    export MLP_MULT=2 LEAKY_SLOPE=0.5 TRAIN_SEQ_LEN=512
-    export ITERATIONS=100 MAX_WALLCLOCK_SECONDS=120
-    export VAL_LOSS_EVERY=50 TRAIN_LOG_EVERY=25
-    export TRAIN_BATCH_TOKENS=32768 WARMUP_STEPS=3 WARMDOWN_ITERS=30
-    echo "=== Quick smoke: $RUN_ID ==="
-    torchrun --standalone --nproc_per_node="$NGPU" train_gpt_hybrid.py ;;
+    export_default RUN_ID "quick_$(date +%s)"
+    export_default USE_WANDB 0
+    export_default NUM_LAYERS 4
+    export_default MODEL_DIM 128
+    export_default NUM_HEADS 4
+    export_default NUM_KV_HEADS 2
+    export_default GDN_N_HEADS 4
+    export_default GDN_HEAD_K_DIM 16
+    export_default GDN_EXPAND_V 2.0
+    export_default GDN_RATIO 3
+    export_default GDN_ALLOW_NEG_EIGVAL 1
+    export_default GDN_CONV_SIZE 4
+    export_default MLP_MULT 2
+    export_default LEAKY_SLOPE 0.5
+    export_default TRAIN_SEQ_LEN 512
+    export_default ITERATIONS 100
+    export_default MAX_WALLCLOCK_SECONDS 120
+    export_default VAL_LOSS_EVERY 50
+    export_default TRAIN_LOG_EVERY 25
+    export_default TRAIN_BATCH_TOKENS 32768
+    export_default WARMUP_STEPS 3
+    export_default WARMDOWN_ITERS 30
+    launch_train "Quick smoke" ;;
 
 *) echo "Usage: $0 {single|baseline|depth|abc|sweep|quick}"; exit 1 ;;
 esac

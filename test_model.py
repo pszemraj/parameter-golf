@@ -58,6 +58,22 @@ def test_gdn_split_projections():
     )
 
 
+def test_gdn_recurrence_input_dtypes():
+    """Keep recurrence inputs aligned with activation dtype for FLA kernels."""
+    layer = GatedDeltaNet(64, n_heads=4, head_k_dim=8, expand_v=2.0, use_fla=False)
+    layer = layer.bfloat16()
+    layer.A_log.data = layer.A_log.data.float()
+    layer.dt_bias.data = layer.dt_bias.data.float()
+    x = torch.randn(2, 16, 64, dtype=torch.bfloat16)
+    q, k, v, g, beta = layer._project_recurrence_inputs(x)
+    assert q.dtype == x.dtype
+    assert k.dtype == x.dtype
+    assert v.dtype == x.dtype
+    assert g.dtype == x.dtype
+    assert beta.dtype == x.dtype
+    print(f"  ✓ recurrence input dtypes OK ({q.dtype})")
+
+
 def test_muon_routing():
     """Verify SCALAR_PARAM_PATTERNS correctly tags w_a/w_b/w_g for Adam."""
     model = HybridGPT(
@@ -278,6 +294,7 @@ if __name__ == "__main__":
     tests = [
         ("Recurrence", test_recurrence),
         ("Split projections", test_gdn_split_projections),
+        ("Recurrence input dtypes", test_gdn_recurrence_input_dtypes),
         ("Muon routing", test_muon_routing),
         ("Causal conv", test_causal_conv),
         ("Hybrid fwd/bwd", test_hybrid_fwd_bwd),

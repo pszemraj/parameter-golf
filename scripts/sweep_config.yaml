@@ -1,9 +1,9 @@
 # sweep_config.yaml — v3: FLA-correct API, size-audited
 # All combos verified ≤ 16MB at int6+zstd.
-program: sweep_agent.sh
+program: scripts/sweep_agent.sh
 method: bayes
 metric:
-  name: final/val_bpb
+  name: roundtrip_val_bpb_final
   goal: minimize
 parameters:
   # Architecture (size-critical, discrete, all audited)

@@ -171,7 +171,9 @@ class GatedDeltaNet(nn.Module):
         self.k_conv = CausalConv1d(total_qk, conv_size)
         self.v_conv = CausalConv1d(total_v, conv_size)
 
-    def forward(self, x: Tensor) -> Tensor:
+    def _project_recurrence_inputs(
+        self, x: Tensor
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
         B, T, D = x.shape
         dt = x.dtype
         H, Dk, Dv = self.n_heads, self.head_k_dim, self.head_v_dim
@@ -182,8 +184,8 @@ class GatedDeltaNet(nn.Module):
         v = self.v_conv(self.w_v(x))
 
         # Reshape and normalize
-        q = l2_norm(q.view(B, T, H, Dk))
-        k = l2_norm(k.view(B, T, H, Dk))
+        q = l2_norm(q.view(B, T, H, Dk)).to(dt)
+        k = l2_norm(k.view(B, T, H, Dk)).to(dt)
         v = v.view(B, T, H, Dv)
 
         # Decay and write gate
@@ -193,6 +195,15 @@ class GatedDeltaNet(nn.Module):
         beta = torch.sigmoid(self.w_b(x))  # (B,T,H)
         if self.allow_neg_eigval:
             beta = beta * 2.0
+        g = g.to(dtype=dt)
+        beta = beta.to(dtype=dt)
+        return q, k, v, g, beta
+
+    def forward(self, x: Tensor) -> Tensor:
+        B, T, _ = x.shape
+        dt = x.dtype
+        H, Dv = self.n_heads, self.head_v_dim
+        q, k, v, g, beta = self._project_recurrence_inputs(x)
 
         # Recurrence
         if self.use_fla and x.is_cuda:
