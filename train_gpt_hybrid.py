@@ -790,7 +790,7 @@ def main() -> None:
             m.float()
     restore_low_dim_params_to_fp32(base_model)
     compiled_model = maybe_compile(
-        base_model, enabled=args.compile, dynamic=False, fullgraph=True
+        base_model, enabled=args.compile, dynamic=False, fullgraph=False
     )
     model = (
         DDP(compiled_model, device_ids=[local_rank], broadcast_buffers=False)
