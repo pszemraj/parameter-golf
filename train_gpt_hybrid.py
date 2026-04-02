@@ -16,6 +16,7 @@ Sweep (see sweep.sh):
 from __future__ import annotations
 
 import copy
+import gc
 import glob
 import io
 import math
@@ -84,6 +85,9 @@ class Hyperparameters:
         int(os.environ.get("TORCH_COMPILE_DISABLE", "0"))
     )
     compile_strategy = os.environ.get("COMPILE_STRATEGY", "hybrid").lower()
+    perf_timing = bool(int(os.environ.get("PERF_TIMING", "0")))
+    perf_ignore_steps = int(os.environ.get("PERF_IGNORE_STEPS", 0))
+    perf_skip_final_eval = bool(int(os.environ.get("PERF_SKIP_FINAL_EVAL", "0")))
     artifact_limit_bytes = int(os.environ.get("ARTIFACT_LIMIT_BYTES", 16_000_000))
 
     # Model — shared
@@ -788,7 +792,9 @@ def main() -> None:
     log0(f"PyTorch {torch.__version__}", console=False)
     log0(
         f"compile:{int(args.compile)} compile_strategy:{args.compile_strategy} "
-        f"sdp_backend:{sdp_backend} fla_available:{int(_HAS_FLA)}",
+        f"sdp_backend:{sdp_backend} fla_available:{int(_HAS_FLA)} "
+        f"perf_timing:{int(args.perf_timing)} perf_ignore_steps:{args.perf_ignore_steps} "
+        f"perf_skip_final_eval:{int(args.perf_skip_final_eval)}",
         console=False,
     )
 
@@ -1041,6 +1047,11 @@ def main() -> None:
         train_loader = DistributedTokenLoader(
             args.train_files, rank, world_size, device
         )
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+        gc.collect()
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
     if master_process and _USE_WANDB:
         wandb.watch(
             base_model,
@@ -1051,6 +1062,8 @@ def main() -> None:
 
     # ── Training loop ─────────────────────────────────────────────────
     training_time_ms = 0.0
+    perf_time_ms = 0.0
+    perf_measured_steps = 0
     stop_after_step = None
     torch.cuda.synchronize()
     t0 = time.perf_counter()
@@ -1061,7 +1074,7 @@ def main() -> None:
             stop_after_step is not None and step >= stop_after_step
         )
         should_validate = (
-            last_step
+            (last_step and not args.perf_skip_final_eval)
             or (step == 0 and args.log_step0_eval)
             or (
                 args.val_loss_every > 0 and step > 0 and step % args.val_loss_every == 0
@@ -1103,6 +1116,7 @@ def main() -> None:
         scale = lr_mul(step, elapsed_ms)
         zero_grad_all()
         train_loss = torch.zeros((), device=device)
+        perf_t0 = time.perf_counter() if args.perf_timing else None
 
         for ms in range(grad_accum_steps):
             if distributed:
@@ -1136,6 +1150,20 @@ def main() -> None:
         zero_grad_all()
 
         step += 1
+        perf_step_ms = float("nan")
+        perf_tokens_per_s = float("nan")
+        if args.perf_timing:
+            torch.cuda.synchronize()
+            assert perf_t0 is not None
+            measured_ms = 1000.0 * (time.perf_counter() - perf_t0)
+            if step > args.perf_ignore_steps:
+                perf_time_ms += measured_ms
+                perf_measured_steps += 1
+            if perf_measured_steps > 0:
+                perf_step_ms = perf_time_ms / perf_measured_steps
+                perf_tokens_per_s = args.train_batch_tokens / max(
+                    perf_step_ms / 1000.0, 1e-9
+                )
         approx_ms = training_time_ms + 1000.0 * (time.perf_counter() - t0)
         step_ms = approx_ms / step
         tokens_per_s = args.train_batch_tokens / max(step_ms / 1000.0, 1e-9)
@@ -1146,22 +1174,31 @@ def main() -> None:
             or stop_after_step is not None
         )
         if should_log:
+            perf_suffix = ""
+            if args.perf_timing:
+                perf_suffix = (
+                    f" perf_avg:{perf_step_ms:.2f}ms"
+                    if perf_measured_steps > 0
+                    else f" perf_avg:pending(ignore<{args.perf_ignore_steps + 1})"
+                )
             log0(
                 f"step:{step}/{args.iterations} train_loss:{train_loss.item():.4f} "
-                f"train_time:{approx_ms:.0f}ms step_avg:{step_ms:.2f}ms"
+                f"train_time:{approx_ms:.0f}ms step_avg:{step_ms:.2f}ms{perf_suffix}"
             )
             if master_process and _USE_WANDB:
-                wandb.log(
-                    {
-                        "train/lr": args.matrix_lr * scale,
-                        "train/lr_scale": scale,
-                        "train/loss": train_loss.item(),
-                        "train/processed_tokens": processed_tokens,
-                        "train/step_ms": step_ms,
-                        "train/tokens_per_s": tokens_per_s,
-                    },
-                    step=step,
-                )
+                metrics = {
+                    "train/lr": args.matrix_lr * scale,
+                    "train/lr_scale": scale,
+                    "train/loss": train_loss.item(),
+                    "train/processed_tokens": processed_tokens,
+                    "train/step_ms": perf_step_ms
+                    if args.perf_timing and perf_measured_steps > 0
+                    else step_ms,
+                    "train/tokens_per_s": perf_tokens_per_s
+                    if args.perf_timing and perf_measured_steps > 0
+                    else tokens_per_s,
+                }
+                wandb.log(metrics, step=step)
 
         reached_cap = max_wallclock_ms is not None and approx_ms >= max_wallclock_ms
         if distributed and max_wallclock_ms is not None:
@@ -1176,6 +1213,28 @@ def main() -> None:
     log0(
         f"peak memory allocated: {peak_mem_alloc_mib} MiB reserved: {peak_mem_reserved_mib} MiB"
     )
+    if args.perf_timing and perf_measured_steps > 0:
+        perf_step_ms_final = perf_time_ms / perf_measured_steps
+        perf_tokens_per_s_final = args.train_batch_tokens / max(
+            perf_step_ms_final / 1000.0, 1e-9
+        )
+        log0(
+            f"perf_summary ignore_steps:{args.perf_ignore_steps} measured_steps:{perf_measured_steps} "
+            f"step_ms:{perf_step_ms_final:.2f} tokens_per_s:{perf_tokens_per_s_final:.2f}"
+        )
+        if master_process and _USE_WANDB:
+            wandb.summary["perf_ignore_steps_final"] = args.perf_ignore_steps
+            wandb.summary["perf_measured_steps_final"] = perf_measured_steps
+            wandb.summary["perf_step_ms_final"] = perf_step_ms_final
+            wandb.summary["perf_tokens_per_s_final"] = perf_tokens_per_s_final
+    if args.perf_skip_final_eval:
+        log0("perf_mode: skipping serialization and final roundtrip eval")
+        if master_process and _USE_WANDB:
+            wandb.summary["perf_skip_final_eval"] = True
+            wandb.finish()
+        if distributed:
+            dist.destroy_process_group()
+        return
 
     # ── Serialize + quantize + roundtrip ──────────────────────────────
     qfb = None

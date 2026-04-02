@@ -22,6 +22,19 @@ export USE_WANDB="${USE_WANDB:-1}"
 export VOCAB_SIZE="${VOCAB_SIZE:-1024}"
 chmod +x "$sweep_agent_path"
 
+setup_perf_env() {
+    if [[ "${PERF_ISOLATE_COMPILE_CACHE:-0}" == "1" ]]; then
+        local cache_root="$repo_root/.cache/perf/${RUN_ID}"
+        export TORCHINDUCTOR_CACHE_DIR="$cache_root/inductor"
+        export TRITON_CACHE_DIR="$cache_root/triton"
+        rm -rf "$TORCHINDUCTOR_CACHE_DIR" "$TRITON_CACHE_DIR"
+        mkdir -p "$TORCHINDUCTOR_CACHE_DIR" "$TRITON_CACHE_DIR"
+    fi
+    if [[ "${PERF_FORCE_DISABLE_COMPILE_CACHES:-0}" == "1" ]]; then
+        export TORCHINDUCTOR_FORCE_DISABLE_CACHES=1
+    fi
+}
+
 print_launch_summary() {
     local label="$1"
     local grad_accum_steps=$((8 / NGPU))
@@ -34,9 +47,18 @@ print_launch_summary() {
     echo "ngpu=$NGPU grad_accum_steps=$grad_accum_steps local_batch_size=$local_batch_size iterations=$ITERATIONS max_wallclock_seconds=$wallclock"
     echo "data_path=$DATA_PATH"
     echo "tokenizer_path=$TOKENIZER_PATH"
+    echo "compile_strategy=${COMPILE_STRATEGY:-hybrid} perf_timing=${PERF_TIMING:-0} perf_ignore_steps=${PERF_IGNORE_STEPS:-0}"
+    if [[ -n "${TORCHINDUCTOR_CACHE_DIR:-}" || -n "${TRITON_CACHE_DIR:-}" ]]; then
+        echo "inductor_cache_dir=${TORCHINDUCTOR_CACHE_DIR:-<default>}"
+        echo "triton_cache_dir=${TRITON_CACHE_DIR:-<default>}"
+    fi
+    if [[ -n "${TORCHINDUCTOR_FORCE_DISABLE_CACHES:-}" ]]; then
+        echo "TORCHINDUCTOR_FORCE_DISABLE_CACHES=${TORCHINDUCTOR_FORCE_DISABLE_CACHES}"
+    fi
 }
 
 launch_train() {
+    setup_perf_env
     print_launch_summary "$1"
     torchrun --standalone --nproc_per_node="$NGPU" "$trainer_path"
 }

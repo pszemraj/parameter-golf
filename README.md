@@ -183,6 +183,8 @@ These helpers accept `DATA_PATH` and `TOKENIZER_PATH` overrides if you want to p
 
 Hybrid compile defaults now use `COMPILE_STRATEGY=hybrid`. That strategy keeps each GDN module eager as an explicit compiler boundary, full-graph compiles pure attention blocks, full-graph compiles GDN-block MLPs, and then compiles the top-level model with `fullgraph=False`. If you need the previous coarse behavior for comparison or debugging, set `COMPILE_STRATEGY=model`.
 
+For throughput screens, use `PERF_TIMING=1` to emit a steady-state timing summary, `PERF_IGNORE_STEPS=N` to exclude the first measured steps after compile priming, `PERF_ISOLATE_COMPILE_CACHE=1` to give each run fresh Inductor/Triton cache directories, and `PERF_SKIP_FINAL_EVAL=1` to stop after the measured training window instead of paying for serialization and final roundtrip eval. These knobs are intended for perf studies, not normal quality runs.
+
 For W&B-backed hybrid runs, per-step metrics stay under the shared `train/*` and `eval/*` namespaces, while one-shot roundtrip and artifact-compliance results are written to run summary fields such as `roundtrip_val_bpb_final`.
 
 For dataset export, tokenizer export, and docs-cache rebuild instructions, see [data/README.md](data/README.md).
