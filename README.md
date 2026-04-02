@@ -181,9 +181,12 @@ scripts/sweep.sh depth
 
 These helpers accept `DATA_PATH` and `TOKENIZER_PATH` overrides if you want to point at a different local export, and they now emit their launch contract up front so matched comparisons are explicit.
 
+Hybrid compile defaults now use `COMPILE_STRATEGY=hybrid`. That strategy keeps each GDN module eager as an explicit compiler boundary, full-graph compiles pure attention blocks, full-graph compiles GDN-block MLPs, and then compiles the top-level model with `fullgraph=False`. If you need the previous coarse behavior for comparison or debugging, set `COMPILE_STRATEGY=model`.
+
 For W&B-backed hybrid runs, per-step metrics stay under the shared `train/*` and `eval/*` namespaces, while one-shot roundtrip and artifact-compliance results are written to run summary fields such as `roundtrip_val_bpb_final`.
 
 For dataset export, tokenizer export, and docs-cache rebuild instructions, see [data/README.md](data/README.md).
+For compile/perf follow-ups that are intentionally not enabled by default, see [docs/TODO.md](docs/TODO.md).
 
 Evaluation will be in the RunPod environment with all packages installed. `requirements.txt` is provided as a reference if you want to self-setup.
 

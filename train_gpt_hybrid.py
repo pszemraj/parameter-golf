@@ -83,6 +83,7 @@ class Hyperparameters:
     compile = bool(int(os.environ.get("COMPILE", "1"))) and not bool(
         int(os.environ.get("TORCH_COMPILE_DISABLE", "0"))
     )
+    compile_strategy = os.environ.get("COMPILE_STRATEGY", "hybrid").lower()
     artifact_limit_bytes = int(os.environ.get("ARTIFACT_LIMIT_BYTES", 16_000_000))
 
     # Model — shared
@@ -619,6 +620,78 @@ def maybe_compile(
     return torch.compile(obj, dynamic=dynamic, fullgraph=fullgraph)
 
 
+def maybe_disable_compile(obj: Any, *, enabled: bool, reason: str | None = None) -> Any:
+    """Conditionally mark an object as eager-only for `torch.compile`.
+
+    :param Any obj: Callable or module to exclude from Dynamo tracing.
+    :param bool enabled: Whether compilation is enabled.
+    :param str | None reason: Optional reason string for debugging, defaults to None.
+    :return Any: Wrapped object when enabled, otherwise the original object.
+    """
+    if not enabled:
+        return obj
+    return torch.compiler.disable(obj, reason=reason)
+
+
+def prepare_hybrid_compile(
+    model: HybridGPT, *, enabled: bool, strategy: str
+) -> tuple[nn.Module, dict[str, int | str]]:
+    """Apply selective compile boundaries for the hybrid stack.
+
+    `hybrid` is the default and most aggressive safe option on torch 2.11:
+    keep GDN layers eager because FLA already dispatches Triton kernels, compile
+    pure attention blocks full-graph, compile GDN-block MLPs full-graph, then
+    compile the top-level model with `fullgraph=False` so the remaining eager
+    GDN boundaries become clean graph breaks instead of trace-time failures.
+
+    :param HybridGPT model: Hybrid language model to prepare.
+    :param bool enabled: Whether compilation is enabled.
+    :param str strategy: One of `model`, `selective`, or `hybrid`.
+    :raises ValueError: If `strategy` is not recognized.
+    :return tuple[nn.Module, dict[str, int | str]]: Prepared model and compile stats.
+    """
+    compile_stats: dict[str, int | str] = {
+        "strategy": "off" if not enabled else strategy,
+        "gdn_disabled": 0,
+        "gdn_mlps_compiled": 0,
+        "attn_blocks_compiled": 0,
+        "model_compiled": 0,
+    }
+    if not enabled:
+        return model, compile_stats
+
+    if strategy not in {"model", "selective", "hybrid"}:
+        raise ValueError(
+            f"Unsupported COMPILE_STRATEGY={strategy!r}; expected model, selective, or hybrid"
+        )
+
+    if strategy in {"selective", "hybrid"}:
+        for idx, block_type in enumerate(model.block_types):
+            block = model.blocks[idx]
+            if block_type == "gdn" and hasattr(block, "gdn") and hasattr(block, "mlp"):
+                block.gdn = maybe_disable_compile(
+                    block.gdn,
+                    enabled=True,
+                    reason="FLA GDN path already dispatches Triton kernels",
+                )
+                block.mlp = maybe_compile(
+                    block.mlp, enabled=True, dynamic=False, fullgraph=True
+                )
+                compile_stats["gdn_disabled"] += 1
+                compile_stats["gdn_mlps_compiled"] += 1
+            elif block_type == "attn":
+                model.blocks[idx] = maybe_compile(
+                    block, enabled=True, dynamic=False, fullgraph=True
+                )
+                compile_stats["attn_blocks_compiled"] += 1
+
+    if strategy in {"model", "hybrid"}:
+        model = maybe_compile(model, enabled=True, dynamic=False, fullgraph=False)
+        compile_stats["model_compiled"] = 1
+
+    return model, compile_stats
+
+
 # =====================================================================
 # MAIN
 # =====================================================================
@@ -714,7 +787,8 @@ def main() -> None:
     log0(f"Python {sys.version}", console=False)
     log0(f"PyTorch {torch.__version__}", console=False)
     log0(
-        f"compile:{int(args.compile)} sdp_backend:{sdp_backend} fla_available:{int(_HAS_FLA)}",
+        f"compile:{int(args.compile)} compile_strategy:{args.compile_strategy} "
+        f"sdp_backend:{sdp_backend} fla_available:{int(_HAS_FLA)}",
         console=False,
     )
 
@@ -795,8 +869,8 @@ def main() -> None:
         if isinstance(m, CastedLinear):
             m.float()
     restore_low_dim_params_to_fp32(base_model)
-    compiled_model = maybe_compile(
-        base_model, enabled=args.compile, dynamic=False, fullgraph=False
+    compiled_model, compile_stats = prepare_hybrid_compile(
+        base_model, enabled=args.compile, strategy=args.compile_strategy
     )
     model = (
         DDP(compiled_model, device_ids=[local_rank], broadcast_buffers=False)
@@ -809,6 +883,14 @@ def main() -> None:
     n_attn = sum(1 for t in base_model.block_types if t == "attn")
     log0(f"model_params:{n_params} blocks:{n_gdn}G+{n_attn}A")
     log0(
+        "compile_plan:"
+        f"strategy:{compile_stats['strategy']} "
+        f"gdn_disabled:{compile_stats['gdn_disabled']} "
+        f"gdn_mlps_compiled:{compile_stats['gdn_mlps_compiled']} "
+        f"attn_blocks_compiled:{compile_stats['attn_blocks_compiled']} "
+        f"model_compiled:{compile_stats['model_compiled']}"
+    )
+    log0(
         f"world_size:{world_size} grad_accum_steps:{grad_accum_steps} "
         f"sdp_backends:cudnn=False flash=True mem_efficient=False math=False"
     )
@@ -818,8 +900,13 @@ def main() -> None:
             {
                 "artifact_limit_bytes": args.artifact_limit_bytes,
                 "compile": args.compile,
+                "compile_strategy": args.compile_strategy,
                 "fla_available": _HAS_FLA,
                 "local_batch_size": local_batch_size,
+                "compile_gdn_disabled": compile_stats["gdn_disabled"],
+                "compile_gdn_mlps_compiled": compile_stats["gdn_mlps_compiled"],
+                "compile_attn_blocks_compiled": compile_stats["attn_blocks_compiled"],
+                "compile_model_compiled": compile_stats["model_compiled"],
                 "n_attn_blocks": n_attn,
                 "n_gdn_blocks": n_gdn,
                 "n_params": n_params,

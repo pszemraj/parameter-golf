@@ -1,0 +1,62 @@
+# HGDN Compile / Perf TODO
+
+This file tracks follow-up work that is intentionally not enabled by default in the current hybrid trainer.
+
+## Already landed
+
+- Default compile path is now `COMPILE_STRATEGY=hybrid`.
+- Each GDN module is wrapped as an explicit eager boundary because the FLA path already dispatches Triton kernels and contains an internal `torch.compiler.disable()` wrapper.
+- Pure attention blocks are compiled with `fullgraph=True`.
+- GDN-block MLPs are compiled with `fullgraph=True`.
+- The top-level hybrid model still compiles with `fullgraph=False` so the remaining GDN boundaries become clean graph breaks instead of hard failures.
+
+## Break-Glass Items
+
+### 1. Graph-break audit with `TORCH_LOGS` / `tlparse`
+
+- Trigger: hybrid remains worse than `1.3x` the depth-control baseline after the current selective-compile quick hits, or compile-time behavior becomes erratic across repeated runs.
+- What to do: run short screens with `TORCH_LOGS="graph_breaks,recompiles,perf_hints"` and inspect whether breaks are only at `GDNBlock.gdn` boundaries.
+- Expected upside: `2-8%` on the 4070, `5-12%` on H100 if extra Python-side breaks are still present.
+- Expected cost: low. Mostly logging and a small cleanup patch.
+
+### 2. Backward-path `compiled_autograd`
+
+- Trigger: forward graphs look clean but hybrid throughput is still lagging, or logs suggest backward fragmentation dominates runtime.
+- What to do: test PyTorch compiled autograd on the hybrid trainer in a separate branch with the same 50-step throughput harness.
+- Expected upside: `0-10%`, highly dependent on whether backward graph breaks are the real bottleneck.
+- Expected cost: medium. Can increase recompiles and runtime overhead if shapes or control flow drift.
+
+### 3. Regional compilation for repeated block stacks
+
+- Trigger: compile warmup/cold-start becomes the main pain point, or we want faster iteration on short local screens without materially changing steady-state kernels.
+- What to do: trial `torch.compiler.nested_compile_region` or a block-stack regional compile pattern around the repeated encoder/decoder loops.
+- Expected upside: little steady-state gain, but compile latency can drop materially on short runs.
+- Expected cost: medium. Good engineering payoff only if compile startup is the bottleneck.
+
+### 4. Dynamic shape marking
+
+- Trigger: frequent recompiles show up when sweeping `TRAIN_SEQ_LEN`, local batch size, or eval shapes inside the same process.
+- What to do: add `mark_dynamic` only at the specific tensor boundaries causing recompiles.
+- Expected upside: stability and lower recompile churn, not raw peak throughput.
+- Expected cost: medium. For fixed-shape runs this can be neutral or negative, so it should stay off unless logs justify it.
+
+### 5. FLA wrapper cleanup inside `model.py`
+
+- Trigger: module-level eager boundaries still leave noisy compile traces, or we want a cleaner OLMo-style explicit wrapper around the FLA dispatch path.
+- What to do: add a small local dispatch helper around `chunk_gated_delta_rule` and mark that wrapper as compiler-disabled instead of relying only on module-level disabling from the trainer.
+- Expected upside: mostly cleaner boundaries and easier debugging, maybe `1-4%` if Dynamo is still poking at surrounding glue code.
+- Expected cost: low to medium. Needs care to keep dtype and API handling identical.
+
+### 6. Compile-mode shootout on finalists only
+
+- Trigger: the hybrid passes the quality gates and is close enough to baseline that a few percent of throughput matters.
+- What to do: compare PyTorch compile modes on fixed-shape finalists only, for example the default mode against a more aggressive autotune mode.
+- Expected upside: `0-5%` if the workload lines up well with the mode.
+- Expected cost: medium to high. More compile/autotune time, and results can differ across the 4070 and H100.
+
+### 7. Nsight / kernel-level profiling
+
+- Trigger: throughput remains unexplained after graph-break cleanup and matched baseline comparisons.
+- What to do: profile attention vs GDN-heavy runs on the local GPU, but only after confirming local Nsight permissions are working.
+- Expected upside: diagnostic clarity more than immediate speed.
+- Expected cost: medium. Useful only after the higher-leverage compile quick hits are exhausted.
