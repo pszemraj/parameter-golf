@@ -20,6 +20,7 @@ export DATA_PATH="${DATA_PATH:-$repo_root/data/datasets/fineweb10B_sp1024}"
 export TOKENIZER_PATH="${TOKENIZER_PATH:-$repo_root/data/tokenizers/fineweb_1024_bpe.model}"
 export USE_WANDB="${USE_WANDB:-1}"
 export VOCAB_SIZE="${VOCAB_SIZE:-1024}"
+export COMPILE_STRATEGY="${COMPILE_STRATEGY:-model}"
 chmod +x "$sweep_agent_path"
 
 setup_perf_env() {
@@ -47,7 +48,7 @@ print_launch_summary() {
     echo "ngpu=$NGPU grad_accum_steps=$grad_accum_steps local_batch_size=$local_batch_size iterations=$ITERATIONS max_wallclock_seconds=$wallclock"
     echo "data_path=$DATA_PATH"
     echo "tokenizer_path=$TOKENIZER_PATH"
-    echo "compile_strategy=${COMPILE_STRATEGY:-hybrid} perf_timing=${PERF_TIMING:-0} perf_ignore_steps=${PERF_IGNORE_STEPS:-0}"
+    echo "compile_strategy=$COMPILE_STRATEGY perf_timing=${PERF_TIMING:-0} perf_ignore_steps=${PERF_IGNORE_STEPS:-0}"
     if [[ -n "${TORCHINDUCTOR_CACHE_DIR:-}" || -n "${TRITON_CACHE_DIR:-}" ]]; then
         echo "inductor_cache_dir=${TORCHINDUCTOR_CACHE_DIR:-<default>}"
         echo "triton_cache_dir=${TRITON_CACHE_DIR:-<default>}"

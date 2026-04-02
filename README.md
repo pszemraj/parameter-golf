@@ -181,7 +181,7 @@ scripts/sweep.sh depth
 
 These helpers accept `DATA_PATH` and `TOKENIZER_PATH` overrides if you want to point at a different local export, and they now emit their launch contract up front so matched comparisons are explicit.
 
-Hybrid compile defaults now use `COMPILE_STRATEGY=hybrid`. That strategy keeps each GDN module eager as an explicit compiler boundary, full-graph compiles pure attention blocks, full-graph compiles GDN-block MLPs, and then compiles the top-level model with `fullgraph=False`. If you need the previous coarse behavior for comparison or debugging, set `COMPILE_STRATEGY=model`.
+Hybrid compile defaults now use `COMPILE_STRATEGY=model`. On the local 4070 throughput screens, plain top-level model compilation outperformed the more selective GDN-boundary strategy for the full HGDN preset. The experimental `COMPILE_STRATEGY=hybrid` path is still available if you want to re-check that tradeoff on a different GPU; it keeps each GDN module eager as an explicit compiler boundary, full-graph compiles pure attention blocks, full-graph compiles GDN-block MLPs, and then compiles the top-level model with `fullgraph=False`.
 
 For throughput screens, use `PERF_TIMING=1` to emit a steady-state timing summary, `PERF_IGNORE_STEPS=N` to exclude the first measured steps after compile priming, `PERF_ISOLATE_COMPILE_CACHE=1` to give each run fresh Inductor/Triton cache directories, and `PERF_SKIP_FINAL_EVAL=1` to stop after the measured training window instead of paying for serialization and final roundtrip eval. These knobs are intended for perf studies, not normal quality runs.
 

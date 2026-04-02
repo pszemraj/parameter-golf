@@ -84,7 +84,7 @@ class Hyperparameters:
     compile = bool(int(os.environ.get("COMPILE", "1"))) and not bool(
         int(os.environ.get("TORCH_COMPILE_DISABLE", "0"))
     )
-    compile_strategy = os.environ.get("COMPILE_STRATEGY", "hybrid").lower()
+    compile_strategy = os.environ.get("COMPILE_STRATEGY", "model").lower()
     perf_timing = bool(int(os.environ.get("PERF_TIMING", "0")))
     perf_ignore_steps = int(os.environ.get("PERF_IGNORE_STEPS", 0))
     perf_skip_final_eval = bool(int(os.environ.get("PERF_SKIP_FINAL_EVAL", "0")))

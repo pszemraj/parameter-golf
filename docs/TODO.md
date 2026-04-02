@@ -4,11 +4,18 @@ This file tracks follow-up work that is intentionally not enabled by default in 
 
 ## Already landed
 
-- Default compile path is now `COMPILE_STRATEGY=hybrid`.
-- Each GDN module is wrapped as an explicit eager boundary because the FLA path already dispatches Triton kernels and contains an internal `torch.compiler.disable()` wrapper.
-- Pure attention blocks are compiled with `fullgraph=True`.
-- GDN-block MLPs are compiled with `fullgraph=True`.
-- The top-level hybrid model still compiles with `fullgraph=False` so the remaining GDN boundaries become clean graph breaks instead of hard failures.
+- Default compile path is now `COMPILE_STRATEGY=model`.
+- The trainer has a dedicated perf harness:
+  - `PERF_TIMING=1` for steady-state timing
+  - `PERF_IGNORE_STEPS=N` to ignore early measured steps
+  - `PERF_ISOLATE_COMPILE_CACHE=1` for fresh Inductor/Triton cache dirs per run
+  - `PERF_SKIP_FINAL_EVAL=1` to stop after the measured training window
+- The experimental `COMPILE_STRATEGY=hybrid` path remains available:
+  - each GDN module is wrapped as an explicit eager boundary because the FLA path already dispatches Triton kernels and contains an internal `torch.compiler.disable()` wrapper
+  - pure attention blocks are compiled with `fullgraph=True`
+  - GDN-block MLPs are compiled with `fullgraph=True`
+  - the top-level hybrid model still compiles with `fullgraph=False`
+- Current local result on the RTX 4070: `COMPILE_STRATEGY=hybrid` underperformed `COMPILE_STRATEGY=model` by roughly `30%` on the 16-layer HGDN throughput screen, so it should stay experimental until an H100 test says otherwise.
 
 ## Break-Glass Items
 
