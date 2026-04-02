@@ -41,15 +41,34 @@ SCALAR_PARAM_PATTERNS = (
 
 
 def rms_norm(x: Tensor, eps: float = 1e-6) -> Tensor:
+    """Apply RMS normalization over the last dimension.
+
+    :param Tensor x: Input activations.
+    :param float eps: Numerical stability epsilon, defaults to 1e-6.
+    :return Tensor: Normalized activations.
+    """
     return F.rms_norm(x, (x.size(-1),), eps=eps)
 
 
 def l2_norm(x: Tensor, eps: float = 1e-6) -> Tensor:
+    """Apply L2 normalization over the last dimension.
+
+    :param Tensor x: Input activations.
+    :param float eps: Numerical stability epsilon, defaults to 1e-6.
+    :return Tensor: Unit-normalized activations.
+    """
     return F.normalize(x, p=2, dim=-1, eps=eps)
 
 
 class CastedLinear(nn.Linear):
+    """Linear projection that casts stored weights to the input dtype."""
+
     def forward(self, x: Tensor) -> Tensor:
+        """Project activations using weights cast to the input dtype.
+
+        :param Tensor x: Input activations.
+        :return Tensor: Projected activations.
+        """
         return F.linear(
             x,
             self.weight.to(x.dtype),
@@ -58,22 +77,46 @@ class CastedLinear(nn.Linear):
 
 
 class RMSNorm(nn.Module):
+    """Parameter-free RMSNorm wrapper used throughout the hybrid stack."""
+
     def __init__(self, dim: int = 0, eps: float = 1e-6):
+        """Initialize the RMSNorm wrapper.
+
+        :param int dim: Unused compatibility argument, defaults to 0.
+        :param float eps: Numerical stability epsilon, defaults to 1e-6.
+        """
         super().__init__()
         self.eps = eps
 
     def forward(self, x: Tensor) -> Tensor:
+        """Normalize activations with RMSNorm.
+
+        :param Tensor x: Input activations.
+        :return Tensor: Normalized activations.
+        """
         return rms_norm(x, self.eps)
 
 
 class CausalConv1d(nn.Module):
+    """Depthwise causal convolution used to preprocess sequence features."""
+
     def __init__(self, dim: int, kernel_size: int = 4):
+        """Initialize the causal depthwise convolution.
+
+        :param int dim: Channel count.
+        :param int kernel_size: Convolution kernel width, defaults to 4.
+        """
         super().__init__()
         self.conv = nn.Conv1d(
             dim, dim, kernel_size, padding=kernel_size - 1, groups=dim, bias=False
         )
 
     def forward(self, x: Tensor) -> Tensor:
+        """Apply the causal convolution over the sequence axis.
+
+        :param Tensor x: Input activations shaped `(batch, seq, dim)`.
+        :return Tensor: Convolved activations with causal trimming applied.
+        """
         x = x.transpose(1, 2)
         x = self.conv(x)[..., : x.size(-1)]
         x = F.silu(x)
@@ -91,9 +134,15 @@ def gdn_recurrent_naive(
     beta: Tensor,
     initial_state: Optional[Tensor] = None,
 ) -> tuple[Tensor, Tensor]:
-    """All inputs use the same head count H.
-    q, k: (B, T, H, Dk)   v: (B, T, H, Dv)   alpha, beta: (B, T, H)
-    State S: (B, H, Dk, Dv) per head.
+    """Run the reference gated delta recurrence on CPU or fallback paths.
+
+    :param Tensor q: Normalized queries shaped `(batch, seq, heads, d_k)`.
+    :param Tensor k: Normalized keys shaped `(batch, seq, heads, d_k)`.
+    :param Tensor v: Values shaped `(batch, seq, heads, d_v)`.
+    :param Tensor alpha: Decay multipliers shaped `(batch, seq, heads)`.
+    :param Tensor beta: Write gates shaped `(batch, seq, heads)`.
+    :param Optional[Tensor] initial_state: Optional initial state shaped `(batch, heads, d_k, d_v)`, defaults to None.
+    :return tuple[Tensor, Tensor]: Sequence outputs and final recurrence state.
     """
     B, T, H, Dk = q.shape
     Dv = v.shape[-1]
@@ -124,6 +173,8 @@ def gdn_recurrent_naive(
 
 
 class GatedDeltaNet(nn.Module):
+    """Hybrid sequence mixer that wraps the FLA Gated DeltaNet kernel."""
+
     def __init__(
         self,
         d_model: int,
@@ -134,6 +185,16 @@ class GatedDeltaNet(nn.Module):
         conv_size: int = 4,
         use_fla: bool = True,
     ):
+        """Initialize a Gated DeltaNet block.
+
+        :param int d_model: Model width.
+        :param int n_heads: Number of recurrence heads, defaults to 4.
+        :param int head_k_dim: Per-head key width, defaults to 48.
+        :param float expand_v: Value expansion relative to `head_k_dim`, defaults to 2.0.
+        :param bool allow_neg_eigval: Whether to allow negative eigenvalues in the write gate, defaults to True.
+        :param int conv_size: Depthwise causal convolution width, defaults to 4.
+        :param bool use_fla: Whether to use the FLA kernel when available, defaults to True.
+        """
         super().__init__()
         self.d_model = d_model
         self.n_heads = n_heads
@@ -174,6 +235,11 @@ class GatedDeltaNet(nn.Module):
     def _project_recurrence_inputs(
         self, x: Tensor
     ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+        """Project activations into recurrence inputs with aligned dtypes.
+
+        :param Tensor x: Input activations shaped `(batch, seq, d_model)`.
+        :return tuple[Tensor, Tensor, Tensor, Tensor, Tensor]: Normalized q/k, values, decay logits, and write gates.
+        """
         B, T, D = x.shape
         dt = x.dtype
         H, Dk, Dv = self.n_heads, self.head_k_dim, self.head_v_dim
@@ -200,6 +266,11 @@ class GatedDeltaNet(nn.Module):
         return q, k, v, g, beta
 
     def forward(self, x: Tensor) -> Tensor:
+        """Apply the Gated DeltaNet layer to a sequence batch.
+
+        :param Tensor x: Input activations shaped `(batch, seq, d_model)`.
+        :return Tensor: Updated activations shaped `(batch, seq, d_model)`.
+        """
         B, T, _ = x.shape
         dt = x.dtype
         H, Dv = self.n_heads, self.head_v_dim
@@ -223,7 +294,14 @@ class GatedDeltaNet(nn.Module):
 
 
 class Rotary(nn.Module):
+    """Rotary embedding cache for attention heads."""
+
     def __init__(self, dim: int, base: float = 10000.0):
+        """Initialize the rotary cache.
+
+        :param int dim: Per-head dimension.
+        :param float base: Rotary frequency base, defaults to 10000.0.
+        """
         super().__init__()
         self.register_buffer(
             "inv_freq",
@@ -234,7 +312,16 @@ class Rotary(nn.Module):
         self._cos: Optional[Tensor] = None
         self._sin: Optional[Tensor] = None
 
-    def forward(self, seq_len, device, dtype):
+    def forward(
+        self, seq_len: int, device: torch.device, dtype: torch.dtype
+    ) -> tuple[Tensor, Tensor]:
+        """Return cached cosine and sine tables for a sequence length.
+
+        :param int seq_len: Sequence length to cover.
+        :param torch.device device: Target device.
+        :param torch.dtype dtype: Target dtype for the cache.
+        :return tuple[Tensor, Tensor]: Cosine and sine rotary tables.
+        """
         if (
             self._cos is None
             or self._cache_len != seq_len
@@ -248,16 +335,38 @@ class Rotary(nn.Module):
         return self._cos.to(dtype), self._sin.to(dtype)
 
 
-def apply_rotary_emb(x, cos, sin):
+def apply_rotary_emb(x: Tensor, cos: Tensor, sin: Tensor) -> Tensor:
+    """Apply rotary embeddings to the last dimension of a head tensor.
+
+    :param Tensor x: Input tensor with paired rotary dimensions.
+    :param Tensor cos: Cached cosine table.
+    :param Tensor sin: Cached sine table.
+    :return Tensor: Rotated tensor.
+    """
     h = x.size(-1) // 2
     x1, x2 = x[..., :h], x[..., h:]
     return torch.cat((x1 * cos + x2 * sin, x1 * (-sin) + x2 * cos), dim=-1)
 
 
 class CausalSelfAttention(nn.Module):
+    """Grouped-query causal self-attention block."""
+
     def __init__(
-        self, dim, num_heads, num_kv_heads, rope_base=10000.0, qk_gain_init=1.5
+        self,
+        dim: int,
+        num_heads: int,
+        num_kv_heads: int,
+        rope_base: float = 10000.0,
+        qk_gain_init: float = 1.5,
     ):
+        """Initialize the causal attention module.
+
+        :param int dim: Model width.
+        :param int num_heads: Attention query head count.
+        :param int num_kv_heads: Key/value head count for GQA.
+        :param float rope_base: Rotary frequency base, defaults to 10000.0.
+        :param float qk_gain_init: Initial per-head query gain, defaults to 1.5.
+        """
         super().__init__()
         assert dim % num_heads == 0 and num_heads % num_kv_heads == 0
         self.num_heads, self.num_kv_heads = num_heads, num_kv_heads
@@ -273,7 +382,12 @@ class CausalSelfAttention(nn.Module):
         )
         self.rotary = Rotary(self.head_dim, base=rope_base)
 
-    def forward(self, x):
+    def forward(self, x: Tensor) -> Tensor:
+        """Apply causal grouped-query attention.
+
+        :param Tensor x: Input activations shaped `(batch, seq, dim)`.
+        :return Tensor: Attention outputs shaped `(batch, seq, dim)`.
+        """
         B, T, D = x.shape
         q = self.c_q(x).reshape(B, T, self.num_heads, self.head_dim).transpose(1, 2)
         k = self.c_k(x).reshape(B, T, self.num_kv_heads, self.head_dim).transpose(1, 2)
@@ -292,7 +406,15 @@ class CausalSelfAttention(nn.Module):
 
 
 class MLP(nn.Module):
-    def __init__(self, dim, mult=3.0, leaky_slope=0.5):
+    """Squared LeakyReLU feed-forward block."""
+
+    def __init__(self, dim: int, mult: float = 3.0, leaky_slope: float = 0.5):
+        """Initialize the MLP block.
+
+        :param int dim: Model width.
+        :param float mult: Hidden width multiplier, defaults to 3.0.
+        :param float leaky_slope: LeakyReLU slope, defaults to 0.5.
+        """
         super().__init__()
         hidden = int(dim * mult)
         self.fc = CastedLinear(dim, hidden, bias=False)
@@ -300,7 +422,12 @@ class MLP(nn.Module):
         self.proj._zero_init = True
         self.leaky_slope = leaky_slope
 
-    def forward(self, x):
+    def forward(self, x: Tensor) -> Tensor:
+        """Apply the squared LeakyReLU MLP.
+
+        :param Tensor x: Input activations.
+        :return Tensor: MLP outputs.
+        """
         h = F.leaky_relu(self.fc(x), negative_slope=self.leaky_slope)
         return self.proj(h * h)
 
@@ -309,17 +436,30 @@ class MLP(nn.Module):
 
 
 class GDNBlock(nn.Module):
+    """Residual transformer block with Gated DeltaNet mixing."""
+
     def __init__(
         self,
-        dim,
-        n_heads=4,
-        mlp_mult=3.0,
-        head_k_dim=48,
-        expand_v=2.0,
-        allow_neg_eigval=True,
-        conv_size=4,
-        leaky_slope=0.5,
+        dim: int,
+        n_heads: int = 4,
+        mlp_mult: float = 3.0,
+        head_k_dim: int = 48,
+        expand_v: float = 2.0,
+        allow_neg_eigval: bool = True,
+        conv_size: int = 4,
+        leaky_slope: float = 0.5,
     ):
+        """Initialize the GDN residual block.
+
+        :param int dim: Model width.
+        :param int n_heads: GDN head count, defaults to 4.
+        :param float mlp_mult: MLP expansion factor, defaults to 3.0.
+        :param int head_k_dim: GDN key width per head, defaults to 48.
+        :param float expand_v: GDN value expansion factor, defaults to 2.0.
+        :param bool allow_neg_eigval: Whether to allow negative eigenvalues, defaults to True.
+        :param int conv_size: Causal convolution width, defaults to 4.
+        :param float leaky_slope: LeakyReLU slope, defaults to 0.5.
+        """
         super().__init__()
         self.attn_norm, self.mlp_norm = RMSNorm(dim), RMSNorm(dim)
         self.gdn = GatedDeltaNet(
@@ -332,7 +472,13 @@ class GDNBlock(nn.Module):
             torch.stack([torch.ones(dim), torch.zeros(dim)]).float()
         )
 
-    def forward(self, x, x0):
+    def forward(self, x: Tensor, x0: Tensor) -> Tensor:
+        """Apply the residual GDN block.
+
+        :param Tensor x: Current activations.
+        :param Tensor x0: Block-stack input used by residual mixing.
+        :return Tensor: Updated activations.
+        """
         mix = self.resid_mix.to(dtype=x.dtype)
         x = mix[0][None, None, :] * x + mix[1][None, None, :] * x0
         x = x + self.attn_scale.to(dtype=x.dtype)[None, None, :] * self.gdn(
@@ -345,16 +491,28 @@ class GDNBlock(nn.Module):
 
 
 class AttnBlock(nn.Module):
+    """Residual transformer block with causal attention mixing."""
+
     def __init__(
         self,
-        dim,
-        num_heads,
-        num_kv_heads,
-        mlp_mult=3.0,
-        rope_base=10000.0,
-        qk_gain_init=1.5,
-        leaky_slope=0.5,
+        dim: int,
+        num_heads: int,
+        num_kv_heads: int,
+        mlp_mult: float = 3.0,
+        rope_base: float = 10000.0,
+        qk_gain_init: float = 1.5,
+        leaky_slope: float = 0.5,
     ):
+        """Initialize the attention residual block.
+
+        :param int dim: Model width.
+        :param int num_heads: Query head count.
+        :param int num_kv_heads: Key/value head count.
+        :param float mlp_mult: MLP expansion factor, defaults to 3.0.
+        :param float rope_base: Rotary frequency base, defaults to 10000.0.
+        :param float qk_gain_init: Initial query gain, defaults to 1.5.
+        :param float leaky_slope: LeakyReLU slope, defaults to 0.5.
+        """
         super().__init__()
         self.attn_norm, self.mlp_norm = RMSNorm(dim), RMSNorm(dim)
         self.attn = CausalSelfAttention(
@@ -367,7 +525,13 @@ class AttnBlock(nn.Module):
             torch.stack([torch.ones(dim), torch.zeros(dim)]).float()
         )
 
-    def forward(self, x, x0):
+    def forward(self, x: Tensor, x0: Tensor) -> Tensor:
+        """Apply the residual attention block.
+
+        :param Tensor x: Current activations.
+        :param Tensor x0: Block-stack input used by residual mixing.
+        :return Tensor: Updated activations.
+        """
         mix = self.resid_mix.to(dtype=x.dtype)
         x = mix[0][None, None, :] * x + mix[1][None, None, :] * x0
         x = x + self.attn_scale.to(dtype=x.dtype)[None, None, :] * self.attn(
@@ -383,30 +547,53 @@ class AttnBlock(nn.Module):
 
 
 class HybridGPT(nn.Module):
+    """Interleaved GDN-attention language model used by the hybrid trainer."""
+
     def __init__(
         self,
-        vocab_size=1024,
-        num_layers=16,
-        d_model=384,
+        vocab_size: int = 1024,
+        num_layers: int = 16,
+        d_model: int = 384,
         # Attention config
-        attn_heads=8,
-        attn_kv_heads=4,
+        attn_heads: int = 8,
+        attn_kv_heads: int = 4,
         # GDN config (single n_heads, expand_v controls state)
-        gdn_n_heads=4,
-        gdn_head_k_dim=48,
-        gdn_expand_v=2.0,
-        gdn_allow_neg_eigval=True,
-        gdn_conv_size=4,
+        gdn_n_heads: int = 4,
+        gdn_head_k_dim: int = 48,
+        gdn_expand_v: float = 2.0,
+        gdn_allow_neg_eigval: bool = True,
+        gdn_conv_size: int = 4,
         # Shared
-        mlp_mult=3.0,
-        leaky_slope=0.5,
-        gdn_ratio=3,
-        rope_base=10000.0,
-        qk_gain_init=1.5,
-        logit_softcap=30.0,
-        tie_embeddings=True,
-        tied_embed_init_std=0.005,
+        mlp_mult: float = 3.0,
+        leaky_slope: float = 0.5,
+        gdn_ratio: int = 3,
+        rope_base: float = 10000.0,
+        qk_gain_init: float = 1.5,
+        logit_softcap: float = 30.0,
+        tie_embeddings: bool = True,
+        tied_embed_init_std: float = 0.005,
     ):
+        """Initialize the hybrid language model.
+
+        :param int vocab_size: Token vocabulary size, defaults to 1024.
+        :param int num_layers: Total block count, defaults to 16.
+        :param int d_model: Model width, defaults to 384.
+        :param int attn_heads: Attention query head count, defaults to 8.
+        :param int attn_kv_heads: Attention key/value head count, defaults to 4.
+        :param int gdn_n_heads: GDN head count, defaults to 4.
+        :param int gdn_head_k_dim: GDN key width per head, defaults to 48.
+        :param float gdn_expand_v: GDN value expansion factor, defaults to 2.0.
+        :param bool gdn_allow_neg_eigval: Whether to allow negative eigenvalues, defaults to True.
+        :param int gdn_conv_size: GDN convolution width, defaults to 4.
+        :param float mlp_mult: MLP expansion factor, defaults to 3.0.
+        :param float leaky_slope: LeakyReLU slope, defaults to 0.5.
+        :param int gdn_ratio: Number of GDN layers per attention layer, defaults to 3.
+        :param float rope_base: Rotary frequency base, defaults to 10000.0.
+        :param float qk_gain_init: Initial attention query gain, defaults to 1.5.
+        :param float logit_softcap: Tanh logit softcap, defaults to 30.0.
+        :param bool tie_embeddings: Whether to tie embedding and output weights, defaults to True.
+        :param float tied_embed_init_std: Embedding init std when tied, defaults to 0.005.
+        """
         super().__init__()
         self.tie_embeddings = tie_embeddings
         self.logit_softcap = logit_softcap
@@ -459,14 +646,24 @@ class HybridGPT(nn.Module):
             self.lm_head._zero_init = True
         self._init_weights(tied_embed_init_std)
 
-    def _init_weights(self, tied_std):
+    def _init_weights(self, tied_std: float) -> None:
+        """Initialize embeddings and zero-init marked projections.
+
+        :param float tied_std: Standard deviation for tied embedding init.
+        """
         if self.tie_embeddings:
             nn.init.normal_(self.tok_emb.weight, mean=0.0, std=tied_std)
         for m in self.modules():
             if isinstance(m, nn.Linear) and getattr(m, "_zero_init", False):
                 nn.init.zeros_(m.weight)
 
-    def forward(self, input_ids, target_ids):
+    def forward(self, input_ids: Tensor, target_ids: Tensor) -> Tensor:
+        """Compute the autoregressive training loss.
+
+        :param Tensor input_ids: Input token ids shaped `(batch, seq)`.
+        :param Tensor target_ids: Next-token targets shaped `(batch, seq)`.
+        :return Tensor: Mean cross-entropy loss.
+        """
         x = rms_norm(self.tok_emb(input_ids))
         x0, skips = x, []
         for i in range(self.num_encoder_layers):
@@ -498,8 +695,12 @@ class HybridGPT(nn.Module):
 # depth_control (16L×384d mlp3.75 attn)     25.2M    15.5MB    2.7%
 
 
-def make_hybrid_tight(vocab_size=1024):
-    """Primary: 8 GDN heads, matched state Dk=Dv=48, fills budget."""
+def make_hybrid_tight(vocab_size: int = 1024) -> HybridGPT:
+    """Build the primary budget-filling hybrid preset.
+
+    :param int vocab_size: Vocabulary size, defaults to 1024.
+    :return HybridGPT: Hybrid preset with matched `Dk=Dv=48`.
+    """
     return HybridGPT(
         vocab_size=vocab_size,
         num_layers=16,
@@ -512,8 +713,12 @@ def make_hybrid_tight(vocab_size=1024):
     )
 
 
-def make_hybrid_wide(vocab_size=1024):
-    """Alt: 4 GDN heads, wider state Dv=96 (expand_v=2), more state capacity."""
+def make_hybrid_wide(vocab_size: int = 1024) -> HybridGPT:
+    """Build the wider-state hybrid preset.
+
+    :param int vocab_size: Vocabulary size, defaults to 1024.
+    :return HybridGPT: Hybrid preset with wider per-head state.
+    """
     return HybridGPT(
         vocab_size=vocab_size,
         num_layers=16,
@@ -526,15 +731,23 @@ def make_hybrid_wide(vocab_size=1024):
     )
 
 
-def make_baseline_fill(vocab_size=1024):
-    """Budget-filling pure attention: 11L×512d."""
+def make_baseline_fill(vocab_size: int = 1024) -> HybridGPT:
+    """Build the width-matched pure-attention baseline.
+
+    :param int vocab_size: Vocabulary size, defaults to 1024.
+    :return HybridGPT: Pure-attention baseline preset.
+    """
     return HybridGPT(
         vocab_size=vocab_size, num_layers=11, d_model=512, gdn_ratio=0, mlp_mult=2.75
     )
 
 
-def make_depth_control(vocab_size=1024):
-    """Depth control: 16L×384d pure attention, isolates depth vs architecture."""
+def make_depth_control(vocab_size: int = 1024) -> HybridGPT:
+    """Build the depth-matched pure-attention control preset.
+
+    :param int vocab_size: Vocabulary size, defaults to 1024.
+    :return HybridGPT: Pure-attention control with matched depth.
+    """
     return HybridGPT(
         vocab_size=vocab_size, num_layers=16, d_model=384, gdn_ratio=0, mlp_mult=3.75
     )

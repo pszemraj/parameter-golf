@@ -26,12 +26,13 @@ import time
 import uuid
 import zlib
 from pathlib import Path
+from typing import Any, Callable
 
 import numpy as np
 import sentencepiece as spm
 import torch
 import torch.distributed as dist
-from torch import Tensor
+from torch import Tensor, nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from model import _HAS_FLA, SCALAR_PARAM_PATTERNS, CastedLinear, HybridGPT
@@ -51,6 +52,8 @@ except ImportError:
 
 
 class Hyperparameters:
+    """Environment-backed hyperparameter surface for the hybrid trainer."""
+
     # Data
     data_path = os.environ.get("DATA_PATH", "./data/datasets/fineweb10B_sp1024")
     train_files = os.path.join(data_path, "fineweb_train_*.bin")
@@ -125,7 +128,11 @@ class Hyperparameters:
     grad_clip_norm = float(os.environ.get("GRAD_CLIP_NORM", 0.0))
     weight_decay = float(os.environ.get("WEIGHT_DECAY", 0.04))
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize the class-level hyperparameters for logging.
+
+        :return dict[str, Any]: Flat hyperparameter mapping.
+        """
         return {
             k: v
             for k, v in vars(type(self)).items()
@@ -141,6 +148,13 @@ class Hyperparameters:
 def zeropower_via_newtonschulz5(
     G: Tensor, steps: int = 10, eps: float = 1e-7
 ) -> Tensor:
+    """Orthogonalize a matrix gradient with Newton-Schulz iterations.
+
+    :param Tensor G: Matrix-shaped gradient update.
+    :param int steps: Iteration count, defaults to 10.
+    :param float eps: Numerical stability epsilon, defaults to 1e-7.
+    :return Tensor: Approximate zeroth-power normalized update.
+    """
     a, b, c = (3.4445, -4.7750, 2.0315)
     X = G.bfloat16()
     X /= X.norm() + eps
@@ -155,15 +169,26 @@ def zeropower_via_newtonschulz5(
 
 
 class Muon(torch.optim.Optimizer):
+    """Minimal Muon optimizer used for matrix-shaped parameters."""
+
     def __init__(
         self,
-        params,
-        lr,
-        momentum,
-        backend_steps,
-        nesterov=True,
-        weight_decay=0.0,
+        params: list[Tensor],
+        lr: float,
+        momentum: float,
+        backend_steps: int,
+        nesterov: bool = True,
+        weight_decay: float = 0.0,
     ):
+        """Initialize Muon.
+
+        :param list[Tensor] params: Matrix parameters assigned to Muon.
+        :param float lr: Learning rate.
+        :param float momentum: Momentum coefficient.
+        :param int backend_steps: Newton-Schulz iteration count.
+        :param bool nesterov: Whether to use Nesterov momentum, defaults to True.
+        :param float weight_decay: Decoupled weight decay, defaults to 0.0.
+        """
         super().__init__(
             params,
             dict(
@@ -176,7 +201,12 @@ class Muon(torch.optim.Optimizer):
         )
 
     @torch.no_grad()
-    def step(self, closure=None):
+    def step(self, closure: Callable[[], Tensor] | None = None) -> Tensor | None:
+        """Apply one Muon optimization step.
+
+        :param Optional[Callable[[], Tensor]] closure: Optional reevaluation closure, defaults to None.
+        :return Optional[Tensor]: Closure loss when provided.
+        """
         loss = None
         if closure is not None:
             with torch.enable_grad():
@@ -227,6 +257,11 @@ class Muon(torch.optim.Optimizer):
 
 
 def load_data_shard(file: Path) -> Tensor:
+    """Load one tokenized FineWeb shard from disk.
+
+    :param Path file: Path to the `.bin` shard.
+    :return Tensor: Flat `uint16` token tensor.
+    """
     header_bytes = 256 * np.dtype("<i4").itemsize
     header = np.fromfile(file, dtype="<i4", count=256)
     if header.size != 256 or int(header[0]) != 20240520 or int(header[1]) != 1:
@@ -237,7 +272,13 @@ def load_data_shard(file: Path) -> Tensor:
 
 
 class TokenStream:
+    """Sequential shard reader that wraps around at the end of the file list."""
+
     def __init__(self, pattern: str):
+        """Initialize a streaming shard reader.
+
+        :param str pattern: Glob pattern for token shards.
+        """
         self.files = [Path(p) for p in sorted(glob.glob(pattern))]
         if not self.files:
             raise FileNotFoundError(f"No files for: {pattern}")
@@ -245,12 +286,18 @@ class TokenStream:
         self.tokens = load_data_shard(self.files[0])
         self.pos = 0
 
-    def _advance_file(self):
+    def _advance_file(self) -> None:
+        """Advance to the next shard, wrapping around when needed."""
         self.file_idx = (self.file_idx + 1) % len(self.files)
         self.tokens = load_data_shard(self.files[self.file_idx])
         self.pos = 0
 
     def take(self, n: int) -> Tensor:
+        """Take a contiguous token span across shard boundaries.
+
+        :param int n: Number of tokens to read.
+        :return Tensor: Requested token span.
+        """
         chunks = []
         remaining = n
         while remaining > 0:
@@ -266,11 +313,29 @@ class TokenStream:
 
 
 class DistributedTokenLoader:
-    def __init__(self, pattern, rank, world_size, device):
+    """Shard loader that slices each global batch by distributed rank."""
+
+    def __init__(self, pattern: str, rank: int, world_size: int, device: torch.device):
+        """Initialize the distributed token loader.
+
+        :param str pattern: Glob pattern for token shards.
+        :param int rank: Distributed rank.
+        :param int world_size: Distributed world size.
+        :param torch.device device: Target device for batches.
+        """
         self.rank, self.world_size, self.device = rank, world_size, device
         self.stream = TokenStream(pattern)
 
-    def next_batch(self, global_tokens, seq_len, grad_accum_steps):
+    def next_batch(
+        self, global_tokens: int, seq_len: int, grad_accum_steps: int
+    ) -> tuple[Tensor, Tensor]:
+        """Build the next local input/target batch pair.
+
+        :param int global_tokens: Global tokens per optimizer step.
+        :param int seq_len: Sequence length.
+        :param int grad_accum_steps: Gradient accumulation factor.
+        :return tuple[Tensor, Tensor]: Input and target batches on the target device.
+        """
         local_tokens = global_tokens // (self.world_size * grad_accum_steps)
         per_rank_span = local_tokens + 1
         chunk = self.stream.take(per_rank_span * self.world_size)
@@ -288,7 +353,16 @@ class DistributedTokenLoader:
 # =====================================================================
 
 
-def build_sentencepiece_luts(sp, vocab_size, device):
+def build_sentencepiece_luts(
+    sp: spm.SentencePieceProcessor, vocab_size: int, device: torch.device
+) -> tuple[Tensor, Tensor, Tensor]:
+    """Build lookup tables for tokenizer-aware byte counting.
+
+    :param spm.SentencePieceProcessor sp: Loaded SentencePiece tokenizer.
+    :param int vocab_size: Expected vocabulary size.
+    :param torch.device device: Target device for the lookup tensors.
+    :return tuple[Tensor, Tensor, Tensor]: Base bytes, leading-space flags, and boundary flags.
+    """
     sp_vocab_size = int(sp.vocab_size())
     table_size = max(sp_vocab_size, vocab_size)
     base_bytes = np.zeros(table_size, dtype=np.int16)
@@ -313,7 +387,13 @@ def build_sentencepiece_luts(sp, vocab_size, device):
     )
 
 
-def load_validation_tokens(pattern, seq_len):
+def load_validation_tokens(pattern: str, seq_len: int) -> Tensor:
+    """Load and trim validation tokens to an integer number of sequences.
+
+    :param str pattern: Glob pattern for validation shards.
+    :param int seq_len: Sequence length used for eval reshaping.
+    :return Tensor: Concatenated validation tokens.
+    """
     files = [Path(p) for p in sorted(glob.glob(pattern))]
     if not files:
         raise FileNotFoundError(f"No files for: {pattern}")
@@ -323,17 +403,31 @@ def load_validation_tokens(pattern, seq_len):
 
 
 def eval_val(
-    args,
-    model,
-    rank,
-    world_size,
-    device,
-    grad_accum_steps,
-    val_tokens,
-    base_bytes_lut,
-    has_leading_space_lut,
-    is_boundary_lut,
-):
+    args: Hyperparameters,
+    model: nn.Module,
+    rank: int,
+    world_size: int,
+    device: torch.device,
+    grad_accum_steps: int,
+    val_tokens: Tensor,
+    base_bytes_lut: Tensor,
+    has_leading_space_lut: Tensor,
+    is_boundary_lut: Tensor,
+) -> tuple[float, float]:
+    """Evaluate validation loss and tokenizer-agnostic BPB.
+
+    :param Hyperparameters args: Trainer hyperparameters.
+    :param nn.Module model: Model or DDP-wrapped model.
+    :param int rank: Distributed rank.
+    :param int world_size: Distributed world size.
+    :param torch.device device: Evaluation device.
+    :param int grad_accum_steps: Gradient accumulation factor used to derive local batch size.
+    :param Tensor val_tokens: Flat validation token buffer.
+    :param Tensor base_bytes_lut: Base byte-count lookup table.
+    :param Tensor has_leading_space_lut: Leading-space lookup table.
+    :param Tensor is_boundary_lut: Boundary-token lookup table.
+    :return tuple[float, float]: Validation loss and bits-per-byte.
+    """
     local_batch_tokens = args.val_batch_size // (world_size * grad_accum_steps)
     local_batch_seqs = local_batch_tokens // args.train_seq_len
     total_seqs = (val_tokens.numel() - 1) // args.train_seq_len
@@ -383,7 +477,14 @@ INT8_CLIP_Q = 99.99984 / 100.0
 INT8_KEEP_FLOAT_MAX_NUMEL = 65_536
 
 
-def quantize_state_dict_int8(state_dict):
+def quantize_state_dict_int8(
+    state_dict: dict[str, Tensor],
+) -> tuple[dict[str, Any], dict[str, int]]:
+    """Quantize a state dict with per-row int8 weights where possible.
+
+    :param dict[str, Tensor] state_dict: Floating-point state dict.
+    :return tuple[dict[str, Any], dict[str, int]]: Quantized payload object and serialization stats.
+    """
     quantized, scales, dtypes, passthrough = {}, {}, {}, {}
     passthrough_orig_dtypes, qmeta = {}, {}
     stats = dict.fromkeys(
@@ -451,7 +552,12 @@ def quantize_state_dict_int8(state_dict):
     return obj, stats
 
 
-def dequantize_state_dict_int8(obj):
+def dequantize_state_dict_int8(obj: dict[str, Any]) -> dict[str, Tensor]:
+    """Restore a quantized state dict payload to dense tensors.
+
+    :param dict[str, Any] obj: Serialized quantized payload.
+    :return dict[str, Tensor]: Dequantized state dict.
+    """
     out = {}
     qmeta = obj.get("qmeta", {})
     pod = obj.get("passthrough_orig_dtypes", {})
@@ -478,7 +584,11 @@ def dequantize_state_dict_int8(obj):
 # =====================================================================
 
 
-def restore_low_dim_params_to_fp32(module):
+def restore_low_dim_params_to_fp32(module: nn.Module) -> None:
+    """Restore low-dimensional or scalar parameters to fp32.
+
+    :param nn.Module module: Module whose parameters should be restored in place.
+    """
     with torch.no_grad():
         for name, param in module.named_parameters():
             if (
@@ -488,8 +598,16 @@ def restore_low_dim_params_to_fp32(module):
 
 
 def maybe_compile(
-    obj, *, enabled: bool, dynamic: bool = False, fullgraph: bool = False
-):
+    obj: Any, *, enabled: bool, dynamic: bool = False, fullgraph: bool = False
+) -> Any:
+    """Conditionally wrap an object with `torch.compile`.
+
+    :param Any obj: Callable or module to compile.
+    :param bool enabled: Whether compilation is enabled.
+    :param bool dynamic: Whether to enable dynamic shapes, defaults to False.
+    :param bool fullgraph: Whether to require full-graph capture, defaults to False.
+    :return Any: Compiled object when enabled, otherwise the original object.
+    """
     if not enabled:
         return obj
     return torch.compile(obj, dynamic=dynamic, fullgraph=fullgraph)
@@ -500,7 +618,8 @@ def maybe_compile(
 # =====================================================================
 
 
-def main():
+def main() -> None:
+    """Run hybrid training, validation, and roundtrip artifact checks."""
     global zeropower_via_newtonschulz5
 
     code = Path(__file__).read_text(encoding="utf-8")
@@ -557,7 +676,12 @@ def main():
     os.makedirs("logs", exist_ok=True)
     logfile = f"logs/{args.run_id}.txt" if master_process else None
 
-    def log0(msg, console=True):
+    def log0(msg: str, console: bool = True) -> None:
+        """Log a line on rank 0 to stdout and the run logfile.
+
+        :param str msg: Message to log.
+        :param bool console: Whether to print to stdout, defaults to True.
+        """
         if not master_process:
             return
         if console:
@@ -766,11 +890,18 @@ def main():
         1000.0 * args.max_wallclock_seconds if args.max_wallclock_seconds > 0 else None
     )
 
-    def zero_grad_all():
+    def zero_grad_all() -> None:
+        """Clear gradients across all optimizer groups."""
         for opt in optimizers:
             opt.zero_grad(set_to_none=True)
 
-    def lr_mul(step, elapsed_ms):
+    def lr_mul(step: int, elapsed_ms: float) -> float:
+        """Compute the warmdown multiplier for the current step.
+
+        :param int step: Completed optimizer steps.
+        :param float elapsed_ms: Elapsed training time in milliseconds.
+        :return float: Learning-rate scale multiplier.
+        """
         if args.warmdown_iters <= 0:
             return 1.0
         if max_wallclock_ms is None:
