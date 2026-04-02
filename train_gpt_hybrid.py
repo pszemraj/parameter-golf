@@ -602,6 +602,9 @@ def maybe_compile(
 ) -> Any:
     """Conditionally wrap an object with `torch.compile`.
 
+    Uses ``nn.Module.compile()`` for top-level modules to match the current
+    PyTorch guidance, and falls back to ``torch.compile`` for plain callables.
+
     :param Any obj: Callable or module to compile.
     :param bool enabled: Whether compilation is enabled.
     :param bool dynamic: Whether to enable dynamic shapes, defaults to False.
@@ -609,6 +612,9 @@ def maybe_compile(
     :return Any: Compiled object when enabled, otherwise the original object.
     """
     if not enabled:
+        return obj
+    if isinstance(obj, nn.Module):
+        obj.compile(dynamic=dynamic, fullgraph=fullgraph)
         return obj
     return torch.compile(obj, dynamic=dynamic, fullgraph=fullgraph)
 
