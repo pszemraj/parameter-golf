@@ -29,6 +29,7 @@ scripts/sweep.sh depth
 - Status: pending target-hardware access.
 - Why: the 4070 ratio improved from `1.38x` at `seq=1024` to `1.16x` at `seq=2048`, but the real question is the H100 ratio.
 - Run only the existing perf harness first, not a full quality sweep.
+- Helper: `scripts/run_h100_single_gpu_hgdn.sh perf`
 
 ### 3. Compute-optimal size sweep
 

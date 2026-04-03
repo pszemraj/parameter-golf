@@ -35,6 +35,7 @@ What is now true:
 - `model.py`: hybrid HGDN architecture and presets
 - `train_gpt_hybrid.py`: hybrid trainer
 - `scripts/sweep.sh`: launch helper and perf-harness env contract
+- `scripts/run_h100_single_gpu_hgdn.sh`: 1xH100 helper for perf and fixed-step target-hardware calibration
 - `docs/REFERENCE.md`: architecture/reference notes
 - `docs/TODO.md`: deferred follow-ups and break-glass items
 
@@ -309,6 +310,7 @@ If continuing this branch, the current best path is:
 - Add the trainer's new byte-audit fields to any future quality-run summaries when comparing branches.
 - Run a small wall-clock-capped HGDN scaling sweep to find the real compute-optimal size.
 - If possible later, re-check throughput and compile strategy on the target H100 environment.
+  - The branch now includes `scripts/run_h100_single_gpu_hgdn.sh` for that 1xH100 calibration step.
 
 ## Recent Branch Checkpoints
 
