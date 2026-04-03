@@ -39,7 +39,8 @@ Environment overrides:
   PYTHON_BIN        Python executable, defaults to python3.
   VARIANT           Tokenizer family, defaults to sp1024.
   TRAIN_SHARDS      Overrides the mode default shard count.
-  DOWNLOAD_JOBS     Passed through as --jobs to the downloader.
+  DOWNLOAD_JOBS     Optional override for downloader workers. By default the
+                    downloader auto-detects and caps at 32.
   WITH_DOCS         Set to 1 to also fetch docs_selected.jsonl and its sidecar.
   SKIP_MANIFEST     Set to 1 to pass --skip-manifest.
 

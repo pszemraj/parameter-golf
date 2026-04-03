@@ -11,7 +11,15 @@ REMOTE_ROOT_PREFIX = os.environ.get("MATCHED_FINEWEB_REMOTE_ROOT_PREFIX", "datas
 ROOT = Path(__file__).resolve().parent
 DATASETS_DIR = ROOT / "datasets"
 TOKENIZERS_DIR = ROOT / "tokenizers"
-DEFAULT_DOWNLOAD_JOBS = int(os.environ.get("MATCHED_FINEWEB_DOWNLOAD_JOBS", "8"))
+
+
+def default_download_jobs() -> int:
+    override = os.environ.get("MATCHED_FINEWEB_DOWNLOAD_JOBS")
+    if override is not None:
+        jobs = int(override)
+    else:
+        jobs = os.cpu_count() or 8
+    return max(1, min(jobs, 32))
 
 
 def dataset_dir_for_variant(name: str) -> str:
@@ -170,8 +178,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--jobs",
         type=int,
-        default=DEFAULT_DOWNLOAD_JOBS,
-        help="Parallel download workers for Hugging Face snapshot fetches. Defaults to MATCHED_FINEWEB_DOWNLOAD_JOBS or 8.",
+        default=default_download_jobs(),
+        help="Parallel download workers for Hugging Face snapshot fetches. Defaults to min(os.cpu_count(), 32), overridable with MATCHED_FINEWEB_DOWNLOAD_JOBS.",
     )
     return parser
 
