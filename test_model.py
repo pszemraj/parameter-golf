@@ -15,7 +15,10 @@ from model import (
     make_hybrid_wide,
     validate_norm_style,
 )
-from train_gpt_hybrid import serialize_quantized_state_dict_int8
+from train_gpt_hybrid import (
+    normalize_wandb_watch_mode,
+    serialize_quantized_state_dict_int8,
+)
 
 
 def test_recurrence():
@@ -189,6 +192,20 @@ def test_invalid_norm_style():
     raise AssertionError("validate_norm_style should reject unknown styles")
 
 
+def test_wandb_watch_mode():
+    """Normalize supported W&B watch modes and reject unknown values."""
+    assert normalize_wandb_watch_mode("none") == "none"
+    assert normalize_wandb_watch_mode("false") == "none"
+    assert normalize_wandb_watch_mode("gradients") == "gradients"
+    assert normalize_wandb_watch_mode("all") == "all"
+    try:
+        normalize_wandb_watch_mode("weird")
+    except ValueError:
+        print("  ✓ wandb watch mode rejected invalid value")
+        return
+    raise AssertionError("normalize_wandb_watch_mode should reject unknown values")
+
+
 def test_block_types():
     for ratio, expected in [
         (0, ["attn"] * 4),
@@ -337,6 +354,7 @@ if __name__ == "__main__":
         ("Hybrid fwd/bwd", test_hybrid_fwd_bwd),
         ("Norm styles", test_norm_styles),
         ("Invalid norm style", test_invalid_norm_style),
+        ("W&B watch mode", test_wandb_watch_mode),
         ("Block types", test_block_types),
         ("Artifact audit (all presets)", test_artifact_audit),
         ("State tracking", test_state_tracking),

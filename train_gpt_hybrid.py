@@ -70,7 +70,8 @@ class Hyperparameters:
     val_loss_every = int(os.environ.get("VAL_LOSS_EVERY", 1000))
     train_log_every = int(os.environ.get("TRAIN_LOG_EVERY", 200))
     log_step0_eval = bool(int(os.environ.get("LOG_STEP0_EVAL", "0")))
-    wandb_watch_log_freq = int(os.environ.get("WANDB_WATCH_LOG_FREQ", 25))
+    wandb_watch = os.environ.get("WANDB_WATCH", "none").lower()
+    wandb_watch_log_freq = int(os.environ.get("WANDB_WATCH_LOG_FREQ", 100))
 
     # Training
     iterations = int(os.environ.get("ITERATIONS", 20000))
@@ -147,6 +148,21 @@ class Hyperparameters:
             for k, v in vars(type(self)).items()
             if not k.startswith("_") and not callable(v) and k != "to_dict"
         }
+
+
+def normalize_wandb_watch_mode(mode: str) -> str:
+    """Normalize the requested W&B watch mode.
+
+    :param str mode: Raw watch mode string.
+    :raises ValueError: If the mode is unsupported.
+    :return str: Normalized watch mode.
+    """
+    normalized = mode.lower()
+    if normalized in {"0", "false", "off", "none"}:
+        return "none"
+    if normalized in {"gradients", "all"}:
+        return normalized
+    raise ValueError(f"WANDB_WATCH must be one of: none, gradients, all (got {mode!r})")
 
 
 # =====================================================================
@@ -756,6 +772,7 @@ def main() -> None:
 
     code = Path(__file__).read_text(encoding="utf-8")
     args = Hyperparameters()
+    wandb_watch_mode = normalize_wandb_watch_mode(args.wandb_watch)
     zeropower_via_newtonschulz5 = maybe_compile(
         zeropower_via_newtonschulz5, enabled=args.compile
     )
@@ -842,6 +859,7 @@ def main() -> None:
     log0(
         f"compile:{int(args.compile)} compile_strategy:{args.compile_strategy} "
         f"sdp_backend:{sdp_backend} fla_available:{int(_HAS_FLA)} "
+        f"wandb_watch:{wandb_watch_mode} wandb_watch_log_freq:{args.wandb_watch_log_freq} "
         f"perf_timing:{int(args.perf_timing)} perf_ignore_steps:{args.perf_ignore_steps} "
         f"perf_skip_final_eval:{int(args.perf_skip_final_eval)}",
         console=False,
@@ -975,6 +993,8 @@ def main() -> None:
                 "n_params": n_params,
                 "planned_train_tokens": planned_train_tokens,
                 "sdp_backend": sdp_backend,
+                "wandb_watch": wandb_watch_mode,
+                "wandb_watch_log_freq": args.wandb_watch_log_freq,
             }
         )
 
@@ -1107,10 +1127,10 @@ def main() -> None:
         gc.collect()
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
-    if master_process and _USE_WANDB:
+    if master_process and _USE_WANDB and wandb_watch_mode != "none":
         wandb.watch(
             base_model,
-            log="gradients",
+            log=wandb_watch_mode,
             log_freq=args.wandb_watch_log_freq,
             log_graph=False,
         )

@@ -9,6 +9,7 @@ This file tracks follow-up work that is intentionally not enabled by default in 
 - Status: newly enabled, not quality-screened yet.
 - Why: recent work argues that pre-norm may be leaving depth utilization on the table, especially when a KEEL-style residual path makes post-norm trainable again.
 - Helper: `scripts/run_laptop_norm_compare.sh {hybrid|depth|both}`
+- Helper default: `WANDB_WATCH=none` so the comparison screens keep online metric logging without gradient-watch stalls. Override with `WANDB_WATCH=gradients` only when histograms are actually needed.
 - Scope for this branch:
   - use the hybrid trainer only
   - compare within the same residual shell

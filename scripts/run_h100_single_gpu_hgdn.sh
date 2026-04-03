@@ -45,6 +45,8 @@ Environment overrides:
   RUN_PREFIX                 Base prefix for run ids.
   USE_WANDB                  Defaults to 1.
   WANDB_MODE                 Defaults to online.
+  WANDB_WATCH                Defaults to none.
+  WANDB_WATCH_LOG_FREQ       Defaults to trainer default.
   WANDB_PROJECT              Passed through to sweep.sh if enabled.
   DATA_PATH                  Passed through to sweep.sh.
   TOKENIZER_PATH             Passed through to sweep.sh.
@@ -88,6 +90,7 @@ run_sweep() {
         export NGPU=1
         export USE_WANDB="${USE_WANDB:-1}"
         export WANDB_MODE="${WANDB_MODE:-online}"
+        export WANDB_WATCH="${WANDB_WATCH:-none}"
         export COMPILE_STRATEGY="${COMPILE_STRATEGY:-model}"
         for kv in "$@"; do
             export "$kv"

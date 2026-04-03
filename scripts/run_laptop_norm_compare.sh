@@ -40,6 +40,7 @@ Defaults:
   - TRAIN_LOG_EVERY=25
   - COMPILE=1
   - COMPILE_STRATEGY=model
+  - WANDB_WATCH=none
   - NORM_STYLES=pre,post,keel
   - USE_WANDB=1
   - WANDB_MODE=online
@@ -53,6 +54,8 @@ Environment overrides:
   TOKENIZER_PATH         Passed through to sweep.sh.
   COMPILE                Defaults to 1.
   COMPILE_STRATEGY       Defaults to model.
+  WANDB_WATCH            Defaults to none.
+  WANDB_WATCH_LOG_FREQ   Defaults to trainer default.
   TRAIN_BATCH_TOKENS     Defaults to 65536.
   TRAIN_SEQ_LEN          Defaults to 1024.
   ITERATIONS             Defaults to 1000.
@@ -90,6 +93,7 @@ run_sweep() {
         export NGPU=1
         export USE_WANDB="${USE_WANDB:-1}"
         export WANDB_MODE="${WANDB_MODE:-online}"
+        export WANDB_WATCH="${WANDB_WATCH:-none}"
         export COMPILE="${COMPILE:-1}"
         export COMPILE_STRATEGY="${COMPILE_STRATEGY:-model}"
         for kv in "$@"; do

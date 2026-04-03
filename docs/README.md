@@ -96,6 +96,7 @@ The branch now includes the following major changes:
 - `COMPILE=0` support for eager fallback.
 - `nn.Module.compile()` for module compilation on torch 2.11.
 - `fullgraph=False` on the top-level hybrid compile path so FLA graph breaks do not hard-fail.
+- `WANDB_WATCH` is now an explicit trainer knob. The helper scripts default it to `none` so sweep screens keep normal online metric logging without gradient-histogram overhead.
 - A fair perf harness:
   - `PERF_TIMING=1`
   - `PERF_IGNORE_STEPS=N`
@@ -127,6 +128,33 @@ Conclusion:
 
 - The selective `COMPILE_STRATEGY=hybrid` path is roughly `30%` slower than plain top-level model compilation on the measured HGDN preset.
 - It remains available as an experimental knob, but it is not the default.
+
+### Recompile diagnosis
+
+Using `TORCH_LOGS=recompiles` on a short compiled HGDN run shows startup-only recompiles, not a steady-state recompile loop:
+
+- one alias-guard recompile in the GDN block because the first block initially sees `x is x0`
+- one attention recompile when the rotary cache transitions from `None` to populated
+- a few Muon helper recompiles because `zeropower_via_newtonschulz5` sees several distinct matrix shapes
+
+Current conclusion:
+
+- the branch does recompile during startup and warmup
+- the branch does not currently show evidence of recompiling every 25 steps during steady-state training
+- if a run appears to freeze every 25 steps, check W&B watch/logging before blaming Dynamo
+
+Recommended diagnostics:
+
+```bash
+TORCH_LOGS=recompiles,graph_breaks \
+PATH=/home/pszemraj/miniforge3/envs/pg/bin:$PATH \
+USE_WANDB=0 ITERATIONS=30 MAX_WALLCLOCK_SECONDS=0 VAL_LOSS_EVERY=0 \
+TRAIN_LOG_EVERY=10 TRAIN_BATCH_TOKENS=65536 TRAIN_SEQ_LEN=1024 \
+COMPILE=1 COMPILE_STRATEGY=model GDN_RATIO=1 MLP_MULT=3.25 NORM_STYLE=pre \
+PERF_SKIP_FINAL_EVAL=1 RUN_ID=diag_recompiles scripts/sweep.sh single
+```
+
+For a richer trace, PyTorch recommends `TORCH_TRACE=/tmp/tracedir` plus `tlparse` on the trace directory.
 
 ## Throughput Screening Results
 
