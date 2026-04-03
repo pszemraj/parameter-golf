@@ -79,6 +79,7 @@ What has not been claimed:
 - `train_gpt_hybrid.py`: hybrid trainer
 - `scripts/sweep.sh`: launch helper and perf-harness env contract
 - `scripts/run_h100_single_gpu_hgdn.sh`: 1xH100 helper for perf and fixed-step target-hardware calibration
+- `scripts/run_laptop_norm_compare.sh`: 1x laptop GPU helper for fixed-step `pre/post/keel` norm screens
 - `docs/REFERENCE.md`: architecture/reference notes
 - `docs/TODO.md`: deferred follow-ups and break-glass items
 
