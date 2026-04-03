@@ -4,6 +4,70 @@ This file tracks follow-up work that is intentionally not enabled by default in 
 
 ## Active next steps
 
+### 0. Norm placement screen (`pre` vs `post` vs `keel`)
+
+- Status: newly enabled, not quality-screened yet.
+- Why: recent work argues that pre-norm may be leaving depth utilization on the table, especially when a KEEL-style residual path makes post-norm trainable again.
+- Scope for this branch:
+  - use the hybrid trainer only
+  - compare within the same residual shell
+  - treat `GDN_RATIO=0` as the pure-attention control
+  - treat `GDN_RATIO=1` as the current HGDN operating point
+- First readout to collect:
+  - fixed-step sampled-eval BPB at the same token budget
+  - whether `post` is merely stable or actually better
+  - whether `keel` beats both `pre` and naive `post`
+
+Suggested local comparison contract:
+
+```bash
+PATH=/home/pszemraj/miniforge3/envs/pg/bin:$PATH \
+WANDB_MODE=offline USE_WANDB=0 NGPU=1 ITERATIONS=750 MAX_WALLCLOCK_SECONDS=0 \
+TRAIN_BATCH_TOKENS=262144 TRAIN_SEQ_LEN=1024 VAL_LOSS_EVERY=100 TRAIN_LOG_EVERY=25 \
+COMPILE=1 COMPILE_STRATEGY=model GDN_RATIO=0 MLP_MULT=4.0 NORM_STYLE=pre \
+RUN_ID=norm_depth_pre_r0 scripts/sweep.sh depth
+```
+
+```bash
+PATH=/home/pszemraj/miniforge3/envs/pg/bin:$PATH \
+WANDB_MODE=offline USE_WANDB=0 NGPU=1 ITERATIONS=750 MAX_WALLCLOCK_SECONDS=0 \
+TRAIN_BATCH_TOKENS=262144 TRAIN_SEQ_LEN=1024 VAL_LOSS_EVERY=100 TRAIN_LOG_EVERY=25 \
+COMPILE=1 COMPILE_STRATEGY=model GDN_RATIO=0 MLP_MULT=4.0 NORM_STYLE=post \
+RUN_ID=norm_depth_post_r0 scripts/sweep.sh depth
+```
+
+```bash
+PATH=/home/pszemraj/miniforge3/envs/pg/bin:$PATH \
+WANDB_MODE=offline USE_WANDB=0 NGPU=1 ITERATIONS=750 MAX_WALLCLOCK_SECONDS=0 \
+TRAIN_BATCH_TOKENS=262144 TRAIN_SEQ_LEN=1024 VAL_LOSS_EVERY=100 TRAIN_LOG_EVERY=25 \
+COMPILE=1 COMPILE_STRATEGY=model GDN_RATIO=0 MLP_MULT=4.0 NORM_STYLE=keel \
+RUN_ID=norm_depth_keel_r0 scripts/sweep.sh depth
+```
+
+```bash
+PATH=/home/pszemraj/miniforge3/envs/pg/bin:$PATH \
+WANDB_MODE=offline USE_WANDB=0 NGPU=1 ITERATIONS=750 MAX_WALLCLOCK_SECONDS=0 \
+TRAIN_BATCH_TOKENS=262144 TRAIN_SEQ_LEN=1024 VAL_LOSS_EVERY=100 TRAIN_LOG_EVERY=25 \
+COMPILE=1 COMPILE_STRATEGY=model GDN_RATIO=1 MLP_MULT=3.25 NORM_STYLE=pre \
+RUN_ID=norm_hybrid_pre_r1 scripts/sweep.sh single
+```
+
+```bash
+PATH=/home/pszemraj/miniforge3/envs/pg/bin:$PATH \
+WANDB_MODE=offline USE_WANDB=0 NGPU=1 ITERATIONS=750 MAX_WALLCLOCK_SECONDS=0 \
+TRAIN_BATCH_TOKENS=262144 TRAIN_SEQ_LEN=1024 VAL_LOSS_EVERY=100 TRAIN_LOG_EVERY=25 \
+COMPILE=1 COMPILE_STRATEGY=model GDN_RATIO=1 MLP_MULT=3.25 NORM_STYLE=post \
+RUN_ID=norm_hybrid_post_r1 scripts/sweep.sh single
+```
+
+```bash
+PATH=/home/pszemraj/miniforge3/envs/pg/bin:$PATH \
+WANDB_MODE=offline USE_WANDB=0 NGPU=1 ITERATIONS=750 MAX_WALLCLOCK_SECONDS=0 \
+TRAIN_BATCH_TOKENS=262144 TRAIN_SEQ_LEN=1024 VAL_LOSS_EVERY=100 TRAIN_LOG_EVERY=25 \
+COMPILE=1 COMPILE_STRATEGY=model GDN_RATIO=1 MLP_MULT=3.25 NORM_STYLE=keel \
+RUN_ID=norm_hybrid_keel_r1 scripts/sweep.sh single
+```
+
 ### 1. Size-matched depth-control rerun
 
 - Status: partially resolved.

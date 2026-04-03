@@ -101,6 +101,10 @@ class Hyperparameters:
     qk_gain_init = float(os.environ.get("QK_GAIN_INIT", 1.5))
     tied_embed_init_std = float(os.environ.get("TIED_EMBED_INIT_STD", 0.005))
     leaky_slope = float(os.environ.get("LEAKY_SLOPE", 0.5))
+    norm_style = os.environ.get("NORM_STYLE", "pre").lower()
+    residual_alpha = (
+        float(os.environ["RESIDUAL_ALPHA"]) if "RESIDUAL_ALPHA" in os.environ else None
+    )
 
     # Model — attention blocks
     num_heads = int(os.environ.get("NUM_HEADS", 8))
@@ -914,6 +918,8 @@ def main() -> None:
             logit_softcap=args.logit_softcap,
             tie_embeddings=args.tie_embeddings,
             tied_embed_init_std=args.tied_embed_init_std,
+            norm_style=args.norm_style,
+            residual_alpha=args.residual_alpha,
         )
         .to(device)
         .bfloat16()
@@ -935,7 +941,10 @@ def main() -> None:
     n_params = sum(p.numel() for p in base_model.parameters())
     n_gdn = sum(1 for t in base_model.block_types if t == "gdn")
     n_attn = sum(1 for t in base_model.block_types if t == "attn")
-    log0(f"model_params:{n_params} blocks:{n_gdn}G+{n_attn}A")
+    log0(
+        f"model_params:{n_params} blocks:{n_gdn}G+{n_attn}A "
+        f"norm_style:{base_model.norm_style} residual_alpha:{base_model.residual_alpha:g}"
+    )
     log0(
         "compile_plan:"
         f"strategy:{compile_stats['strategy']} "

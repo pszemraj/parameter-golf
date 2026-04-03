@@ -29,6 +29,49 @@ What is now true:
 - A dedicated perf harness exists for fair throughput screens.
 - The initial quality comparison at `TRAIN_SEQ_LEN=2048` favors the hybrid over the matched depth-control baseline.
 - A larger pure-attention depth control (`MLP_MULT=4.0`) was re-run under the same 2k-step contract and still failed to close the hybrid gap.
+- The hybrid stack now has an experimental residual normalization knob: `NORM_STYLE=pre|post|keel`.
+
+## Norm Placement Aside
+
+There is now a controlled norm-placement surface in the hybrid model family for side experiments:
+
+- `NORM_STYLE=pre`: current default behavior
+- `NORM_STYLE=post`: plain post-residual RMSNorm per sublayer
+- `NORM_STYLE=keel`: KEEL-inspired variant with:
+  - inner RMSNorm on the transform branch
+  - post-residual RMSNorm after the sum
+  - amplified residual path via `residual_alpha`
+  - first block left as pre-norm for stable embedding handoff
+
+Important scope note:
+
+- This branch did not mutate the reference [train_gpt.py](/home/pszemraj/workspace/projects/parameter-golf/train_gpt.py) baseline script for this experiment.
+- The cleanest apples-to-apples probe here is within the hybrid trainer itself:
+  - pure attention depth control via `GDN_RATIO=0`
+  - mixed HGDN via `GDN_RATIO=1`
+
+Current judgment:
+
+- There is a legitimate case for trying something more post-norm-like here.
+- That case is stronger for the HGDN branch than it would be for blindly editing the repo reference trainer.
+- The right first comparison is not only `pre` vs naive `post`; it is `pre` vs `post` vs `keel`.
+
+Why this is plausible in this repo:
+
+- Our models are shallow relative to the regimes where post-norm historically failed catastrophically.
+- The stack already has branch scales (`attn_scale`, `mlp_scale`) and residual mixing, which make the residual path more controllable than a bare Transformer shell.
+- The hybrid path already pays for extra normalization and state-control structure, so a KEEL-style experiment is not out of character architecturally.
+
+What has been validated so far:
+
+- CPU tests pass for all three styles.
+- Tiny offline trainer smokes for `post` and `keel` on the hybrid path run end-to-end without immediate instability.
+
+What has not been claimed:
+
+- No BPB win is established yet.
+- No exact `train_gpt.py` baseline result exists yet.
+- No wall-clock or target-hardware claim should be made from the norm-style work until matched runs are completed.
 
 ## Important Files
 

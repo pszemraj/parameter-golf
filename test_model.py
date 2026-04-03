@@ -13,6 +13,7 @@ from model import (
     make_depth_control,
     make_hybrid_tight,
     make_hybrid_wide,
+    validate_norm_style,
 )
 from train_gpt_hybrid import serialize_quantized_state_dict_int8
 
@@ -144,6 +145,48 @@ def test_hybrid_fwd_bwd():
     assert not no_grad, f"Missing grads: {no_grad}"
     assert not nan_grads, f"NaN grads: {nan_grads}"
     print(f"  ✓ fwd/bwd OK  loss={loss.item():.4f}")
+
+
+def test_norm_styles():
+    """Exercise pre/post/KEEL block variants on a tiny hybrid stack."""
+    torch.manual_seed(42)
+    ids = torch.randint(0, 32, (2, 24))
+    tgt = torch.randint(0, 32, (2, 24))
+    for style in ["pre", "post", "keel"]:
+        model = HybridGPT(
+            vocab_size=32,
+            num_layers=4,
+            d_model=64,
+            attn_heads=4,
+            attn_kv_heads=2,
+            gdn_n_heads=4,
+            gdn_head_k_dim=8,
+            gdn_expand_v=1.0,
+            gdn_ratio=1,
+            mlp_mult=2,
+            norm_style=style,
+        )
+        loss = model(ids, tgt)
+        assert not torch.isnan(loss), f"{style} loss is NaN"
+        loss.backward()
+        assert model.norm_style == style
+        if style == "keel":
+            assert model.residual_alpha == 8.0
+        no_grad = [
+            name for name, param in model.named_parameters() if param.grad is None
+        ]
+        assert not no_grad, f"{style} missing grads: {no_grad}"
+    print("  ✓ norm styles OK (pre/post/keel)")
+
+
+def test_invalid_norm_style():
+    """Reject unsupported normalization styles."""
+    try:
+        validate_norm_style("weird")
+    except ValueError:
+        print("  ✓ invalid norm style rejected")
+        return
+    raise AssertionError("validate_norm_style should reject unknown styles")
 
 
 def test_block_types():
@@ -292,6 +335,8 @@ if __name__ == "__main__":
         ("Muon routing", test_muon_routing),
         ("Causal conv", test_causal_conv),
         ("Hybrid fwd/bwd", test_hybrid_fwd_bwd),
+        ("Norm styles", test_norm_styles),
+        ("Invalid norm style", test_invalid_norm_style),
         ("Block types", test_block_types),
         ("Artifact audit (all presets)", test_artifact_audit),
         ("State tracking", test_state_tracking),

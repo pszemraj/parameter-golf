@@ -11,7 +11,7 @@ P0 fixes from code review:
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Literal, Optional
 
 import torch
 import torch.nn.functional as F
@@ -38,6 +38,23 @@ SCALAR_PARAM_PATTERNS = (
     "A_log",
     "dt_bias",  # GDN decay params → Adam
 )
+
+NormStyle = Literal["pre", "post", "keel"]
+
+
+def validate_norm_style(norm_style: str) -> NormStyle:
+    """Normalize and validate a residual norm-placement string.
+
+    :param str norm_style: Requested normalization style.
+    :raises ValueError: If the style is unsupported.
+    :return NormStyle: Validated normalization style.
+    """
+    normalized = norm_style.lower()
+    if normalized not in {"pre", "post", "keel"}:
+        raise ValueError(
+            f"norm_style must be 'pre', 'post', or 'keel', got {norm_style!r}"
+        )
+    return normalized
 
 
 def rms_norm(x: Tensor, eps: float = 1e-6) -> Tensor:
@@ -447,6 +464,9 @@ class GDNBlock(nn.Module):
         allow_neg_eigval: bool = True,
         conv_size: int = 4,
         leaky_slope: float = 0.5,
+        norm_style: NormStyle = "pre",
+        residual_alpha: float = 1.0,
+        is_first_block: bool = False,
     ):
         """Initialize the GDN residual block.
 
@@ -458,9 +478,16 @@ class GDNBlock(nn.Module):
         :param bool allow_neg_eigval: Whether to allow negative eigenvalues, defaults to True.
         :param int conv_size: Causal convolution width, defaults to 4.
         :param float leaky_slope: LeakyReLU slope, defaults to 0.5.
+        :param NormStyle norm_style: Residual norm placement, defaults to "pre".
+        :param float residual_alpha: Residual scaling factor used by KEEL-style blocks, defaults to 1.0.
+        :param bool is_first_block: Whether this is the first block in the stack, defaults to False.
         """
         super().__init__()
-        self.attn_norm, self.mlp_norm = RMSNorm(), RMSNorm()
+        self.norm_style = validate_norm_style(norm_style)
+        self.residual_alpha = residual_alpha
+        self.is_first_block = is_first_block
+        self.attn_in_norm, self.attn_out_norm = RMSNorm(), RMSNorm()
+        self.mlp_in_norm, self.mlp_out_norm = RMSNorm(), RMSNorm()
         self.gdn = GatedDeltaNet(
             dim, n_heads, head_k_dim, expand_v, allow_neg_eigval, conv_size
         )
@@ -480,11 +507,25 @@ class GDNBlock(nn.Module):
         """
         mix = self.resid_mix.to(dtype=x.dtype)
         x = mix[0][None, None, :] * x + mix[1][None, None, :] * x0
-        x = x + self.attn_scale.to(dtype=x.dtype)[None, None, :] * self.gdn(
-            self.attn_norm(x)
+        attn_scale = self.attn_scale.to(dtype=x.dtype)[None, None, :]
+        mlp_scale = self.mlp_scale.to(dtype=x.dtype)[None, None, :]
+        if self.norm_style == "pre":
+            x = x + attn_scale * self.gdn(self.attn_in_norm(x))
+            x = x + mlp_scale * self.mlp(self.mlp_in_norm(x))
+            return x
+        if self.norm_style == "post":
+            x = self.attn_out_norm(x + attn_scale * self.gdn(x))
+            x = self.mlp_out_norm(x + mlp_scale * self.mlp(x))
+            return x
+        if self.is_first_block:
+            x = x + attn_scale * self.gdn(self.attn_in_norm(x))
+            x = x + mlp_scale * self.mlp(self.mlp_in_norm(x))
+            return x
+        x = self.attn_out_norm(
+            self.residual_alpha * x + attn_scale * self.gdn(self.attn_in_norm(x))
         )
-        x = x + self.mlp_scale.to(dtype=x.dtype)[None, None, :] * self.mlp(
-            self.mlp_norm(x)
+        x = self.mlp_out_norm(
+            self.residual_alpha * x + mlp_scale * self.mlp(self.mlp_in_norm(x))
         )
         return x
 
@@ -501,6 +542,9 @@ class AttnBlock(nn.Module):
         rope_base: float = 10000.0,
         qk_gain_init: float = 1.5,
         leaky_slope: float = 0.5,
+        norm_style: NormStyle = "pre",
+        residual_alpha: float = 1.0,
+        is_first_block: bool = False,
     ):
         """Initialize the attention residual block.
 
@@ -511,9 +555,16 @@ class AttnBlock(nn.Module):
         :param float rope_base: Rotary frequency base, defaults to 10000.0.
         :param float qk_gain_init: Initial query gain, defaults to 1.5.
         :param float leaky_slope: LeakyReLU slope, defaults to 0.5.
+        :param NormStyle norm_style: Residual norm placement, defaults to "pre".
+        :param float residual_alpha: Residual scaling factor used by KEEL-style blocks, defaults to 1.0.
+        :param bool is_first_block: Whether this is the first block in the stack, defaults to False.
         """
         super().__init__()
-        self.attn_norm, self.mlp_norm = RMSNorm(), RMSNorm()
+        self.norm_style = validate_norm_style(norm_style)
+        self.residual_alpha = residual_alpha
+        self.is_first_block = is_first_block
+        self.attn_in_norm, self.attn_out_norm = RMSNorm(), RMSNorm()
+        self.mlp_in_norm, self.mlp_out_norm = RMSNorm(), RMSNorm()
         self.attn = CausalSelfAttention(
             dim, num_heads, num_kv_heads, rope_base, qk_gain_init
         )
@@ -533,11 +584,25 @@ class AttnBlock(nn.Module):
         """
         mix = self.resid_mix.to(dtype=x.dtype)
         x = mix[0][None, None, :] * x + mix[1][None, None, :] * x0
-        x = x + self.attn_scale.to(dtype=x.dtype)[None, None, :] * self.attn(
-            self.attn_norm(x)
+        attn_scale = self.attn_scale.to(dtype=x.dtype)[None, None, :]
+        mlp_scale = self.mlp_scale.to(dtype=x.dtype)[None, None, :]
+        if self.norm_style == "pre":
+            x = x + attn_scale * self.attn(self.attn_in_norm(x))
+            x = x + mlp_scale * self.mlp(self.mlp_in_norm(x))
+            return x
+        if self.norm_style == "post":
+            x = self.attn_out_norm(x + attn_scale * self.attn(x))
+            x = self.mlp_out_norm(x + mlp_scale * self.mlp(x))
+            return x
+        if self.is_first_block:
+            x = x + attn_scale * self.attn(self.attn_in_norm(x))
+            x = x + mlp_scale * self.mlp(self.mlp_in_norm(x))
+            return x
+        x = self.attn_out_norm(
+            self.residual_alpha * x + attn_scale * self.attn(self.attn_in_norm(x))
         )
-        x = x + self.mlp_scale.to(dtype=x.dtype)[None, None, :] * self.mlp(
-            self.mlp_norm(x)
+        x = self.mlp_out_norm(
+            self.residual_alpha * x + mlp_scale * self.mlp(self.mlp_in_norm(x))
         )
         return x
 
@@ -571,6 +636,8 @@ class HybridGPT(nn.Module):
         logit_softcap: float = 30.0,
         tie_embeddings: bool = True,
         tied_embed_init_std: float = 0.005,
+        norm_style: NormStyle = "pre",
+        residual_alpha: float | None = None,
     ):
         """Initialize the hybrid language model.
 
@@ -592,11 +659,19 @@ class HybridGPT(nn.Module):
         :param float logit_softcap: Tanh logit softcap, defaults to 30.0.
         :param bool tie_embeddings: Whether to tie embedding and output weights, defaults to True.
         :param float tied_embed_init_std: Embedding init std when tied, defaults to 0.005.
+        :param NormStyle norm_style: Residual norm placement inside each block, defaults to "pre".
+        :param float | None residual_alpha: Optional residual scaling for KEEL-style blocks, defaults to None.
         """
         super().__init__()
         self.tie_embeddings = tie_embeddings
         self.logit_softcap = logit_softcap
         self.d_model = d_model
+        self.norm_style = validate_norm_style(norm_style)
+        self.residual_alpha = (
+            float(2 * num_layers)
+            if residual_alpha is None and self.norm_style == "keel"
+            else float(1.0 if residual_alpha is None else residual_alpha)
+        )
         self.tok_emb = nn.Embedding(vocab_size, d_model)
 
         period = gdn_ratio + 1
@@ -612,6 +687,9 @@ class HybridGPT(nn.Module):
                         rope_base,
                         qk_gain_init,
                         leaky_slope,
+                        self.norm_style,
+                        self.residual_alpha,
+                        i == 0,
                     )
                 )
                 self.block_types.append("attn")
@@ -626,6 +704,9 @@ class HybridGPT(nn.Module):
                         gdn_allow_neg_eigval,
                         gdn_conv_size,
                         leaky_slope,
+                        self.norm_style,
+                        self.residual_alpha,
+                        i == 0,
                     )
                 )
                 self.block_types.append("gdn")
