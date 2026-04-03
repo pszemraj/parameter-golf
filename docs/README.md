@@ -1,6 +1,6 @@
 # HGDN Branch Status
 
-Last updated: 2026-04-02 21:54:53 EDT
+Last updated: 2026-04-03 00:24:09 EDT
 
 Branch: `exp/hgdn`
 
@@ -28,6 +28,7 @@ What is now true:
 - The default compile strategy is now `COMPILE_STRATEGY=model`.
 - A dedicated perf harness exists for fair throughput screens.
 - The initial quality comparison at `TRAIN_SEQ_LEN=2048` favors the hybrid over the matched depth-control baseline.
+- A larger pure-attention depth control (`MLP_MULT=4.0`) was re-run under the same 2k-step contract and still failed to close the hybrid gap.
 
 ## Important Files
 
@@ -137,12 +138,13 @@ The correct byte story has two stages:
 
 ### Actual trained-run endpoints
 
-From the logged 2k quality runs:
+From the logged 2k quality runs and follow-up controls:
 
 | Config | Raw `state_dict` bytes | `int8+zlib` bytes | Code bytes | Total artifact |
 |---|---:|---:|---:|---:|
 | Hybrid `GDN_RATIO=1, MLP_MULT=3.25` | `100,338,699` | `10,909,417` | `53,459` | `10,962,876` |
 | Depth control `MLP_MULT=3.75` | `100,047,451` | `9,401,537` | `53,459` | `9,454,996` |
+| Depth control `MLP_MULT=4.0` | `104,766,043` | `9,611,898` | `56,483` | `9,668,381` |
 
 ### Exact init-state quantization audit
 
@@ -166,6 +168,7 @@ Current conclusion:
 - The old proxy table should not be used for budget decisions.
 - Future size decisions should use the trainer's real artifact audit fields, not a static heuristic.
 - The hybrid is genuinely less compressible than the depth control, so size matching needs to use actual bytes, not only parameter counts.
+- A 600-second local wallclock screen is good enough to reject obviously bad size candidates, but not good enough to stand in for the fixed-step artifact outcome.
 
 ## Quality Comparison
 
@@ -189,12 +192,18 @@ Depth run:
 
 - `RUN_ID=quality_depth_seq2k`
 
+Depth follow-up:
+
+- `RUN_ID=quality_depth_mlp40_seq2k`
+- `MLP_MULT=4.0`
+
 ### Validation BPB
 
 | Config | 500 | 1000 | 1500 | 2000 | Final int8 roundtrip |
 |---|---:|---:|---:|---:|---:|
 | Hybrid `GDN_RATIO=1, MLP_MULT=3.25` | `2.9000` | `2.7492` | `2.6148` | `2.5138` | `2.5209` |
-| Depth control | `3.0342` | `2.8792` | `2.7660` | `2.6604` | `2.6778` |
+| Depth control `MLP_MULT=3.75` | `3.0342` | `2.8792` | `2.7660` | `2.6604` | `2.6778` |
+| Depth control `MLP_MULT=4.0` | `3.0298` | `2.8709` | `2.7586` | `2.6550` | `2.6715` |
 
 ### Delta
 
@@ -206,17 +215,29 @@ Depth run:
 | `2000` | `0.1466 BPB` |
 | Final roundtrip | `0.1569 BPB` |
 
+### Delta vs enlarged depth control
+
+| Checkpoint | Hybrid improvement over depth `MLP_MULT=4.0` |
+|---|---:|
+| `500` | `0.1298 BPB` |
+| `1000` | `0.1217 BPB` |
+| `1500` | `0.1438 BPB` |
+| `2000` | `0.1412 BPB` |
+| Final roundtrip | `0.1506 BPB` |
+
 ### Quantization sensitivity
 
 | Config | Pre-roundtrip | Roundtrip | Degradation |
 |---|---:|---:|---:|
 | Hybrid | `2.5138` | `2.5209` | `+0.0071` |
-| Depth | `2.6604` | `2.6778` | `+0.0174` |
+| Depth `MLP_MULT=3.75` | `2.6604` | `2.6778` | `+0.0174` |
+| Depth `MLP_MULT=4.0` | `2.6550` | `2.6715` | `+0.0165` |
 
 Interpretation:
 
 - The hybrid wins cleanly at every measured checkpoint.
 - The hybrid also degrades less after the int8 roundtrip than the depth-control baseline.
+- Giving the pure-attention depth control more MLP width from `3.75 -> 4.0` only improved final BPB by about `0.0054`, which is far smaller than the hybrid-vs-depth gap.
 - The architecture question is currently answered in favor of the hybrid on this local quality comparison.
 
 ## Time-Matched Reindex
@@ -238,30 +259,37 @@ Interpretation:
 - The gap narrows at the `1000` checkpoint, then widens again.
 - Even before size matching, the branch is not relying on a misleading equal-step-only win.
 
-## Caveat: Current Quality Win Is Not Yet Size-Matched
+## Size-Matching Follow-Up
 
 Even with the stronger `GDN_RATIO=1, MLP_MULT=3.25` hybrid:
 
 - Hybrid actual total artifact bytes: `10,962,876`
 - Depth actual total artifact bytes: `9,454,996`
 
-That means the hybrid had about a `16%` artifact-size advantage in the current comparison. Some unknown fraction of the BPB gap is therefore still "more compressed params."
+That means the hybrid had about a `16%` artifact-size advantage in the original comparison. Some unknown fraction of the BPB gap is therefore still "more compressed params."
 
-The next matched depth-control candidate is:
+Two follow-up controls were run to pressure this assumption:
 
-- `depth` with `MLP_MULT=4.7`
+1. `MLP_MULT=4.7`, local 600-second calibration
+   - `step 577 val_bpb: 2.7986`
+   - total artifact: `17,092,318`
+   - result: clearly over budget and therefore invalid as a submission-matched control
+2. `MLP_MULT=4.0`, full 2k-step rerun
+   - final total artifact: `9,668,381`
+   - result: still about `11.8%` smaller than the hybrid, but only improves the pure-attention depth baseline by about `0.0054` BPB at step 2000
 
-Why this setting:
+Interpretation:
 
-- exact init-state quant audit gives `8,439,594` compressed payload bytes
-- applying the observed depth train/init compression factor from `quality_depth_seq2k` projects to about `10,964,745` total bytes including code
-- that is effectively matched to the hybrid's `10,962,876` total bytes
+- The old `MLP_MULT=4.7` projection was wrong; init-state compression did not transfer to the trained model.
+- The 600-second local screen was still useful to reject `4.7`, but it should not be treated as a representative fixed-step artifact proxy.
+- The attention-only depth family appears to be relatively insensitive to extra MLP width on this local contract.
+- The hybrid win survives giving the depth control more room, even though exact size matching is still unresolved.
 
 This means:
 
 - The quality result is already useful and meaningful.
-- But the branch is not yet at a final submission-grade matched-budget comparison.
-- The next work should focus on size matching and then wall-clock-aware scaling, not re-asking whether HGDN works at all.
+- But the branch is not yet at a final submission-grade perfectly size-matched comparison.
+- The next work should focus on whether exact local size matching is still worth the time, versus moving on to hybrid scaling and H100 calibration.
 
 ## Current Recommendation
 
@@ -271,14 +299,15 @@ If continuing this branch, the current best path is:
 2. Treat `GDN_RATIO=1, MLP_MULT=3.25, TRAIN_SEQ_LEN=2048` as the primary HGDN operating point.
 3. Stop spending time on selective compile unless an H100 result contradicts the 4070 measurements.
 4. Use the hybrid as the current quality winner over the depth-control baseline at this local scale, including after wall-time reindexing.
-5. Run the size-matched depth-control follow-up next with `MLP_MULT=4.7`.
-6. After that rerun, move to compute-optimal scaling instead of blindly filling the full 16MB.
+5. Treat `MLP_MULT=4.7` as ruled out locally; it overshot the artifact budget badly.
+6. Treat `MLP_MULT=4.0` as a stronger but still underfilled depth control that did not materially reduce the hybrid's advantage.
+7. After this, move to compute-optimal scaling and H100 calibration instead of spending unlimited time on perfect local size matching.
 
 ## Likely Next Work
 
-- Re-run the same `2048` quality comparison with the size-matched depth control (`MLP_MULT=4.7`).
+- If exact local size matching is still required, bracket the depth control between `MLP_MULT=4.0` and a slightly larger fixed-step candidate. Do not use 600-second local runs as the final size-matching proxy.
 - Add the trainer's new byte-audit fields to any future quality-run summaries when comparing branches.
-- After the size-matched rerun, run a small wall-clock-capped HGDN scaling sweep to find the real compute-optimal size.
+- Run a small wall-clock-capped HGDN scaling sweep to find the real compute-optimal size.
 - If possible later, re-check throughput and compile strategy on the target H100 environment.
 
 ## Recent Branch Checkpoints

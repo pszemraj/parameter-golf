@@ -6,18 +6,22 @@ This file tracks follow-up work that is intentionally not enabled by default in 
 
 ### 1. Size-matched depth-control rerun
 
-- Status: ready to run, not launched automatically.
-- Why: the current hybrid quality win is real, but the logged artifact sizes are not matched yet.
-- Current best candidate: `depth` with `MLP_MULT=4.7`.
-  - Exact init-state quant audit: `8,439,594` compressed payload bytes.
-  - Using the observed depth train/init compression factor from `quality_depth_seq2k`, that projects to about `10,964,745` total bytes with code included, which is effectively matched to the hybrid's `10,962,876`.
-- Exact command:
+- Status: partially resolved.
+- Why: the current hybrid quality win is real, but the logged artifact sizes are still not perfectly matched.
+- What was tried:
+  - `MLP_MULT=4.7` at a local 600-second screen: invalid, landed at `17,092,318` total bytes and was over budget.
+  - `MLP_MULT=4.0` at the proper 2k-step fixed-step contract: valid, landed at `9,668,381` total bytes and `2.6550` / `2.6715` pre/post-roundtrip BPB. It is still smaller than the hybrid and only marginally better than `MLP_MULT=3.75`.
+- Current takeaway:
+  - Do not use a 600-second local 4070 run as the final size-matching proxy.
+  - If exact size matching still matters locally, bracket the next fixed-step depth candidate between `4.0` and a slightly larger setting.
+- Last fixed-step command used:
 
 ```bash
 PATH=/home/pszemraj/miniforge3/envs/pg/bin:$PATH \
 WANDB_MODE=offline USE_WANDB=0 NGPU=1 ITERATIONS=2000 TRAIN_BATCH_TOKENS=65536 \
-TRAIN_SEQ_LEN=2048 VAL_LOSS_EVERY=500 TRAIN_LOG_EVERY=200 COMPILE_STRATEGY=model \
-MLP_MULT=4.7 RUN_ID=quality_depth_mlp47_seq2k scripts/sweep.sh depth
+MAX_WALLCLOCK_SECONDS=0 TRAIN_SEQ_LEN=2048 VAL_LOSS_EVERY=500 TRAIN_LOG_EVERY=200 \
+COMPILE_STRATEGY=model MLP_MULT=4.0 RUN_ID=quality_depth_mlp40_seq2k \
+scripts/sweep.sh depth
 ```
 
 ### 2. H100 throughput calibration
@@ -28,7 +32,7 @@ MLP_MULT=4.7 RUN_ID=quality_depth_mlp47_seq2k scripts/sweep.sh depth
 
 ### 3. Compute-optimal size sweep
 
-- Status: blocked on the size-matched control run above.
+- Status: no longer blocked by architecture viability; only blocked if exact local size-matching is considered a hard requirement first.
 - Why: actual trained artifacts are around `11MB`, so the branch still needs a wall-clock-vs-size sweep instead of assuming "fill 16MB" is optimal.
 - Candidate HGDN wall-clock sweep family:
   - `slim`: `MODEL_DIM=320`, `MLP_MULT=3.25`
