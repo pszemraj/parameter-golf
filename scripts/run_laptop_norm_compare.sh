@@ -41,13 +41,13 @@ Defaults:
   - COMPILE=1
   - COMPILE_STRATEGY=model
   - NORM_STYLES=pre,post,keel
-  - USE_WANDB=0
-  - WANDB_MODE=offline
+  - USE_WANDB=1
+  - WANDB_MODE=online
 
 Environment overrides:
   RUN_PREFIX             Base prefix for run ids.
-  USE_WANDB              Defaults to 0.
-  WANDB_MODE             Defaults to offline.
+  USE_WANDB              Defaults to 1.
+  WANDB_MODE             Defaults to online.
   WANDB_PROJECT          Passed through to sweep.sh if enabled.
   DATA_PATH              Passed through to sweep.sh.
   TOKENIZER_PATH         Passed through to sweep.sh.
@@ -65,7 +65,8 @@ Environment overrides:
 
 Examples:
   scripts/run_laptop_norm_compare.sh hybrid
-  RUN_PREFIX=norma USE_WANDB=1 WANDB_MODE=online scripts/run_laptop_norm_compare.sh depth
+  RUN_PREFIX=norma scripts/run_laptop_norm_compare.sh depth
+  USE_WANDB=0 WANDB_MODE=offline scripts/run_laptop_norm_compare.sh both
   TRAIN_SEQ_LEN=2048 ITERATIONS=750 scripts/run_laptop_norm_compare.sh both
 EOF
 }
@@ -87,8 +88,8 @@ run_sweep() {
     echo ">>> $label"
     (
         export NGPU=1
-        export USE_WANDB="${USE_WANDB:-0}"
-        export WANDB_MODE="${WANDB_MODE:-offline}"
+        export USE_WANDB="${USE_WANDB:-1}"
+        export WANDB_MODE="${WANDB_MODE:-online}"
         export COMPILE="${COMPILE:-1}"
         export COMPILE_STRATEGY="${COMPILE_STRATEGY:-model}"
         for kv in "$@"; do

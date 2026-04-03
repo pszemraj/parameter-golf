@@ -43,8 +43,8 @@ Modes:
 
 Environment overrides:
   RUN_PREFIX                 Base prefix for run ids.
-  USE_WANDB                  Defaults to 0.
-  WANDB_MODE                 Defaults to offline.
+  USE_WANDB                  Defaults to 1.
+  WANDB_MODE                 Defaults to online.
   WANDB_PROJECT              Passed through to sweep.sh if enabled.
   DATA_PATH                  Passed through to sweep.sh.
   TOKENIZER_PATH             Passed through to sweep.sh.
@@ -64,7 +64,8 @@ Environment overrides:
 
 Examples:
   scripts/run_h100_single_gpu_hgdn.sh perf
-  RUN_PREFIX=h100a USE_WANDB=1 WANDB_MODE=online scripts/run_h100_single_gpu_hgdn.sh fixed2k
+  RUN_PREFIX=h100a scripts/run_h100_single_gpu_hgdn.sh fixed2k
+  USE_WANDB=0 WANDB_MODE=offline scripts/run_h100_single_gpu_hgdn.sh perf
 EOF
 }
 
@@ -85,8 +86,8 @@ run_sweep() {
     echo ">>> $label"
     (
         export NGPU=1
-        export USE_WANDB="${USE_WANDB:-0}"
-        export WANDB_MODE="${WANDB_MODE:-offline}"
+        export USE_WANDB="${USE_WANDB:-1}"
+        export WANDB_MODE="${WANDB_MODE:-online}"
         export COMPILE_STRATEGY="${COMPILE_STRATEGY:-model}"
         for kv in "$@"; do
             export "$kv"
