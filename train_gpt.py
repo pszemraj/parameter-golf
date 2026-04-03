@@ -18,6 +18,7 @@ import time
 import uuid
 import zlib
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import sentencepiece as spm
@@ -72,6 +73,14 @@ class Hyperparameters:
     tie_embeddings = bool(int(os.environ.get("TIE_EMBEDDINGS", "1")))
     rope_base = float(os.environ.get("ROPE_BASE", 10000.0))
     logit_softcap = float(os.environ.get("LOGIT_SOFTCAP", 30.0))
+    norm_kind = os.environ.get("NORM_KIND", "rms").lower()
+    norm_style = os.environ.get("NORM_STYLE", "pre").lower()
+    residual_alpha = os.environ.get("RESIDUAL_ALPHA")
+    residual_alpha = None if residual_alpha in {None, ""} else float(residual_alpha)
+    use_input_norm = bool(int(os.environ.get("INPUT_NORM", "1")))
+    use_final_norm = bool(int(os.environ.get("FINAL_NORM", "1")))
+    use_residual_mix = bool(int(os.environ.get("USE_RESIDUAL_MIX", "1")))
+    use_skip_weights = bool(int(os.environ.get("USE_SKIP_WEIGHTS", "1")))
 
     # Optimizer hyperparameters.
     embed_lr = float(os.environ.get("EMBED_LR", 0.6))
@@ -565,6 +574,25 @@ class DistributedTokenLoader:
 # TRANSFORMER MODULES
 # -----------------------------
 
+NormStyle = Literal["pre", "post", "keel"]
+NormKind = Literal["rms", "layer"]
+
+
+def validate_norm_style(norm_style: str) -> NormStyle:
+    normalized = norm_style.lower()
+    if normalized not in {"pre", "post", "keel"}:
+        raise ValueError(
+            f"NORM_STYLE must be 'pre', 'post', or 'keel', got {norm_style!r}"
+        )
+    return normalized
+
+
+def validate_norm_kind(norm_kind: str) -> NormKind:
+    normalized = norm_kind.lower()
+    if normalized not in {"rms", "layer"}:
+        raise ValueError(f"NORM_KIND must be 'rms' or 'layer', got {norm_kind!r}")
+    return normalized
+
 
 class RMSNorm(nn.Module):
     def __init__(self, eps: float | None = None):
@@ -573,6 +601,13 @@ class RMSNorm(nn.Module):
 
     def forward(self, x: Tensor) -> Tensor:
         return F.rms_norm(x, (x.size(-1),), eps=self.eps)
+
+
+def build_norm(kind: NormKind, dim: int, eps: float = 1e-6) -> nn.Module:
+    kind = validate_norm_kind(kind)
+    if kind == "rms":
+        return RMSNorm(eps)
+    return nn.LayerNorm(dim, eps=eps, elementwise_affine=True)
 
 
 class CastedLinear(nn.Linear):
@@ -714,27 +749,57 @@ class Block(nn.Module):
         mlp_mult: int,
         rope_base: float,
         qk_gain_init: float,
+        norm_kind: NormKind = "rms",
+        norm_style: NormStyle = "pre",
+        residual_alpha: float = 1.0,
+        use_residual_mix: bool = True,
+        is_first_block: bool = False,
     ):
         super().__init__()
-        self.attn_norm = RMSNorm()
-        self.mlp_norm = RMSNorm()
+        self.norm_style = validate_norm_style(norm_style)
+        self.residual_alpha = residual_alpha
+        self.use_residual_mix = use_residual_mix
+        self.is_first_block = is_first_block
+        self.attn_in_norm = build_norm(norm_kind, dim)
+        self.attn_out_norm = build_norm(norm_kind, dim)
+        self.mlp_in_norm = build_norm(norm_kind, dim)
+        self.mlp_out_norm = build_norm(norm_kind, dim)
         self.attn = CausalSelfAttention(
             dim, num_heads, num_kv_heads, rope_base, qk_gain_init
         )
         self.mlp = MLP(dim, mlp_mult)
         self.attn_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
         self.mlp_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
-        self.resid_mix = nn.Parameter(
-            torch.stack((torch.ones(dim), torch.zeros(dim))).float()
-        )
+        if self.use_residual_mix:
+            self.resid_mix = nn.Parameter(
+                torch.stack((torch.ones(dim), torch.zeros(dim))).float()
+            )
+        else:
+            self.register_parameter("resid_mix", None)
 
     def forward(self, x: Tensor, x0: Tensor) -> Tensor:
-        mix = self.resid_mix.to(dtype=x.dtype)
-        x = mix[0][None, None, :] * x + mix[1][None, None, :] * x0
-        attn_out = self.attn(self.attn_norm(x))
-        x = x + self.attn_scale.to(dtype=x.dtype)[None, None, :] * attn_out
-        x = x + self.mlp_scale.to(dtype=x.dtype)[None, None, :] * self.mlp(
-            self.mlp_norm(x)
+        if self.resid_mix is not None:
+            mix = self.resid_mix.to(dtype=x.dtype)
+            x = mix[0][None, None, :] * x + mix[1][None, None, :] * x0
+        attn_scale = self.attn_scale.to(dtype=x.dtype)[None, None, :]
+        mlp_scale = self.mlp_scale.to(dtype=x.dtype)[None, None, :]
+        if self.norm_style == "pre":
+            x = x + attn_scale * self.attn(self.attn_in_norm(x))
+            x = x + mlp_scale * self.mlp(self.mlp_in_norm(x))
+            return x
+        if self.norm_style == "post":
+            x = self.attn_out_norm(x + attn_scale * self.attn(x))
+            x = self.mlp_out_norm(x + mlp_scale * self.mlp(x))
+            return x
+        if self.is_first_block:
+            x = x + attn_scale * self.attn(self.attn_in_norm(x))
+            x = x + mlp_scale * self.mlp(self.mlp_in_norm(x))
+            return x
+        x = self.attn_out_norm(
+            self.residual_alpha * x + attn_scale * self.attn(self.attn_in_norm(x))
+        )
+        x = self.mlp_out_norm(
+            self.residual_alpha * x + mlp_scale * self.mlp(self.mlp_in_norm(x))
         )
         return x
 
@@ -753,6 +818,13 @@ class GPT(nn.Module):
         logit_softcap: float,
         rope_base: float,
         qk_gain_init: float,
+        norm_kind: NormKind = "rms",
+        norm_style: NormStyle = "pre",
+        residual_alpha: float | None = None,
+        use_input_norm: bool = True,
+        use_final_norm: bool = True,
+        use_residual_mix: bool = True,
+        use_skip_weights: bool = True,
     ):
         super().__init__()
         if logit_softcap <= 0.0:
@@ -760,13 +832,32 @@ class GPT(nn.Module):
         self.tie_embeddings = tie_embeddings
         self.tied_embed_init_std = tied_embed_init_std
         self.logit_softcap = logit_softcap
+        self.norm_kind = validate_norm_kind(norm_kind)
+        self.norm_style = validate_norm_style(norm_style)
+        self.residual_alpha = (
+            float(2 * num_layers)
+            if residual_alpha is None and self.norm_style == "keel"
+            else float(1.0 if residual_alpha is None else residual_alpha)
+        )
+        self.use_input_norm = use_input_norm
+        self.use_final_norm = use_final_norm
+        self.use_residual_mix = use_residual_mix
+        self.use_skip_weights = use_skip_weights
         self.tok_emb = nn.Embedding(vocab_size, model_dim)
+        self.input_norm = (
+            build_norm(self.norm_kind, model_dim)
+            if self.use_input_norm
+            else nn.Identity()
+        )
         self.num_encoder_layers = num_layers // 2
         self.num_decoder_layers = num_layers - self.num_encoder_layers
         self.num_skip_weights = min(self.num_encoder_layers, self.num_decoder_layers)
-        self.skip_weights = nn.Parameter(
-            torch.ones(self.num_skip_weights, model_dim, dtype=torch.float32)
-        )
+        if self.use_skip_weights and self.num_skip_weights > 0:
+            self.skip_weights = nn.Parameter(
+                torch.ones(self.num_skip_weights, model_dim, dtype=torch.float32)
+            )
+        else:
+            self.register_parameter("skip_weights", None)
         self.blocks = nn.ModuleList(
             [
                 Block(
@@ -776,11 +867,20 @@ class GPT(nn.Module):
                     mlp_mult,
                     rope_base,
                     qk_gain_init,
+                    self.norm_kind,
+                    self.norm_style,
+                    self.residual_alpha,
+                    self.use_residual_mix,
+                    i == 0,
                 )
                 for i in range(num_layers)
             ]
         )
-        self.final_norm = RMSNorm()
+        self.final_norm = (
+            build_norm(self.norm_kind, model_dim)
+            if self.use_final_norm
+            else nn.Identity()
+        )
         self.lm_head = (
             None if tie_embeddings else CastedLinear(model_dim, vocab_size, bias=False)
         )
@@ -797,16 +897,17 @@ class GPT(nn.Module):
 
     def forward(self, input_ids: Tensor, target_ids: Tensor) -> Tensor:
         x = self.tok_emb(input_ids)
-        x = F.rms_norm(x, (x.size(-1),))
+        x = self.input_norm(x)
         x0 = x
         skips: list[Tensor] = []
 
         # First half stores skips; second half reuses them in reverse order.
         for i in range(self.num_encoder_layers):
             x = self.blocks[i](x, x0)
-            skips.append(x)
+            if self.skip_weights is not None:
+                skips.append(x)
         for i in range(self.num_decoder_layers):
-            if skips:
+            if self.skip_weights is not None and skips:
                 x = (
                     x
                     + self.skip_weights[i].to(dtype=x.dtype)[None, None, :]
@@ -956,6 +1057,13 @@ def main() -> None:
             logit_softcap=args.logit_softcap,
             rope_base=args.rope_base,
             qk_gain_init=args.qk_gain_init,
+            norm_kind=args.norm_kind,
+            norm_style=args.norm_style,
+            residual_alpha=args.residual_alpha,
+            use_input_norm=args.use_input_norm,
+            use_final_norm=args.use_final_norm,
+            use_residual_mix=args.use_residual_mix,
+            use_skip_weights=args.use_skip_weights,
         )
         .to(device)
         .bfloat16()
@@ -989,7 +1097,7 @@ def main() -> None:
         if p.ndim < 2
         or any(pattern in name for pattern in CONTROL_TENSOR_NAME_PATTERNS)
     ]
-    if base_model.skip_weights.numel() > 0:
+    if base_model.skip_weights is not None:
         scalar_params.append(base_model.skip_weights)
     token_lr = args.tied_embed_lr if args.tie_embeddings else args.embed_lr
     optimizer_tok = torch.optim.Adam(
@@ -1034,6 +1142,16 @@ def main() -> None:
 
     n_params = sum(p.numel() for p in base_model.parameters())
     log0(f"model_params:{n_params}")
+    log0(
+        "norm_contract:"
+        f" kind:{base_model.norm_kind}"
+        f" style:{base_model.norm_style}"
+        f" residual_alpha:{base_model.residual_alpha:g}"
+        f" input_norm:{int(base_model.use_input_norm)}"
+        f" final_norm:{int(base_model.use_final_norm)}"
+        f" residual_mix:{int(base_model.use_residual_mix)}"
+        f" skip_weights:{int(base_model.use_skip_weights)}"
+    )
     log0(f"world_size:{world_size} grad_accum_steps:{grad_accum_steps}")
     log0("sdp_backends:cudnn=False flash=True mem_efficient=False math=False")
     log0(
