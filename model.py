@@ -685,14 +685,11 @@ class HybridGPT(nn.Module):
         return F.cross_entropy(logits.float(), target_ids.reshape(-1), reduction="mean")
 
 
-# ── Presets (size-audited int6+zstd, all head dims mult of 8) ─────────
+# ── Presets ──────────────────────────────────────────────────────────
 #
-# Config                                    Params     est     HR%
-# ──────────────────────────────────────────────────────────────────
-# hybrid_tight  (8h Dk48 Dv48 mlp3.0)      25.3M    15.8MB    1.1%
-# hybrid_wide   (4h Dk48 Dv96 mlp3.25)     24.7M    15.3MB    4.1%
-# baseline_fill (11L×512d mlp2.75 attn)     25.1M    15.4MB    3.2%
-# depth_control (16L×384d mlp3.75 attn)     25.2M    15.5MB    2.7%
+# These constructors mirror the historical sweep families. Earlier artifact-size
+# comments here were based on a stale proxy estimate; use the trainer's final
+# quantized artifact audit or docs/README.md for current measured bytes.
 
 
 def make_hybrid_tight(vocab_size: int = 1024) -> HybridGPT:

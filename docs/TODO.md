@@ -2,6 +2,40 @@
 
 This file tracks follow-up work that is intentionally not enabled by default in the current hybrid trainer.
 
+## Active next steps
+
+### 1. Size-matched depth-control rerun
+
+- Status: ready to run, not launched automatically.
+- Why: the current hybrid quality win is real, but the logged artifact sizes are not matched yet.
+- Current best candidate: `depth` with `MLP_MULT=4.7`.
+  - Exact init-state quant audit: `8,439,594` compressed payload bytes.
+  - Using the observed depth train/init compression factor from `quality_depth_seq2k`, that projects to about `10,964,745` total bytes with code included, which is effectively matched to the hybrid's `10,962,876`.
+- Exact command:
+
+```bash
+PATH=/home/pszemraj/miniforge3/envs/pg/bin:$PATH \
+WANDB_MODE=offline USE_WANDB=0 NGPU=1 ITERATIONS=2000 TRAIN_BATCH_TOKENS=65536 \
+TRAIN_SEQ_LEN=2048 VAL_LOSS_EVERY=500 TRAIN_LOG_EVERY=200 COMPILE_STRATEGY=model \
+MLP_MULT=4.7 RUN_ID=quality_depth_mlp47_seq2k scripts/sweep.sh depth
+```
+
+### 2. H100 throughput calibration
+
+- Status: pending target-hardware access.
+- Why: the 4070 ratio improved from `1.38x` at `seq=1024` to `1.16x` at `seq=2048`, but the real question is the H100 ratio.
+- Run only the existing perf harness first, not a full quality sweep.
+
+### 3. Compute-optimal size sweep
+
+- Status: blocked on the size-matched control run above.
+- Why: actual trained artifacts are around `11MB`, so the branch still needs a wall-clock-vs-size sweep instead of assuming "fill 16MB" is optimal.
+- Candidate HGDN wall-clock sweep family:
+  - `slim`: `MODEL_DIM=320`, `MLP_MULT=3.25`
+  - `current`: `MODEL_DIM=384`, `MLP_MULT=3.25`
+  - `mid`: `MODEL_DIM=416`, `MLP_MULT=3.25`
+  - `wide`: `MODEL_DIM=448`, `MLP_MULT=3.0`
+
 ## Already landed
 
 - Default compile path is now `COMPILE_STRATEGY=model`.

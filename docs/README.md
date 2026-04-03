@@ -1,6 +1,6 @@
 # HGDN Branch Status
 
-Last updated: 2026-04-02 21:34:28 EDT
+Last updated: 2026-04-02 21:54:53 EDT
 
 Branch: `exp/hgdn`
 
@@ -126,22 +126,46 @@ Interpretation:
 - It preserves the hybrid architecture while cutting the throughput penalty materially.
 - On this GPU/kernel stack, it is the best measured compromise so far.
 
-## Budget Check
+## Artifact Audit
 
-The `GDN_RATIO=1` hybrid needed an MLP width bump to use more of the artifact budget.
+The old branch-local artifact estimate was wrong. It used a hand proxy based on large-tensor int8 packing plus a fixed compression factor, and it overstated the final submission size by roughly `30-40%`.
 
-Measured estimate sweep:
+The correct byte story has two stages:
 
-| `MLP_MULT` | Params | Estimated artifact | Headroom |
-|---|---:|---:|---:|
-| `3.0` | `24,100,032` | `14.98 MB` | `6.2%` |
-| `3.125` | `24,689,856` | `15.34 MB` | `3.9%` |
-| `3.25` | `25,279,680` | `15.70 MB` | `1.6%` |
-| `3.375` | `25,869,504` | `16.07 MB` | `-0.6%` |
+- shape-driven int8 packing, which is nearly deterministic for a given state dict layout
+- value-driven zlib compression on the serialized quantized payload, which changes materially after training
+
+### Actual trained-run endpoints
+
+From the logged 2k quality runs:
+
+| Config | Raw `state_dict` bytes | `int8+zlib` bytes | Code bytes | Total artifact |
+|---|---:|---:|---:|---:|
+| Hybrid `GDN_RATIO=1, MLP_MULT=3.25` | `100,338,699` | `10,909,417` | `53,459` | `10,962,876` |
+| Depth control `MLP_MULT=3.75` | `100,047,451` | `9,401,537` | `53,459` | `9,454,996` |
+
+### Exact init-state quantization audit
+
+These numbers use the real `quantize_state_dict_int8 -> torch.save -> zlib.compress` path on the same model shapes:
+
+| Config | Params | Int8 payload | Raw quant `torch.save` | Init `int8+zlib` |
+|---|---:|---:|---:|---:|
+| Hybrid `GDN_RATIO=1, MLP_MULT=3.25` | `25,279,680` | `25,650,944` | `25,750,713` | `8,140,843` |
+| Depth control `MLP_MULT=3.75` | `25,193,600` | `25,374,208` | `25,453,817` | `7,271,843` |
+
+Interpretation:
+
+- The int8 payload itself is only about `3.95x` smaller than raw fp32 tensor bytes.
+- The large extra shrink happens in zlib on the serialized quantized object.
+- Training increases payload entropy, so trained checkpoints compress noticeably worse than init-state ones:
+  - hybrid payload-to-zlib: about `3.15x` at init, `2.35x` after training
+  - depth payload-to-zlib: about `3.49x` at init, `2.70x` after training
 
 Current conclusion:
 
-- `GDN_RATIO=1, MLP_MULT=3.25` is the best local budget-filling hybrid variant found so far.
+- The old proxy table should not be used for budget decisions.
+- Future size decisions should use the trainer's real artifact audit fields, not a static heuristic.
+- The hybrid is genuinely less compressible than the depth control, so size matching needs to use actual bytes, not only parameter counts.
 
 ## Quality Comparison
 
@@ -195,20 +219,49 @@ Interpretation:
 - The hybrid also degrades less after the int8 roundtrip than the depth-control baseline.
 - The architecture question is currently answered in favor of the hybrid on this local quality comparison.
 
-## Caveat: Actual Artifact Bytes Are Still Underfilled
+## Time-Matched Reindex
+
+The existing quality comparison is step-matched. The hybrid is slower, so the fair wall-clock question is whether the depth control would erase the gap if given its extra steps.
+
+Using the logged depth checkpoints and a log-linear fit of `eval/bpb` against `train_time_ms`, the predicted depth-control BPB at the hybrid's wall times is:
+
+| Hybrid checkpoint | Hybrid train time | Hybrid BPB | Predicted depth BPB at same wall time | Hybrid advantage |
+|---|---:|---:|---:|---:|
+| `500` | `567,508 ms` | `2.9000` | `2.9996` | `0.0996` |
+| `1000` | `1,134,115 ms` | `2.7492` | `2.8163` | `0.0671` |
+| `1500` | `1,701,439 ms` | `2.6148` | `2.7089` | `0.0941` |
+| `2000` | `2,272,172 ms` | `2.5138` | `2.6324` | `0.1186` |
+
+Interpretation:
+
+- The hybrid still wins under equal wall time.
+- The gap narrows at the `1000` checkpoint, then widens again.
+- Even before size matching, the branch is not relying on a misleading equal-step-only win.
+
+## Caveat: Current Quality Win Is Not Yet Size-Matched
 
 Even with the stronger `GDN_RATIO=1, MLP_MULT=3.25` hybrid:
 
 - Hybrid actual total artifact bytes: `10,962,876`
 - Depth actual total artifact bytes: `9,454,996`
 
-So both families are still substantially under the `16,000,000` byte limit in actual `code + int8_zlib` bytes.
+That means the hybrid had about a `16%` artifact-size advantage in the current comparison. Some unknown fraction of the BPB gap is therefore still "more compressed params."
+
+The next matched depth-control candidate is:
+
+- `depth` with `MLP_MULT=4.7`
+
+Why this setting:
+
+- exact init-state quant audit gives `8,439,594` compressed payload bytes
+- applying the observed depth train/init compression factor from `quality_depth_seq2k` projects to about `10,964,745` total bytes including code
+- that is effectively matched to the hybrid's `10,962,876` total bytes
 
 This means:
 
 - The quality result is already useful and meaningful.
-- But the branch is not yet at a final submission-grade budget-filled comparison.
-- The next work should focus on capacity filling and matched-budget refinement, not re-asking whether HGDN works at all.
+- But the branch is not yet at a final submission-grade matched-budget comparison.
+- The next work should focus on size matching and then wall-clock-aware scaling, not re-asking whether HGDN works at all.
 
 ## Current Recommendation
 
@@ -217,14 +270,15 @@ If continuing this branch, the current best path is:
 1. Keep `COMPILE_STRATEGY=model`.
 2. Treat `GDN_RATIO=1, MLP_MULT=3.25, TRAIN_SEQ_LEN=2048` as the primary HGDN operating point.
 3. Stop spending time on selective compile unless an H100 result contradicts the 4070 measurements.
-4. Use the hybrid as the current winner over the depth-control baseline at this local scale.
-5. Spend the next iteration on filling the actual artifact budget while preserving the matched comparison contract.
+4. Use the hybrid as the current quality winner over the depth-control baseline at this local scale, including after wall-time reindexing.
+5. Run the size-matched depth-control follow-up next with `MLP_MULT=4.7`.
+6. After that rerun, move to compute-optimal scaling instead of blindly filling the full 16MB.
 
 ## Likely Next Work
 
-- Build a more budget-filled hybrid variant using the real `int8+zlib` artifact bytes, not only the proxy estimate.
-- Build a correspondingly budget-filled depth-control comparison so artifact size is better matched.
-- Re-run the same `2048` quality comparison on those fuller configs.
+- Re-run the same `2048` quality comparison with the size-matched depth control (`MLP_MULT=4.7`).
+- Add the trainer's new byte-audit fields to any future quality-run summaries when comparing branches.
+- After the size-matched rerun, run a small wall-clock-capped HGDN scaling sweep to find the real compute-optimal size.
 - If possible later, re-check throughput and compile strategy on the target H100 environment.
 
 ## Recent Branch Checkpoints

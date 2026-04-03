@@ -14,6 +14,7 @@ from model import (
     make_hybrid_tight,
     make_hybrid_wide,
 )
+from train_gpt_hybrid import serialize_quantized_state_dict_int8
 
 
 def test_recurrence():
@@ -168,8 +169,8 @@ def test_block_types():
     print("  ✓ block types OK")
 
 
-def test_sizing():
-    BUDGET = 15_965_000
+def test_artifact_audit():
+    """Verify the real quantized artifact audit behaves monotonically."""
     for label, m in [
         ("hybrid_tight  (8h Dk48 Dv48 mlp3.0)", make_hybrid_tight()),
         ("hybrid_wide   (4h Dk48 Dv96 mlp3.25)", make_hybrid_wide()),
@@ -177,26 +178,19 @@ def test_sizing():
         ("depth_control (16L×384d mlp3.75)", make_depth_control()),
     ]:
         total = sum(p.numel() for p in m.parameters())
-        sd = m.state_dict()
-        lp = sum(
-            t.numel()
-            for t in sd.values()
-            if t.is_floating_point() and t.numel() > 65536
-        )
-        sb = sum(
-            t.numel() * 2
-            for t in sd.values()
-            if t.is_floating_point() and t.numel() <= 65536
-        )
-        est = int(lp * 6 / 8 * 0.82) + sb
+        _, _, audit = serialize_quantized_state_dict_int8(m.state_dict())
         ng = sum(1 for t in m.block_types if t == "gdn")
         na = sum(1 for t in m.block_types if t == "attn")
-        hr = (BUDGET - est) / BUDGET * 100
-        status = "✓" if est < BUDGET else "✗"
+        assert audit["baseline_tensor_bytes"] >= audit["int8_payload_bytes"]
+        assert audit["quant_raw_torch_bytes"] >= audit["int8_payload_bytes"]
+        assert audit["quant_raw_torch_bytes"] >= audit["quant_zlib_bytes"]
         print(
-            f"  {status} {label}: {total:,}p ({ng}G+{na}A) ≈{est / 1e6:.1f}MB [{hr:.1f}%]"
+            f"  ✓ {label}: {total:,}p ({ng}G+{na}A) "
+            f"payload={audit['int8_payload_bytes'] / 1e6:.2f}MB "
+            f"raw_torch={audit['quant_raw_torch_bytes'] / 1e6:.2f}MB "
+            f"int8_zlib_init={audit['quant_zlib_bytes'] / 1e6:.2f}MB"
         )
-    print("  ✓ sizing OK")
+    print("  ✓ artifact audit OK")
 
 
 def test_state_tracking():
@@ -299,7 +293,7 @@ if __name__ == "__main__":
         ("Causal conv", test_causal_conv),
         ("Hybrid fwd/bwd", test_hybrid_fwd_bwd),
         ("Block types", test_block_types),
-        ("Sizing (all presets)", test_sizing),
+        ("Artifact audit (all presets)", test_artifact_audit),
         ("State tracking", test_state_tracking),
         ("Convergence", test_convergence),
     ]

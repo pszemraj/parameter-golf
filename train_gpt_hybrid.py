@@ -584,6 +584,36 @@ def dequantize_state_dict_int8(obj: dict[str, Any]) -> dict[str, Tensor]:
     return out
 
 
+def serialize_quantized_state_dict_int8(
+    state_dict: dict[str, Tensor], zlib_level: int = 9
+) -> tuple[dict[str, Any], bytes, dict[str, int | float]]:
+    """Quantize, serialize, and compress a state dict with byte-level audit stats.
+
+    :param dict[str, Tensor] state_dict: Floating-point state dict to pack.
+    :param int zlib_level: Compression level for the final zlib payload, defaults to 9.
+    :return tuple[dict[str, Any], bytes, dict[str, int | float]]: Quantized object, compressed blob, and byte audit metrics.
+    """
+    quant_obj, quant_stats = quantize_state_dict_int8(state_dict)
+    quant_buf = io.BytesIO()
+    torch.save(quant_obj, quant_buf)
+    quant_raw = quant_buf.getvalue()
+    quant_blob = zlib.compress(quant_raw, level=zlib_level)
+    quant_raw_bytes = len(quant_raw)
+    quant_zlib_bytes = len(quant_blob)
+    int8_payload_bytes = quant_stats["int8_payload_bytes"]
+    baseline_tensor_bytes = quant_stats["baseline_tensor_bytes"]
+    audit = {
+        **quant_stats,
+        "quant_raw_torch_bytes": quant_raw_bytes,
+        "quant_raw_overhead_bytes": quant_raw_bytes - int8_payload_bytes,
+        "quant_zlib_bytes": quant_zlib_bytes,
+        "baseline_to_payload_ratio": baseline_tensor_bytes / max(int8_payload_bytes, 1),
+        "payload_to_zlib_ratio": int8_payload_bytes / max(quant_zlib_bytes, 1),
+        "raw_quant_to_zlib_ratio": quant_raw_bytes / max(quant_zlib_bytes, 1),
+    }
+    return quant_obj, quant_blob, audit
+
+
 # =====================================================================
 # UTILITY
 # =====================================================================
@@ -1238,19 +1268,30 @@ def main() -> None:
 
     # ── Serialize + quantize + roundtrip ──────────────────────────────
     qfb = None
+    raw_model_bytes = None
     code_bytes = len(code.encode("utf-8"))
     if master_process:
         torch.save(base_model.state_dict(), "final_model.pt")
-        log0(f"raw_model_bytes:{os.path.getsize('final_model.pt')}")
+        raw_model_bytes = os.path.getsize("final_model.pt")
+        log0(f"raw_model_bytes:{raw_model_bytes}")
 
-    quant_obj, _ = quantize_state_dict_int8(base_model.state_dict())
-    quant_buf = io.BytesIO()
-    torch.save(quant_obj, quant_buf)
-    quant_blob = zlib.compress(quant_buf.getvalue(), level=9)
+    quant_obj, quant_blob, quant_audit = serialize_quantized_state_dict_int8(
+        base_model.state_dict()
+    )
     if master_process:
         with open("final_model.int8.ptz", "wb") as f:
             f.write(quant_blob)
-        qfb = os.path.getsize("final_model.int8.ptz")
+        qfb = len(quant_blob)
+        log0(
+            "quant_audit "
+            f"baseline_tensor_bytes:{quant_audit['baseline_tensor_bytes']} "
+            f"int8_payload_bytes:{quant_audit['int8_payload_bytes']} "
+            f"raw_torch_bytes:{quant_audit['quant_raw_torch_bytes']} "
+            f"raw_torch_overhead_bytes:{quant_audit['quant_raw_overhead_bytes']} "
+            f"baseline_to_payload_ratio:{quant_audit['baseline_to_payload_ratio']:.2f}x "
+            f"payload_to_zlib_ratio:{quant_audit['payload_to_zlib_ratio']:.2f}x "
+            f"raw_quant_to_zlib_ratio:{quant_audit['raw_quant_to_zlib_ratio']:.2f}x"
+        )
         log0(f"int8_zlib_bytes:{qfb} code_bytes:{code_bytes} total:{qfb + code_bytes}")
 
     if distributed:
@@ -1315,6 +1356,28 @@ def main() -> None:
         wandb.summary["artifact_warning_final"] = artifact_warning
         wandb.summary["artifact_bytes_final"] = artifact_bytes
         wandb.summary["artifact_headroom_bytes_final"] = artifact_headroom
+        wandb.summary["artifact/raw_state_dict_bytes_final"] = raw_model_bytes
+        wandb.summary["artifact/quant_baseline_tensor_bytes_final"] = quant_audit[
+            "baseline_tensor_bytes"
+        ]
+        wandb.summary["artifact/quant_int8_payload_bytes_final"] = quant_audit[
+            "int8_payload_bytes"
+        ]
+        wandb.summary["artifact/quant_raw_torch_bytes_final"] = quant_audit[
+            "quant_raw_torch_bytes"
+        ]
+        wandb.summary["artifact/quant_raw_torch_overhead_bytes_final"] = quant_audit[
+            "quant_raw_overhead_bytes"
+        ]
+        wandb.summary["artifact/quant_baseline_to_payload_ratio_final"] = quant_audit[
+            "baseline_to_payload_ratio"
+        ]
+        wandb.summary["artifact/quant_payload_to_zlib_ratio_final"] = quant_audit[
+            "payload_to_zlib_ratio"
+        ]
+        wandb.summary["artifact/quant_raw_to_zlib_ratio_final"] = quant_audit[
+            "raw_quant_to_zlib_ratio"
+        ]
         wandb.summary["artifact/code_bytes_final"] = code_bytes
         wandb.summary["artifact/int8_payload_zlib_bytes_final"] = qfb
         wandb.finish()
