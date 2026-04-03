@@ -79,10 +79,9 @@ class CastedLinear(nn.Linear):
 class RMSNorm(nn.Module):
     """Parameter-free RMSNorm wrapper used throughout the hybrid stack."""
 
-    def __init__(self, dim: int = 0, eps: float = 1e-6):
+    def __init__(self, eps: float = 1e-6):
         """Initialize the RMSNorm wrapper.
 
-        :param int dim: Unused compatibility argument, defaults to 0.
         :param float eps: Numerical stability epsilon, defaults to 1e-6.
         """
         super().__init__()
@@ -461,7 +460,7 @@ class GDNBlock(nn.Module):
         :param float leaky_slope: LeakyReLU slope, defaults to 0.5.
         """
         super().__init__()
-        self.attn_norm, self.mlp_norm = RMSNorm(dim), RMSNorm(dim)
+        self.attn_norm, self.mlp_norm = RMSNorm(), RMSNorm()
         self.gdn = GatedDeltaNet(
             dim, n_heads, head_k_dim, expand_v, allow_neg_eigval, conv_size
         )
@@ -514,7 +513,7 @@ class AttnBlock(nn.Module):
         :param float leaky_slope: LeakyReLU slope, defaults to 0.5.
         """
         super().__init__()
-        self.attn_norm, self.mlp_norm = RMSNorm(dim), RMSNorm(dim)
+        self.attn_norm, self.mlp_norm = RMSNorm(), RMSNorm()
         self.attn = CausalSelfAttention(
             dim, num_heads, num_kv_heads, rope_base, qk_gain_init
         )
@@ -638,7 +637,7 @@ class HybridGPT(nn.Module):
         self.skip_weights = nn.Parameter(
             torch.ones(self.num_skip_weights, d_model, dtype=torch.float32)
         )
-        self.final_norm = RMSNorm(d_model)
+        self.final_norm = RMSNorm()
         self.lm_head = (
             None if tie_embeddings else CastedLinear(d_model, vocab_size, bias=False)
         )

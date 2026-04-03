@@ -276,17 +276,33 @@ def load_data_shard(file: Path) -> Tensor:
     return torch.from_numpy(tokens_np.astype(np.uint16, copy=False))
 
 
+def resolve_token_files(
+    pattern: str, *, missing_message: str | None = None
+) -> list[Path]:
+    """Resolve a token-shard glob into a sorted file list.
+
+    :param str pattern: Glob pattern for token shards.
+    :param str | None missing_message: Optional custom error when no files match, defaults to None.
+    :raises FileNotFoundError: If the pattern matches no files.
+    :return list[Path]: Sorted shard paths.
+    """
+    files = [Path(p) for p in sorted(glob.glob(pattern))]
+    if not files:
+        raise FileNotFoundError(missing_message or f"No files for: {pattern}")
+    return files
+
+
 class TokenStream:
     """Sequential shard reader that wraps around at the end of the file list."""
 
-    def __init__(self, pattern: str):
+    def __init__(self, files: list[Path]):
         """Initialize a streaming shard reader.
 
-        :param str pattern: Glob pattern for token shards.
+        :param list[Path] files: Ordered token shard paths.
         """
-        self.files = [Path(p) for p in sorted(glob.glob(pattern))]
+        self.files = list(files)
         if not self.files:
-            raise FileNotFoundError(f"No files for: {pattern}")
+            raise ValueError("TokenStream requires at least one shard file")
         self.file_idx = 0
         self.tokens = load_data_shard(self.files[0])
         self.pos = 0
@@ -320,16 +336,18 @@ class TokenStream:
 class DistributedTokenLoader:
     """Shard loader that slices each global batch by distributed rank."""
 
-    def __init__(self, pattern: str, rank: int, world_size: int, device: torch.device):
+    def __init__(
+        self, files: list[Path], rank: int, world_size: int, device: torch.device
+    ):
         """Initialize the distributed token loader.
 
-        :param str pattern: Glob pattern for token shards.
+        :param list[Path] files: Ordered token shard paths.
         :param int rank: Distributed rank.
         :param int world_size: Distributed world size.
         :param torch.device device: Target device for batches.
         """
         self.rank, self.world_size, self.device = rank, world_size, device
-        self.stream = TokenStream(pattern)
+        self.stream = TokenStream(files)
 
     def next_batch(
         self, global_tokens: int, seq_len: int, grad_accum_steps: int
@@ -392,16 +410,13 @@ def build_sentencepiece_luts(
     )
 
 
-def load_validation_tokens(pattern: str, seq_len: int) -> Tensor:
+def load_validation_tokens(files: list[Path], seq_len: int) -> Tensor:
     """Load and trim validation tokens to an integer number of sequences.
 
-    :param str pattern: Glob pattern for validation shards.
+    :param list[Path] files: Ordered validation shard paths.
     :param int seq_len: Sequence length used for eval reshaping.
     :return Tensor: Concatenated validation tokens.
     """
-    files = [Path(p) for p in sorted(glob.glob(pattern))]
-    if not files:
-        raise FileNotFoundError(f"No files for: {pattern}")
     tokens = torch.cat([load_data_shard(f) for f in files]).contiguous()
     usable = ((tokens.numel() - 1) // seq_len) * seq_len
     return tokens[: usable + 1]
@@ -846,22 +861,25 @@ def main() -> None:
             f"Expected tokenizer at: {tokenizer_path}"
         )
     dataset_dir = Path(args.data_path).resolve()
-    train_files = sorted(dataset_dir.glob("fineweb_train_*.bin"))
-    val_files = sorted(dataset_dir.glob("fineweb_val_*.bin"))
-    if not train_files or not val_files:
-        raise FileNotFoundError(
-            "FineWeb shards not found for the hybrid trainer. Download the published "
-            "sp1024 assets with:\n"
-            "  python data/cached_challenge_fineweb.py --variant sp1024 --train-shards 1\n"
-            f"Expected dataset under: {dataset_dir}"
-        )
+    missing_data_message = (
+        "FineWeb shards not found for the hybrid trainer. Download the published "
+        "sp1024 assets with:\n"
+        "  python data/cached_challenge_fineweb.py --variant sp1024 --train-shards 1\n"
+        f"Expected dataset under: {dataset_dir}"
+    )
+    train_files = resolve_token_files(
+        args.train_files, missing_message=missing_data_message
+    )
+    val_files = resolve_token_files(
+        args.val_files, missing_message=missing_data_message
+    )
 
     sp = spm.SentencePieceProcessor(model_file=args.tokenizer_path)
     if int(sp.vocab_size()) != args.vocab_size:
         raise ValueError(
             f"VOCAB_SIZE={args.vocab_size} does not match tokenizer vocab_size={int(sp.vocab_size())}"
         )
-    val_tokens = load_validation_tokens(args.val_files, args.train_seq_len)
+    val_tokens = load_validation_tokens(val_files, args.train_seq_len)
     base_bytes_lut, has_ls_lut, is_bnd_lut = build_sentencepiece_luts(
         sp, args.vocab_size, device
     )
@@ -1014,7 +1032,7 @@ def main() -> None:
         optimizers.insert(1, optimizer_head)
 
     # ── Data loader & warmup ──────────────────────────────────────────
-    train_loader = DistributedTokenLoader(args.train_files, rank, world_size, device)
+    train_loader = DistributedTokenLoader(train_files, rank, world_size, device)
     max_wallclock_ms = (
         1000.0 * args.max_wallclock_seconds if args.max_wallclock_seconds > 0 else None
     )
@@ -1074,9 +1092,7 @@ def main() -> None:
         zero_grad_all()
         if distributed:
             model.require_backward_grad_sync = True
-        train_loader = DistributedTokenLoader(
-            args.train_files, rank, world_size, device
-        )
+        train_loader = DistributedTokenLoader(train_files, rank, world_size, device)
     if device.type == "cuda":
         torch.cuda.synchronize()
         gc.collect()
