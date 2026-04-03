@@ -39,6 +39,7 @@ Environment overrides:
   PYTHON_BIN        Python executable, defaults to python3.
   VARIANT           Tokenizer family, defaults to sp1024.
   TRAIN_SHARDS      Overrides the mode default shard count.
+  DOWNLOAD_JOBS     Passed through as --jobs to the downloader.
   WITH_DOCS         Set to 1 to also fetch docs_selected.jsonl and its sidecar.
   SKIP_MANIFEST     Set to 1 to pass --skip-manifest.
 
@@ -53,6 +54,7 @@ Examples:
   scripts/bootstrap_challenge_data.sh smoke
   scripts/bootstrap_challenge_data.sh h100
   TRAIN_SHARDS=24 scripts/bootstrap_challenge_data.sh h100
+  DOWNLOAD_JOBS=16 scripts/bootstrap_challenge_data.sh h100
   WITH_DOCS=1 scripts/bootstrap_challenge_data.sh full
 EOF
 }
@@ -125,6 +127,9 @@ dataset_dir="data/datasets/$(dataset_dir_for_variant "$variant")"
 tokenizer_path="$(tokenizer_model_for_variant "$variant")"
 
 cmd=("$python_bin" "data/cached_challenge_fineweb.py" "--variant" "$variant" "--train-shards" "$train_shards")
+if [[ -n "${DOWNLOAD_JOBS:-}" ]]; then
+    cmd+=("--jobs" "$DOWNLOAD_JOBS")
+fi
 if [[ "${SKIP_MANIFEST:-0}" == "1" ]]; then
     cmd+=("--skip-manifest")
 fi

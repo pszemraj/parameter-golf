@@ -4,13 +4,14 @@ import os
 import shutil
 from pathlib import Path
 
-from huggingface_hub import hf_hub_download
+from huggingface_hub import hf_hub_download, snapshot_download
 
 REPO_ID = os.environ.get("MATCHED_FINEWEB_REPO_ID", "willdepueoai/parameter-golf")
 REMOTE_ROOT_PREFIX = os.environ.get("MATCHED_FINEWEB_REMOTE_ROOT_PREFIX", "datasets")
 ROOT = Path(__file__).resolve().parent
 DATASETS_DIR = ROOT / "datasets"
 TOKENIZERS_DIR = ROOT / "tokenizers"
+DEFAULT_DOWNLOAD_JOBS = int(os.environ.get("MATCHED_FINEWEB_DOWNLOAD_JOBS", "8"))
 
 
 def dataset_dir_for_variant(name: str) -> str:
@@ -60,6 +61,50 @@ def get(relative_path: str) -> None:
         os.link(cached_source, destination)
     except OSError:
         shutil.copy2(cached_source, destination)
+
+
+def materialize_cached_file(snapshot_root: Path, relative_path: str) -> None:
+    destination = local_path_for_remote(relative_path)
+    if destination.exists():
+        return
+    if destination.is_symlink():
+        destination.unlink()
+    cached_source = (snapshot_root / relative_path).resolve(strict=True)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.link(cached_source, destination)
+    except OSError:
+        shutil.copy2(cached_source, destination)
+
+
+def download_many(relative_paths: list[str], *, max_workers: int) -> None:
+    unique_paths = list(dict.fromkeys(relative_paths))
+    needed_paths = []
+    for path in unique_paths:
+        destination = local_path_for_remote(path)
+        if not destination.exists() or destination.is_symlink():
+            needed_paths.append(path)
+    print(
+        f"download_plan:requested={len(unique_paths)} "
+        f"missing={len(needed_paths)} jobs={max_workers}"
+    )
+    if not needed_paths:
+        return
+    if max_workers <= 1:
+        for path in needed_paths:
+            get(path)
+        return
+
+    snapshot_root = Path(
+        snapshot_download(
+            repo_id=REPO_ID,
+            repo_type="dataset",
+            allow_patterns=needed_paths,
+            max_workers=max_workers,
+        )
+    ).resolve(strict=True)
+    for path in needed_paths:
+        materialize_cached_file(snapshot_root, path)
 
 
 def manifest_path() -> Path:
@@ -122,6 +167,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Also download docs_selected.jsonl and its sidecar for tokenizer retraining or dataset re-export.",
     )
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=DEFAULT_DOWNLOAD_JOBS,
+        help="Parallel download workers for Hugging Face snapshot fetches. Defaults to MATCHED_FINEWEB_DOWNLOAD_JOBS or 8.",
+    )
     return parser
 
 
@@ -135,6 +186,8 @@ def main() -> None:
     )
     if train_shards < 0:
         raise ValueError("train_shards must be non-negative")
+    if args.jobs <= 0:
+        raise ValueError("jobs must be positive")
 
     manifest = load_manifest(skip_manifest_download=args.skip_manifest)
     dataset_entry = next(
@@ -160,18 +213,28 @@ def main() -> None:
             f"tokenizer {tokenizer_name} not found in {REMOTE_ROOT_PREFIX}/manifest.json"
         )
 
-    if args.with_docs:
-        get(f"{REMOTE_ROOT_PREFIX}/docs_selected.jsonl")
-        get(f"{REMOTE_ROOT_PREFIX}/docs_selected.source_manifest.json")
-
     dataset_prefix = f"{REMOTE_ROOT_PREFIX}/datasets/{dataset_dir}"
+    download_plan: list[str] = []
+    if args.with_docs:
+        download_plan.extend(
+            [
+                f"{REMOTE_ROOT_PREFIX}/docs_selected.jsonl",
+                f"{REMOTE_ROOT_PREFIX}/docs_selected.source_manifest.json",
+            ]
+        )
     for i in range(val_shards):
-        get(f"{dataset_prefix}/fineweb_val_{i:06d}.bin")
+        download_plan.append(f"{dataset_prefix}/fineweb_val_{i:06d}.bin")
     for i in range(train_shards):
-        get(f"{dataset_prefix}/fineweb_train_{i:06d}.bin")
+        download_plan.append(f"{dataset_prefix}/fineweb_train_{i:06d}.bin")
 
     for artifact_path in artifact_paths_for_tokenizer(tokenizer_entry):
-        get(f"{REMOTE_ROOT_PREFIX}/{artifact_path}")
+        download_plan.append(f"{REMOTE_ROOT_PREFIX}/{artifact_path}")
+
+    print(
+        f"Downloading variant={args.variant} train_shards={train_shards} "
+        f"val_shards={val_shards} jobs={args.jobs}"
+    )
+    download_many(download_plan, max_workers=args.jobs)
 
 
 if __name__ == "__main__":
