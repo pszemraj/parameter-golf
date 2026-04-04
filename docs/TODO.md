@@ -100,6 +100,15 @@ Latest local attribution checkpoint:
   - layout cleanup between `conv_qkv` and recurrence
   - then `norm_qkv` / `output_gate` glue
   - not generic trainer-wide `copy_` chasing
+- First boundary candidate now exists and is worth keeping in the experiment surface:
+  - `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+  - it fixes q/k/v contiguity all the way from `conv_qkv` to `recurrence_inputs`
+  - local trainer self-device time improved from `25,990.59 ms` to `25,258.00 ms` (`-2.82%`)
+  - the tradeoff is a more expensive `gdn.conv_qkv` bucket (`236.67 -> 322.01 ms`) in exchange for a cheaper recurrence/norm path
+- Immediate next local target after this candidate:
+  - `gdn.gates`
+  - then `gdn.output_gate`
+  - with explicit attention to avoidable fp32 promotion islands
 
 ### 1. Norm placement screen (`pre` vs `post` vs `keel`)
 

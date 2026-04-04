@@ -1,6 +1,6 @@
 # HGDN Branch Status
 
-Last updated: 2026-04-04 15:35 EDT
+Last updated: 2026-04-04 17:20 EDT
 
 Branch: `exp/hgdn`
 
@@ -87,6 +87,7 @@ What has not been claimed:
 - `scripts/run_hgdn_local_phase1.sh`: sequential local 4070 phase-1 investigation bundle
 - `scripts/profile_hgdn_local_hotpath.py`: bare-GDN / hybrid-FB / optimizer-only local profiler
 - `scripts/analyze_hgdn_phase1.py`: bucket-attribution and boundary-audit analyzer for phase-1 bundles
+- `scripts/compare_hgdn_phase1.py`: structured before/after comparator for two local phase-1 bundles
 - `scripts/run_laptop_norm_compare.sh`: 1x laptop GPU helper for fixed-step `pre/post/keel` norm screens
 - `docs/HARDWARE_TRANSFER.md`: what does and does not transfer from local 4070 profiling to 1xH100 profiling
 - `docs/PROFILING_LOG.md`: tracked profiler checkpoints and conclusions that should survive beyond raw `profiles/` bundles
@@ -130,6 +131,13 @@ The branch now includes the following major changes:
   - `GDN_USE_Q_CONV`
   - `GDN_USE_K_CONV`
   - `GDN_USE_V_CONV`
+- The branch now has an explicit conv-to-recurrence layout experiment knob:
+  - `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+  - first local result:
+    - fixes q/k/v contiguity from `conv_qkv` through `recurrence_inputs`
+    - reduces local trainer self-device time from `25,990.59 ms` to `25,258.00 ms` (`-2.82%`)
+    - reduces `gdn.recurrence`, `gdn.norm_qkv`, and trainer-level `aten::mul`/`aten::copy_`
+    - increases `gdn.conv_qkv`, so it remains an experimental candidate pending H100 confirmation
 - A fair perf harness:
   - `PERF_TIMING=1`
   - `PERF_IGNORE_STEPS=N`

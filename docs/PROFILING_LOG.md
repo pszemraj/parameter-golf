@@ -1,6 +1,6 @@
 # Profiling Log
 
-Last updated: 2026-04-04 18:15 EDT
+Last updated: 2026-04-04 17:20 EDT
 
 This file records profiler-driven checkpoints that should survive beyond the raw
 artifacts under `profiles/`.
@@ -95,3 +95,75 @@ What should not be the first target from this run:
 - this run was intentionally local-only and eager for attribution
 - H100 confirmation should happen only after a local conv-to-recurrence layout
   intervention shows a measurable win
+
+## 2026-04-04 — Local conv-output layout variant (`rtx4070_phase1_convcontig`)
+
+Bundle:
+
+- raw artifacts: `profiles/rtx4070_phase1_convcontig/`
+- structured comparison: `profiles/rtx4070_phase1_convcontig/compare_vs_rtx4070_phase1/comparison.md`
+- commit at run time: `82be69c`
+
+Contract:
+
+- GPU: local RTX 4070 Laptop
+- env: `pg`
+- one change enabled:
+  - `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+- everything else matched the earlier `rtx4070_phase1` bundle
+
+### Main findings
+
+This is the first boundary variant that produced a clear local win rather than
+just moving time around.
+
+Boundary result:
+
+- q/k/v now stay contiguous from `conv_qkv` through `norm_qkv` into
+  `recurrence_inputs`
+- the old non-contiguous stride `(786432, 1, 2048)` becomes contiguous
+  `(786432, 384, 1)` at the conv output
+
+Trainer-eager profiler result:
+
+- total trainer self-device time:
+  - baseline: `25,990.59 ms`
+  - candidate: `25,258.00 ms`
+  - delta: `-732.59 ms` (`-2.82%`)
+- targeted trainer buckets:
+  - `aten::copy_`: `795.81 -> 776.98 ms`
+  - `aten::mul`: `1047.57 -> 1000.68 ms`
+  - `gdn.recurrence`: `268.79 -> 194.16 ms`
+  - `gdn.norm_qkv`: `113.18 -> 96.47 ms`
+  - `gdn.output_gate`: `145.90 -> 141.58 ms`
+  - `gdn.conv_qkv`: `236.67 -> 322.01 ms`
+
+Interpretation:
+
+- the explicit contiguous materialization is paying for itself overall
+- the improvement is coming from a cheaper recurrence/norm path and slightly
+  lower step-level `copy_` / `mul`
+- the tradeoff is that `gdn.conv_qkv` itself becomes more expensive because the
+  conv path is now doing the explicit layout materialization once up front
+
+### Decision
+
+`GDN_CONV_OUTPUT_CONTIGUOUS=1` is a real local candidate and should stay in the
+experiment surface.
+
+Current judgment:
+
+- promising enough for an eventual 1xH100 confirmation
+- not ready to become the default path yet
+- next local target should move to the gate/output side, because after the
+  layout fix the largest remaining bare-GDN bucket is now `gdn.gates`
+
+### Next target
+
+The next local-first investigation should focus on the remaining HGDN fp32
+islands and elementwise glue:
+
+1. `gdn.gates`
+2. `gdn.output_gate`
+3. any unnecessary dtype promotion around `softplus`, `sigmoid`, and
+   `rms_norm(o.float()).to(x.dtype)`
