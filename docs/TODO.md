@@ -122,10 +122,17 @@ Latest local attribution checkpoint:
   - `gdn.output_norm`: `93.83 ms`
   - `gdn.q_norm`: `50.53 ms`
   - `gdn.k_norm`: `49.46 ms`
+- Packed qkv conv follow-up is now done on `rtx4070_phase1_packedqkv_fix1`.
+- Result:
+  - the contiguity bug is fixed and the isolated hotpaths improved
+  - but the full trainer-eager step still regressed by `+1.11%`
+  - the main new tax is `aten::cat` plus a slightly worse conv backward path
 - Updated next step:
-  - try a semantics-preserving packed q/k/v depthwise-conv path
-  - keep `GDN_CONV_OUTPUT_CONTIGUOUS=1`
-  - re-check whether that lowers the combined conv stack without reintroducing the old recurrence/layout tax
+  - do not send packed qkv conv alone to H100
+  - if revisiting packing, the next experiment must remove the `aten::cat`
+    overhead by emitting packed q/k/v directly from projection
+  - otherwise keep working from the current local winner:
+    - `GDN_CONV_OUTPUT_CONTIGUOUS=1`
 
 ### 1. Norm placement screen (`pre` vs `post` vs `keel`)
 

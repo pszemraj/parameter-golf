@@ -1,6 +1,6 @@
 # Profiling Log
 
-Last updated: 2026-04-04 18:10 EDT
+Last updated: 2026-04-04 18:29 EDT
 
 This file records profiler-driven checkpoints that should survive beyond the raw
 artifacts under `profiles/`.
@@ -400,3 +400,108 @@ What moves down the list after this run:
 - more coarse fp32 on/off gate experiments
 - q/k-only contiguity experiments
 - `v_conv` ablation as the next default step
+
+## 2026-04-04 — Corrected packed qkv conv follow-up (`rtx4070_phase1_packedqkv_fix1`)
+
+Bundle:
+
+- raw artifacts: `profiles/rtx4070_phase1_packedqkv_fix1/`
+- structured comparison:
+  `profiles/rtx4070_phase1_packedqkv_fix1/compare_vs_rtx4070_phase1_convcontig_subranges/comparison.md`
+- packed-fix commit at run time: `b17b80d`
+
+Contract:
+
+- GPU: local RTX 4070 Laptop
+- env: `pg`
+- fixed baseline:
+  - `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+- candidate:
+  - `GDN_USE_PACKED_QKV_CONV=1`
+  - `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+- purpose:
+  - re-run the packed q/k/v depthwise-conv idea after fixing the earlier
+    contiguity bug so the candidate is judged on real trainer data rather than
+    on a broken layout path
+
+### Main findings
+
+The corrected packed path fixed the original structural flaw.
+
+Boundary result:
+
+- q/k/v are now contiguous after `conv_qkv`
+- contiguity is preserved through:
+  - `norm_qkv`
+  - `recurrence_inputs`
+  - `output_proj_input`
+
+That repaired the earlier recurrence/layout regression. The isolated hotpaths
+did improve:
+
+- bare GDN total self-device time:
+  - baseline: `171.05 ms`
+  - candidate: `166.76 ms`
+  - delta: `-4.29 ms` (`-2.51%`)
+- hybrid forward/backward total self-device time:
+  - baseline: `1273.39 ms`
+  - candidate: `1162.71 ms`
+  - delta: `-110.69 ms` (`-8.69%`)
+- hybrid optimizer total self-device time:
+  - baseline: `203.39 ms`
+  - candidate: `176.65 ms`
+  - delta: `-26.74 ms` (`-13.15%`)
+
+But the full trainer-eager step still lost:
+
+- trainer total self-device time:
+  - baseline: `25797.53 ms`
+  - candidate: `26082.79 ms`
+  - delta: `+285.26 ms` (`+1.11%`)
+
+### Why it still lost
+
+The packed candidate bought the expected HGDN-path wins:
+
+- trainer `gdn.recurrence`: `180.70 -> 173.34 ms`
+- trainer `gdn.q_norm`: `50.53 -> 48.72 ms`
+- trainer `gdn.k_norm`: `49.46 -> 48.99 ms`
+- hybrid-fwd-bwd `aten::copy_`: `14.25 -> 11.99 ms`
+
+But those gains were offset by new packing overhead and a slightly worse conv
+backward path:
+
+- trainer `gdn.qkv_conv_packed`: `+405.74 ms`
+- trainer `aten::cat`: `16.45 -> 99.91 ms`
+- trainer `aten::convolution_backward`: `159.30 -> 173.79 ms`
+- trainer `aten::_conv_depthwise2d`: `125.02 -> 141.34 ms`
+- trainer `aten::copy_`: `776.28 -> 788.81 ms`
+- trainer `aten::mul`: `1003.44 -> 1011.34 ms`
+
+Interpretation:
+
+- the packed-conv idea itself is not dead
+- but packing only at the conv stage is not enough
+- the current implementation still pays too much to build the packed q/k/v
+  tensor before the conv, and that cost comes back at trainer scope
+
+### Decision
+
+Do not promote the current packed qkv conv path to H100.
+
+Current judgment:
+
+- fixed packed qkv conv is a **hotpath win but trainer loss**
+- keep the contiguity repair in the code because it makes the experiment valid
+- reject the current packed-conv-only variant as a local winner
+
+### Next target
+
+If packing is revisited, it needs the next structural step:
+
+1. remove the `aten::cat` tax by emitting packed q/k/v directly from projection
+2. then remeasure packed projection + packed conv as one experiment
+
+Absent that, the active default local winner remains:
+
+- `GDN_CONV_OUTPUT_CONTIGUOUS=1`
