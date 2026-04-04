@@ -4,7 +4,77 @@ This file tracks follow-up work that is intentionally not enabled by default in 
 
 ## Active next steps
 
-### 0. Norm placement screen (`pre` vs `post` vs `keel`)
+### 0. H100 profiling-driven HGDN kernel pass
+
+- Status: active top priority.
+- Why: the H100 runs confirmed that the architecture is worth optimizing, and the profiler says the current throughput tax is not just "FLA recurrence is slow." A large fraction of the overhead is HGDN-side glue code around the recurrence.
+- Current H100 facts:
+  - throughput: hybrid is about `1.40x` slower than the pure-attention depth control at `seq=2048`
+  - quality: hybrid still wins strongly on H100 fixed-2k quality and roundtrip BPB
+- Profiling helper:
+  - `scripts/run_h100_single_gpu_hgdn_profile.sh {hybrid|depth|both}`
+  - default is now `USE_WANDB=0`
+- Measured hotspot read on the 4 active profiled H100 steps:
+  - hybrid flash-attention self CUDA: about `1.15s`
+  - depth flash-attention self CUDA: about `2.38s`
+  - hybrid GDN recurrence-family kernels: about `0.71s`
+  - hybrid depthwise conv stack: about `1.01s`
+  - hybrid extra elementwise/Triton glue: about `1.26s`
+  - hybrid `aten::copy_`: about `0.51s`
+  - depth `aten::copy_`: about `0.04s`
+- Takeaway:
+  - the recurrence kernel matters, but it is not the whole problem
+  - the immediate optimization target is the HGDN scaffolding around the recurrence
+  - attention is already on a strong PyTorch flash-SDPA path, so it is not the first place to spend engineering time
+
+Ranked optimization checklist:
+
+1. Eliminate dtype/layout churn in the HGDN path.
+   - Why: `aten::copy_` is materially larger in hybrid than depth on H100.
+   - What to inspect:
+     - casts around `q/k` normalization
+     - casts around `g`, `beta`, and `g_out`
+     - any view/contiguous path forcing copies before or after the FLA call
+   - Expected upside: high, because this is pure overhead and not model math.
+2. Fuse or rewrite the `q_conv/k_conv/v_conv` preprocessing path.
+   - Why: depthwise conv plus its backward path is one of the largest HGDN-only buckets.
+   - What to try:
+     - a custom Triton kernel or a more direct fused implementation for depthwise causal conv + SiLU
+     - at minimum, benchmark whether `v_conv` can be removed again on H100 without hurting quality
+   - Expected upside: high.
+3. Fuse HGDN elementwise glue.
+   - Why: the profiler shows a broad pile of Triton/elementwise kernels beyond the recurrence itself.
+   - What to target:
+     - q/k normalization path
+     - output `rms_norm(o) * silu(g_out)`
+     - simple gate/decay prep if it currently spills through multiple kernels
+   - Expected upside: medium to high.
+4. Only after 1-3, revisit the FLA recurrence kernel itself.
+   - Why: the recurrence is important, but the trace says the branch is currently losing plenty of time outside it.
+   - What to do:
+     - compare current FLA kernel behavior against the surrounding glue cost
+     - only invest in recurrence-kernel changes if it remains one of the top HGDN buckets after the glue cleanup
+   - Expected upside: medium, but expensive engineering.
+5. Run one attribution-only pass with `COMPILE=0`.
+   - Why: compiled mode swallows some `record_function` labels, so a short eager profile will be easier to read.
+   - Important: use it for diagnosis only, not throughput conclusions.
+6. Consider attention-side alternatives only later.
+   - Why: the attention stack is already using PyTorch flash SDPA, not a naive slow path.
+   - Flex attention or external `flash-attn` should only be tested if HGDN-side kernels stop being the dominant issue.
+
+Suggested immediate sequence:
+
+```bash
+RUN_PREFIX=h100prof scripts/run_h100_single_gpu_hgdn_profile.sh both
+```
+
+Then:
+
+- inspect `profiles/<run_id>/key_averages.txt`
+- inspect the Chrome/Perfetto trace in `profiles/<run_id>/traces/`
+- do one short eager attribution rerun with `COMPILE=0` only if compiled traces remain too anonymous
+
+### 1. Norm placement screen (`pre` vs `post` vs `keel`)
 
 - Status: newly enabled, not quality-screened yet.
 - Why: recent work argues that pre-norm may be leaving depth utilization on the table, especially when a KEEL-style residual path makes post-norm trainable again.
@@ -70,7 +140,7 @@ COMPILE=1 COMPILE_STRATEGY=model GDN_RATIO=1 MLP_MULT=3.25 NORM_STYLE=keel \
 RUN_ID=norm_hybrid_keel_r1 scripts/sweep.sh single
 ```
 
-### 1. Size-matched depth-control rerun
+### 2. Size-matched depth-control rerun
 
 - Status: partially resolved.
 - Why: the current hybrid quality win is real, but the logged artifact sizes are still not perfectly matched.
@@ -90,16 +160,20 @@ COMPILE_STRATEGY=model MLP_MULT=4.0 RUN_ID=quality_depth_mlp40_seq2k \
 scripts/sweep.sh depth
 ```
 
-### 2. H100 throughput calibration
+### 3. H100 throughput calibration
 
-- Status: pending target-hardware access.
-- Why: the 4070 ratio improved from `1.38x` at `seq=1024` to `1.16x` at `seq=2048`, but the real question is the H100 ratio.
-- Run only the existing perf harness first, not a full quality sweep.
-- Helper: `scripts/run_h100_single_gpu_hgdn.sh perf`
+- Status: done.
+- Result:
+  - H100 hybrid `GDN_RATIO=1, MLP_MULT=3.25` perf: `1002.72 ms`
+  - H100 depth `MLP_MULT=4.0` perf: `714.74 ms`
+  - hybrid slowdown: about `1.40x`
+- Current takeaway:
+  - the architecture remains interesting because the quality gap on H100 is stronger than local
+  - but kernel work should come before broader size sweeps because the throughput penalty is larger than the 4070 suggested
 
-### 3. Compute-optimal size sweep
+### 4. Compute-optimal size sweep
 
-- Status: no longer blocked by architecture viability; only blocked if exact local size-matching is considered a hard requirement first.
+- Status: temporarily deprioritized behind kernel work.
 - Why: actual trained artifacts are around `11MB`, so the branch still needs a wall-clock-vs-size sweep instead of assuming "fill 16MB" is optimal.
 - Candidate HGDN wall-clock sweep family:
   - `slim`: `MODEL_DIM=320`, `MLP_MULT=3.25`
@@ -110,6 +184,14 @@ scripts/sweep.sh depth
 ## Already landed
 
 - Default compile path is now `COMPILE_STRATEGY=model`.
+- The branch now has a profiling harness in the trainer:
+  - `PROFILE=1`
+  - scheduled `torch.profiler` capture
+  - trace export under `profiles/<run_id>/traces/`
+  - operator summary export to `profiles/<run_id>/key_averages.txt`
+- The branch now has a dedicated H100 profiling helper:
+  - `scripts/run_h100_single_gpu_hgdn_profile.sh`
+  - defaults to `USE_WANDB=0`
 - The trainer has a dedicated perf harness:
   - `PERF_TIMING=1` for steady-state timing
   - `PERF_IGNORE_STEPS=N` to ignore early measured steps
@@ -168,7 +250,27 @@ scripts/sweep.sh depth
 
 ### 7. Nsight / kernel-level profiling
 
-- Trigger: throughput remains unexplained after graph-break cleanup and matched baseline comparisons.
-- What to do: profile attention vs GDN-heavy runs on the local GPU, but only after confirming local Nsight permissions are working.
-- Expected upside: diagnostic clarity more than immediate speed.
-- Expected cost: medium. Useful only after the higher-leverage compile quick hits are exhausted.
+- Trigger: after the first HGDN glue/kernel cleanup pass, or when we need a firmer memory-bound vs compute-bound answer on H100.
+- What to do:
+  - use the current torch-profiler pass first
+  - then move to Nsight Compute on the top HGDN kernels, especially depthwise conv and recurrence-adjacent kernels
+- Expected upside: high diagnostic clarity for the second optimization pass, not necessarily an immediate speedup by itself.
+- Expected cost: medium.
+
+### 8. cuLA backend swap on Hopper, after the in-repo kernel pass
+
+- Trigger: only after the current HGDN kernel work has already attacked copies, depthwise convs, and elementwise glue, and only if the linear-attention backend itself still looks like a serious remaining bottleneck on H100.
+- Why it is interesting:
+  - cuLA targets Hopper and Blackwell directly with CUDA/CuTe/CUTLASS kernels
+  - it is intended to align with the FLA interface, so the eventual integration path may be relatively shallow
+- Why it is not the first move:
+  - the current profile says the branch is losing plenty of time outside the recurrence kernel
+  - cuLA is early-stage and the README still marks modular GDN forward/backward support as incomplete
+  - its published requirements and tested stack differ from this branch's current environment, so it is not a low-friction drop-in today
+- What to do:
+  - treat this as an H100-only side experiment, not a portability-preserving branch default
+  - make a separate backend wrapper so the code can switch between FLA and cuLA cleanly
+  - benchmark recurrence-heavy HGDN runs against the same FLA baseline on the same Hopper machine
+  - only keep it if it wins materially without introducing integration debt or correctness drift
+- Expected upside: unknown, potentially material, but currently speculative for this exact GDN training path.
+- Expected cost: high. Environment churn plus backend-integration work.
