@@ -340,6 +340,9 @@ class GatedDeltaNet(nn.Module):
         use_k_conv: bool = True,
         use_v_conv: bool = True,
         conv_output_contiguous: bool = False,
+        q_conv_output_contiguous: bool | None = None,
+        k_conv_output_contiguous: bool | None = None,
+        v_conv_output_contiguous: bool | None = None,
         gates_fp32: bool = True,
         output_norm_fp32: bool = True,
     ):
@@ -356,6 +359,9 @@ class GatedDeltaNet(nn.Module):
         :param bool use_k_conv: Whether to apply the k-path convolution, defaults to True.
         :param bool use_v_conv: Whether to apply the v-path convolution, defaults to True.
         :param bool conv_output_contiguous: Whether to materialize contiguous `(batch, seq, dim)` conv outputs before recurrence prep, defaults to False.
+        :param bool | None q_conv_output_contiguous: Optional q-path override for contiguous conv outputs, defaults to None.
+        :param bool | None k_conv_output_contiguous: Optional k-path override for contiguous conv outputs, defaults to None.
+        :param bool | None v_conv_output_contiguous: Optional v-path override for contiguous conv outputs, defaults to None.
         :param bool gates_fp32: Whether to keep the decay-gate softplus path in fp32, defaults to True.
         :param bool output_norm_fp32: Whether to keep the post-recurrence RMSNorm in fp32 before casting back to the activation dtype, defaults to True.
         """
@@ -369,6 +375,21 @@ class GatedDeltaNet(nn.Module):
         self.use_fla = use_fla and _HAS_FLA
         self.gates_fp32 = gates_fp32
         self.output_norm_fp32 = output_norm_fp32
+        q_conv_output_contiguous = (
+            conv_output_contiguous
+            if q_conv_output_contiguous is None
+            else q_conv_output_contiguous
+        )
+        k_conv_output_contiguous = (
+            conv_output_contiguous
+            if k_conv_output_contiguous is None
+            else k_conv_output_contiguous
+        )
+        v_conv_output_contiguous = (
+            conv_output_contiguous
+            if v_conv_output_contiguous is None
+            else v_conv_output_contiguous
+        )
 
         total_qk = n_heads * head_k_dim
         total_v = n_heads * self.head_v_dim
@@ -398,19 +419,19 @@ class GatedDeltaNet(nn.Module):
             total_qk,
             conv_size,
             enabled=use_q_conv,
-            output_contiguous=conv_output_contiguous,
+            output_contiguous=q_conv_output_contiguous,
         )
         self.k_conv = CausalConv1d(
             total_qk,
             conv_size,
             enabled=use_k_conv,
-            output_contiguous=conv_output_contiguous,
+            output_contiguous=k_conv_output_contiguous,
         )
         self.v_conv = CausalConv1d(
             total_v,
             conv_size,
             enabled=use_v_conv,
-            output_contiguous=conv_output_contiguous,
+            output_contiguous=v_conv_output_contiguous,
         )
 
     def _project_recurrence_inputs(
@@ -717,6 +738,9 @@ class GDNBlock(nn.Module):
         use_k_conv: bool = True,
         use_v_conv: bool = True,
         conv_output_contiguous: bool = False,
+        q_conv_output_contiguous: bool | None = None,
+        k_conv_output_contiguous: bool | None = None,
+        v_conv_output_contiguous: bool | None = None,
         gates_fp32: bool = True,
         output_norm_fp32: bool = True,
         leaky_slope: float = 0.5,
@@ -737,6 +761,9 @@ class GDNBlock(nn.Module):
         :param bool use_k_conv: Whether to apply the k-path convolution, defaults to True.
         :param bool use_v_conv: Whether to apply the v-path convolution, defaults to True.
         :param bool conv_output_contiguous: Whether to materialize contiguous `(batch, seq, dim)` conv outputs before recurrence prep, defaults to False.
+        :param bool | None q_conv_output_contiguous: Optional q-path override for contiguous conv outputs, defaults to None.
+        :param bool | None k_conv_output_contiguous: Optional k-path override for contiguous conv outputs, defaults to None.
+        :param bool | None v_conv_output_contiguous: Optional v-path override for contiguous conv outputs, defaults to None.
         :param bool gates_fp32: Whether to keep the decay-gate softplus path in fp32, defaults to True.
         :param bool output_norm_fp32: Whether to keep the post-recurrence RMSNorm in fp32 before casting back to the activation dtype, defaults to True.
         :param float leaky_slope: LeakyReLU slope, defaults to 0.5.
@@ -761,6 +788,9 @@ class GDNBlock(nn.Module):
             use_k_conv=use_k_conv,
             use_v_conv=use_v_conv,
             conv_output_contiguous=conv_output_contiguous,
+            q_conv_output_contiguous=q_conv_output_contiguous,
+            k_conv_output_contiguous=k_conv_output_contiguous,
+            v_conv_output_contiguous=v_conv_output_contiguous,
             gates_fp32=gates_fp32,
             output_norm_fp32=output_norm_fp32,
         )
@@ -906,6 +936,9 @@ class HybridGPT(nn.Module):
         gdn_use_k_conv: bool = True,
         gdn_use_v_conv: bool = True,
         gdn_conv_output_contiguous: bool = False,
+        gdn_q_conv_output_contiguous: bool | None = None,
+        gdn_k_conv_output_contiguous: bool | None = None,
+        gdn_v_conv_output_contiguous: bool | None = None,
         gdn_gates_fp32: bool = True,
         gdn_output_norm_fp32: bool = True,
         # Shared
@@ -936,6 +969,9 @@ class HybridGPT(nn.Module):
         :param bool gdn_use_k_conv: Whether to apply the k-path convolution, defaults to True.
         :param bool gdn_use_v_conv: Whether to apply the v-path convolution, defaults to True.
         :param bool gdn_conv_output_contiguous: Whether to materialize contiguous `(batch, seq, dim)` conv outputs before recurrence prep, defaults to False.
+        :param bool | None gdn_q_conv_output_contiguous: Optional q-path override for contiguous conv outputs, defaults to None.
+        :param bool | None gdn_k_conv_output_contiguous: Optional k-path override for contiguous conv outputs, defaults to None.
+        :param bool | None gdn_v_conv_output_contiguous: Optional v-path override for contiguous conv outputs, defaults to None.
         :param bool gdn_gates_fp32: Whether to keep the decay-gate softplus path in fp32, defaults to True.
         :param bool gdn_output_norm_fp32: Whether to keep the post-recurrence RMSNorm in fp32 before casting back to the activation dtype, defaults to True.
         :param float mlp_mult: MLP expansion factor, defaults to 3.0.
@@ -994,6 +1030,9 @@ class HybridGPT(nn.Module):
                         gdn_use_k_conv,
                         gdn_use_v_conv,
                         gdn_conv_output_contiguous,
+                        gdn_q_conv_output_contiguous,
+                        gdn_k_conv_output_contiguous,
+                        gdn_v_conv_output_contiguous,
                         gdn_gates_fp32,
                         gdn_output_norm_fp32,
                         leaky_slope,

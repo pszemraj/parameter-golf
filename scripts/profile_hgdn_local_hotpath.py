@@ -169,6 +169,18 @@ def build_hybrid_model() -> HybridGPT:
             gdn_use_k_conv=env_flag("GDN_USE_K_CONV", True),
             gdn_use_v_conv=env_flag("GDN_USE_V_CONV", True),
             gdn_conv_output_contiguous=env_flag("GDN_CONV_OUTPUT_CONTIGUOUS"),
+            gdn_q_conv_output_contiguous=env_flag(
+                "GDN_Q_CONV_OUTPUT_CONTIGUOUS",
+                env_flag("GDN_CONV_OUTPUT_CONTIGUOUS"),
+            ),
+            gdn_k_conv_output_contiguous=env_flag(
+                "GDN_K_CONV_OUTPUT_CONTIGUOUS",
+                env_flag("GDN_CONV_OUTPUT_CONTIGUOUS"),
+            ),
+            gdn_v_conv_output_contiguous=env_flag(
+                "GDN_V_CONV_OUTPUT_CONTIGUOUS",
+                env_flag("GDN_CONV_OUTPUT_CONTIGUOUS"),
+            ),
             gdn_gates_fp32=env_flag("GDN_GATES_FP32", True),
             gdn_output_norm_fp32=env_flag("GDN_OUTPUT_NORM_FP32", True),
             gdn_ratio=1,
@@ -332,6 +344,18 @@ def profile_gdn(
             use_k_conv=env_flag("GDN_USE_K_CONV", True),
             use_v_conv=env_flag("GDN_USE_V_CONV", True),
             conv_output_contiguous=env_flag("GDN_CONV_OUTPUT_CONTIGUOUS"),
+            q_conv_output_contiguous=env_flag(
+                "GDN_Q_CONV_OUTPUT_CONTIGUOUS",
+                env_flag("GDN_CONV_OUTPUT_CONTIGUOUS"),
+            ),
+            k_conv_output_contiguous=env_flag(
+                "GDN_K_CONV_OUTPUT_CONTIGUOUS",
+                env_flag("GDN_CONV_OUTPUT_CONTIGUOUS"),
+            ),
+            v_conv_output_contiguous=env_flag(
+                "GDN_V_CONV_OUTPUT_CONTIGUOUS",
+                env_flag("GDN_CONV_OUTPUT_CONTIGUOUS"),
+            ),
             gates_fp32=env_flag("GDN_GATES_FP32", True),
             output_norm_fp32=env_flag("GDN_OUTPUT_NORM_FP32", True),
         )

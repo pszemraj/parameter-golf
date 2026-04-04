@@ -195,6 +195,29 @@ def test_gdn_conv_output_contiguous():
     print("  ✓ GDN contiguous recurrence inputs OK")
 
 
+def test_gdn_qk_only_contiguous():
+    """Allow selecting contiguous conv outputs per HGDN path."""
+    layer = GatedDeltaNet(
+        64,
+        n_heads=4,
+        head_k_dim=8,
+        expand_v=2.0,
+        use_fla=False,
+        conv_output_contiguous=False,
+        q_conv_output_contiguous=True,
+        k_conv_output_contiguous=True,
+        v_conv_output_contiguous=False,
+    ).bfloat16()
+    layer.A_log.data = layer.A_log.data.float()
+    layer.dt_bias.data = layer.dt_bias.data.float()
+    x = torch.randn(2, 16, 64, dtype=torch.bfloat16)
+    q, k, v, _, _ = layer._project_recurrence_inputs(x)
+    assert q.is_contiguous()
+    assert k.is_contiguous()
+    assert not v.is_contiguous()
+    print("  ✓ GDN q/k-only contiguous outputs OK")
+
+
 def test_gdn_gate_and_output_precision_toggles():
     """Precision toggles should preserve HGDN forward/backward viability."""
     layer = GatedDeltaNet(

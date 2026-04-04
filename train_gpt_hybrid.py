@@ -146,6 +146,30 @@ class Hyperparameters:
     gdn_conv_output_contiguous = bool(
         int(os.environ.get("GDN_CONV_OUTPUT_CONTIGUOUS", "0"))
     )
+    gdn_q_conv_output_contiguous = bool(
+        int(
+            os.environ.get(
+                "GDN_Q_CONV_OUTPUT_CONTIGUOUS",
+                "1" if gdn_conv_output_contiguous else "0",
+            )
+        )
+    )
+    gdn_k_conv_output_contiguous = bool(
+        int(
+            os.environ.get(
+                "GDN_K_CONV_OUTPUT_CONTIGUOUS",
+                "1" if gdn_conv_output_contiguous else "0",
+            )
+        )
+    )
+    gdn_v_conv_output_contiguous = bool(
+        int(
+            os.environ.get(
+                "GDN_V_CONV_OUTPUT_CONTIGUOUS",
+                "1" if gdn_conv_output_contiguous else "0",
+            )
+        )
+    )
     gdn_gates_fp32 = bool(int(os.environ.get("GDN_GATES_FP32", "1")))
     gdn_output_norm_fp32 = bool(int(os.environ.get("GDN_OUTPUT_NORM_FP32", "1")))
     gdn_ratio = int(os.environ.get("GDN_RATIO", 3))  # 3 GDN : 1 Attn
@@ -955,6 +979,9 @@ def main() -> None:
         f"gdn_convs:q={int(args.gdn_use_q_conv)} k={int(args.gdn_use_k_conv)} "
         f"v={int(args.gdn_use_v_conv)} "
         f"output_contiguous={int(args.gdn_conv_output_contiguous)} "
+        f"q_output_contiguous={int(args.gdn_q_conv_output_contiguous)} "
+        f"k_output_contiguous={int(args.gdn_k_conv_output_contiguous)} "
+        f"v_output_contiguous={int(args.gdn_v_conv_output_contiguous)} "
         f"gates_fp32={int(args.gdn_gates_fp32)} "
         f"output_norm_fp32={int(args.gdn_output_norm_fp32)}",
         console=False,
@@ -1038,6 +1065,9 @@ def main() -> None:
             gdn_use_k_conv=args.gdn_use_k_conv,
             gdn_use_v_conv=args.gdn_use_v_conv,
             gdn_conv_output_contiguous=args.gdn_conv_output_contiguous,
+            gdn_q_conv_output_contiguous=args.gdn_q_conv_output_contiguous,
+            gdn_k_conv_output_contiguous=args.gdn_k_conv_output_contiguous,
+            gdn_v_conv_output_contiguous=args.gdn_v_conv_output_contiguous,
             gdn_gates_fp32=args.gdn_gates_fp32,
             gdn_output_norm_fp32=args.gdn_output_norm_fp32,
             mlp_mult=args.mlp_mult,
@@ -1106,6 +1136,9 @@ def main() -> None:
                 "gdn_use_k_conv": args.gdn_use_k_conv,
                 "gdn_use_v_conv": args.gdn_use_v_conv,
                 "gdn_conv_output_contiguous": args.gdn_conv_output_contiguous,
+                "gdn_q_conv_output_contiguous": args.gdn_q_conv_output_contiguous,
+                "gdn_k_conv_output_contiguous": args.gdn_k_conv_output_contiguous,
+                "gdn_v_conv_output_contiguous": args.gdn_v_conv_output_contiguous,
                 "gdn_gates_fp32": args.gdn_gates_fp32,
                 "gdn_output_norm_fp32": args.gdn_output_norm_fp32,
                 "wandb_watch": wandb_watch_mode,
