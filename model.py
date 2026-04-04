@@ -11,6 +11,8 @@ P0 fixes from code review:
 
 from __future__ import annotations
 
+import os
+from contextlib import AbstractContextManager, nullcontext
 from typing import Literal, Optional
 
 import torch
@@ -40,6 +42,18 @@ SCALAR_PARAM_PATTERNS = (
 )
 
 NormStyle = Literal["pre", "post", "keel"]
+_PROFILE_RANGES = bool(int(os.environ.get("PROFILE_RANGES", "0")))
+
+
+def profile_range(name: str) -> AbstractContextManager[None]:
+    """Return a profiling context manager when range capture is enabled.
+
+    :param str name: Label to emit into the profiler trace.
+    :return: `record_function(name)` when profiling ranges are enabled, else a no-op context.
+    """
+    if _PROFILE_RANGES:
+        return torch.autograd.profiler.record_function(name)
+    return nullcontext()
 
 
 def validate_norm_style(norm_style: str) -> NormStyle:
@@ -260,21 +274,26 @@ class GatedDeltaNet(nn.Module):
         dt = x.dtype
         H, Dk, Dv = self.n_heads, self.head_k_dim, self.head_v_dim
 
-        # Project (separate matmuls — correct Muon/Adam routing)
-        q = self.q_conv(self.w_q(x))
-        k = self.k_conv(self.w_k(x))
-        v = self.v_conv(self.w_v(x))
+        with profile_range("gdn.project_qkv"):
+            q = self.w_q(x)
+            k = self.w_k(x)
+            v = self.w_v(x)
 
-        # Reshape and normalize
-        q = l2_norm(q.view(B, T, H, Dk)).to(dt)
-        k = l2_norm(k.view(B, T, H, Dk)).to(dt)
-        v = v.view(B, T, H, Dv)
+        with profile_range("gdn.conv_qkv"):
+            q = self.q_conv(q)
+            k = self.k_conv(k)
+            v = self.v_conv(v)
 
-        # Decay and write gate
-        g = -self.A_log.exp() * F.softplus(
-            self.w_a(x) + self.dt_bias
-        )  # (B,T,H) log-space
-        beta = torch.sigmoid(self.w_b(x))  # (B,T,H)
+        with profile_range("gdn.norm_qkv"):
+            q = l2_norm(q.view(B, T, H, Dk)).to(dt)
+            k = l2_norm(k.view(B, T, H, Dk)).to(dt)
+            v = v.view(B, T, H, Dv)
+
+        with profile_range("gdn.gates"):
+            g = -self.A_log.exp() * F.softplus(
+                self.w_a(x) + self.dt_bias
+            )  # (B,T,H) log-space
+            beta = torch.sigmoid(self.w_b(x))  # (B,T,H)
         if self.allow_neg_eigval:
             beta = beta * 2.0
         g = g.to(dtype=dt)
@@ -290,20 +309,23 @@ class GatedDeltaNet(nn.Module):
         B, T, _ = x.shape
         dt = x.dtype
         H, Dv = self.n_heads, self.head_v_dim
-        q, k, v, g, beta = self._project_recurrence_inputs(x)
+        with profile_range("gdn.forward"):
+            q, k, v, g, beta = self._project_recurrence_inputs(x)
 
-        # Recurrence
-        if self.use_fla and x.is_cuda:
-            o, _ = chunk_gated_delta_rule(
-                q, k, v, g, beta, scale=1.0, output_final_state=False
-            )
-        else:
-            o, _ = gdn_recurrent_naive(q, k, v, g.exp(), beta)
+            with profile_range("gdn.recurrence"):
+                if self.use_fla and x.is_cuda:
+                    o, _ = chunk_gated_delta_rule(
+                        q, k, v, g, beta, scale=1.0, output_final_state=False
+                    )
+                else:
+                    o, _ = gdn_recurrent_naive(q, k, v, g.exp(), beta)
 
-        # Output gating
-        g_out = self.w_g(x).view(B, T, H, Dv)
-        o = rms_norm(o.float()).to(dt) * F.silu(g_out)
-        return self.w_out(o.reshape(B, T, -1))
+            with profile_range("gdn.output_gate"):
+                g_out = self.w_g(x).view(B, T, H, Dv)
+                o = rms_norm(o.float()).to(dt) * F.silu(g_out)
+
+            with profile_range("gdn.output_proj"):
+                return self.w_out(o.reshape(B, T, -1))
 
 
 # ── Standard attention ────────────────────────────────────────────────
@@ -405,17 +427,41 @@ class CausalSelfAttention(nn.Module):
         :return Tensor: Attention outputs shaped `(batch, seq, dim)`.
         """
         B, T, D = x.shape
-        q = self.c_q(x).reshape(B, T, self.num_heads, self.head_dim).transpose(1, 2)
-        k = self.c_k(x).reshape(B, T, self.num_kv_heads, self.head_dim).transpose(1, 2)
-        v = self.c_v(x).reshape(B, T, self.num_kv_heads, self.head_dim).transpose(1, 2)
-        q, k = F.rms_norm(q, (q.size(-1),)), F.rms_norm(k, (k.size(-1),))
-        cos, sin = self.rotary(T, x.device, q.dtype)
-        q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin)
-        q = q * self.q_gain.to(dtype=q.dtype)[None, :, None, None]
-        y = F.scaled_dot_product_attention(
-            q, k, v, is_causal=True, enable_gqa=(self.num_kv_heads != self.num_heads)
-        )
-        return self.proj(y.transpose(1, 2).contiguous().reshape(B, T, D))
+        with profile_range("attn.forward"):
+            with profile_range("attn.project_qkv"):
+                q = (
+                    self.c_q(x)
+                    .reshape(B, T, self.num_heads, self.head_dim)
+                    .transpose(1, 2)
+                )
+                k = (
+                    self.c_k(x)
+                    .reshape(B, T, self.num_kv_heads, self.head_dim)
+                    .transpose(1, 2)
+                )
+                v = (
+                    self.c_v(x)
+                    .reshape(B, T, self.num_kv_heads, self.head_dim)
+                    .transpose(1, 2)
+                )
+
+            with profile_range("attn.norm_rope"):
+                q, k = F.rms_norm(q, (q.size(-1),)), F.rms_norm(k, (k.size(-1),))
+                cos, sin = self.rotary(T, x.device, q.dtype)
+                q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin)
+                q = q * self.q_gain.to(dtype=q.dtype)[None, :, None, None]
+
+            with profile_range("attn.sdpa"):
+                y = F.scaled_dot_product_attention(
+                    q,
+                    k,
+                    v,
+                    is_causal=True,
+                    enable_gqa=(self.num_kv_heads != self.num_heads),
+                )
+
+            with profile_range("attn.output_proj"):
+                return self.proj(y.transpose(1, 2).contiguous().reshape(B, T, D))
 
 
 # ── MLP ───────────────────────────────────────────────────────────────
@@ -444,8 +490,9 @@ class MLP(nn.Module):
         :param Tensor x: Input activations.
         :return Tensor: MLP outputs.
         """
-        h = F.leaky_relu(self.fc(x), negative_slope=self.leaky_slope)
-        return self.proj(h * h)
+        with profile_range("mlp.forward"):
+            h = F.leaky_relu(self.fc(x), negative_slope=self.leaky_slope)
+            return self.proj(h * h)
 
 
 # ── Blocks ────────────────────────────────────────────────────────────
@@ -505,29 +552,30 @@ class GDNBlock(nn.Module):
         :param Tensor x0: Block-stack input used by residual mixing.
         :return Tensor: Updated activations.
         """
-        mix = self.resid_mix.to(dtype=x.dtype)
-        x = mix[0][None, None, :] * x + mix[1][None, None, :] * x0
-        attn_scale = self.attn_scale.to(dtype=x.dtype)[None, None, :]
-        mlp_scale = self.mlp_scale.to(dtype=x.dtype)[None, None, :]
-        if self.norm_style == "pre":
-            x = x + attn_scale * self.gdn(self.attn_in_norm(x))
-            x = x + mlp_scale * self.mlp(self.mlp_in_norm(x))
+        with profile_range("block.gdn"):
+            mix = self.resid_mix.to(dtype=x.dtype)
+            x = mix[0][None, None, :] * x + mix[1][None, None, :] * x0
+            attn_scale = self.attn_scale.to(dtype=x.dtype)[None, None, :]
+            mlp_scale = self.mlp_scale.to(dtype=x.dtype)[None, None, :]
+            if self.norm_style == "pre":
+                x = x + attn_scale * self.gdn(self.attn_in_norm(x))
+                x = x + mlp_scale * self.mlp(self.mlp_in_norm(x))
+                return x
+            if self.norm_style == "post":
+                x = self.attn_out_norm(x + attn_scale * self.gdn(x))
+                x = self.mlp_out_norm(x + mlp_scale * self.mlp(x))
+                return x
+            if self.is_first_block:
+                x = x + attn_scale * self.gdn(self.attn_in_norm(x))
+                x = x + mlp_scale * self.mlp(self.mlp_in_norm(x))
+                return x
+            x = self.attn_out_norm(
+                self.residual_alpha * x + attn_scale * self.gdn(self.attn_in_norm(x))
+            )
+            x = self.mlp_out_norm(
+                self.residual_alpha * x + mlp_scale * self.mlp(self.mlp_in_norm(x))
+            )
             return x
-        if self.norm_style == "post":
-            x = self.attn_out_norm(x + attn_scale * self.gdn(x))
-            x = self.mlp_out_norm(x + mlp_scale * self.mlp(x))
-            return x
-        if self.is_first_block:
-            x = x + attn_scale * self.gdn(self.attn_in_norm(x))
-            x = x + mlp_scale * self.mlp(self.mlp_in_norm(x))
-            return x
-        x = self.attn_out_norm(
-            self.residual_alpha * x + attn_scale * self.gdn(self.attn_in_norm(x))
-        )
-        x = self.mlp_out_norm(
-            self.residual_alpha * x + mlp_scale * self.mlp(self.mlp_in_norm(x))
-        )
-        return x
 
 
 class AttnBlock(nn.Module):
@@ -582,29 +630,30 @@ class AttnBlock(nn.Module):
         :param Tensor x0: Block-stack input used by residual mixing.
         :return Tensor: Updated activations.
         """
-        mix = self.resid_mix.to(dtype=x.dtype)
-        x = mix[0][None, None, :] * x + mix[1][None, None, :] * x0
-        attn_scale = self.attn_scale.to(dtype=x.dtype)[None, None, :]
-        mlp_scale = self.mlp_scale.to(dtype=x.dtype)[None, None, :]
-        if self.norm_style == "pre":
-            x = x + attn_scale * self.attn(self.attn_in_norm(x))
-            x = x + mlp_scale * self.mlp(self.mlp_in_norm(x))
+        with profile_range("block.attn"):
+            mix = self.resid_mix.to(dtype=x.dtype)
+            x = mix[0][None, None, :] * x + mix[1][None, None, :] * x0
+            attn_scale = self.attn_scale.to(dtype=x.dtype)[None, None, :]
+            mlp_scale = self.mlp_scale.to(dtype=x.dtype)[None, None, :]
+            if self.norm_style == "pre":
+                x = x + attn_scale * self.attn(self.attn_in_norm(x))
+                x = x + mlp_scale * self.mlp(self.mlp_in_norm(x))
+                return x
+            if self.norm_style == "post":
+                x = self.attn_out_norm(x + attn_scale * self.attn(x))
+                x = self.mlp_out_norm(x + mlp_scale * self.mlp(x))
+                return x
+            if self.is_first_block:
+                x = x + attn_scale * self.attn(self.attn_in_norm(x))
+                x = x + mlp_scale * self.mlp(self.mlp_in_norm(x))
+                return x
+            x = self.attn_out_norm(
+                self.residual_alpha * x + attn_scale * self.attn(self.attn_in_norm(x))
+            )
+            x = self.mlp_out_norm(
+                self.residual_alpha * x + mlp_scale * self.mlp(self.mlp_in_norm(x))
+            )
             return x
-        if self.norm_style == "post":
-            x = self.attn_out_norm(x + attn_scale * self.attn(x))
-            x = self.mlp_out_norm(x + mlp_scale * self.mlp(x))
-            return x
-        if self.is_first_block:
-            x = x + attn_scale * self.attn(self.attn_in_norm(x))
-            x = x + mlp_scale * self.mlp(self.mlp_in_norm(x))
-            return x
-        x = self.attn_out_norm(
-            self.residual_alpha * x + attn_scale * self.attn(self.attn_in_norm(x))
-        )
-        x = self.mlp_out_norm(
-            self.residual_alpha * x + mlp_scale * self.mlp(self.mlp_in_norm(x))
-        )
-        return x
 
 
 # ── Hybrid GPT ────────────────────────────────────────────────────────

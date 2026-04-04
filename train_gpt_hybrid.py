@@ -26,6 +26,7 @@ import sys
 import time
 import uuid
 import zlib
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Callable
 
@@ -90,6 +91,22 @@ class Hyperparameters:
     perf_ignore_steps = int(os.environ.get("PERF_IGNORE_STEPS", 0))
     perf_skip_final_eval = bool(int(os.environ.get("PERF_SKIP_FINAL_EVAL", "0")))
     artifact_limit_bytes = int(os.environ.get("ARTIFACT_LIMIT_BYTES", 16_000_000))
+    profile = bool(int(os.environ.get("PROFILE", "0")))
+    profile_dir = os.environ.get("PROFILE_DIR", "./profiles")
+    profile_wait = int(os.environ.get("PROFILE_WAIT", 5))
+    profile_warmup = int(os.environ.get("PROFILE_WARMUP", 3))
+    profile_active = int(os.environ.get("PROFILE_ACTIVE", 4))
+    profile_repeat = int(os.environ.get("PROFILE_REPEAT", 1))
+    profile_record_shapes = bool(int(os.environ.get("PROFILE_RECORD_SHAPES", "1")))
+    profile_memory = bool(int(os.environ.get("PROFILE_MEMORY", "1")))
+    profile_with_stack = bool(int(os.environ.get("PROFILE_WITH_STACK", "0")))
+    profile_with_flops = bool(int(os.environ.get("PROFILE_WITH_FLOPS", "0")))
+    profile_with_modules = bool(int(os.environ.get("PROFILE_WITH_MODULES", "0")))
+    profile_row_limit = int(os.environ.get("PROFILE_ROW_LIMIT", 60))
+    profile_sort_by = os.environ.get("PROFILE_SORT_BY", "self_cuda_time_total")
+    profile_stop_on_complete = bool(
+        int(os.environ.get("PROFILE_STOP_ON_COMPLETE", "1"))
+    )
 
     # Model — shared
     vocab_size = int(os.environ.get("VOCAB_SIZE", 1024))
@@ -163,6 +180,55 @@ def normalize_wandb_watch_mode(mode: str) -> str:
     if normalized in {"gradients", "all"}:
         return normalized
     raise ValueError(f"WANDB_WATCH must be one of: none, gradients, all (got {mode!r})")
+
+
+def build_profiler(
+    args: Hyperparameters,
+    run_id: str,
+    master_process: bool,
+) -> tuple[Any, Path | None, int]:
+    """Create a scheduled torch profiler and its output directory.
+
+    :param Hyperparameters args: Trainer hyperparameters.
+    :param str run_id: Logical run identifier used for trace paths.
+    :param bool master_process: Whether the current rank owns profiler output.
+    :return tuple[Any, Path | None, int]: Profiler instance or `None`, output directory, and total scheduled train steps.
+    """
+    if not args.profile or not master_process:
+        return None, None, 0
+    if args.profile_active <= 0:
+        raise ValueError("PROFILE_ACTIVE must be > 0 when PROFILE=1")
+    if args.profile_repeat <= 0:
+        raise ValueError("PROFILE_REPEAT must be > 0 when PROFILE=1")
+    output_dir = Path(args.profile_dir).resolve() / run_id
+    trace_dir = output_dir / "traces"
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    total_steps = (
+        args.profile_wait + args.profile_warmup + args.profile_active
+    ) * args.profile_repeat
+    profiler = torch.profiler.profile(
+        activities=[
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.CUDA,
+        ],
+        schedule=torch.profiler.schedule(
+            wait=args.profile_wait,
+            warmup=args.profile_warmup,
+            active=args.profile_active,
+            repeat=args.profile_repeat,
+        ),
+        on_trace_ready=torch.profiler.tensorboard_trace_handler(
+            str(trace_dir),
+            worker_name=run_id,
+            use_gzip=True,
+        ),
+        record_shapes=args.profile_record_shapes,
+        profile_memory=args.profile_memory,
+        with_stack=args.profile_with_stack,
+        with_flops=args.profile_with_flops,
+        with_modules=args.profile_with_modules,
+    )
+    return profiler, output_dir, total_steps
 
 
 # =====================================================================
@@ -839,6 +905,16 @@ def main() -> None:
             with open(logfile, "a", encoding="utf-8") as f:
                 print(msg, file=f)
 
+    profiler, profile_output_dir, profile_total_steps = build_profiler(
+        args, args.run_id, master_process
+    )
+    profile_ctx: Callable[[str], Any]
+    profile_ctx = (
+        torch.autograd.profiler.record_function
+        if args.profile
+        else lambda _n: nullcontext()
+    )
+
     # ── wandb init ────────────────────────────────────────────────────
     if master_process and _USE_WANDB:
         wandb.init(
@@ -861,9 +937,21 @@ def main() -> None:
         f"sdp_backend:{sdp_backend} fla_available:{int(_HAS_FLA)} "
         f"wandb_watch:{wandb_watch_mode} wandb_watch_log_freq:{args.wandb_watch_log_freq} "
         f"perf_timing:{int(args.perf_timing)} perf_ignore_steps:{args.perf_ignore_steps} "
-        f"perf_skip_final_eval:{int(args.perf_skip_final_eval)}",
+        f"perf_skip_final_eval:{int(args.perf_skip_final_eval)} "
+        f"profile:{int(args.profile)}",
         console=False,
     )
+    if args.profile:
+        log0(
+            f"profile_plan:dir:{profile_output_dir} wait:{args.profile_wait} "
+            f"warmup:{args.profile_warmup} active:{args.profile_active} "
+            f"repeat:{args.profile_repeat} total_steps:{profile_total_steps} "
+            f"record_shapes:{int(args.profile_record_shapes)} "
+            f"profile_memory:{int(args.profile_memory)} with_stack:{int(args.profile_with_stack)} "
+            f"with_flops:{int(args.profile_with_flops)} "
+            f"with_modules:{int(args.profile_with_modules)} "
+            f"stop_on_complete:{int(args.profile_stop_on_complete)}"
+        )
 
     # ── Tokenizer + data ──────────────────────────────────────────────
     random.seed(args.seed)
@@ -1143,6 +1231,8 @@ def main() -> None:
     torch.cuda.synchronize()
     t0 = time.perf_counter()
     step = 0
+    if profiler is not None:
+        profiler.__enter__()
 
     while True:
         last_step = step == args.iterations or (
@@ -1159,18 +1249,19 @@ def main() -> None:
         if should_validate:
             torch.cuda.synchronize()
             training_time_ms += 1000.0 * (time.perf_counter() - t0)
-            val_loss, val_bpb = eval_val(
-                args,
-                model,
-                rank,
-                world_size,
-                device,
-                grad_accum_steps,
-                val_tokens,
-                base_bytes_lut,
-                has_ls_lut,
-                is_bnd_lut,
-            )
+            with profile_ctx("eval.val"):
+                val_loss, val_bpb = eval_val(
+                    args,
+                    model,
+                    rank,
+                    world_size,
+                    device,
+                    grad_accum_steps,
+                    val_tokens,
+                    base_bytes_lut,
+                    has_ls_lut,
+                    is_bnd_lut,
+                )
             log0(
                 f"step:{step}/{args.iterations} val_loss:{val_loss:.4f} val_bpb:{val_bpb:.4f} "
                 f"train_time:{training_time_ms:.0f}ms"
@@ -1193,16 +1284,19 @@ def main() -> None:
         train_loss = torch.zeros((), device=device)
         perf_t0 = time.perf_counter() if args.perf_timing else None
 
-        for ms in range(grad_accum_steps):
-            if distributed:
-                model.require_backward_grad_sync = ms == grad_accum_steps - 1
-            x, y = train_loader.next_batch(
-                args.train_batch_tokens, args.train_seq_len, grad_accum_steps
-            )
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                loss = model(x, y)
-            train_loss += loss.detach()
-            (loss * grad_scale).backward()
+        with profile_ctx("train.step"):
+            for ms in range(grad_accum_steps):
+                if distributed:
+                    model.require_backward_grad_sync = ms == grad_accum_steps - 1
+                with profile_ctx("train.load_batch"):
+                    x, y = train_loader.next_batch(
+                        args.train_batch_tokens, args.train_seq_len, grad_accum_steps
+                    )
+                with profile_ctx("train.forward_backward"):
+                    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                        loss = model(x, y)
+                    train_loss += loss.detach()
+                    (loss * grad_scale).backward()
         train_loss /= grad_accum_steps
 
         # Muon momentum warmup
@@ -1215,14 +1309,17 @@ def main() -> None:
         for g in optimizer_muon.param_groups:
             g["momentum"] = mm
 
-        for opt in optimizers:
-            for g in opt.param_groups:
-                g["lr"] = g["base_lr"] * scale
-        if args.grad_clip_norm > 0:
-            torch.nn.utils.clip_grad_norm_(base_model.parameters(), args.grad_clip_norm)
-        for opt in optimizers:
-            opt.step()
-        zero_grad_all()
+        with profile_ctx("train.optimizer_step"):
+            for opt in optimizers:
+                for g in opt.param_groups:
+                    g["lr"] = g["base_lr"] * scale
+            if args.grad_clip_norm > 0:
+                torch.nn.utils.clip_grad_norm_(
+                    base_model.parameters(), args.grad_clip_norm
+                )
+            for opt in optimizers:
+                opt.step()
+            zero_grad_all()
 
         step += 1
         perf_step_ms = float("nan")
@@ -1282,6 +1379,25 @@ def main() -> None:
             reached_cap = bool(rc.item())
         if stop_after_step is None and reached_cap:
             stop_after_step = step
+        if profiler is not None:
+            profiler.step()
+            if args.profile_stop_on_complete and step >= profile_total_steps:
+                stop_after_step = step
+
+    if profiler is not None:
+        profiler.__exit__(None, None, None)
+        if profile_output_dir is not None:
+            table = profiler.key_averages().table(
+                sort_by=args.profile_sort_by,
+                row_limit=args.profile_row_limit,
+            )
+            (profile_output_dir / "key_averages.txt").write_text(
+                table,
+                encoding="utf-8",
+            )
+            log0(f"profile_summary:{profile_output_dir / 'key_averages.txt'}")
+            if master_process and _USE_WANDB:
+                wandb.summary["profile_dir"] = str(profile_output_dir)
 
     peak_mem_alloc_mib = torch.cuda.max_memory_allocated() // 1024 // 1024
     peak_mem_reserved_mib = torch.cuda.max_memory_reserved() // 1024 // 1024
