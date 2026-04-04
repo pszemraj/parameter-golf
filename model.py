@@ -462,9 +462,12 @@ class GatedDeltaNet(nn.Module):
         )
 
         with profile_range("gdn.conv_qkv"):
-            q = self.q_conv(q)
-            k = self.k_conv(k)
-            v = self.v_conv(v)
+            with profile_range("gdn.q_conv"):
+                q = self.q_conv(q)
+            with profile_range("gdn.k_conv"):
+                k = self.k_conv(k)
+            with profile_range("gdn.v_conv"):
+                v = self.v_conv(v)
         audit_gdn_boundary(
             "conv_qkv",
             audit_call_index,
@@ -476,9 +479,12 @@ class GatedDeltaNet(nn.Module):
         with profile_range("gdn.norm_qkv"):
             # Keep the recurrence inputs on one activation dtype across PyTorch /
             # platform variants. Some stacks promote F.normalize to fp32 here.
-            q = l2_norm(q.view(B, T, H, Dk)).to(dtype=x.dtype)
-            k = l2_norm(k.view(B, T, H, Dk)).to(dtype=x.dtype)
-            v = v.view(B, T, H, Dv).to(dtype=x.dtype)
+            with profile_range("gdn.q_norm"):
+                q = l2_norm(q.view(B, T, H, Dk)).to(dtype=x.dtype)
+            with profile_range("gdn.k_norm"):
+                k = l2_norm(k.view(B, T, H, Dk)).to(dtype=x.dtype)
+            with profile_range("gdn.v_reshape"):
+                v = v.view(B, T, H, Dv).to(dtype=x.dtype)
         audit_gdn_boundary(
             "norm_qkv",
             audit_call_index,
@@ -489,18 +495,29 @@ class GatedDeltaNet(nn.Module):
 
         with profile_range("gdn.gates"):
             if self.gates_fp32:
-                g = -self.A_log.exp() * F.softplus(
-                    self.w_a(x).float() + self.dt_bias
-                )  # (B,T,H) log-space
+                with profile_range("gdn.g_proj"):
+                    g_pre = self.w_a(x).float()
+                with profile_range("gdn.g_pointwise"):
+                    g = -self.A_log.exp() * F.softplus(
+                        g_pre + self.dt_bias
+                    )  # (B,T,H) log-space
             else:
-                g = -self.A_log.to(dtype=x.dtype).exp() * F.softplus(
-                    self.w_a(x) + self.dt_bias.to(dtype=x.dtype)
-                )
-            beta = torch.sigmoid(self.w_b(x))  # (B,T,H)
+                with profile_range("gdn.g_proj"):
+                    g_pre = self.w_a(x)
+                with profile_range("gdn.g_pointwise"):
+                    g = -self.A_log.to(dtype=x.dtype).exp() * F.softplus(
+                        g_pre + self.dt_bias.to(dtype=x.dtype)
+                    )
+            with profile_range("gdn.beta_proj"):
+                beta_pre = self.w_b(x)
+            with profile_range("gdn.beta_pointwise"):
+                beta = torch.sigmoid(beta_pre)  # (B,T,H)
         if self.allow_neg_eigval:
-            beta = beta * 2.0
-        g = g.to(dtype=x.dtype)
-        beta = beta.to(dtype=x.dtype)
+            with profile_range("gdn.beta_scale"):
+                beta = beta * 2.0
+        with profile_range("gdn.gate_casts"):
+            g = g.to(dtype=x.dtype)
+            beta = beta.to(dtype=x.dtype)
         audit_gdn_boundary(
             "recurrence_inputs",
             audit_call_index,
@@ -537,15 +554,18 @@ class GatedDeltaNet(nn.Module):
             audit_gdn_boundary("recurrence_output", audit_call_index, o=o)
 
             with profile_range("gdn.output_gate"):
-                g_out = self.w_g(x).view(B, T, H, Dv)
-                if self.output_norm_fp32:
-                    o = rms_norm(o.float()).to(x.dtype)
-                else:
-                    o = rms_norm(o).to(dtype=x.dtype)
+                with profile_range("gdn.output_gate_proj"):
+                    g_out = self.w_g(x).view(B, T, H, Dv)
+                with profile_range("gdn.output_norm"):
+                    if self.output_norm_fp32:
+                        o = rms_norm(o.float()).to(x.dtype)
+                    else:
+                        o = rms_norm(o).to(dtype=x.dtype)
                 audit_gdn_boundary(
                     "output_gate_inputs", audit_call_index, o=o, g_out=g_out
                 )
-                o = o * F.silu(g_out)
+                with profile_range("gdn.output_gate_mul"):
+                    o = o * F.silu(g_out)
             audit_gdn_boundary("output_proj_input", audit_call_index, o=o)
 
             with profile_range("gdn.output_proj"):
