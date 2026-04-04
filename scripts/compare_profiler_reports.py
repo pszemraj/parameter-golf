@@ -18,13 +18,20 @@ from profiler_report import load_profile_report  # noqa: E402
 DEFAULT_BUCKETS = (
     "aten::copy_",
     "aten::mul",
-    "gdn.conv_qkv",
+    "gdn.q_conv",
+    "gdn.k_conv",
+    "gdn.v_conv",
     "gdn.recurrence",
     "aten::convolution_backward",
     "aten::_conv_depthwise2d",
-    "gdn.norm_qkv",
-    "gdn.gates",
-    "gdn.output_gate",
+    "gdn.q_norm",
+    "gdn.k_norm",
+    "gdn.g_proj",
+    "gdn.g_pointwise",
+    "gdn.beta_proj",
+    "gdn.output_gate_proj",
+    "gdn.output_norm",
+    "gdn.output_gate_mul",
 )
 
 

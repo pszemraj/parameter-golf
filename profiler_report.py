@@ -110,6 +110,46 @@ def build_profile_rows(events: Iterable[Any]) -> list[ProfileRow]:
     return rows
 
 
+def _coalesce_profile_rows(rows: Sequence[ProfileRow]) -> list[ProfileRow]:
+    """Merge duplicate profiler row names into a single structured row.
+
+    PyTorch profiler exports can contain duplicate keys where one row carries the
+    real device timing and a second row is all-zero. Coalescing here keeps the
+    structured reports stable for exact-name comparison helpers.
+
+    :param Sequence[ProfileRow] rows: Raw structured rows.
+    :return list[ProfileRow]: Rows merged by exact event name.
+    """
+    merged: dict[str, ProfileRow] = {}
+    order: list[str] = []
+    for row in rows:
+        existing = merged.get(row.name)
+        if existing is None:
+            merged[row.name] = row
+            order.append(row.name)
+            continue
+        merged[row.name] = ProfileRow(
+            name=row.name,
+            count=max(existing.count, row.count),
+            self_cpu_time_us=existing.self_cpu_time_us + row.self_cpu_time_us,
+            cpu_time_total_us=existing.cpu_time_total_us + row.cpu_time_total_us,
+            self_device_time_us=existing.self_device_time_us + row.self_device_time_us,
+            device_time_total_us=existing.device_time_total_us
+            + row.device_time_total_us,
+            cpu_memory_bytes=max(existing.cpu_memory_bytes, row.cpu_memory_bytes),
+            self_cpu_memory_bytes=max(
+                existing.self_cpu_memory_bytes, row.self_cpu_memory_bytes
+            ),
+            device_memory_bytes=max(
+                existing.device_memory_bytes, row.device_memory_bytes
+            ),
+            self_device_memory_bytes=max(
+                existing.self_device_memory_bytes, row.self_device_memory_bytes
+            ),
+        )
+    return [merged[name] for name in order]
+
+
 def _sort_key_name(sort_by: str) -> str:
     """Map a profiler sort key to a structured row attribute.
 
@@ -152,6 +192,7 @@ def build_profile_report(
     :param dict[str, Any] metadata: Optional extra metadata.
     :return dict[str, Any]: Serializable report dictionary.
     """
+    rows = _coalesce_profile_rows(rows)
     sort_attr = _sort_key_name(sort_by)
     sorted_rows = sorted(
         rows,
@@ -213,12 +254,37 @@ def load_profile_report(path: str | Path) -> dict[str, Any]:
     :raises FileNotFoundError: If no supported report is found.
     :return dict[str, Any]: Structured report payload.
     """
+
+    def _normalize_report(report: dict[str, Any]) -> dict[str, Any]:
+        rows = [
+            ProfileRow(
+                name=str(row["name"]),
+                count=int(row["count"]),
+                self_cpu_time_us=float(row["self_cpu_time_us"]),
+                cpu_time_total_us=float(row["cpu_time_total_us"]),
+                self_device_time_us=float(row["self_device_time_us"]),
+                device_time_total_us=float(row["device_time_total_us"]),
+                cpu_memory_bytes=int(row["cpu_memory_bytes"]),
+                self_cpu_memory_bytes=int(row["self_cpu_memory_bytes"]),
+                device_memory_bytes=int(row["device_memory_bytes"]),
+                self_device_memory_bytes=int(row["self_device_memory_bytes"]),
+            )
+            for row in report["rows"]
+        ]
+        metadata = dict(report.get("metadata", {}))
+        metadata.pop("row_count", None)
+        metadata.pop("total_self_cpu_time_us", None)
+        metadata.pop("total_self_device_time_us", None)
+        metadata.pop("sort_attr", None)
+        sort_by = metadata.pop("sort_by", "self_device_time_total")
+        return build_profile_report(rows, sort_by=sort_by, metadata=metadata)
+
     report_path = Path(path)
     if report_path.is_dir():
         json_path = report_path / "key_averages.json"
         if json_path.is_file():
-            return json.loads(json_path.read_text(encoding="utf-8"))
+            return _normalize_report(json.loads(json_path.read_text(encoding="utf-8")))
         raise FileNotFoundError(f"No key_averages.json report found in {report_path}")
     if report_path.suffix == ".json":
-        return json.loads(report_path.read_text(encoding="utf-8"))
+        return _normalize_report(json.loads(report_path.read_text(encoding="utf-8")))
     raise FileNotFoundError(f"Unsupported profile report path: {report_path}")

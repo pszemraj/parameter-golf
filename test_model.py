@@ -19,6 +19,7 @@ from model import (
     validate_norm_style,
 )
 from profiler_report import (
+    ProfileRow,
     build_profile_report,
     build_profile_rows,
     load_profile_report,
@@ -482,6 +483,48 @@ def test_profile_report_json_roundtrip():
     print("  ✓ profiler report json/csv roundtrip OK")
 
 
+def test_profile_report_coalesces_duplicate_names():
+    """Merge duplicate profiler names instead of keeping zero-time duplicates."""
+    rows = [
+        ProfileRow(
+            name="gdn.g_pointwise",
+            count=8,
+            self_cpu_time_us=0.0,
+            cpu_time_total_us=0.0,
+            self_device_time_us=27_000.0,
+            device_time_total_us=27_000.0,
+            cpu_memory_bytes=0,
+            self_cpu_memory_bytes=0,
+            device_memory_bytes=0,
+            self_device_memory_bytes=0,
+        ),
+        ProfileRow(
+            name="gdn.g_pointwise",
+            count=8,
+            self_cpu_time_us=0.0,
+            cpu_time_total_us=0.0,
+            self_device_time_us=0.0,
+            device_time_total_us=0.0,
+            cpu_memory_bytes=0,
+            self_cpu_memory_bytes=0,
+            device_memory_bytes=0,
+            self_device_memory_bytes=0,
+        ),
+    ]
+    report = build_profile_report(rows, sort_by="self_device_time_total")
+    assert report["metadata"]["row_count"] == 1
+    assert report["rows"][0]["name"] == "gdn.g_pointwise"
+    assert report["rows"][0]["count"] == 8
+    assert report["rows"][0]["self_device_time_us"] == 27_000.0
+    with tempfile.TemporaryDirectory() as tmpdir:
+        outpath = Path(tmpdir)
+        write_profile_report(outpath, report=report, stem="sample")
+        loaded = load_profile_report(outpath / "sample.json")
+        assert loaded["metadata"]["row_count"] == 1
+        assert loaded["rows"][0]["self_device_time_us"] == 27_000.0
+    print("  ✓ profiler report coalesces duplicate names")
+
+
 if __name__ == "__main__":
     print("=" * 60)
     print(f"GDN Hybrid v3 Tests — PyTorch {torch.__version__}")
@@ -503,6 +546,10 @@ if __name__ == "__main__":
         ("State tracking", test_state_tracking),
         ("Convergence", test_convergence),
         ("Profiler report json/csv roundtrip", test_profile_report_json_roundtrip),
+        (
+            "Profiler report duplicate coalescing",
+            test_profile_report_coalesces_duplicate_names,
+        ),
     ]
     for i, (name, fn) in enumerate(tests, 1):
         print(f"\n[{i}/{len(tests)}] {name}")
