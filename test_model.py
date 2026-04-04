@@ -27,6 +27,7 @@ from profiler_report import (
 )
 from train_gpt_hybrid import (
     normalize_wandb_watch_mode,
+    restore_low_dim_params_to_fp32,
     serialize_quantized_state_dict_int8,
 )
 
@@ -371,6 +372,32 @@ def test_gdn_gate_and_output_precision_toggles():
     out.float().sum().backward()
     assert x.grad is not None
     print("  ✓ GDN precision toggles OK")
+
+
+def test_restore_low_dim_params_to_fp32_gdn_control_override():
+    """Allow HGDN control projections to remain bf16 while scalars stay fp32."""
+    layer = GatedDeltaNet(
+        64, n_heads=4, head_k_dim=8, expand_v=2.0, use_fla=False
+    ).bfloat16()
+    restore_low_dim_params_to_fp32(layer, gdn_control_proj_fp32=False)
+    assert layer.w_a.weight.dtype == torch.bfloat16
+    assert layer.w_b.weight.dtype == torch.bfloat16
+    assert layer.w_g.weight.dtype == torch.bfloat16
+    assert layer.A_log.dtype == torch.float32
+    assert layer.dt_bias.dtype == torch.float32
+    print("  ✓ GDN control projection fp32 override OK")
+
+
+def test_restore_low_dim_params_to_fp32_default_restores_gdn_control():
+    """Keep the default fp32 restore behavior for HGDN control projections."""
+    layer = GatedDeltaNet(
+        64, n_heads=4, head_k_dim=8, expand_v=2.0, use_fla=False
+    ).bfloat16()
+    restore_low_dim_params_to_fp32(layer)
+    assert layer.w_a.weight.dtype == torch.float32
+    assert layer.w_b.weight.dtype == torch.float32
+    assert layer.w_g.weight.dtype == torch.float32
+    print("  ✓ default GDN control projection fp32 restore OK")
 
 
 def test_hybrid_fwd_bwd():

@@ -625,3 +625,122 @@ Next step:
 1. re-check the candidate on 1xH100
 2. compare against the current H100 hybrid baseline
 3. only then decide whether this becomes the default HGDN perf path
+
+## 2026-04-04 — Keep HGDN control projections in bf16 (`rtx4070_phase1_ctrlbf16_fix1`)
+
+Bundle:
+
+- raw artifacts: `profiles/rtx4070_phase1_ctrlbf16_fix1/`
+- structured comparisons:
+  - `profiles/rtx4070_phase1_ctrlbf16_fix1/compare_vs_refresh1/comparison.md`
+  - `profiles/rtx4070_phase1_ctrlbf16_fix1/compare_vs_fix1/comparison.md`
+- experiment-surface commit at run time: working tree after `eb08a00`
+
+Contract:
+
+- GPU: local RTX 4070 Laptop
+- env: `pg`
+- fixed baseline:
+  - `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+  - `GDN_USE_PACKED_QKV_CONV=1`
+  - `GDN_USE_PACKED_QKV_PROJ=1`
+- candidate:
+  - fixed baseline plus `GDN_CONTROL_PROJ_FP32=0`
+- purpose:
+  - test whether the remaining trainer `copy_` and `mul` tax was still coming
+    from repeated fp32 → bf16 casts on the tiny HGDN control projections
+    `w_a/w_b/w_g`
+
+### Main findings
+
+This is a real local win, and it is stronger than the current packed-path
+winner.
+
+Compared with the refreshed packed-path baseline
+`rtx4070_phase1_packedqkvproj_refresh1`, the full trainer-eager step improved
+substantially:
+
+- trainer total self-device time:
+  - baseline: `25957.29 ms`
+  - candidate: `16588.06 ms`
+  - delta: `-9369.23 ms` (`-36.09%`)
+
+Compared with the original packed-path winner
+`rtx4070_phase1_packedqkvproj_fix1`, it still wins materially:
+
+- trainer total self-device time:
+  - baseline: `18282.05 ms`
+  - candidate: `16588.06 ms`
+  - delta: `-1693.99 ms` (`-9.27%`)
+
+This is not just one noisy bucket moving around. The step-level HGDN path got
+cheaper in multiple places while preserving the same good recurrence-facing
+layout.
+
+### Why it won
+
+Against the refreshed baseline, the trainer-eager trace improved in the exact
+family of buckets this experiment targeted:
+
+- `aten::copy_`: `800.91 -> 510.77 ms`
+- `aten::mul`: `1027.72 -> 659.15 ms`
+- `gdn.qkv_conv_packed`: `366.43 -> 234.58 ms`
+- `gdn.recurrence`: `176.97 -> 114.97 ms`
+- `aten::convolution_backward`: `177.24 -> 113.86 ms`
+- `aten::_conv_depthwise2d`: `143.16 -> 91.58 ms`
+- `gdn.q_norm`: `49.55 -> 31.74 ms`
+- `gdn.k_norm`: `49.84 -> 31.84 ms`
+- `gdn.output_norm`: `97.06 -> 62.05 ms`
+- `gdn.output_gate_proj`: `21.70 -> 13.45 ms`
+
+The hotpath views are mixed but still consistent with the interpretation:
+
+- bare GDN:
+  - `gdn.g_pointwise`: `66.44 -> 49.85 ms`
+  - `gdn.recurrence`: `37.30 -> 34.71 ms`
+  - `gdn.output_norm`: `14.63 -> 9.29 ms`
+- hybrid forward/backward:
+  - `gdn.q_norm`: `57.32 -> 51.48 ms`
+  - `gdn.g_pointwise`: `31.76 -> 29.34 ms`
+  - `gdn.recurrence`: `46.08 -> 48.46 ms` (slightly worse)
+  - `gdn.qkv_conv_packed`: `22.14 -> 25.93 ms` (slightly worse)
+
+Interpretation:
+
+- the local winner is still defined by the *real training step*, not the bare
+  recurrence microprofile
+- keeping `w_a/w_b/w_g` in bf16 appears to remove a large amount of recast
+  overhead that was being paid repeatedly across the training shell
+
+### Boundary read
+
+The important part is that the winning packed-path boundary layout stayed
+unchanged:
+
+- `conv_qkv` outputs are still contiguous
+- `norm_qkv` outputs are still contiguous
+- `recurrence_inputs` remain contiguous bf16 tensors
+- recurrence/output-gate/output-proj boundaries are unchanged
+
+So this candidate did not win by giving up the packed-path layout cleanup.
+It stacked on top of it.
+
+### Decision
+
+Promote this as the new local winner.
+
+Current local winning HGDN speed candidate:
+
+- `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+- `GDN_USE_PACKED_QKV_CONV=1`
+- `GDN_USE_PACKED_QKV_PROJ=1`
+- `GDN_CONTROL_PROJ_FP32=0`
+
+### Next target
+
+This candidate has earned target-hardware confirmation.
+
+The next remaining HGDN-native hotspot on the local winner is now `gdn.q_norm`
+(with `gdn.k_norm` close behind), so the next local follow-up after H100
+confirmation should be a normalization-path experiment rather than another
+trainer-shell copy chase.

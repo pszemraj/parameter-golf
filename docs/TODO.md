@@ -159,8 +159,23 @@ Latest local attribution checkpoint:
     - `GDN_CONV_OUTPUT_CONTIGUOUS=1`
     - `GDN_USE_PACKED_QKV_CONV=1`
     - `GDN_USE_PACKED_QKV_PROJ=1`
+  - follow-up on `rtx4070_phase1_ctrlbf16_fix1` is now done:
+    - keeping `w_a/w_b/w_g` in bf16 via `GDN_CONTROL_PROJ_FP32=0` is a second
+      real local win on top of the packed-path baseline
+    - vs `rtx4070_phase1_packedqkvproj_refresh1`, trainer self-device time fell
+      from `25957.29 ms` to `16588.06 ms` (`-36.09%`)
+    - vs the original packed-path winner `rtx4070_phase1_packedqkvproj_fix1`,
+      it still improved by `-9.27%`
+    - the recurrence-facing contiguous bf16 layout is unchanged
+  - current local winning config:
+    - `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+    - `GDN_USE_PACKED_QKV_CONV=1`
+    - `GDN_USE_PACKED_QKV_PROJ=1`
+    - `GDN_CONTROL_PROJ_FP32=0`
   - immediate next step:
     - run 1xH100 confirmation on the new winner before changing the default path
+  - next local hotspot after that:
+    - `gdn.q_norm` / `gdn.k_norm`
 
 ### 2. Norm placement screen (`pre` vs `post` vs `keel`)
 

@@ -49,7 +49,9 @@ def prepare_module(module: torch.nn.Module) -> torch.nn.Module:
     :return torch.nn.Module: Prepared module.
     """
     module = module.cuda().bfloat16()
-    restore_low_dim_params_to_fp32(module)
+    restore_low_dim_params_to_fp32(
+        module, gdn_control_proj_fp32=env_flag("GDN_CONTROL_PROJ_FP32", True)
+    )
     return module
 
 

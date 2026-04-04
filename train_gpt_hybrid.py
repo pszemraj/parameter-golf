@@ -172,6 +172,7 @@ class Hyperparameters:
             )
         )
     )
+    gdn_control_proj_fp32 = bool(int(os.environ.get("GDN_CONTROL_PROJ_FP32", "1")))
     gdn_gates_fp32 = bool(int(os.environ.get("GDN_GATES_FP32", "1")))
     gdn_output_norm_fp32 = bool(int(os.environ.get("GDN_OUTPUT_NORM_FP32", "1")))
     gdn_ratio = int(os.environ.get("GDN_RATIO", 3))  # 3 GDN : 1 Attn
@@ -759,13 +760,22 @@ def serialize_quantized_state_dict_int8(
 # =====================================================================
 
 
-def restore_low_dim_params_to_fp32(module: nn.Module) -> None:
+def restore_low_dim_params_to_fp32(
+    module: nn.Module, *, gdn_control_proj_fp32: bool = True
+) -> None:
     """Restore low-dimensional or scalar parameters to fp32.
 
     :param nn.Module module: Module whose parameters should be restored in place.
+    :param bool gdn_control_proj_fp32: Whether to also restore HGDN control
+        projections `w_a/w_b/w_g` to fp32, defaults to True.
     """
+    gdn_control_patterns = ("w_a.", "w_b.", "w_g.")
     with torch.no_grad():
         for name, param in module.named_parameters():
+            if not gdn_control_proj_fp32 and any(
+                pattern in name for pattern in gdn_control_patterns
+            ):
+                continue
             if (
                 param.ndim < 2 or any(p in name for p in SCALAR_PARAM_PATTERNS)
             ) and param.dtype != torch.float32:
@@ -986,6 +996,7 @@ def main() -> None:
         f"q_output_contiguous={int(args.gdn_q_conv_output_contiguous)} "
         f"k_output_contiguous={int(args.gdn_k_conv_output_contiguous)} "
         f"v_output_contiguous={int(args.gdn_v_conv_output_contiguous)} "
+        f"control_proj_fp32={int(args.gdn_control_proj_fp32)} "
         f"gates_fp32={int(args.gdn_gates_fp32)} "
         f"output_norm_fp32={int(args.gdn_output_norm_fp32)}",
         console=False,
@@ -1091,7 +1102,9 @@ def main() -> None:
         .bfloat16()
     )
 
-    restore_low_dim_params_to_fp32(base_model)
+    restore_low_dim_params_to_fp32(
+        base_model, gdn_control_proj_fp32=args.gdn_control_proj_fp32
+    )
     compiled_model, compile_stats = prepare_hybrid_compile(
         base_model, enabled=args.compile, strategy=args.compile_strategy
     )
@@ -1147,6 +1160,7 @@ def main() -> None:
                 "gdn_q_conv_output_contiguous": args.gdn_q_conv_output_contiguous,
                 "gdn_k_conv_output_contiguous": args.gdn_k_conv_output_contiguous,
                 "gdn_v_conv_output_contiguous": args.gdn_v_conv_output_contiguous,
+                "gdn_control_proj_fp32": args.gdn_control_proj_fp32,
                 "gdn_gates_fp32": args.gdn_gates_fp32,
                 "gdn_output_norm_fp32": args.gdn_output_norm_fp32,
                 "wandb_watch": wandb_watch_mode,
