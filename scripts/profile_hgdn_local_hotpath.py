@@ -341,6 +341,7 @@ def profile_gdn(
             allow_neg_eigval=True,
             conv_size=4,
             use_fla=True,
+            use_packed_qkv_conv=env_flag("GDN_USE_PACKED_QKV_CONV"),
             use_q_conv=env_flag("GDN_USE_Q_CONV", True),
             use_k_conv=env_flag("GDN_USE_K_CONV", True),
             use_v_conv=env_flag("GDN_USE_V_CONV", True),

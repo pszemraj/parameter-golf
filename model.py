@@ -316,10 +316,12 @@ class PackedCausalConv1d(nn.Module):
         x = self.conv(x)[..., : x.size(-1)]
         x = F.silu(x)
         x = x.transpose(1, 2)
-        if self.output_contiguous:
-            x = x.contiguous()
         q_dim, k_dim, v_dim = self.dims
         q, k, v = x.split((q_dim, k_dim, v_dim), dim=-1)
+        if self.output_contiguous:
+            q = q.contiguous()
+            k = k.contiguous()
+            v = v.contiguous()
         return q, k, v
 
 
