@@ -18,8 +18,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from model import CastedLinear, GatedDeltaNet, HybridGPT
-from train_gpt_hybrid import prepare_hybrid_compile, restore_low_dim_params_to_fp32
+from model import GatedDeltaNet, HybridGPT  # noqa: E402
+from train_gpt_hybrid import (  # noqa: E402
+    prepare_hybrid_compile,
+    restore_low_dim_params_to_fp32,
+)
 
 
 @dataclass(frozen=True)
@@ -45,9 +48,6 @@ def prepare_module(module: torch.nn.Module) -> torch.nn.Module:
     :return torch.nn.Module: Prepared module.
     """
     module = module.cuda().bfloat16()
-    for submodule in module.modules():
-        if isinstance(submodule, CastedLinear):
-            submodule.float()
     restore_low_dim_params_to_fp32(module)
     return module
 
@@ -68,7 +68,9 @@ def run_gdn_eager() -> PreflightResult:
             use_fla=True,
         )
     )
-    x = torch.randn(2, 256, 384, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    x = torch.randn(
+        2, 256, 384, device="cuda", dtype=torch.bfloat16, requires_grad=True
+    )
     torch.cuda.synchronize()
     torch.cuda.reset_peak_memory_stats()
     t0 = time.perf_counter()
@@ -107,9 +109,7 @@ def run_hybrid_case(*, compiled: bool) -> PreflightResult:
             norm_style="pre",
         )
     )
-    model, _ = prepare_hybrid_compile(
-        base_model, enabled=compiled, strategy="model"
-    )
+    model, _ = prepare_hybrid_compile(base_model, enabled=compiled, strategy="model")
     ids = torch.randint(0, 1024, (2, 256), device="cuda", dtype=torch.int64)
     tgt = torch.randint(0, 1024, (2, 256), device="cuda", dtype=torch.int64)
     torch.cuda.synchronize()

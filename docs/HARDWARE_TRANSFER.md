@@ -149,6 +149,26 @@ In practical terms:
 - if a patch reduces `copy/mul/conv/norm/gate` cost locally, it is worth testing on H100
 - if a patch only improves GEMM-heavy buckets locally, it is lower priority unless H100 also agrees
 
+## Local Profiling Workflow
+
+Use two different local profiling modes for different questions:
+
+1. Full trainer eager profile
+   - use the existing trainer/profile helper when you need a like-for-like local analog of the H100 training-step profile
+   - this keeps the same shell effects such as DDP, grad accumulation, optimizer stepping, and data loading
+2. HGDN hotpath profile
+   - use `scripts/profile_hgdn_local_hotpath.py` when you want clean local attribution for:
+     - bare GDN forward/backward
+     - HybridGPT forward/backward without optimizer stepping
+     - optimizer step only
+   - this is the better tool for deciding whether a local patch changed the model path itself versus the surrounding training shell
+
+Rule of thumb:
+
+- use the hotpath profiler to develop HGDN kernel/path changes locally
+- use the full trainer eager profile to confirm the change still matters at the step level
+- use H100 after that to confirm transfer and final payoff
+
 ## Why This Is Useful
 
 This result materially changes the workflow.
