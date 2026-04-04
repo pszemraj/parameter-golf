@@ -30,8 +30,8 @@ Modes:
     Run hybrid first, then depth.
 
 Defaults:
-  - USE_WANDB=1
-  - WANDB_MODE=online
+  - USE_WANDB=0
+  - WANDB_MODE=offline
   - WANDB_WATCH=none
   - COMPILE_STRATEGY=model
   - TRAIN_BATCH_TOKENS=524288
@@ -55,7 +55,8 @@ Outputs:
 
 Examples:
   scripts/run_h100_single_gpu_hgdn_profile.sh hybrid
-  RUN_PREFIX=h100prof USE_WANDB=0 WANDB_MODE=offline scripts/run_h100_single_gpu_hgdn_profile.sh both
+  RUN_PREFIX=h100prof scripts/run_h100_single_gpu_hgdn_profile.sh both
+  RUN_PREFIX=h100prof USE_WANDB=1 WANDB_MODE=online scripts/run_h100_single_gpu_hgdn_profile.sh both
 EOF
 }
 
@@ -76,8 +77,8 @@ run_sweep() {
     echo ">>> $label"
     (
         export NGPU=1
-        export USE_WANDB="${USE_WANDB:-1}"
-        export WANDB_MODE="${WANDB_MODE:-online}"
+        export USE_WANDB="${USE_WANDB:-0}"
+        export WANDB_MODE="${WANDB_MODE:-offline}"
         export WANDB_WATCH="${WANDB_WATCH:-none}"
         export COMPILE_STRATEGY="${COMPILE_STRATEGY:-model}"
         export TRAIN_BATCH_TOKENS="${TRAIN_BATCH_TOKENS:-524288}"
