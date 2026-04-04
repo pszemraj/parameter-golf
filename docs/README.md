@@ -332,6 +332,87 @@ Interpretation:
 - The gap narrows at the `1000` checkpoint, then widens again.
 - Even before size matching, the branch is not relying on a misleading equal-step-only win.
 
+## 1xH100 Calibration
+
+Date of target-hardware calibration: `2026-04-03`
+
+These runs used the branch helper on a single H100:
+
+- `scripts/run_h100_single_gpu_hgdn.sh perf`
+- `scripts/run_h100_single_gpu_hgdn.sh fixed2k`
+
+Only the H100 results are treated as decision-relevant here. A100 runs were collected as a curiosity check and are not used for the branch conclusion.
+
+### Throughput
+
+Perf harness contract:
+
+- `NGPU=1`
+- `TRAIN_BATCH_TOKENS=524288`
+- `TRAIN_SEQ_LEN=2048`
+- `ITERATIONS=50`
+- `PERF_IGNORE_STEPS=10`
+- `COMPILE_STRATEGY=model`
+
+| Config | Blocks | Step ms | Tokens/s | Ratio vs depth |
+|---|---|---:|---:|---:|
+| Depth control `MLP_MULT=4.0` | `0G+16A` | `714.74` | `733,538` | `1.00x` |
+| Hybrid `GDN_RATIO=1, MLP_MULT=3.25` | `8G+8A` | `1002.72` | `522,866` | `1.40x` |
+
+Interpretation:
+
+- On target hardware, the HGDN throughput penalty is materially worse than the local 4070 estimate.
+- The laptop did capture the direction correctly, but it understated the size of the throughput tax.
+- `COMPILE_STRATEGY=model` remains the right choice; there is no evidence here that selective compile should be revisited first.
+
+### Fixed-2k Quality
+
+Fixed-step contract:
+
+- `NGPU=1`
+- `TRAIN_BATCH_TOKENS=524288`
+- `TRAIN_SEQ_LEN=2048`
+- `ITERATIONS=2000`
+- `VAL_LOSS_EVERY=500`
+- `COMPILE_STRATEGY=model`
+
+| Config | Train loss @1000 | Train loss @2000 | Eval BPB @1000 | Eval BPB @1500 | Eval BPB @2000 | Final roundtrip | Artifact bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Depth control `MLP_MULT=4.0` | `4.4989` | `4.2910` | `2.6662` | `2.6166` | `2.5457` | `2.5950` | `9,991,658` |
+| Hybrid `GDN_RATIO=1, MLP_MULT=3.25` | `4.3018` | `3.9760` | `2.5477` | `2.4594` | `2.3587` | `2.3719` | `10,936,348` |
+
+### Granular curve comparison
+
+The two H100 runs show the same qualitative pattern on both training and validation metrics: after the noisy startup region, the hybrid stays below the pure-attention depth control.
+
+Selected training-loss checkpoints:
+
+| Step | Hybrid train loss | Depth train loss | Hybrid advantage |
+|---|---:|---:|---:|
+| `200` | `4.8443` | `5.0946` | `0.2504` |
+| `400` | `4.5009` | `4.8394` | `0.3386` |
+| `800` | `4.4042` | `4.5552` | `0.1510` |
+| `1000` | `4.3018` | `4.4989` | `0.1970` |
+| `1400` | `4.1591` | `4.4101` | `0.2510` |
+| `1800` | `4.0413` | `4.3587` | `0.3174` |
+| `2000` | `3.9760` | `4.2910` | `0.3150` |
+
+Selected validation checkpoints:
+
+| Step | Hybrid `eval/bpb` | Depth `eval/bpb` | Hybrid advantage |
+|---|---:|---:|---:|
+| `1000` | `2.5477` | `2.6662` | `0.1184` |
+| `1500` | `2.4594` | `2.6166` | `0.1573` |
+| `2000` | `2.3587` | `2.5457` | `0.1870` |
+| Final roundtrip | `2.3719` | `2.5950` | `0.2231` |
+
+Interpretation:
+
+- The hybrid is not merely holding parity while paying a throughput tax; it is learning faster per step on H100 too.
+- The H100 gap is stronger than the earlier laptop comparison on both train loss and validation BPB.
+- The hybrid artifact is still larger by `944,690` bytes, so this is not a perfectly size-matched comparison yet, but the quality gap is also larger than the local branch result.
+- The roundtrip gap widening from `0.1870 -> 0.2231` suggests the hybrid remains at least as quantization-robust as the depth baseline under this contract.
+
 ## Size-Matching Follow-Up
 
 Even with the stronger `GDN_RATIO=1, MLP_MULT=3.25` hybrid:
@@ -374,7 +455,8 @@ If continuing this branch, the current best path is:
 4. Use the hybrid as the current quality winner over the depth-control baseline at this local scale, including after wall-time reindexing.
 5. Treat `MLP_MULT=4.7` as ruled out locally; it overshot the artifact budget badly.
 6. Treat `MLP_MULT=4.0` as a stronger but still underfilled depth control that did not materially reduce the hybrid's advantage.
-7. After this, move to compute-optimal scaling and H100 calibration instead of spending unlimited time on perfect local size matching.
+7. Treat the 1xH100 calibration as a real positive signal for the architecture: the throughput tax is worse than local, but the quality gap is also stronger than local.
+8. After this, move to compute-optimal scaling and H100 calibration instead of spending unlimited time on perfect local size matching.
 
 ## Likely Next Work
 
