@@ -1,5 +1,8 @@
 """test_model.py — v3 tests. Run: python test_model.py"""
 
+import tempfile
+from pathlib import Path
+
 import torch
 
 from model import (
@@ -14,6 +17,12 @@ from model import (
     make_hybrid_tight,
     make_hybrid_wide,
     validate_norm_style,
+)
+from profiler_report import (
+    build_profile_report,
+    build_profile_rows,
+    load_profile_report,
+    write_profile_report,
 )
 from train_gpt_hybrid import (
     normalize_wandb_watch_mode,
@@ -368,6 +377,30 @@ def test_convergence():
     print(f"  ✓ converges: {losses[0]:.3f} → {losses[-1]:.3f}")
 
 
+def test_profile_report_json_roundtrip():
+    """Write and reload a structured profiler report without txt artifacts."""
+    with torch.profiler.profile(
+        activities=[torch.profiler.ProfilerActivity.CPU]
+    ) as prof:
+        x = torch.randn(8, 8)
+        _ = x @ x
+    rows = build_profile_rows(prof.key_averages())
+    report = build_profile_report(rows, sort_by="self_cpu_time_total")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        outpath = Path(tmpdir)
+        write_profile_report(
+            outpath,
+            report=report,
+            stem="sample",
+        )
+        loaded = load_profile_report(outpath / "sample.json")
+        assert loaded["metadata"]["row_count"] > 0
+        assert (outpath / "sample.json").is_file()
+        assert (outpath / "sample.csv").is_file()
+        assert not (outpath / "sample.txt").exists()
+    print("  ✓ profiler report json/csv roundtrip OK")
+
+
 if __name__ == "__main__":
     print("=" * 60)
     print(f"GDN Hybrid v3 Tests — PyTorch {torch.__version__}")
@@ -388,6 +421,7 @@ if __name__ == "__main__":
         ("Artifact audit (all presets)", test_artifact_audit),
         ("State tracking", test_state_tracking),
         ("Convergence", test_convergence),
+        ("Profiler report json/csv roundtrip", test_profile_report_json_roundtrip),
     ]
     for i, (name, fn) in enumerate(tests, 1):
         print(f"\n[{i}/{len(tests)}] {name}")

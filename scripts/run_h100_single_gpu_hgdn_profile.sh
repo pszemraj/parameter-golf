@@ -63,7 +63,7 @@ Defaults:
 
 Outputs:
   - Chrome/Perfetto traces under profiles/<run_id>/traces/
-  - Operator summary under profiles/<run_id>/key_averages.txt
+  - Operator summary under profiles/<run_id>/key_averages.json and key_averages.csv
 
 Examples:
   scripts/run_h100_single_gpu_hgdn_profile.sh hybrid

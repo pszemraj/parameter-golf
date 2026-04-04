@@ -84,6 +84,9 @@ What has not been claimed:
 - `scripts/run_h100_single_gpu_hgdn.sh`: 1xH100 helper for perf and fixed-step target-hardware calibration
 - `scripts/run_h100_single_gpu_hgdn_profile.sh`: 1xH100 helper for compiled and eager-attribution profiler captures
 - `scripts/run_hgdn_cuda_preflight.sh`: single-process CUDA preflight for the HGDN kernel path
+- `scripts/run_hgdn_local_phase1.sh`: sequential local 4070 phase-1 investigation bundle
+- `scripts/profile_hgdn_local_hotpath.py`: bare-GDN / hybrid-FB / optimizer-only local profiler
+- `scripts/analyze_hgdn_phase1.py`: bucket-attribution and boundary-audit analyzer for phase-1 bundles
 - `scripts/run_laptop_norm_compare.sh`: 1x laptop GPU helper for fixed-step `pre/post/keel` norm screens
 - `docs/HARDWARE_TRANSFER.md`: what does and does not transfer from local 4070 profiling to 1xH100 profiling
 - `docs/REFERENCE.md`: architecture/reference notes
@@ -107,8 +110,13 @@ The branch now includes the following major changes:
   - `PROFILE=1`
   - scheduled `torch.profiler` capture
   - trace export under `profiles/<run_id>/traces/`
-  - operator summary export to `profiles/<run_id>/key_averages.txt`
+  - operator summary export to `profiles/<run_id>/key_averages.{json,csv}`
   - one-shot HGDN FLA-boundary layout logging via `GDN_LOG_LAYOUTS=1`
+- The local profiling workflow is now structured rather than ad hoc:
+  - `scripts/profile_hgdn_local_hotpath.py` writes `trace + key_averages.{json,csv}`
+  - `scripts/analyze_hgdn_phase1.py` turns the saved profiles into a bucket-attribution table
+  - `GDN_AUDIT_BOUNDARIES=1` emits JSONL boundary records for q/k/v/gate/output dtype-layout audit
+  - `scripts/run_hgdn_local_phase1.sh` runs the full local diagnostic bundle sequentially and writes analysis artifacts under one `profiles/<run_prefix>/` root
 - The branch now has a tiny CUDA preflight:
   - `scripts/run_hgdn_cuda_preflight.sh`
   - runs direct single-process `gdn_eager`, `hybrid_eager`, and `hybrid_compiled` checks

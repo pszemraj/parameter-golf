@@ -162,6 +162,25 @@ Use two different local profiling modes for different questions:
      - HybridGPT forward/backward without optimizer stepping
      - optimizer step only
    - this is the better tool for deciding whether a local patch changed the model path itself versus the surrounding training shell
+   - it now exports `trace + key_averages.{json,csv}` so comparisons do not depend on pasted console output alone
+3. Boundary audit
+   - use `GDN_AUDIT_BOUNDARIES=1` with the hotpath or trainer eager profile when you need a concrete dtype/layout table
+   - this captures the HGDN boundaries that matter for copy/cast cleanup:
+     - `project_qkv`
+     - `conv_qkv`
+     - `norm_qkv`
+     - `recurrence_inputs`
+     - `recurrence_output`
+     - `output_gate_inputs`
+     - `output_proj_input`
+4. Phase-1 bundle runner
+   - use `scripts/run_hgdn_local_phase1.sh` when you want the full local protocol executed sequentially:
+     - CUDA preflight
+     - bare GDN hotpath
+     - hybrid forward/backward hotpath
+     - optimizer-only hotpath
+     - full trainer eager profile
+     - bucket-attribution + boundary-audit analysis
 
 Rule of thumb:
 

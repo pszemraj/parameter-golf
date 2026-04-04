@@ -23,11 +23,47 @@ os.environ.setdefault("WANDB_MODE", "offline")
 import torch
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
 
-from model import GatedDeltaNet, HybridGPT, SCALAR_PARAM_PATTERNS  # noqa: E402
-from train_gpt_hybrid import Muon, restore_low_dim_params_to_fp32  # noqa: E402
+GatedDeltaNet = None
+HybridGPT = None
+Muon = None
+restore_low_dim_params_to_fp32 = None
+SCALAR_PARAM_PATTERNS = ()
+build_profile_report = None
+build_profile_rows = None
+write_profile_report = None
+
+
+def load_repo_symbols() -> None:
+    """Import repo modules after env-backed profiling knobs are finalized."""
+    global GatedDeltaNet, HybridGPT, Muon, restore_low_dim_params_to_fp32
+    global SCALAR_PARAM_PATTERNS
+
+    if GatedDeltaNet is not None:
+        return
+    if str(REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT))
+    from model import GatedDeltaNet as gdn_cls  # noqa: WPS433
+    from model import HybridGPT as hybrid_cls  # noqa: WPS433
+    from model import SCALAR_PARAM_PATTERNS as scalar_patterns  # noqa: WPS433
+    from profiler_report import (  # noqa: WPS433
+        build_profile_report,
+        build_profile_rows,
+        write_profile_report,
+    )
+    from train_gpt_hybrid import Muon as muon_cls  # noqa: WPS433
+    from train_gpt_hybrid import (  # noqa: WPS433
+        restore_low_dim_params_to_fp32 as restore_fp32,
+    )
+
+    globals()["GatedDeltaNet"] = gdn_cls
+    globals()["HybridGPT"] = hybrid_cls
+    globals()["SCALAR_PARAM_PATTERNS"] = scalar_patterns
+    globals()["Muon"] = muon_cls
+    globals()["restore_low_dim_params_to_fp32"] = restore_fp32
+    globals()["build_profile_report"] = build_profile_report
+    globals()["build_profile_rows"] = build_profile_rows
+    globals()["write_profile_report"] = write_profile_report
 
 
 def parse_args() -> argparse.Namespace:
@@ -50,6 +86,18 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=REPO_ROOT / "profiles" / "local_hotpath",
     )
+    parser.add_argument(
+        "--audit-boundaries-path",
+        type=Path,
+        default=None,
+        help="Optional JSONL file for HGDN boundary dtype/layout audit.",
+    )
+    parser.add_argument(
+        "--audit-boundaries-limit",
+        type=int,
+        default=1,
+        help="Number of GDN forward calls to audit when --audit-boundaries-path is set.",
+    )
     return parser.parse_args()
 
 
@@ -67,6 +115,18 @@ def configure_cuda(seed: int) -> None:
     torch.backends.cudnn.allow_tf32 = True
 
 
+def configure_boundary_audit(args: argparse.Namespace) -> None:
+    """Enable optional HGDN boundary audit logging before repo imports.
+
+    :param argparse.Namespace args: Parsed command-line arguments.
+    """
+    if args.audit_boundaries_path is None:
+        return
+    os.environ["GDN_AUDIT_BOUNDARIES"] = "1"
+    os.environ["GDN_AUDIT_BOUNDARIES_PATH"] = str(args.audit_boundaries_path)
+    os.environ["GDN_AUDIT_BOUNDARIES_LIMIT"] = str(args.audit_boundaries_limit)
+
+
 def prepare_model(module: torch.nn.Module) -> torch.nn.Module:
     """Apply the trainer's mixed-precision parameter policy.
 
@@ -74,6 +134,7 @@ def prepare_model(module: torch.nn.Module) -> torch.nn.Module:
     :return torch.nn.Module: CUDA bf16 module with low-dimensional params restored to fp32.
     """
     module = module.cuda().bfloat16()
+    load_repo_symbols()
     restore_low_dim_params_to_fp32(module)
     return module
 
@@ -193,7 +254,6 @@ def run_profile(
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     trace_path = output_dir / f"{name}.trace.json"
-    table_path = output_dir / f"{name}.key_averages.txt"
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
     with torch.profiler.profile(
@@ -207,11 +267,24 @@ def run_profile(
     ) as prof:
         body()
     prof.export_chrome_trace(str(trace_path))
+    rows = build_profile_rows(prof.key_averages())
     table = prof.key_averages().table(
         sort_by="self_cuda_time_total",
         row_limit=row_limit,
     )
-    table_path.write_text(table, encoding="utf-8")
+    report = build_profile_report(
+        rows,
+        sort_by="self_cuda_time_total",
+        metadata={
+            "profile_name": name,
+            "trace_path": str(trace_path),
+        },
+    )
+    write_profile_report(
+        output_dir,
+        report=report,
+        stem=name,
+    )
     print(f"\n=== {name} ===")
     print(table)
     print(
@@ -320,6 +393,8 @@ def resolve_modes(mode: str) -> Iterable[str]:
 def main() -> None:
     """Run the requested local HGDN hotpath profiles."""
     args = parse_args()
+    configure_boundary_audit(args)
+    load_repo_symbols()
     configure_cuda(args.seed)
     for mode in resolve_modes(args.mode):
         if mode == "gdn":

@@ -38,6 +38,11 @@ from torch import Tensor, nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from model import _HAS_FLA, SCALAR_PARAM_PATTERNS, HybridGPT
+from profiler_report import (
+    build_profile_report,
+    build_profile_rows,
+    write_profile_report,
+)
 
 # ── Optional wandb ────────────────────────────────────────────────────
 _USE_WANDB = bool(int(os.environ.get("USE_WANDB", "1")))
@@ -1395,15 +1400,30 @@ def main() -> None:
     if profiler is not None:
         profiler.__exit__(None, None, None)
         if profile_output_dir is not None:
-            table = profiler.key_averages().table(
+            profile_rows = build_profile_rows(profiler.key_averages())
+            report = build_profile_report(
+                profile_rows,
                 sort_by=args.profile_sort_by,
-                row_limit=args.profile_row_limit,
+                metadata={
+                    "run_id": args.run_id,
+                    "profile_output_dir": str(profile_output_dir),
+                    "profile_row_limit": args.profile_row_limit,
+                    "profile_total_steps": profile_total_steps,
+                    "train_batch_tokens": args.train_batch_tokens,
+                    "train_seq_len": args.train_seq_len,
+                    "model_dim": args.model_dim,
+                    "num_layers": args.num_layers,
+                    "gdn_ratio": args.gdn_ratio,
+                    "mlp_mult": args.mlp_mult,
+                    "compile": args.compile,
+                    "compile_strategy": args.compile_strategy,
+                },
             )
-            (profile_output_dir / "key_averages.txt").write_text(
-                table,
-                encoding="utf-8",
+            write_profile_report(
+                profile_output_dir,
+                report=report,
             )
-            log0(f"profile_summary:{profile_output_dir / 'key_averages.txt'}")
+            log0(f"profile_summary:{profile_output_dir / 'key_averages.json'}")
             if master_process and _USE_WANDB:
                 wandb.summary["profile_dir"] = str(profile_output_dir)
 

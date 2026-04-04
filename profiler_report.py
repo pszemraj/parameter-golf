@@ -1,0 +1,224 @@
+"""Utilities for structured profiler export and comparison.
+
+This module gives the hybrid trainer and the local HGDN hotpath profiler a
+shared machine-readable report format based on JSON and CSV.
+"""
+
+from __future__ import annotations
+
+import csv
+import json
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any, Iterable, Sequence
+
+
+@dataclass(frozen=True)
+class ProfileRow:
+    """Structured representation of one profiler row.
+
+    :param str name: Event or range label.
+    :param int count: Number of calls.
+    :param float self_cpu_time_us: Self CPU time in microseconds.
+    :param float cpu_time_total_us: Total CPU time in microseconds.
+    :param float self_device_time_us: Self CUDA/device time in microseconds.
+    :param float device_time_total_us: Total CUDA/device time in microseconds.
+    :param int cpu_memory_bytes: Total CPU memory bytes.
+    :param int self_cpu_memory_bytes: Self CPU memory bytes.
+    :param int device_memory_bytes: Total device memory bytes.
+    :param int self_device_memory_bytes: Self device memory bytes.
+    """
+
+    name: str
+    count: int
+    self_cpu_time_us: float
+    cpu_time_total_us: float
+    self_device_time_us: float
+    device_time_total_us: float
+    cpu_memory_bytes: int
+    self_cpu_memory_bytes: int
+    device_memory_bytes: int
+    self_device_memory_bytes: int
+
+
+def _event_float(event: Any, *names: str) -> float:
+    """Fetch a float-like event attribute with alias fallback.
+
+    :param Any event: Profiler event row.
+    :param str names: Candidate attribute names in priority order.
+    :return float: Attribute value or `0.0` if none exist.
+    """
+    for name in names:
+        value = getattr(event, name, None)
+        if value is not None:
+            return float(value)
+    return 0.0
+
+
+def _event_int(event: Any, *names: str) -> int:
+    """Fetch an int-like event attribute with alias fallback.
+
+    :param Any event: Profiler event row.
+    :param str names: Candidate attribute names in priority order.
+    :return int: Attribute value or `0` if none exist.
+    """
+    for name in names:
+        value = getattr(event, name, None)
+        if value is not None:
+            return int(value)
+    return 0
+
+
+def build_profile_rows(events: Iterable[Any]) -> list[ProfileRow]:
+    """Convert profiler events into a structured row list.
+
+    :param Iterable[Any] events: `prof.key_averages()` iterable.
+    :return list[ProfileRow]: Structured row objects.
+    """
+    rows: list[ProfileRow] = []
+    for event in events:
+        rows.append(
+            ProfileRow(
+                name=str(getattr(event, "key", "")),
+                count=_event_int(event, "count"),
+                self_cpu_time_us=_event_float(event, "self_cpu_time_total"),
+                cpu_time_total_us=_event_float(event, "cpu_time_total"),
+                self_device_time_us=_event_float(
+                    event,
+                    "self_cuda_time_total",
+                    "self_device_time_total",
+                    "cuda_time_total",
+                    "device_time_total",
+                ),
+                device_time_total_us=_event_float(
+                    event,
+                    "cuda_time_total",
+                    "device_time_total",
+                    "self_cuda_time_total",
+                    "self_device_time_total",
+                ),
+                cpu_memory_bytes=_event_int(event, "cpu_memory_usage"),
+                self_cpu_memory_bytes=_event_int(event, "self_cpu_memory_usage"),
+                device_memory_bytes=_event_int(
+                    event, "cuda_memory_usage", "device_memory_usage"
+                ),
+                self_device_memory_bytes=_event_int(
+                    event, "self_cuda_memory_usage", "self_device_memory_usage"
+                ),
+            )
+        )
+    return rows
+
+
+def _sort_key_name(sort_by: str) -> str:
+    """Map a profiler sort key to a structured row attribute.
+
+    :param str sort_by: Requested sort key.
+    :return str: `ProfileRow` field name.
+    """
+    aliases = {
+        "self_cuda_time_total": "self_device_time_us",
+        "self_device_time_total": "self_device_time_us",
+        "cuda_time_total": "device_time_total_us",
+        "device_time_total": "device_time_total_us",
+        "self_cpu_time_total": "self_cpu_time_us",
+        "cpu_time_total": "cpu_time_total_us",
+    }
+    return aliases.get(sort_by, sort_by)
+
+
+def _percent(numerator: float, denominator: float) -> float:
+    """Compute a percentage safely.
+
+    :param float numerator: Numerator.
+    :param float denominator: Denominator.
+    :return float: Percentage, or `0.0` if the denominator is zero.
+    """
+    if denominator == 0.0:
+        return 0.0
+    return 100.0 * numerator / denominator
+
+
+def build_profile_report(
+    rows: Sequence[ProfileRow],
+    *,
+    sort_by: str,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build a machine-readable report from structured rows.
+
+    :param Sequence[ProfileRow] rows: Structured profiler rows.
+    :param str sort_by: Requested sort key.
+    :param dict[str, Any] metadata: Optional extra metadata.
+    :return dict[str, Any]: Serializable report dictionary.
+    """
+    sort_attr = _sort_key_name(sort_by)
+    sorted_rows = sorted(
+        rows,
+        key=lambda row: getattr(row, sort_attr, 0.0),
+        reverse=True,
+    )
+    total_self_cpu_us = sum(row.self_cpu_time_us for row in rows)
+    total_self_device_us = sum(row.self_device_time_us for row in rows)
+    payload_rows: list[dict[str, Any]] = []
+    for row in sorted_rows:
+        row_dict = asdict(row)
+        row_dict["self_cpu_percent"] = _percent(row.self_cpu_time_us, total_self_cpu_us)
+        row_dict["self_device_percent"] = _percent(
+            row.self_device_time_us, total_self_device_us
+        )
+        payload_rows.append(row_dict)
+    return {
+        "metadata": {
+            **(metadata or {}),
+            "sort_by": sort_by,
+            "sort_attr": sort_attr,
+            "total_self_cpu_time_us": total_self_cpu_us,
+            "total_self_device_time_us": total_self_device_us,
+            "row_count": len(payload_rows),
+        },
+        "rows": payload_rows,
+    }
+
+
+def write_profile_report(
+    output_dir: Path,
+    *,
+    report: dict[str, Any],
+    stem: str = "key_averages",
+) -> None:
+    """Write JSON and CSV profiler artifacts.
+
+    :param Path output_dir: Output directory.
+    :param dict[str, Any] report: Structured report payload.
+    :param str stem: Basename prefix, defaults to `key_averages`.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / f"{stem}.json").write_text(
+        json.dumps(report, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    rows = report["rows"]
+    if rows:
+        with (output_dir / f"{stem}.csv").open("w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(rows)
+
+
+def load_profile_report(path: str | Path) -> dict[str, Any]:
+    """Load a structured profile report from a directory or JSON file.
+
+    :param str | Path path: Report directory or JSON file.
+    :raises FileNotFoundError: If no supported report is found.
+    :return dict[str, Any]: Structured report payload.
+    """
+    report_path = Path(path)
+    if report_path.is_dir():
+        json_path = report_path / "key_averages.json"
+        if json_path.is_file():
+            return json.loads(json_path.read_text(encoding="utf-8"))
+        raise FileNotFoundError(f"No key_averages.json report found in {report_path}")
+    if report_path.suffix == ".json":
+        return json.loads(report_path.read_text(encoding="utf-8"))
+    raise FileNotFoundError(f"Unsupported profile report path: {report_path}")

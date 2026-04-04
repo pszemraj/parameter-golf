@@ -15,6 +15,10 @@ This file tracks follow-up work that is intentionally not enabled by default in 
   - `scripts/run_h100_single_gpu_hgdn_profile.sh {hybrid|depth|both|both-eager}`
   - default is now `USE_WANDB=0`
   - eager modes force `COMPILE=0` for attribution-only traces when compiled graphs hide the `record_function` labels
+  - local phase-1 workflow is now scripted via:
+    - `scripts/run_hgdn_local_phase1.sh`
+    - `scripts/analyze_hgdn_phase1.py`
+    - `scripts/profile_hgdn_local_hotpath.py`
 - Measured hotspot read on the 4 active profiled H100 steps:
   - hybrid flash-attention self CUDA: about `1.15s`
   - depth flash-attention self CUDA: about `2.38s`
@@ -83,7 +87,7 @@ RUN_PREFIX=h100prof scripts/run_h100_single_gpu_hgdn_profile.sh both
 
 Then:
 
-- inspect `profiles/<run_id>/key_averages.txt`
+- inspect `profiles/<run_id>/key_averages.json`
 - inspect the Chrome/Perfetto trace in `profiles/<run_id>/traces/`
 - do one short eager attribution rerun with `COMPILE=0` only if compiled traces remain too anonymous
 
@@ -201,7 +205,7 @@ scripts/sweep.sh depth
   - `PROFILE=1`
   - scheduled `torch.profiler` capture
   - trace export under `profiles/<run_id>/traces/`
-  - operator summary export to `profiles/<run_id>/key_averages.txt`
+  - operator summary export to `profiles/<run_id>/key_averages.json` and `key_averages.csv`
 - The branch now has a dedicated H100 profiling helper:
   - `scripts/run_h100_single_gpu_hgdn_profile.sh`
   - defaults to `USE_WANDB=0`

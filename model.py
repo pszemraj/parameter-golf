@@ -11,8 +11,10 @@ P0 fixes from code review:
 
 from __future__ import annotations
 
+import json
 import os
 from contextlib import AbstractContextManager, nullcontext
+from pathlib import Path
 from typing import Literal, Optional
 
 import torch
@@ -45,6 +47,10 @@ NormStyle = Literal["pre", "post", "keel"]
 _PROFILE_RANGES = bool(int(os.environ.get("PROFILE_RANGES", "0")))
 _LOG_GDN_LAYOUTS = bool(int(os.environ.get("GDN_LOG_LAYOUTS", "0")))
 _GDN_LAYOUTS_REMAINING = int(os.environ.get("GDN_LOG_LAYOUTS_LIMIT", "1"))
+_AUDIT_GDN_BOUNDARIES = bool(int(os.environ.get("GDN_AUDIT_BOUNDARIES", "0")))
+_GDN_AUDIT_BOUNDARIES_PATH = os.environ.get("GDN_AUDIT_BOUNDARIES_PATH", "")
+_GDN_AUDIT_BOUNDARIES_REMAINING = int(os.environ.get("GDN_AUDIT_BOUNDARIES_LIMIT", "1"))
+_GDN_AUDIT_CALL_INDEX = 0
 
 
 def profile_range(name: str) -> AbstractContextManager[None]:
@@ -87,6 +93,70 @@ def log_gdn_layouts_once(**tensors: Tensor) -> None:
     )
     print(f"gdn_layout:{joined}")
     _GDN_LAYOUTS_REMAINING -= 1
+
+
+def _tensor_layout_record(name: str, tensor: Tensor) -> dict[str, object]:
+    """Build a structured tensor layout record for HGDN audit logs.
+
+    :param str name: User-facing tensor label.
+    :param Tensor tensor: Tensor to summarize.
+    :return dict[str, object]: Serializable tensor record.
+    """
+    return {
+        "name": name,
+        "dtype": str(tensor.dtype),
+        "device": str(tensor.device),
+        "shape": list(tensor.shape),
+        "stride": list(tensor.stride()),
+        "contiguous": bool(tensor.is_contiguous()),
+    }
+
+
+def begin_gdn_boundary_audit() -> int | None:
+    """Reserve one GDN forward call for structured boundary logging.
+
+    :return int | None: Audit call index, or `None` when audit is disabled.
+    """
+    global _GDN_AUDIT_BOUNDARIES_REMAINING, _GDN_AUDIT_CALL_INDEX
+
+    if not _AUDIT_GDN_BOUNDARIES or _GDN_AUDIT_BOUNDARIES_REMAINING <= 0:
+        return None
+    if int(os.environ.get("RANK", "0")) != 0:
+        return None
+    call_index = _GDN_AUDIT_CALL_INDEX
+    _GDN_AUDIT_CALL_INDEX += 1
+    _GDN_AUDIT_BOUNDARIES_REMAINING -= 1
+    return call_index
+
+
+def audit_gdn_boundary(
+    boundary: str,
+    call_index: int | None,
+    **tensors: Tensor,
+) -> None:
+    """Emit a structured HGDN boundary audit record when enabled.
+
+    :param str boundary: Logical HGDN boundary label.
+    :param int | None call_index: Reserved audit-call identifier.
+    :param Tensor tensors: Named tensors to summarize.
+    """
+    if call_index is None:
+        return
+    payload = {
+        "call_index": call_index,
+        "boundary": boundary,
+        "tensors": [
+            _tensor_layout_record(name, tensor) for name, tensor in tensors.items()
+        ],
+    }
+    encoded = json.dumps(payload, sort_keys=True)
+    if _GDN_AUDIT_BOUNDARIES_PATH:
+        path = Path(_GDN_AUDIT_BOUNDARIES_PATH)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(encoded + "\n")
+        return
+    print(f"gdn_boundary:{encoded}")
 
 
 def validate_norm_style(norm_style: str) -> NormStyle:
@@ -310,11 +380,15 @@ class GatedDeltaNet(nn.Module):
         self.v_conv = CausalConv1d(total_v, conv_size, enabled=use_v_conv)
 
     def _project_recurrence_inputs(
-        self, x: Tensor
+        self,
+        x: Tensor,
+        *,
+        audit_call_index: int | None = None,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
         """Project activations into recurrence inputs with aligned dtypes.
 
         :param Tensor x: Input activations shaped `(batch, seq, d_model)`.
+        :param int | None audit_call_index: Optional structured audit call index.
         :return tuple[Tensor, Tensor, Tensor, Tensor, Tensor]: Normalized q/k, values, decay logits, and write gates.
         """
         B, T, D = x.shape
@@ -324,11 +398,25 @@ class GatedDeltaNet(nn.Module):
             q = self.w_q(x)
             k = self.w_k(x)
             v = self.w_v(x)
+        audit_gdn_boundary(
+            "project_qkv",
+            audit_call_index,
+            q=q,
+            k=k,
+            v=v,
+        )
 
         with profile_range("gdn.conv_qkv"):
             q = self.q_conv(q)
             k = self.k_conv(k)
             v = self.v_conv(v)
+        audit_gdn_boundary(
+            "conv_qkv",
+            audit_call_index,
+            q=q,
+            k=k,
+            v=v,
+        )
 
         with profile_range("gdn.norm_qkv"):
             # Keep the recurrence inputs on one activation dtype across PyTorch /
@@ -336,6 +424,13 @@ class GatedDeltaNet(nn.Module):
             q = l2_norm(q.view(B, T, H, Dk)).to(dtype=x.dtype)
             k = l2_norm(k.view(B, T, H, Dk)).to(dtype=x.dtype)
             v = v.view(B, T, H, Dv).to(dtype=x.dtype)
+        audit_gdn_boundary(
+            "norm_qkv",
+            audit_call_index,
+            q=q,
+            k=k,
+            v=v,
+        )
 
         with profile_range("gdn.gates"):
             g = -self.A_log.exp() * F.softplus(
@@ -346,6 +441,15 @@ class GatedDeltaNet(nn.Module):
             beta = beta * 2.0
         g = g.to(dtype=x.dtype)
         beta = beta.to(dtype=x.dtype)
+        audit_gdn_boundary(
+            "recurrence_inputs",
+            audit_call_index,
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+        )
         return q, k, v, g, beta
 
     def forward(self, x: Tensor) -> Tensor:
@@ -357,7 +461,10 @@ class GatedDeltaNet(nn.Module):
         B, T, _ = x.shape
         H, Dv = self.n_heads, self.head_v_dim
         with profile_range("gdn.forward"):
-            q, k, v, g, beta = self._project_recurrence_inputs(x)
+            audit_call_index = begin_gdn_boundary_audit()
+            q, k, v, g, beta = self._project_recurrence_inputs(
+                x, audit_call_index=audit_call_index
+            )
             log_gdn_layouts_once(q=q, k=k, v=v, g=g, beta=beta)
 
             with profile_range("gdn.recurrence"):
@@ -367,10 +474,16 @@ class GatedDeltaNet(nn.Module):
                     )
                 else:
                     o, _ = gdn_recurrent_naive(q, k, v, g.exp(), beta)
+            audit_gdn_boundary("recurrence_output", audit_call_index, o=o)
 
             with profile_range("gdn.output_gate"):
                 g_out = self.w_g(x).view(B, T, H, Dv)
-                o = rms_norm(o.float()).to(x.dtype) * F.silu(g_out)
+                o = rms_norm(o.float()).to(x.dtype)
+                audit_gdn_boundary(
+                    "output_gate_inputs", audit_call_index, o=o, g_out=g_out
+                )
+                o = o * F.silu(g_out)
+            audit_gdn_boundary("output_proj_input", audit_call_index, o=o)
 
             with profile_range("gdn.output_proj"):
                 return self.w_out(o.reshape(B, T, -1))
