@@ -105,10 +105,14 @@ Latest local attribution checkpoint:
   - it fixes q/k/v contiguity all the way from `conv_qkv` to `recurrence_inputs`
   - local trainer self-device time improved from `25,990.59 ms` to `25,258.00 ms` (`-2.82%`)
   - the tradeoff is a more expensive `gdn.conv_qkv` bucket (`236.67 -> 322.01 ms`) in exchange for a cheaper recurrence/norm path
+- Negative local follow-ups already ruled out:
+  - `GDN_GATES_FP32=0` regressed badly
+  - `GDN_OUTPUT_NORM_FP32=0` regressed overall even though `gdn.output_gate` itself got cheaper
+  - q/k-only contiguous outputs caused a catastrophic recurrence regression
+  - `GDN_USE_V_CONV=0` reduced some conv work but lost overall
 - Immediate next local target after this candidate:
-  - `gdn.gates`
-  - then `gdn.output_gate`
-  - with explicit attention to avoidable fp32 promotion islands
+  - finer subrange attribution inside `gdn.gates`, `gdn.norm_qkv`, and `gdn.output_gate`
+  - then a semantics-preserving cleanup inside the winning all-path contiguous layout
 
 ### 1. Norm placement screen (`pre` vs `post` vs `keel`)
 

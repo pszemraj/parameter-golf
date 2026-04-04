@@ -1,6 +1,6 @@
 # Profiling Log
 
-Last updated: 2026-04-04 17:20 EDT
+Last updated: 2026-04-04 17:35 EDT
 
 This file records profiler-driven checkpoints that should survive beyond the raw
 artifacts under `profiles/`.
@@ -167,3 +167,144 @@ islands and elementwise glue:
 2. `gdn.output_gate`
 3. any unnecessary dtype promotion around `softplus`, `sigmoid`, and
    `rms_norm(o.float()).to(x.dtype)`
+
+## 2026-04-04 — Follow-up local HGDN experiments against `rtx4070_phase1_convcontig`
+
+Bundles:
+
+- gate precision candidate: `profiles/rtx4070_phase1_gatebf16/`
+- output-norm precision candidate: `profiles/rtx4070_phase1_outputnormbf16/`
+- q/k-only contiguous candidate: `profiles/rtx4070_phase1_qkcontig/`
+- `v_conv` ablation candidate: `profiles/rtx4070_phase1_vconv0/`
+- commit at run time: `318bc22`
+
+Contract:
+
+- GPU: local RTX 4070 Laptop
+- env: `pg`
+- all comparisons used `rtx4070_phase1_convcontig` as the baseline
+- runs were executed sequentially:
+  - CUDA preflight
+  - hotpath GDN forward/backward
+  - hotpath hybrid forward/backward
+  - compare against the structured conv-contiguous baseline
+
+### Candidate matrix
+
+1. `GDN_GATES_FP32=0`
+2. `GDN_OUTPUT_NORM_FP32=0`
+3. `GDN_Q_CONV_OUTPUT_CONTIGUOUS=1`, `GDN_K_CONV_OUTPUT_CONTIGUOUS=1`, `GDN_V_CONV_OUTPUT_CONTIGUOUS=0`
+4. `GDN_USE_V_CONV=0`
+
+### Main findings
+
+None of the four follow-up candidates beat the blanket contiguous baseline.
+
+#### `GDN_GATES_FP32=0`
+
+This was the clearest negative result.
+
+- bare GDN total self-device time:
+  - baseline: `177.16 ms`
+  - candidate: `255.20 ms`
+  - delta: `+78.04 ms` (`+44.05%`)
+- main regressions:
+  - `gdn.gates`: `52.45 -> 107.01 ms`
+  - `gdn.norm_qkv`: `30.05 -> 48.48 ms`
+  - `gdn.recurrence`: `31.57 -> 34.77 ms`
+
+Decision:
+
+- keeping the gate softplus path in fp32 is currently the correct choice
+
+#### `GDN_OUTPUT_NORM_FP32=0`
+
+This improved one local bucket but still lost overall.
+
+- bare GDN total self-device time:
+  - baseline: `177.16 ms`
+  - candidate: `218.98 ms`
+  - delta: `+41.82 ms` (`+23.61%`)
+- hybrid forward/backward total self-device time:
+  - baseline: `1232.48 ms`
+  - candidate: `1266.42 ms`
+  - delta: `+33.94 ms` (`+2.75%`)
+- targeted win:
+  - `gdn.output_gate`: `8.29 -> 4.11 ms`
+- but offsetting losses:
+  - `gdn.norm_qkv`: `34.04 -> 38.57 ms`
+  - `gdn.gates`: `39.31 -> 41.70 ms`
+  - `aten::copy_`: `11.71 -> 13.74 ms`
+
+Decision:
+
+- the output-norm fp32 island is not the first thing to remove
+
+#### q/k-only contiguous outputs
+
+This was catastrophically worse than making all three conv outputs contiguous.
+
+- bare GDN total self-device time:
+  - baseline: `177.16 ms`
+  - candidate: `511.72 ms`
+  - delta: `+334.56 ms` (`+188.84%`)
+- hybrid forward/backward total self-device time:
+  - baseline: `1232.48 ms`
+  - candidate: `1691.34 ms`
+  - delta: `+458.86 ms` (`+37.23%`)
+- dominant regression:
+  - bare `gdn.recurrence`: `31.57 -> 314.31 ms`
+  - hybrid `gdn.recurrence`: `43.99 -> 332.35 ms`
+
+Decision:
+
+- q/k-only contiguity is not a “cheaper version” of the contiguous fix
+- if contiguity is forced, it needs to be coherent across q/k/v
+
+#### `GDN_USE_V_CONV=0`
+
+This reduced some conv-related work but still lost overall.
+
+- bare GDN total self-device time:
+  - baseline: `177.16 ms`
+  - candidate: `199.40 ms`
+  - delta: `+22.24 ms` (`+12.55%`)
+- hybrid forward/backward total self-device time:
+  - baseline: `1232.48 ms`
+  - candidate: `1385.00 ms`
+  - delta: `+152.53 ms` (`+12.38%`)
+- small local wins:
+  - hybrid `aten::copy_`: `11.71 -> 9.25 ms`
+  - hybrid `aten::convolution_backward`: `3.17 -> 2.12 ms`
+  - hybrid `aten::_conv_depthwise2d`: `2.52 -> 1.68 ms`
+- larger regressions:
+  - hybrid `gdn.norm_qkv`: `34.04 -> 50.56 ms`
+  - hybrid `gdn.output_gate`: `8.29 -> 11.31 ms`
+  - hybrid `gdn.recurrence`: `43.99 -> 48.43 ms`
+
+Decision:
+
+- removing `v_conv` is not a free speed win under the current HGDN path
+
+### Decision
+
+The winning local variant is still:
+
+- `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+- `GDN_GATES_FP32=1`
+- `GDN_OUTPUT_NORM_FP32=1`
+- `GDN_USE_Q_CONV=1`
+- `GDN_USE_K_CONV=1`
+- `GDN_USE_V_CONV=1`
+
+What these follow-up runs changed in the plan:
+
+- the next target should **not** be another coarse precision toggle
+- the next target should **not** be a blind conv ablation
+- the next step should be finer subrange attribution inside:
+  - `gdn.gates`
+  - `gdn.norm_qkv`
+  - `gdn.output_gate`
+  - optionally q/k/v conv paths separately
+
+That is the missing measurement needed before the next real optimization pass.
