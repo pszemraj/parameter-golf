@@ -4,7 +4,22 @@ This file tracks follow-up work that is intentionally not enabled by default in 
 
 ## Active next steps
 
-### 0. H100 profiling-driven HGDN kernel pass
+### 0. Interim cleanup checkpoint from the redundancy audit
+
+- Status: documented; not started.
+- Reference: `docs/REDUNDANCY_AUDIT.md`
+- Purpose: shrink obvious maintenance debt before the next round of HGDN kernel work so profiler and experiment tooling do not keep multiplying parallel copies.
+- Ranked follow-ups:
+  1. remove or merge `scripts/compare_profiler_reports.py`
+  2. extract shared profiler/report helpers and the canonical HGDN transfer-bucket list
+  3. deduplicate the repeated `GDN_*` env-contract plumbing in `scripts/run_hgdn_local_phase1.sh`
+  4. consolidate the duplicated `env_flag` helper in the local HGDN GPU tools
+  5. decide whether `scripts/export_wandb_hgdn_runs.py` is canonical or archival
+- Explicit defer:
+  - do not blindly merge `train_gpt.py` and `model.py` transformer utilities
+  - do not touch baseline/hybrid quantization helpers without artifact-byte regression checks
+
+### 1. H100 profiling-driven HGDN kernel pass
 
 - Status: active top priority.
 - Why: the H100 runs confirmed that the architecture is worth optimizing, and the profiler says the current throughput tax is not just "FLA recurrence is slow." A large fraction of the overhead is HGDN-side glue code around the recurrence.
@@ -143,7 +158,7 @@ Latest local attribution checkpoint:
   - immediate next step:
     - run 1xH100 confirmation on the new winner before changing the default path
 
-### 1. Norm placement screen (`pre` vs `post` vs `keel`)
+### 2. Norm placement screen (`pre` vs `post` vs `keel`)
 
 - Status: newly enabled, not quality-screened yet.
 - Why: recent work argues that pre-norm may be leaving depth utilization on the table, especially when a KEEL-style residual path makes post-norm trainable again.
@@ -209,7 +224,7 @@ COMPILE=1 COMPILE_STRATEGY=model GDN_RATIO=1 MLP_MULT=3.25 NORM_STYLE=keel \
 RUN_ID=norm_hybrid_keel_r1 scripts/sweep.sh single
 ```
 
-### 2. Size-matched depth-control rerun
+### 3. Size-matched depth-control rerun
 
 - Status: partially resolved.
 - Why: the current hybrid quality win is real, but the logged artifact sizes are still not perfectly matched.
@@ -229,7 +244,7 @@ COMPILE_STRATEGY=model MLP_MULT=4.0 RUN_ID=quality_depth_mlp40_seq2k \
 scripts/sweep.sh depth
 ```
 
-### 3. H100 throughput calibration
+### 4. H100 throughput calibration
 
 - Status: done.
 - Result:
@@ -240,7 +255,7 @@ scripts/sweep.sh depth
   - the architecture remains interesting because the quality gap on H100 is stronger than local
   - but kernel work should come before broader size sweeps because the throughput penalty is larger than the 4070 suggested
 
-### 4. Compute-optimal size sweep
+### 5. Compute-optimal size sweep
 
 - Status: temporarily deprioritized behind kernel work.
 - Why: actual trained artifacts are around `11MB`, so the branch still needs a wall-clock-vs-size sweep instead of assuming "fill 16MB" is optimal.
