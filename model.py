@@ -43,6 +43,8 @@ SCALAR_PARAM_PATTERNS = (
 
 NormStyle = Literal["pre", "post", "keel"]
 _PROFILE_RANGES = bool(int(os.environ.get("PROFILE_RANGES", "0")))
+_LOG_GDN_LAYOUTS = bool(int(os.environ.get("GDN_LOG_LAYOUTS", "0")))
+_GDN_LAYOUTS_REMAINING = int(os.environ.get("GDN_LOG_LAYOUTS_LIMIT", "1"))
 
 
 def profile_range(name: str) -> AbstractContextManager[None]:
@@ -54,6 +56,37 @@ def profile_range(name: str) -> AbstractContextManager[None]:
     if _PROFILE_RANGES:
         return torch.autograd.profiler.record_function(name)
     return nullcontext()
+
+
+def _tensor_layout_summary(name: str, tensor: Tensor) -> str:
+    """Summarize tensor dtype and layout for one-shot debug logging.
+
+    :param str name: User-facing tensor label.
+    :param Tensor tensor: Tensor to summarize.
+    :return str: Compact dtype/layout summary string.
+    """
+    return (
+        f"{name}:dtype={tensor.dtype} shape={tuple(tensor.shape)} "
+        f"stride={tuple(tensor.stride())} contiguous={int(tensor.is_contiguous())}"
+    )
+
+
+def log_gdn_layouts_once(**tensors: Tensor) -> None:
+    """Emit one-shot HGDN layout diagnostics on rank 0 when enabled.
+
+    :param Tensor tensors: Named tensors to summarize.
+    """
+    global _GDN_LAYOUTS_REMAINING
+
+    if not _LOG_GDN_LAYOUTS or _GDN_LAYOUTS_REMAINING <= 0:
+        return
+    if int(os.environ.get("RANK", "0")) != 0:
+        return
+    joined = " | ".join(
+        _tensor_layout_summary(name, tensor) for name, tensor in tensors.items()
+    )
+    print(f"gdn_layout:{joined}")
+    _GDN_LAYOUTS_REMAINING -= 1
 
 
 def validate_norm_style(norm_style: str) -> NormStyle:
@@ -130,13 +163,15 @@ class RMSNorm(nn.Module):
 class CausalConv1d(nn.Module):
     """Depthwise causal convolution used to preprocess sequence features."""
 
-    def __init__(self, dim: int, kernel_size: int = 4):
+    def __init__(self, dim: int, kernel_size: int = 4, enabled: bool = True):
         """Initialize the causal depthwise convolution.
 
         :param int dim: Channel count.
         :param int kernel_size: Convolution kernel width, defaults to 4.
+        :param bool enabled: Whether to apply the convolution, defaults to True.
         """
         super().__init__()
+        self.enabled = enabled
         self.conv = nn.Conv1d(
             dim, dim, kernel_size, padding=kernel_size - 1, groups=dim, bias=False
         )
@@ -145,12 +180,16 @@ class CausalConv1d(nn.Module):
         """Apply the causal convolution over the sequence axis.
 
         :param Tensor x: Input activations shaped `(batch, seq, dim)`.
-        :return Tensor: Convolved activations with causal trimming applied.
+        :return Tensor: Convolved activations with causal trimming applied, or the input unchanged when disabled.
         """
+        if not self.enabled:
+            return x
         x = x.transpose(1, 2)
         x = self.conv(x)[..., : x.size(-1)]
         x = F.silu(x)
-        return x.transpose(1, 2)
+        # Materialize sequence-major layout once here to avoid repeated hidden copies
+        # in the downstream HGDN normalization and recurrence path.
+        return x.transpose(1, 2).contiguous()
 
 
 # ── Naive GDN recurrence ─────────────────────────────────────────────
@@ -214,6 +253,9 @@ class GatedDeltaNet(nn.Module):
         allow_neg_eigval: bool = True,
         conv_size: int = 4,
         use_fla: bool = True,
+        use_q_conv: bool = True,
+        use_k_conv: bool = True,
+        use_v_conv: bool = True,
     ):
         """Initialize a Gated DeltaNet block.
 
@@ -224,6 +266,9 @@ class GatedDeltaNet(nn.Module):
         :param bool allow_neg_eigval: Whether to allow negative eigenvalues in the write gate, defaults to True.
         :param int conv_size: Depthwise causal convolution width, defaults to 4.
         :param bool use_fla: Whether to use the FLA kernel when available, defaults to True.
+        :param bool use_q_conv: Whether to apply the q-path convolution, defaults to True.
+        :param bool use_k_conv: Whether to apply the k-path convolution, defaults to True.
+        :param bool use_v_conv: Whether to apply the v-path convolution, defaults to True.
         """
         super().__init__()
         self.d_model = d_model
@@ -258,9 +303,9 @@ class GatedDeltaNet(nn.Module):
         self.dt_bias = nn.Parameter(torch.zeros(n_heads))
 
         # Short causal convolutions
-        self.q_conv = CausalConv1d(total_qk, conv_size)
-        self.k_conv = CausalConv1d(total_qk, conv_size)
-        self.v_conv = CausalConv1d(total_v, conv_size)
+        self.q_conv = CausalConv1d(total_qk, conv_size, enabled=use_q_conv)
+        self.k_conv = CausalConv1d(total_qk, conv_size, enabled=use_k_conv)
+        self.v_conv = CausalConv1d(total_v, conv_size, enabled=use_v_conv)
 
     def _project_recurrence_inputs(
         self, x: Tensor
@@ -271,7 +316,6 @@ class GatedDeltaNet(nn.Module):
         :return tuple[Tensor, Tensor, Tensor, Tensor, Tensor]: Normalized q/k, values, decay logits, and write gates.
         """
         B, T, D = x.shape
-        dt = x.dtype
         H, Dk, Dv = self.n_heads, self.head_k_dim, self.head_v_dim
 
         with profile_range("gdn.project_qkv"):
@@ -285,8 +329,8 @@ class GatedDeltaNet(nn.Module):
             v = self.v_conv(v)
 
         with profile_range("gdn.norm_qkv"):
-            q = l2_norm(q.view(B, T, H, Dk)).to(dt)
-            k = l2_norm(k.view(B, T, H, Dk)).to(dt)
+            q = l2_norm(q.view(B, T, H, Dk))
+            k = l2_norm(k.view(B, T, H, Dk))
             v = v.view(B, T, H, Dv)
 
         with profile_range("gdn.gates"):
@@ -296,8 +340,8 @@ class GatedDeltaNet(nn.Module):
             beta = torch.sigmoid(self.w_b(x))  # (B,T,H)
         if self.allow_neg_eigval:
             beta = beta * 2.0
-        g = g.to(dtype=dt)
-        beta = beta.to(dtype=dt)
+        g = g.to(dtype=x.dtype)
+        beta = beta.to(dtype=x.dtype)
         return q, k, v, g, beta
 
     def forward(self, x: Tensor) -> Tensor:
@@ -307,10 +351,10 @@ class GatedDeltaNet(nn.Module):
         :return Tensor: Updated activations shaped `(batch, seq, d_model)`.
         """
         B, T, _ = x.shape
-        dt = x.dtype
         H, Dv = self.n_heads, self.head_v_dim
         with profile_range("gdn.forward"):
             q, k, v, g, beta = self._project_recurrence_inputs(x)
+            log_gdn_layouts_once(q=q, k=k, v=v, g=g, beta=beta)
 
             with profile_range("gdn.recurrence"):
                 if self.use_fla and x.is_cuda:
@@ -322,7 +366,7 @@ class GatedDeltaNet(nn.Module):
 
             with profile_range("gdn.output_gate"):
                 g_out = self.w_g(x).view(B, T, H, Dv)
-                o = rms_norm(o.float()).to(dt) * F.silu(g_out)
+                o = rms_norm(o.float()).to(x.dtype) * F.silu(g_out)
 
             with profile_range("gdn.output_proj"):
                 return self.w_out(o.reshape(B, T, -1))
@@ -510,6 +554,9 @@ class GDNBlock(nn.Module):
         expand_v: float = 2.0,
         allow_neg_eigval: bool = True,
         conv_size: int = 4,
+        use_q_conv: bool = True,
+        use_k_conv: bool = True,
+        use_v_conv: bool = True,
         leaky_slope: float = 0.5,
         norm_style: NormStyle = "pre",
         residual_alpha: float = 1.0,
@@ -524,6 +571,9 @@ class GDNBlock(nn.Module):
         :param float expand_v: GDN value expansion factor, defaults to 2.0.
         :param bool allow_neg_eigval: Whether to allow negative eigenvalues, defaults to True.
         :param int conv_size: Causal convolution width, defaults to 4.
+        :param bool use_q_conv: Whether to apply the q-path convolution, defaults to True.
+        :param bool use_k_conv: Whether to apply the k-path convolution, defaults to True.
+        :param bool use_v_conv: Whether to apply the v-path convolution, defaults to True.
         :param float leaky_slope: LeakyReLU slope, defaults to 0.5.
         :param NormStyle norm_style: Residual norm placement, defaults to "pre".
         :param float residual_alpha: Residual scaling factor used by KEEL-style blocks, defaults to 1.0.
@@ -536,7 +586,15 @@ class GDNBlock(nn.Module):
         self.attn_in_norm, self.attn_out_norm = RMSNorm(), RMSNorm()
         self.mlp_in_norm, self.mlp_out_norm = RMSNorm(), RMSNorm()
         self.gdn = GatedDeltaNet(
-            dim, n_heads, head_k_dim, expand_v, allow_neg_eigval, conv_size
+            dim,
+            n_heads,
+            head_k_dim,
+            expand_v,
+            allow_neg_eigval,
+            conv_size,
+            use_q_conv=use_q_conv,
+            use_k_conv=use_k_conv,
+            use_v_conv=use_v_conv,
         )
         self.mlp = MLP(dim, mlp_mult, leaky_slope)
         self.attn_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
@@ -676,6 +734,9 @@ class HybridGPT(nn.Module):
         gdn_expand_v: float = 2.0,
         gdn_allow_neg_eigval: bool = True,
         gdn_conv_size: int = 4,
+        gdn_use_q_conv: bool = True,
+        gdn_use_k_conv: bool = True,
+        gdn_use_v_conv: bool = True,
         # Shared
         mlp_mult: float = 3.0,
         leaky_slope: float = 0.5,
@@ -700,6 +761,9 @@ class HybridGPT(nn.Module):
         :param float gdn_expand_v: GDN value expansion factor, defaults to 2.0.
         :param bool gdn_allow_neg_eigval: Whether to allow negative eigenvalues, defaults to True.
         :param int gdn_conv_size: GDN convolution width, defaults to 4.
+        :param bool gdn_use_q_conv: Whether to apply the q-path convolution, defaults to True.
+        :param bool gdn_use_k_conv: Whether to apply the k-path convolution, defaults to True.
+        :param bool gdn_use_v_conv: Whether to apply the v-path convolution, defaults to True.
         :param float mlp_mult: MLP expansion factor, defaults to 3.0.
         :param float leaky_slope: LeakyReLU slope, defaults to 0.5.
         :param int gdn_ratio: Number of GDN layers per attention layer, defaults to 3.
@@ -752,6 +816,9 @@ class HybridGPT(nn.Module):
                         gdn_expand_v,
                         gdn_allow_neg_eigval,
                         gdn_conv_size,
+                        gdn_use_q_conv,
+                        gdn_use_k_conv,
+                        gdn_use_v_conv,
                         leaky_slope,
                         self.norm_style,
                         self.residual_alpha,

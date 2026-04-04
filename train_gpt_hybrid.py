@@ -135,6 +135,9 @@ class Hyperparameters:
 
     gdn_allow_neg_eigval = bool(int(os.environ.get("GDN_ALLOW_NEG_EIGVAL", "1")))
     gdn_conv_size = int(os.environ.get("GDN_CONV_SIZE", 4))
+    gdn_use_q_conv = bool(int(os.environ.get("GDN_USE_Q_CONV", "1")))
+    gdn_use_k_conv = bool(int(os.environ.get("GDN_USE_K_CONV", "1")))
+    gdn_use_v_conv = bool(int(os.environ.get("GDN_USE_V_CONV", "1")))
     gdn_ratio = int(os.environ.get("GDN_RATIO", 3))  # 3 GDN : 1 Attn
 
     # Optimizer
@@ -938,7 +941,9 @@ def main() -> None:
         f"wandb_watch:{wandb_watch_mode} wandb_watch_log_freq:{args.wandb_watch_log_freq} "
         f"perf_timing:{int(args.perf_timing)} perf_ignore_steps:{args.perf_ignore_steps} "
         f"perf_skip_final_eval:{int(args.perf_skip_final_eval)} "
-        f"profile:{int(args.profile)}",
+        f"profile:{int(args.profile)} "
+        f"gdn_convs:q={int(args.gdn_use_q_conv)} k={int(args.gdn_use_k_conv)} "
+        f"v={int(args.gdn_use_v_conv)}",
         console=False,
     )
     if args.profile:
@@ -1016,6 +1021,9 @@ def main() -> None:
             gdn_expand_v=args.gdn_expand_v,
             gdn_allow_neg_eigval=args.gdn_allow_neg_eigval,
             gdn_conv_size=args.gdn_conv_size,
+            gdn_use_q_conv=args.gdn_use_q_conv,
+            gdn_use_k_conv=args.gdn_use_k_conv,
+            gdn_use_v_conv=args.gdn_use_v_conv,
             mlp_mult=args.mlp_mult,
             leaky_slope=args.leaky_slope,
             gdn_ratio=args.gdn_ratio,
@@ -1081,6 +1089,9 @@ def main() -> None:
                 "n_params": n_params,
                 "planned_train_tokens": planned_train_tokens,
                 "sdp_backend": sdp_backend,
+                "gdn_use_q_conv": args.gdn_use_q_conv,
+                "gdn_use_k_conv": args.gdn_use_k_conv,
+                "gdn_use_v_conv": args.gdn_use_v_conv,
                 "wandb_watch": wandb_watch_mode,
                 "wandb_watch_log_freq": args.wandb_watch_log_freq,
             }

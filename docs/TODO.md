@@ -12,8 +12,9 @@ This file tracks follow-up work that is intentionally not enabled by default in 
   - throughput: hybrid is about `1.40x` slower than the pure-attention depth control at `seq=2048`
   - quality: hybrid still wins strongly on H100 fixed-2k quality and roundtrip BPB
 - Profiling helper:
-  - `scripts/run_h100_single_gpu_hgdn_profile.sh {hybrid|depth|both}`
+  - `scripts/run_h100_single_gpu_hgdn_profile.sh {hybrid|depth|both|both-eager}`
   - default is now `USE_WANDB=0`
+  - eager modes force `COMPILE=0` for attribution-only traces when compiled graphs hide the `record_function` labels
 - Measured hotspot read on the 4 active profiled H100 steps:
   - hybrid flash-attention self CUDA: about `1.15s`
   - depth flash-attention self CUDA: about `2.38s`
@@ -35,12 +36,16 @@ Ranked optimization checklist:
      - casts around `q/k` normalization
      - casts around `g`, `beta`, and `g_out`
      - any view/contiguous path forcing copies before or after the FLA call
+   - Current branch support:
+     - `GDN_LOG_LAYOUTS=1` prints one-shot tensor dtype/shape/stride summaries at the FLA boundary
    - Expected upside: high, because this is pure overhead and not model math.
 2. Fuse or rewrite the `q_conv/k_conv/v_conv` preprocessing path.
    - Why: depthwise conv plus its backward path is one of the largest HGDN-only buckets.
    - What to try:
      - a custom Triton kernel or a more direct fused implementation for depthwise causal conv + SiLU
      - at minimum, benchmark whether `v_conv` can be removed again on H100 without hurting quality
+   - Current branch support:
+     - `GDN_USE_Q_CONV`, `GDN_USE_K_CONV`, `GDN_USE_V_CONV` now allow direct q/k/v ablations without code edits
    - Expected upside: high.
 3. Fuse HGDN elementwise glue.
    - Why: the profiler shows a broad pile of Triton/elementwise kernels beyond the recurrence itself.

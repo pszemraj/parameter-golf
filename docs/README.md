@@ -27,6 +27,7 @@ What is now true:
 - `torch.compile` works on the hybrid path when graph breaks are allowed.
 - The default compile strategy is now `COMPILE_STRATEGY=model`.
 - A dedicated perf harness exists for fair throughput screens.
+- A dedicated profiling harness exists for compiled and eager-attribution H100 traces.
 - The initial quality comparison at `TRAIN_SEQ_LEN=2048` favors the hybrid over the matched depth-control baseline.
 - A larger pure-attention depth control (`MLP_MULT=4.0`) was re-run under the same 2k-step contract and still failed to close the hybrid gap.
 - The hybrid stack now has an experimental residual normalization knob: `NORM_STYLE=pre|post|keel`.
@@ -79,6 +80,7 @@ What has not been claimed:
 - `train_gpt_hybrid.py`: hybrid trainer
 - `scripts/sweep.sh`: launch helper and perf-harness env contract
 - `scripts/run_h100_single_gpu_hgdn.sh`: 1xH100 helper for perf and fixed-step target-hardware calibration
+- `scripts/run_h100_single_gpu_hgdn_profile.sh`: 1xH100 helper for compiled and eager-attribution profiler captures
 - `scripts/run_laptop_norm_compare.sh`: 1x laptop GPU helper for fixed-step `pre/post/keel` norm screens
 - `docs/REFERENCE.md`: architecture/reference notes
 - `docs/TODO.md`: deferred follow-ups and break-glass items
@@ -97,6 +99,16 @@ The branch now includes the following major changes:
 - `nn.Module.compile()` for module compilation on torch 2.11.
 - `fullgraph=False` on the top-level hybrid compile path so FLA graph breaks do not hard-fail.
 - `WANDB_WATCH` is now an explicit trainer knob. The helper scripts default it to `none` so sweep screens keep normal online metric logging without gradient-histogram overhead.
+- The trainer now has a profiling harness:
+  - `PROFILE=1`
+  - scheduled `torch.profiler` capture
+  - trace export under `profiles/<run_id>/traces/`
+  - operator summary export to `profiles/<run_id>/key_averages.txt`
+  - one-shot HGDN FLA-boundary layout logging via `GDN_LOG_LAYOUTS=1`
+- The branch now exposes per-path GDN conv toggles:
+  - `GDN_USE_Q_CONV`
+  - `GDN_USE_K_CONV`
+  - `GDN_USE_V_CONV`
 - A fair perf harness:
   - `PERF_TIMING=1`
   - `PERF_IGNORE_STEPS=N`

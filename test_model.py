@@ -76,6 +76,9 @@ def test_gdn_recurrence_input_dtypes():
     assert v.dtype == x.dtype
     assert g.dtype == x.dtype
     assert beta.dtype == x.dtype
+    assert q.is_contiguous()
+    assert k.is_contiguous()
+    assert v.is_contiguous()
     print(f"  ✓ recurrence input dtypes OK ({q.dtype})")
 
 
@@ -120,6 +123,33 @@ def test_causal_conv():
     x2[:, 5:] = torch.randn_like(x2[:, 5:])
     torch.testing.assert_close(conv(x1)[:, :5], conv(x2)[:, :5], atol=1e-6, rtol=1e-6)
     print("  ✓ causal conv OK")
+
+
+def test_causal_conv_disable():
+    """Disabling the causal conv should become an exact identity."""
+    conv = CausalConv1d(32, 4, enabled=False)
+    x = torch.randn(2, 16, 32)
+    torch.testing.assert_close(conv(x), x, atol=0.0, rtol=0.0)
+    print("  ✓ causal conv disable OK")
+
+
+def test_gdn_conv_toggles():
+    """Allow v-path ablations without breaking the HGDN forward path."""
+    layer = GatedDeltaNet(
+        64,
+        n_heads=4,
+        head_k_dim=8,
+        expand_v=2.0,
+        use_fla=False,
+        use_v_conv=False,
+    )
+    x = torch.randn(2, 16, 64, requires_grad=True)
+    out = layer(x)
+    assert out.shape == x.shape
+    out.sum().backward()
+    assert x.grad is not None
+    assert not layer.v_conv.enabled
+    print("  ✓ GDN conv toggles OK")
 
 
 def test_hybrid_fwd_bwd():
@@ -351,6 +381,8 @@ if __name__ == "__main__":
         ("Recurrence input dtypes", test_gdn_recurrence_input_dtypes),
         ("Muon routing", test_muon_routing),
         ("Causal conv", test_causal_conv),
+        ("Causal conv disable", test_causal_conv_disable),
+        ("GDN conv toggles", test_gdn_conv_toggles),
         ("Hybrid fwd/bwd", test_hybrid_fwd_bwd),
         ("Norm styles", test_norm_styles),
         ("Invalid norm style", test_invalid_norm_style),
