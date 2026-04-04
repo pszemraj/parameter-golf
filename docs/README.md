@@ -28,6 +28,7 @@ What is now true:
 - The default compile strategy is now `COMPILE_STRATEGY=model`.
 - A dedicated perf harness exists for fair throughput screens.
 - A dedicated profiling harness exists for compiled and eager-attribution H100 traces.
+- A dedicated tiny CUDA preflight now exists for direct HGDN FLA/compile validation without `torchrun`.
 - The initial quality comparison at `TRAIN_SEQ_LEN=2048` favors the hybrid over the matched depth-control baseline.
 - A larger pure-attention depth control (`MLP_MULT=4.0`) was re-run under the same 2k-step contract and still failed to close the hybrid gap.
 - The hybrid stack now has an experimental residual normalization knob: `NORM_STYLE=pre|post|keel`.
@@ -81,6 +82,7 @@ What has not been claimed:
 - `scripts/sweep.sh`: launch helper and perf-harness env contract
 - `scripts/run_h100_single_gpu_hgdn.sh`: 1xH100 helper for perf and fixed-step target-hardware calibration
 - `scripts/run_h100_single_gpu_hgdn_profile.sh`: 1xH100 helper for compiled and eager-attribution profiler captures
+- `scripts/run_hgdn_cuda_preflight.sh`: single-process CUDA preflight for the HGDN kernel path
 - `scripts/run_laptop_norm_compare.sh`: 1x laptop GPU helper for fixed-step `pre/post/keel` norm screens
 - `docs/REFERENCE.md`: architecture/reference notes
 - `docs/TODO.md`: deferred follow-ups and break-glass items
@@ -105,6 +107,10 @@ The branch now includes the following major changes:
   - trace export under `profiles/<run_id>/traces/`
   - operator summary export to `profiles/<run_id>/key_averages.txt`
   - one-shot HGDN FLA-boundary layout logging via `GDN_LOG_LAYOUTS=1`
+- The branch now has a tiny CUDA preflight:
+  - `scripts/run_hgdn_cuda_preflight.sh`
+  - runs direct single-process `gdn_eager`, `hybrid_eager`, and `hybrid_compiled` checks
+  - intended to catch HGDN kernel-path regressions before handing the user longer GPU commands
 - The branch now exposes per-path GDN conv toggles:
   - `GDN_USE_Q_CONV`
   - `GDN_USE_K_CONV`

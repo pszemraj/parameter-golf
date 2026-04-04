@@ -70,6 +70,12 @@ Ranked optimization checklist:
 Suggested immediate sequence:
 
 ```bash
+scripts/run_hgdn_cuda_preflight.sh
+```
+
+Then:
+
+```bash
 RUN_PREFIX=h100prof scripts/run_h100_single_gpu_hgdn_profile.sh both
 ```
 
