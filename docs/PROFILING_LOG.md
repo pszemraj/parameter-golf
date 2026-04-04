@@ -1,6 +1,6 @@
 # Profiling Log
 
-Last updated: 2026-04-04 17:35 EDT
+Last updated: 2026-04-04 18:10 EDT
 
 This file records profiler-driven checkpoints that should survive beyond the raw
 artifacts under `profiles/`.
@@ -308,3 +308,95 @@ What these follow-up runs changed in the plan:
   - optionally q/k/v conv paths separately
 
 That is the missing measurement needed before the next real optimization pass.
+
+## 2026-04-04 — Fine HGDN subrange attribution on the winning local variant (`rtx4070_phase1_convcontig_subranges`)
+
+Bundle:
+
+- raw artifacts: `profiles/rtx4070_phase1_convcontig_subranges/`
+- synthesized analysis: `profiles/rtx4070_phase1_convcontig_subranges/analysis/analysis.md`
+- commit at run time: `c0ed0ae`
+- analysis/tooling normalization commit: `8f0c626`
+
+Contract:
+
+- GPU: local RTX 4070 Laptop
+- env: `pg`
+- fixed winning config:
+  - `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+  - `GDN_GATES_FP32=1`
+  - `GDN_OUTPUT_NORM_FP32=1`
+  - q/k/v convs all enabled
+- purpose:
+  - replace coarse HGDN ranges with finer subranges so the next optimization
+    target is based on specific code paths rather than whole-block labels
+
+### Main findings
+
+The subrange pass changed the next-step decision materially.
+
+Under the current winning local variant, the most useful trainer-eager HGDN
+sub-buckets are:
+
+- `gdn.recurrence`: `180.70 ms`
+- `gdn.q_conv`: `106.75 ms`
+- `gdn.k_conv`: `109.86 ms`
+- `gdn.v_conv`: `106.40 ms`
+- `gdn.output_norm`: `93.83 ms`
+- `gdn.q_norm`: `50.53 ms`
+- `gdn.k_norm`: `49.46 ms`
+- `gdn.output_gate_mul`: `25.32 ms`
+- `gdn.output_gate_proj`: `23.32 ms`
+- `gdn.g_proj`: `13.23 ms`
+- `gdn.g_pointwise`: `6.66 ms`
+- `gdn.beta_proj`: `6.28 ms`
+
+Interpretation:
+
+- the remaining cost is **not** primarily the old coarse `gdn.gates` bucket
+- once first-call artifacts are separated out, the gate pointwise path is much
+  smaller in the real training step than the earlier bare-GDN view suggested
+- the major remaining HGDN costs are now:
+  - recurrence
+  - the three conv paths together
+  - q/k normalization
+  - output normalization
+
+### Important caution
+
+The fine-subrange pass also showed that bare-GDN microprofiles can overstate
+first-call effects.
+
+Examples:
+
+- bare `gdn.g_pointwise`: `44.69 ms`
+- trainer-eager `gdn.g_pointwise`: `6.66 ms`
+- bare `gdn.q_conv`: `11.92 ms`
+- trainer-eager `gdn.q_conv`: `106.75 ms` across `128` calls, with `k/v` now in
+  the same ballpark
+
+Decision:
+
+- use bare-GDN hotpaths to find code-path ownership
+- use trainer-eager totals to rank remaining payoff on the real training step
+
+### Decision
+
+The next local optimization pass should target **conv-path consolidation**, not
+another precision toggle.
+
+Reason:
+
+- recurrence is still the single largest HGDN sub-bucket
+- but the three conv paths together are materially larger than recurrence
+- they are followed by depthwise-conv backward and `_conv_depthwise2d`
+- that makes the highest-value next semantics-preserving experiment:
+  - pack q/k/v depthwise causal conv into one shared conv path
+  - preserve the current all-path contiguous layout
+  - then remeasure recurrence, conv, and copy/mul spillover
+
+What moves down the list after this run:
+
+- more coarse fp32 on/off gate experiments
+- q/k-only contiguity experiments
+- `v_conv` ablation as the next default step

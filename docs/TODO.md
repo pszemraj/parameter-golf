@@ -113,6 +113,19 @@ Latest local attribution checkpoint:
 - Immediate next local target after this candidate:
   - finer subrange attribution inside `gdn.gates`, `gdn.norm_qkv`, and `gdn.output_gate`
   - then a semantics-preserving cleanup inside the winning all-path contiguous layout
+- Fine-subrange attribution is now done on `rtx4070_phase1_convcontig_subranges`.
+- Current trainer-eager HGDN sub-bucket ordering on the local winner:
+  - `gdn.recurrence`: `180.70 ms`
+  - `gdn.q_conv`: `106.75 ms`
+  - `gdn.k_conv`: `109.86 ms`
+  - `gdn.v_conv`: `106.40 ms`
+  - `gdn.output_norm`: `93.83 ms`
+  - `gdn.q_norm`: `50.53 ms`
+  - `gdn.k_norm`: `49.46 ms`
+- Updated next step:
+  - try a semantics-preserving packed q/k/v depthwise-conv path
+  - keep `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+  - re-check whether that lowers the combined conv stack without reintroducing the old recurrence/layout tax
 
 ### 1. Norm placement screen (`pre` vs `post` vs `keel`)
 
