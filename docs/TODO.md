@@ -128,11 +128,20 @@ Latest local attribution checkpoint:
   - but the full trainer-eager step still regressed by `+1.11%`
   - the main new tax is `aten::cat` plus a slightly worse conv backward path
 - Updated next step:
-  - do not send packed qkv conv alone to H100
-  - if revisiting packing, the next experiment must remove the `aten::cat`
-    overhead by emitting packed q/k/v directly from projection
-  - otherwise keep working from the current local winner:
+  - packed qkv projection + packed conv is now implemented and screened on
+    `rtx4070_phase1_packedqkvproj_fix1`
+  - that candidate is the first packed-path local winner on the real training
+    step:
+    - trainer self-device time: `25797.53 -> 18282.05 ms` (`-29.13%`)
+    - `aten::copy_`: `776.28 -> 560.86 ms`
+    - `aten::mul`: `1003.44 -> 719.87 ms`
+    - `gdn.recurrence`: `180.70 -> 123.78 ms`
+  - new local winning config:
     - `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+    - `GDN_USE_PACKED_QKV_CONV=1`
+    - `GDN_USE_PACKED_QKV_PROJ=1`
+  - immediate next step:
+    - run 1xH100 confirmation on the new winner before changing the default path
 
 ### 1. Norm placement screen (`pre` vs `post` vs `keel`)
 

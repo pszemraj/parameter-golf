@@ -1,6 +1,6 @@
 # Profiling Log
 
-Last updated: 2026-04-04 18:29 EDT
+Last updated: 2026-04-04 18:41 EDT
 
 This file records profiler-driven checkpoints that should survive beyond the raw
 artifacts under `profiles/`.
@@ -505,3 +505,123 @@ If packing is revisited, it needs the next structural step:
 Absent that, the active default local winner remains:
 
 - `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+
+## 2026-04-04 — Packed qkv projection + packed conv (`rtx4070_phase1_packedqkvproj_fix1`)
+
+Bundle:
+
+- raw artifacts: `profiles/rtx4070_phase1_packedqkvproj_fix1/`
+- structured comparison:
+  `profiles/rtx4070_phase1_packedqkvproj_fix1/compare_vs_rtx4070_phase1_convcontig_subranges/comparison.md`
+- experiment-surface commit at run time: `21f4d73`
+
+Contract:
+
+- GPU: local RTX 4070 Laptop
+- env: `pg`
+- fixed baseline:
+  - `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+- candidate:
+  - `GDN_USE_PACKED_QKV_CONV=1`
+  - `GDN_USE_PACKED_QKV_PROJ=1`
+  - `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+- purpose:
+  - follow the packed-conv loss with the missing structural patch
+  - remove the q/k/v packing tax at projection time instead of building the
+    packed tensor with a late `cat` before the conv
+
+### Main findings
+
+This is the first packed-path candidate that wins on the real local training
+step.
+
+The microprofiles alone give a mixed story:
+
+- bare GDN total self-device time:
+  - baseline: `171.05 ms`
+  - candidate: `208.44 ms`
+  - delta: `+37.39 ms` (`+21.86%`)
+- hybrid forward/backward total self-device time:
+  - baseline: `1273.39 ms`
+  - candidate: `1319.72 ms`
+  - delta: `+46.33 ms` (`+3.64%`)
+- hybrid optimizer total self-device time:
+  - baseline: `203.39 ms`
+  - candidate: `158.05 ms`
+  - delta: `-45.34 ms` (`-22.29%`)
+
+But the trainer-eager result is decisive:
+
+- trainer total self-device time:
+  - baseline: `25797.53 ms`
+  - candidate: `18282.05 ms`
+  - delta: `-7515.47 ms` (`-29.13%`)
+
+Interpretation:
+
+- this candidate is a reminder not to over-rank bare-GDN microprofiles
+- the packed projection path helps where the real training step was paying,
+  which was not visible from the bare recurrence view alone
+
+### Why it won
+
+Compared with the current conv-contiguous baseline, the trainer-eager trace
+shows broad HGDN-path reductions:
+
+- `aten::copy_`: `776.28 -> 560.86 ms`
+- `aten::mul`: `1003.44 -> 719.87 ms`
+- `gdn.recurrence`: `180.70 -> 123.78 ms`
+- `aten::convolution_backward`: `159.30 -> 124.35 ms`
+- `aten::_conv_depthwise2d`: `125.02 -> 100.19 ms`
+- `gdn.q_norm`: `50.53 -> 34.57 ms`
+- `gdn.k_norm`: `49.46 -> 34.82 ms`
+- `gdn.output_norm`: `93.83 -> 67.79 ms`
+- combined separate trainer conv buckets:
+  - baseline `gdn.q_conv + gdn.k_conv + gdn.v_conv`: `323.01 ms`
+  - candidate `gdn.qkv_conv_packed`: `256.35 ms`
+
+The specific packed-conv-only failure mode was substantially reduced:
+
+- packed-conv-only trainer `aten::cat`: `99.91 ms`
+- packed-projection trainer `aten::cat`: `39.25 ms`
+
+So the original hypothesis was correct:
+
+- packed conv alone was not enough
+- packed projection was the missing piece that made packing viable at trainer
+  scope
+
+### Boundary read
+
+The candidate boundary audit is also coherent:
+
+- `project_qkv` q/k/v are split views over one packed tensor and are not
+  contiguous there
+- `conv_qkv` restores contiguous q/k/v outputs
+- contiguity is preserved through:
+  - `norm_qkv`
+  - `recurrence_inputs`
+  - `output_proj_input`
+
+This is acceptable because the expensive recurrence-facing path is still seeing
+the same good layout as the earlier contiguous baseline.
+
+### Decision
+
+Promote this as the new local winner.
+
+Current local winning HGDN speed candidate:
+
+- `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+- `GDN_USE_PACKED_QKV_CONV=1`
+- `GDN_USE_PACKED_QKV_PROJ=1`
+
+### Next target
+
+This candidate has earned target-hardware confirmation.
+
+Next step:
+
+1. re-check the candidate on 1xH100
+2. compare against the current H100 hybrid baseline
+3. only then decide whether this becomes the default HGDN perf path
