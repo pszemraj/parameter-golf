@@ -131,6 +131,21 @@ def test_causal_conv():
     print("  ✓ causal conv OK")
 
 
+def test_causal_conv_output_contiguous():
+    """Optional contiguous conv materialization should preserve values and improve layout."""
+    torch.manual_seed(42)
+    conv = CausalConv1d(32, 4)
+    conv_contig = CausalConv1d(32, 4, output_contiguous=True)
+    conv_contig.load_state_dict(conv.state_dict())
+    x = torch.randn(2, 16, 32)
+    y = conv(x)
+    y_contig = conv_contig(x)
+    torch.testing.assert_close(y_contig, y, atol=1e-6, rtol=1e-6)
+    assert not y.is_contiguous()
+    assert y_contig.is_contiguous()
+    print("  ✓ causal conv contiguous output OK")
+
+
 def test_causal_conv_disable():
     """Disabling the causal conv should become an exact identity."""
     conv = CausalConv1d(32, 4, enabled=False)
@@ -156,6 +171,28 @@ def test_gdn_conv_toggles():
     assert x.grad is not None
     assert not layer.v_conv.enabled
     print("  ✓ GDN conv toggles OK")
+
+
+def test_gdn_conv_output_contiguous():
+    """Contiguous conv outputs should produce contiguous recurrence inputs."""
+    layer = GatedDeltaNet(
+        64,
+        n_heads=4,
+        head_k_dim=8,
+        expand_v=2.0,
+        use_fla=False,
+        conv_output_contiguous=True,
+    ).bfloat16()
+    layer.A_log.data = layer.A_log.data.float()
+    layer.dt_bias.data = layer.dt_bias.data.float()
+    x = torch.randn(2, 16, 64, dtype=torch.bfloat16)
+    q, k, v, g, beta = layer._project_recurrence_inputs(x)
+    assert q.is_contiguous()
+    assert k.is_contiguous()
+    assert v.is_contiguous()
+    assert g.is_contiguous()
+    assert beta.is_contiguous()
+    print("  ✓ GDN contiguous recurrence inputs OK")
 
 
 def test_hybrid_fwd_bwd():

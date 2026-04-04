@@ -237,15 +237,23 @@ class RMSNorm(nn.Module):
 class CausalConv1d(nn.Module):
     """Depthwise causal convolution used to preprocess sequence features."""
 
-    def __init__(self, dim: int, kernel_size: int = 4, enabled: bool = True):
+    def __init__(
+        self,
+        dim: int,
+        kernel_size: int = 4,
+        enabled: bool = True,
+        output_contiguous: bool = False,
+    ):
         """Initialize the causal depthwise convolution.
 
         :param int dim: Channel count.
         :param int kernel_size: Convolution kernel width, defaults to 4.
         :param bool enabled: Whether to apply the convolution, defaults to True.
+        :param bool output_contiguous: Whether to materialize a contiguous `(batch, seq, dim)` result, defaults to False.
         """
         super().__init__()
         self.enabled = enabled
+        self.output_contiguous = output_contiguous
         self.conv = nn.Conv1d(
             dim, dim, kernel_size, padding=kernel_size - 1, groups=dim, bias=False
         )
@@ -261,7 +269,10 @@ class CausalConv1d(nn.Module):
         x = x.transpose(1, 2)
         x = self.conv(x)[..., : x.size(-1)]
         x = F.silu(x)
-        return x.transpose(1, 2)
+        x = x.transpose(1, 2)
+        if self.output_contiguous:
+            return x.contiguous()
+        return x
 
 
 # ── Naive GDN recurrence ─────────────────────────────────────────────
@@ -328,6 +339,7 @@ class GatedDeltaNet(nn.Module):
         use_q_conv: bool = True,
         use_k_conv: bool = True,
         use_v_conv: bool = True,
+        conv_output_contiguous: bool = False,
     ):
         """Initialize a Gated DeltaNet block.
 
@@ -341,6 +353,7 @@ class GatedDeltaNet(nn.Module):
         :param bool use_q_conv: Whether to apply the q-path convolution, defaults to True.
         :param bool use_k_conv: Whether to apply the k-path convolution, defaults to True.
         :param bool use_v_conv: Whether to apply the v-path convolution, defaults to True.
+        :param bool conv_output_contiguous: Whether to materialize contiguous `(batch, seq, dim)` conv outputs before recurrence prep, defaults to False.
         """
         super().__init__()
         self.d_model = d_model
@@ -375,9 +388,24 @@ class GatedDeltaNet(nn.Module):
         self.dt_bias = nn.Parameter(torch.zeros(n_heads))
 
         # Short causal convolutions
-        self.q_conv = CausalConv1d(total_qk, conv_size, enabled=use_q_conv)
-        self.k_conv = CausalConv1d(total_qk, conv_size, enabled=use_k_conv)
-        self.v_conv = CausalConv1d(total_v, conv_size, enabled=use_v_conv)
+        self.q_conv = CausalConv1d(
+            total_qk,
+            conv_size,
+            enabled=use_q_conv,
+            output_contiguous=conv_output_contiguous,
+        )
+        self.k_conv = CausalConv1d(
+            total_qk,
+            conv_size,
+            enabled=use_k_conv,
+            output_contiguous=conv_output_contiguous,
+        )
+        self.v_conv = CausalConv1d(
+            total_v,
+            conv_size,
+            enabled=use_v_conv,
+            output_contiguous=conv_output_contiguous,
+        )
 
     def _project_recurrence_inputs(
         self,
@@ -674,6 +702,7 @@ class GDNBlock(nn.Module):
         use_q_conv: bool = True,
         use_k_conv: bool = True,
         use_v_conv: bool = True,
+        conv_output_contiguous: bool = False,
         leaky_slope: float = 0.5,
         norm_style: NormStyle = "pre",
         residual_alpha: float = 1.0,
@@ -691,6 +720,7 @@ class GDNBlock(nn.Module):
         :param bool use_q_conv: Whether to apply the q-path convolution, defaults to True.
         :param bool use_k_conv: Whether to apply the k-path convolution, defaults to True.
         :param bool use_v_conv: Whether to apply the v-path convolution, defaults to True.
+        :param bool conv_output_contiguous: Whether to materialize contiguous `(batch, seq, dim)` conv outputs before recurrence prep, defaults to False.
         :param float leaky_slope: LeakyReLU slope, defaults to 0.5.
         :param NormStyle norm_style: Residual norm placement, defaults to "pre".
         :param float residual_alpha: Residual scaling factor used by KEEL-style blocks, defaults to 1.0.
@@ -712,6 +742,7 @@ class GDNBlock(nn.Module):
             use_q_conv=use_q_conv,
             use_k_conv=use_k_conv,
             use_v_conv=use_v_conv,
+            conv_output_contiguous=conv_output_contiguous,
         )
         self.mlp = MLP(dim, mlp_mult, leaky_slope)
         self.attn_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
@@ -854,6 +885,7 @@ class HybridGPT(nn.Module):
         gdn_use_q_conv: bool = True,
         gdn_use_k_conv: bool = True,
         gdn_use_v_conv: bool = True,
+        gdn_conv_output_contiguous: bool = False,
         # Shared
         mlp_mult: float = 3.0,
         leaky_slope: float = 0.5,
@@ -881,6 +913,7 @@ class HybridGPT(nn.Module):
         :param bool gdn_use_q_conv: Whether to apply the q-path convolution, defaults to True.
         :param bool gdn_use_k_conv: Whether to apply the k-path convolution, defaults to True.
         :param bool gdn_use_v_conv: Whether to apply the v-path convolution, defaults to True.
+        :param bool gdn_conv_output_contiguous: Whether to materialize contiguous `(batch, seq, dim)` conv outputs before recurrence prep, defaults to False.
         :param float mlp_mult: MLP expansion factor, defaults to 3.0.
         :param float leaky_slope: LeakyReLU slope, defaults to 0.5.
         :param int gdn_ratio: Number of GDN layers per attention layer, defaults to 3.
@@ -936,6 +969,7 @@ class HybridGPT(nn.Module):
                         gdn_use_q_conv,
                         gdn_use_k_conv,
                         gdn_use_v_conv,
+                        gdn_conv_output_contiguous,
                         leaky_slope,
                         self.norm_style,
                         self.residual_alpha,

@@ -66,6 +66,16 @@ def load_repo_symbols() -> None:
     globals()["write_profile_report"] = write_profile_report
 
 
+def env_flag(name: str, default: bool = False) -> bool:
+    """Parse a boolean environment flag.
+
+    :param str name: Environment variable name.
+    :param bool default: Default value when unset.
+    :return bool: Parsed boolean flag.
+    """
+    return bool(int(os.environ.get(name, "1" if default else "0")))
+
+
 def parse_args() -> argparse.Namespace:
     """Parse CLI arguments for the local HGDN profiler.
 
@@ -155,6 +165,10 @@ def build_hybrid_model() -> HybridGPT:
             gdn_head_k_dim=48,
             gdn_expand_v=1.0,
             gdn_allow_neg_eigval=True,
+            gdn_use_q_conv=env_flag("GDN_USE_Q_CONV", True),
+            gdn_use_k_conv=env_flag("GDN_USE_K_CONV", True),
+            gdn_use_v_conv=env_flag("GDN_USE_V_CONV", True),
+            gdn_conv_output_contiguous=env_flag("GDN_CONV_OUTPUT_CONTIGUOUS"),
             gdn_ratio=1,
             mlp_mult=3.25,
             norm_style="pre",
@@ -312,6 +326,10 @@ def profile_gdn(
             allow_neg_eigval=True,
             conv_size=4,
             use_fla=True,
+            use_q_conv=env_flag("GDN_USE_Q_CONV", True),
+            use_k_conv=env_flag("GDN_USE_K_CONV", True),
+            use_v_conv=env_flag("GDN_USE_V_CONV", True),
+            conv_output_contiguous=env_flag("GDN_CONV_OUTPUT_CONTIGUOUS"),
         )
     )
     x = torch.randn(

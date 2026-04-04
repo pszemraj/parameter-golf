@@ -41,6 +41,16 @@ class PreflightResult:
     peak_mem_mib: float
 
 
+def env_flag(name: str, default: bool = False) -> bool:
+    """Parse a boolean environment flag.
+
+    :param str name: Environment variable name.
+    :param bool default: Default value when unset.
+    :return bool: Parsed boolean flag.
+    """
+    return bool(int(os.environ.get(name, "1" if default else "0")))
+
+
 def prepare_module(module: torch.nn.Module) -> torch.nn.Module:
     """Apply the trainer's mixed-precision parameter policy.
 
@@ -66,6 +76,10 @@ def run_gdn_eager() -> PreflightResult:
             allow_neg_eigval=True,
             conv_size=4,
             use_fla=True,
+            use_q_conv=env_flag("GDN_USE_Q_CONV", True),
+            use_k_conv=env_flag("GDN_USE_K_CONV", True),
+            use_v_conv=env_flag("GDN_USE_V_CONV", True),
+            conv_output_contiguous=env_flag("GDN_CONV_OUTPUT_CONTIGUOUS"),
         )
     )
     x = torch.randn(
@@ -104,6 +118,10 @@ def run_hybrid_case(*, compiled: bool) -> PreflightResult:
             gdn_expand_v=1.0,
             gdn_allow_neg_eigval=True,
             gdn_conv_size=4,
+            gdn_use_q_conv=env_flag("GDN_USE_Q_CONV", True),
+            gdn_use_k_conv=env_flag("GDN_USE_K_CONV", True),
+            gdn_use_v_conv=env_flag("GDN_USE_V_CONV", True),
+            gdn_conv_output_contiguous=env_flag("GDN_CONV_OUTPUT_CONTIGUOUS"),
             gdn_ratio=1,
             mlp_mult=2.0,
             norm_style="pre",
