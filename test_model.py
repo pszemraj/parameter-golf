@@ -76,9 +76,6 @@ def test_gdn_recurrence_input_dtypes():
     assert v.dtype == x.dtype
     assert g.dtype == x.dtype
     assert beta.dtype == x.dtype
-    assert q.is_contiguous()
-    assert k.is_contiguous()
-    assert v.is_contiguous()
     print(f"  ✓ recurrence input dtypes OK ({q.dtype})")
 
 

@@ -97,7 +97,7 @@ single)
     export_default ITERATIONS 20000
     export_default VAL_LOSS_EVERY 1000
     export_default TRAIN_LOG_EVERY 200
-    launch_train "Hybrid tight (16Lx384d 12G+4A 8h Dk48 Dv48 mlp3.0)" ;;
+    launch_train "Hybrid tight (${NUM_LAYERS}Lx${MODEL_DIM}d GDN_RATIO=${GDN_RATIO} ${GDN_N_HEADS}h Dk${GDN_HEAD_K_DIM} mlp${MLP_MULT})" ;;
 
 # ── baseline_fill: 11L×512d mlp2.75 attn (15.4MB, 3.2% HR) ──
 baseline)
@@ -120,7 +120,7 @@ baseline)
     export_default ITERATIONS 20000
     export_default VAL_LOSS_EVERY 1000
     export_default TRAIN_LOG_EVERY 200
-    launch_train "Baseline fill (11Lx512d 0G+11A mlp2.75)" ;;
+    launch_train "Baseline fill (${NUM_LAYERS}Lx${MODEL_DIM}d 0G+${NUM_LAYERS}A mlp${MLP_MULT})" ;;
 
 # ── depth_control: 16L×384d mlp3.75 attn (15.5MB, 2.7% HR) ──
 depth)
@@ -143,7 +143,7 @@ depth)
     export_default ITERATIONS 20000
     export_default VAL_LOSS_EVERY 1000
     export_default TRAIN_LOG_EVERY 200
-    launch_train "Depth control (16Lx384d 0G+16A mlp3.75)" ;;
+    launch_train "Depth control (${NUM_LAYERS}Lx${MODEL_DIM}d 0G+${NUM_LAYERS}A mlp${MLP_MULT})" ;;
 
 # ── A/B/C: reviewer-recommended 3-way comparison ──
 abc)

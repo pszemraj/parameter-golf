@@ -187,9 +187,7 @@ class CausalConv1d(nn.Module):
         x = x.transpose(1, 2)
         x = self.conv(x)[..., : x.size(-1)]
         x = F.silu(x)
-        # Materialize sequence-major layout once here to avoid repeated hidden copies
-        # in the downstream HGDN normalization and recurrence path.
-        return x.transpose(1, 2).contiguous()
+        return x.transpose(1, 2)
 
 
 # ── Naive GDN recurrence ─────────────────────────────────────────────
