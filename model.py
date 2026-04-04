@@ -327,9 +327,11 @@ class GatedDeltaNet(nn.Module):
             v = self.v_conv(v)
 
         with profile_range("gdn.norm_qkv"):
-            q = l2_norm(q.view(B, T, H, Dk))
-            k = l2_norm(k.view(B, T, H, Dk))
-            v = v.view(B, T, H, Dv)
+            # Keep the recurrence inputs on one activation dtype across PyTorch /
+            # platform variants. Some stacks promote F.normalize to fp32 here.
+            q = l2_norm(q.view(B, T, H, Dk)).to(dtype=x.dtype)
+            k = l2_norm(k.view(B, T, H, Dk)).to(dtype=x.dtype)
+            v = v.view(B, T, H, Dv).to(dtype=x.dtype)
 
         with profile_range("gdn.gates"):
             g = -self.A_log.exp() * F.softplus(
