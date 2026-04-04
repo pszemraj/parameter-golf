@@ -31,6 +31,67 @@ from train_gpt_hybrid import (
 )
 
 
+def _make_bf16_gdn(**kwargs) -> GatedDeltaNet:
+    """Build the standard bf16 GDN test fixture with fp32 control params restored.
+
+    :param dict kwargs: Extra `GatedDeltaNet` keyword arguments.
+    :return GatedDeltaNet: Prepared bf16 test layer.
+    """
+    layer = GatedDeltaNet(
+        64,
+        n_heads=4,
+        head_k_dim=8,
+        expand_v=2.0,
+        use_fla=False,
+        **kwargs,
+    ).bfloat16()
+    layer.A_log.data = layer.A_log.data.float()
+    layer.dt_bias.data = layer.dt_bias.data.float()
+    return layer
+
+
+def _load_packed_qkv_state(
+    separate: GatedDeltaNet,
+    packed: GatedDeltaNet,
+    *,
+    copy_proj: bool,
+) -> None:
+    """Copy split q/k/v projection and conv weights into a packed HGDN module.
+
+    :param GatedDeltaNet separate: Reference module with split q/k/v path.
+    :param GatedDeltaNet packed: Packed module to receive copied weights.
+    :param bool copy_proj: Whether to also copy `w_q/w_k/w_v` into `w_qkv`.
+    """
+    packed_state = packed.state_dict()
+    skip_prefixes = ["q_conv.", "k_conv.", "v_conv."]
+    if copy_proj:
+        skip_prefixes.extend(["w_q.", "w_k.", "w_v."])
+    for key, value in separate.state_dict().items():
+        if key.startswith(tuple(skip_prefixes)):
+            continue
+        packed_state[key] = value.clone()
+    q_dim = separate.q_conv.conv.weight.shape[0]
+    k_dim = separate.k_conv.conv.weight.shape[0]
+    packed_state["qkv_conv.conv.weight"][:q_dim] = separate.q_conv.conv.weight.clone()
+    packed_state["qkv_conv.conv.weight"][q_dim : q_dim + k_dim] = (
+        separate.k_conv.conv.weight.clone()
+    )
+    packed_state["qkv_conv.conv.weight"][q_dim + k_dim :] = (
+        separate.v_conv.conv.weight.clone()
+    )
+    if copy_proj:
+        q_dim = separate.w_q.weight.shape[0]
+        k_dim = separate.w_k.weight.shape[0]
+        packed_state["w_qkv.linear.weight"][:q_dim] = separate.w_q.weight.clone()
+        packed_state["w_qkv.linear.weight"][q_dim : q_dim + k_dim] = (
+            separate.w_k.weight.clone()
+        )
+        packed_state["w_qkv.linear.weight"][q_dim + k_dim :] = (
+            separate.w_v.weight.clone()
+        )
+    packed.load_state_dict(packed_state, strict=True)
+
+
 def test_recurrence():
     B, T, H, Dk, Dv = 2, 16, 4, 8, 16
     torch.manual_seed(42)
@@ -75,10 +136,7 @@ def test_gdn_split_projections():
 
 def test_gdn_recurrence_input_dtypes():
     """Keep recurrence inputs aligned with activation dtype for FLA kernels."""
-    layer = GatedDeltaNet(64, n_heads=4, head_k_dim=8, expand_v=2.0, use_fla=False)
-    layer = layer.bfloat16()
-    layer.A_log.data = layer.A_log.data.float()
-    layer.dt_bias.data = layer.dt_bias.data.float()
+    layer = _make_bf16_gdn()
     x = torch.randn(2, 16, 64, dtype=torch.bfloat16)
     q, k, v, g, beta = layer._project_recurrence_inputs(x)
     assert q.dtype == x.dtype
@@ -192,22 +250,7 @@ def test_gdn_packed_qkv_conv_matches_separate_path():
     )
     separate = GatedDeltaNet(**kwargs)
     packed = GatedDeltaNet(**kwargs, use_packed_qkv_conv=True)
-    packed_state = packed.state_dict()
-    separate_state = separate.state_dict()
-    for key, value in separate_state.items():
-        if key.startswith(("q_conv.", "k_conv.", "v_conv.")):
-            continue
-        packed_state[key] = value.clone()
-    q_dim = separate.q_conv.conv.weight.shape[0]
-    k_dim = separate.k_conv.conv.weight.shape[0]
-    packed_state["qkv_conv.conv.weight"][:q_dim] = separate.q_conv.conv.weight.clone()
-    packed_state["qkv_conv.conv.weight"][q_dim : q_dim + k_dim] = (
-        separate.k_conv.conv.weight.clone()
-    )
-    packed_state["qkv_conv.conv.weight"][q_dim + k_dim :] = (
-        separate.v_conv.conv.weight.clone()
-    )
-    packed.load_state_dict(packed_state, strict=True)
+    _load_packed_qkv_state(separate, packed, copy_proj=False)
     x = torch.randn(2, 32, 64)
     torch.testing.assert_close(separate(x), packed(x), atol=1e-5, rtol=1e-5)
     print("  ✓ packed qkv conv matches separate path")
@@ -281,29 +324,7 @@ def test_gdn_packed_qkv_proj_conv_matches_separate_path():
         use_packed_qkv_conv=True,
         use_packed_qkv_proj=True,
     )
-    packed_state = packed.state_dict()
-    separate_state = separate.state_dict()
-    for key, value in separate_state.items():
-        if key.startswith(("w_q.", "w_k.", "w_v.", "q_conv.", "k_conv.", "v_conv.")):
-            continue
-        packed_state[key] = value.clone()
-    q_dim = separate.w_q.weight.shape[0]
-    k_dim = separate.w_k.weight.shape[0]
-    packed_state["w_qkv.linear.weight"][:q_dim] = separate.w_q.weight.clone()
-    packed_state["w_qkv.linear.weight"][q_dim : q_dim + k_dim] = (
-        separate.w_k.weight.clone()
-    )
-    packed_state["w_qkv.linear.weight"][q_dim + k_dim :] = (
-        separate.w_v.weight.clone()
-    )
-    packed_state["qkv_conv.conv.weight"][:q_dim] = separate.q_conv.conv.weight.clone()
-    packed_state["qkv_conv.conv.weight"][q_dim : q_dim + k_dim] = (
-        separate.k_conv.conv.weight.clone()
-    )
-    packed_state["qkv_conv.conv.weight"][q_dim + k_dim :] = (
-        separate.v_conv.conv.weight.clone()
-    )
-    packed.load_state_dict(packed_state, strict=True)
+    _load_packed_qkv_state(separate, packed, copy_proj=True)
     x = torch.randn(2, 32, 64)
     torch.testing.assert_close(separate(x), packed(x), atol=1e-5, rtol=1e-5)
     print("  ✓ packed qkv projection+conv matches separate path")
@@ -311,16 +332,7 @@ def test_gdn_packed_qkv_proj_conv_matches_separate_path():
 
 def test_gdn_conv_output_contiguous():
     """Contiguous conv outputs should produce contiguous recurrence inputs."""
-    layer = GatedDeltaNet(
-        64,
-        n_heads=4,
-        head_k_dim=8,
-        expand_v=2.0,
-        use_fla=False,
-        conv_output_contiguous=True,
-    ).bfloat16()
-    layer.A_log.data = layer.A_log.data.float()
-    layer.dt_bias.data = layer.dt_bias.data.float()
+    layer = _make_bf16_gdn(conv_output_contiguous=True)
     x = torch.randn(2, 16, 64, dtype=torch.bfloat16)
     q, k, v, g, beta = layer._project_recurrence_inputs(x)
     assert q.is_contiguous()
@@ -333,19 +345,12 @@ def test_gdn_conv_output_contiguous():
 
 def test_gdn_qk_only_contiguous():
     """Allow selecting contiguous conv outputs per HGDN path."""
-    layer = GatedDeltaNet(
-        64,
-        n_heads=4,
-        head_k_dim=8,
-        expand_v=2.0,
-        use_fla=False,
+    layer = _make_bf16_gdn(
         conv_output_contiguous=False,
         q_conv_output_contiguous=True,
         k_conv_output_contiguous=True,
         v_conv_output_contiguous=False,
-    ).bfloat16()
-    layer.A_log.data = layer.A_log.data.float()
-    layer.dt_bias.data = layer.dt_bias.data.float()
+    )
     x = torch.randn(2, 16, 64, dtype=torch.bfloat16)
     q, k, v, _, _ = layer._project_recurrence_inputs(x)
     assert q.is_contiguous()
@@ -356,17 +361,10 @@ def test_gdn_qk_only_contiguous():
 
 def test_gdn_gate_and_output_precision_toggles():
     """Precision toggles should preserve HGDN forward/backward viability."""
-    layer = GatedDeltaNet(
-        64,
-        n_heads=4,
-        head_k_dim=8,
-        expand_v=2.0,
-        use_fla=False,
+    layer = _make_bf16_gdn(
         gates_fp32=False,
         output_norm_fp32=False,
-    ).bfloat16()
-    layer.A_log.data = layer.A_log.data.float()
-    layer.dt_bias.data = layer.dt_bias.data.float()
+    )
     x = torch.randn(2, 16, 64, dtype=torch.bfloat16, requires_grad=True)
     out = layer(x)
     assert out.dtype == x.dtype

@@ -9,7 +9,6 @@ This script converts the phase-1 profiler bundle into two decision aids:
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import sys
 from pathlib import Path
@@ -19,26 +18,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from profiler_report import load_profile_report  # noqa: E402
-
-DEFAULT_BUCKETS = (
-    "aten::copy_",
-    "aten::mul",
-    "gdn.qkv_conv_packed",
-    "gdn.q_conv",
-    "gdn.k_conv",
-    "gdn.v_conv",
-    "gdn.recurrence",
-    "aten::convolution_backward",
-    "aten::_conv_depthwise2d",
-    "gdn.q_norm",
-    "gdn.k_norm",
-    "gdn.g_proj",
-    "gdn.g_pointwise",
-    "gdn.beta_proj",
-    "gdn.output_gate_proj",
-    "gdn.output_norm",
-    "gdn.output_gate_mul",
+from profiler_report import (  # noqa: E402
+    HGDN_TRANSFER_BUCKETS,
+    find_profile_row,
+    format_profile_bucket_cell,
+    load_profile_report,
+    write_rows_csv,
 )
 
 VIEW_LABELS = {
@@ -94,38 +79,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--buckets",
         nargs="+",
-        default=list(DEFAULT_BUCKETS),
+        default=list(HGDN_TRANSFER_BUCKETS),
         help="Exact profiler bucket names to compare.",
     )
     return parser.parse_args()
-
-
-def find_row(report: dict[str, Any], bucket: str) -> dict[str, Any] | None:
-    """Find one profiler row by exact event name.
-
-    :param dict[str, Any] report: Structured report payload.
-    :param str bucket: Exact bucket name.
-    :return dict[str, Any] | None: Matching row, if present.
-    """
-    for row in report["rows"]:
-        if row["name"] == bucket:
-            return row
-    return None
-
-
-def bucket_cell(row: dict[str, Any] | None) -> str:
-    """Format one report row for the markdown table.
-
-    :param dict[str, Any] row: Structured row data.
-    :return str: Compact `ms / % / calls` summary or `-`.
-    """
-    if row is None:
-        return "-"
-    return (
-        f"{row['self_device_time_us'] / 1000.0:.2f}ms / "
-        f"{row['self_device_percent']:.2f}% / "
-        f"{row['count']}"
-    )
 
 
 def classify_bucket(view_rows: dict[str, dict[str, Any] | None]) -> tuple[str, str]:
@@ -181,16 +138,16 @@ def render_bucket_table(
     ]
     for bucket in buckets:
         view_rows = {
-            VIEW_LABELS[name]: find_row(report, bucket)
+            VIEW_LABELS[name]: find_profile_row(report, bucket)
             for name, report in reports.items()
         }
         dominant_view, owner = classify_bucket(view_rows)
         row = {
             "bucket": bucket,
-            "bare_gdn": bucket_cell(view_rows["bare_gdn"]),
-            "hybrid_fwd_bwd": bucket_cell(view_rows["hybrid_fwd_bwd"]),
-            "hybrid_opt": bucket_cell(view_rows["hybrid_opt"]),
-            "trainer_eager": bucket_cell(view_rows["trainer_eager"]),
+            "bare_gdn": format_profile_bucket_cell(view_rows["bare_gdn"]),
+            "hybrid_fwd_bwd": format_profile_bucket_cell(view_rows["hybrid_fwd_bwd"]),
+            "hybrid_opt": format_profile_bucket_cell(view_rows["hybrid_opt"]),
+            "trainer_eager": format_profile_bucket_cell(view_rows["trainer_eager"]),
             "dominant_view": dominant_view,
             "suggested_owner": owner,
         }
@@ -253,20 +210,6 @@ def render_boundary_table(rows: list[dict[str, Any]]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
-    """Write a row list as CSV.
-
-    :param Path path: Output CSV path.
-    :param list[dict[str, Any]] rows: Rows to write.
-    """
-    if not rows:
-        return
-    with path.open("w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-        writer.writeheader()
-        writer.writerows(rows)
-
-
 def main() -> None:
     """Load phase-1 outputs and write decision-complete analysis artifacts."""
     args = parse_args()
@@ -298,12 +241,12 @@ def main() -> None:
         json.dumps(bucket_rows, indent=2),
         encoding="utf-8",
     )
-    write_csv(args.output_dir / "bucket_attribution.csv", bucket_rows)
+    write_rows_csv(args.output_dir / "bucket_attribution.csv", bucket_rows)
     (args.output_dir / "boundary_audit.json").write_text(
         json.dumps(boundary_rows, indent=2),
         encoding="utf-8",
     )
-    write_csv(args.output_dir / "boundary_audit.csv", boundary_rows)
+    write_rows_csv(args.output_dir / "boundary_audit.csv", boundary_rows)
     (args.output_dir / "summary.json").write_text(
         json.dumps(summary, indent=2),
         encoding="utf-8",

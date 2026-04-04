@@ -18,6 +18,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from local_env import env_flag  # noqa: E402
 from model import GatedDeltaNet, HybridGPT  # noqa: E402
 from train_gpt_hybrid import (  # noqa: E402
     prepare_hybrid_compile,
@@ -39,16 +40,6 @@ class PreflightResult:
     loss: float
     step_ms: float
     peak_mem_mib: float
-
-
-def env_flag(name: str, default: bool = False) -> bool:
-    """Parse a boolean environment flag.
-
-    :param str name: Environment variable name.
-    :param bool default: Default value when unset.
-    :return bool: Parsed boolean flag.
-    """
-    return bool(int(os.environ.get(name, "1" if default else "0")))
 
 
 def prepare_module(module: torch.nn.Module) -> torch.nn.Module:

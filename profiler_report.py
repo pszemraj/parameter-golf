@@ -12,6 +12,26 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
+HGDN_TRANSFER_BUCKETS = (
+    "aten::copy_",
+    "aten::mul",
+    "gdn.qkv_conv_packed",
+    "gdn.q_conv",
+    "gdn.k_conv",
+    "gdn.v_conv",
+    "gdn.recurrence",
+    "aten::convolution_backward",
+    "aten::_conv_depthwise2d",
+    "gdn.q_norm",
+    "gdn.k_norm",
+    "gdn.g_proj",
+    "gdn.g_pointwise",
+    "gdn.beta_proj",
+    "gdn.output_gate_proj",
+    "gdn.output_norm",
+    "gdn.output_gate_mul",
+)
+
 
 @dataclass(frozen=True)
 class ProfileRow:
@@ -179,6 +199,78 @@ def _percent(numerator: float, denominator: float) -> float:
     return 100.0 * numerator / denominator
 
 
+def find_profile_row(report: dict[str, Any], name: str) -> dict[str, Any] | None:
+    """Find one structured profiler row by exact name.
+
+    :param dict[str, Any] report: Structured profile report.
+    :param str name: Exact row name.
+    :return dict[str, Any] | None: Matching row, if present.
+    """
+    for row in report["rows"]:
+        if row["name"] == name:
+            return row
+    return None
+
+
+def profile_row_ms(row: dict[str, Any] | None) -> float:
+    """Extract self-device time in milliseconds from one structured row.
+
+    :param dict[str, Any] row: Structured profiler row.
+    :return float: Self-device time in milliseconds.
+    """
+    if row is None:
+        return 0.0
+    return float(row["self_device_time_us"]) / 1000.0
+
+
+def profile_row_percent(row: dict[str, Any] | None) -> float:
+    """Extract self-device percentage from one structured row.
+
+    :param dict[str, Any] row: Structured profiler row.
+    :return float: Self-device percentage.
+    """
+    if row is None:
+        return 0.0
+    return float(row["self_device_percent"])
+
+
+def format_profile_bucket_cell(row: dict[str, Any] | None) -> str:
+    """Format one profiler row as `ms / % / calls` for markdown tables.
+
+    :param dict[str, Any] row: Structured profiler row.
+    :return str: Compact cell string, or `-` when the row is absent.
+    """
+    if row is None:
+        return "-"
+    return (
+        f"{profile_row_ms(row):.2f}ms / "
+        f"{profile_row_percent(row):.2f}% / "
+        f"{row['count']}"
+    )
+
+
+def write_rows_csv(path: Path, rows: list[dict[str, Any]]) -> None:
+    """Write heterogeneous dict rows to CSV.
+
+    :param Path path: Output CSV path.
+    :param list[dict[str, Any]] rows: Rows to write.
+    """
+    if not rows:
+        path.write_text("", encoding="utf-8")
+        return
+    fieldnames: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        for key in row:
+            if key not in seen:
+                seen.add(key)
+                fieldnames.append(key)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def build_profile_report(
     rows: Sequence[ProfileRow],
     *,
@@ -239,12 +331,7 @@ def write_profile_report(
         json.dumps(report, indent=2, sort_keys=True),
         encoding="utf-8",
     )
-    rows = report["rows"]
-    if rows:
-        with (output_dir / f"{stem}.csv").open("w", encoding="utf-8", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-            writer.writeheader()
-            writer.writerows(rows)
+    write_rows_csv(output_dir / f"{stem}.csv", report["rows"])
 
 
 def load_profile_report(path: str | Path) -> dict[str, Any]:
@@ -256,6 +343,11 @@ def load_profile_report(path: str | Path) -> dict[str, Any]:
     """
 
     def _normalize_report(report: dict[str, Any]) -> dict[str, Any]:
+        """Normalize a stored report back through the current schema builder.
+
+        :param dict[str, Any] report: Raw serialized report payload.
+        :return dict[str, Any]: Schema-normalized report.
+        """
         rows = [
             ProfileRow(
                 name=str(row["name"]),

@@ -9,7 +9,6 @@ actually changed.
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import sys
 from pathlib import Path
@@ -19,26 +18,14 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from profiler_report import load_profile_report  # noqa: E402
-
-DEFAULT_BUCKETS = (
-    "aten::copy_",
-    "aten::mul",
-    "gdn.qkv_conv_packed",
-    "gdn.q_conv",
-    "gdn.k_conv",
-    "gdn.v_conv",
-    "gdn.recurrence",
-    "aten::convolution_backward",
-    "aten::_conv_depthwise2d",
-    "gdn.q_norm",
-    "gdn.k_norm",
-    "gdn.g_proj",
-    "gdn.g_pointwise",
-    "gdn.beta_proj",
-    "gdn.output_gate_proj",
-    "gdn.output_norm",
-    "gdn.output_gate_mul",
+from profiler_report import (  # noqa: E402
+    HGDN_TRANSFER_BUCKETS,
+    find_profile_row,
+    format_profile_bucket_cell,
+    load_profile_report,
+    profile_row_ms,
+    profile_row_percent,
+    write_rows_csv,
 )
 
 VIEW_PATHS = {
@@ -77,7 +64,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--buckets",
         nargs="+",
-        default=list(DEFAULT_BUCKETS),
+        default=list(HGDN_TRANSFER_BUCKETS),
         help="Exact profiler bucket names to compare.",
     )
     return parser.parse_args()
@@ -123,69 +110,6 @@ def load_boundary_rows(bundle_root: Path) -> list[dict[str, Any]]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def find_row(report: dict[str, Any], bucket: str) -> dict[str, Any] | None:
-    """Find one exact event row inside a structured profile report.
-
-    :param dict[str, Any] report: Structured profile report.
-    :param str bucket: Exact event label.
-    :return dict[str, Any] | None: Matching row, if present.
-    """
-    for row in report["rows"]:
-        if row["name"] == bucket:
-            return row
-    return None
-
-
-def fmt_bucket(row: dict[str, Any] | None) -> str:
-    """Format one profiler row into a compact cell.
-
-    :param dict[str, Any] row: Structured row, or `None`.
-    :return str: Compact display string.
-    """
-    if row is None:
-        return "-"
-    return (
-        f"{row['self_device_time_us'] / 1000.0:.2f}ms / "
-        f"{row['self_device_percent']:.2f}% / {row['count']}"
-    )
-
-
-def bucket_ms(row: dict[str, Any] | None) -> float:
-    """Return self-device milliseconds for one profiler row.
-
-    :param dict[str, Any] row: Structured profiler row.
-    :return float: Self-device milliseconds.
-    """
-    if row is None:
-        return 0.0
-    return row["self_device_time_us"] / 1000.0
-
-
-def bucket_pct(row: dict[str, Any] | None) -> float:
-    """Return self-device percentage for one profiler row.
-
-    :param dict[str, Any] row: Structured profiler row.
-    :return float: Self-device percentage.
-    """
-    if row is None:
-        return 0.0
-    return row["self_device_percent"]
-
-
-def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
-    """Write a row list as CSV.
-
-    :param Path path: Output CSV path.
-    :param list[dict[str, Any]] rows: Rows to write.
-    """
-    if not rows:
-        return
-    with path.open("w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-        writer.writeheader()
-        writer.writerows(rows)
-
-
 def build_bucket_rows(
     baseline: dict[str, dict[str, Any]],
     candidate: dict[str, dict[str, Any]],
@@ -201,17 +125,20 @@ def build_bucket_rows(
     rows: list[dict[str, Any]] = []
     for bucket in buckets:
         for view in ("bare_gdn", "hybrid_fwd_bwd", "hybrid_opt", "trainer_eager"):
-            base_row = find_row(baseline[view], bucket)
-            cand_row = find_row(candidate[view], bucket)
+            base_row = find_profile_row(baseline[view], bucket)
+            cand_row = find_profile_row(candidate[view], bucket)
             rows.append(
                 {
                     "bucket": bucket,
                     "view": view,
-                    "baseline": fmt_bucket(base_row),
-                    "candidate": fmt_bucket(cand_row),
-                    "delta_ms": round(bucket_ms(cand_row) - bucket_ms(base_row), 2),
+                    "baseline": format_profile_bucket_cell(base_row),
+                    "candidate": format_profile_bucket_cell(cand_row),
+                    "delta_ms": round(
+                        profile_row_ms(cand_row) - profile_row_ms(base_row), 2
+                    ),
                     "delta_pct_points": round(
-                        bucket_pct(cand_row) - bucket_pct(base_row), 2
+                        profile_row_percent(cand_row) - profile_row_percent(base_row),
+                        2,
                     ),
                 }
             )
@@ -337,12 +264,12 @@ def main() -> None:
         json.dumps(bucket_rows, indent=2),
         encoding="utf-8",
     )
-    write_csv(output_dir / "bucket_deltas.csv", bucket_rows)
+    write_rows_csv(output_dir / "bucket_deltas.csv", bucket_rows)
     (output_dir / "boundary_deltas.json").write_text(
         json.dumps(boundary_rows, indent=2),
         encoding="utf-8",
     )
-    write_csv(output_dir / "boundary_deltas.csv", boundary_rows)
+    write_rows_csv(output_dir / "boundary_deltas.csv", boundary_rows)
     (output_dir / "summary.json").write_text(
         json.dumps(summary, indent=2),
         encoding="utf-8",

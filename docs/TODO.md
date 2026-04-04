@@ -6,15 +6,19 @@ This file tracks follow-up work that is intentionally not enabled by default in 
 
 ### 0. Interim cleanup checkpoint from the redundancy audit
 
-- Status: documented; not started.
+- Status: first low-risk consolidation pass done.
 - Reference: `docs/REDUNDANCY_AUDIT.md`
 - Purpose: shrink obvious maintenance debt before the next round of HGDN kernel work so profiler and experiment tooling do not keep multiplying parallel copies.
-- Ranked follow-ups:
-  1. remove or merge `scripts/compare_profiler_reports.py`
-  2. extract shared profiler/report helpers and the canonical HGDN transfer-bucket list
-  3. deduplicate the repeated `GDN_*` env-contract plumbing in `scripts/run_hgdn_local_phase1.sh`
-  4. consolidate the duplicated `env_flag` helper in the local HGDN GPU tools
-  5. decide whether `scripts/export_wandb_hgdn_runs.py` is canonical or archival
+- Completed in the first pass:
+  1. removed the superseded `scripts/compare_profiler_reports.py`
+  2. extracted shared profiler row/CSV helpers and the canonical HGDN transfer-bucket list into `profiler_report.py`
+  3. deduplicated the repeated `GDN_*` env-contract plumbing in `scripts/run_hgdn_local_phase1.sh`
+  4. consolidated the duplicated `env_flag` helper into `local_env.py`
+  5. reduced repeated bf16 fixture and packed-state-copy setup in `test_model.py`
+- Remaining follow-ups:
+  1. decide whether `scripts/export_wandb_hgdn_runs.py` is canonical or archival
+  2. revisit extraction of shared baseline/hybrid tokenizer-data helpers
+  3. revisit extraction of shared quantization core only with artifact-byte regression checks
 - Explicit defer:
   - do not blindly merge `train_gpt.py` and `model.py` transformer utilities
   - do not touch baseline/hybrid quantization helpers without artifact-byte regression checks

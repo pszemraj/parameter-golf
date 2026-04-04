@@ -23,6 +23,8 @@ os.environ.setdefault("WANDB_MODE", "offline")
 import torch
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 GatedDeltaNet = None
 HybridGPT = None
@@ -33,6 +35,8 @@ build_profile_report = None
 build_profile_rows = None
 write_profile_report = None
 
+from local_env import env_flag  # noqa: E402
+
 
 def load_repo_symbols() -> None:
     """Import repo modules after env-backed profiling knobs are finalized."""
@@ -41,8 +45,6 @@ def load_repo_symbols() -> None:
 
     if GatedDeltaNet is not None:
         return
-    if str(REPO_ROOT) not in sys.path:
-        sys.path.insert(0, str(REPO_ROOT))
     from model import GatedDeltaNet as gdn_cls  # noqa: WPS433
     from model import HybridGPT as hybrid_cls  # noqa: WPS433
     from model import SCALAR_PARAM_PATTERNS as scalar_patterns  # noqa: WPS433
@@ -64,16 +66,6 @@ def load_repo_symbols() -> None:
     globals()["build_profile_report"] = build_profile_report
     globals()["build_profile_rows"] = build_profile_rows
     globals()["write_profile_report"] = write_profile_report
-
-
-def env_flag(name: str, default: bool = False) -> bool:
-    """Parse a boolean environment flag.
-
-    :param str name: Environment variable name.
-    :param bool default: Default value when unset.
-    :return bool: Parsed boolean flag.
-    """
-    return bool(int(os.environ.get(name, "1" if default else "0")))
 
 
 def parse_args() -> argparse.Namespace:
