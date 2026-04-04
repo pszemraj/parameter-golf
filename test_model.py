@@ -243,7 +243,70 @@ def test_gdn_packed_qkv_conv_requires_aligned_settings():
         )
     except ValueError:
         pass
+    try:
+        GatedDeltaNet(
+            d_model=64,
+            n_heads=4,
+            head_k_dim=8,
+            expand_v=1.0,
+            use_packed_qkv_proj=True,
+        )
+        raise AssertionError(
+            "Expected packed qkv projection to require packed qkv conv"
+        )
+    except ValueError:
+        pass
     print("  ✓ packed qkv conv rejects incompatible settings")
+
+
+def test_gdn_packed_qkv_proj_conv_matches_separate_path():
+    """Packed qkv projection+conv should match the separate path with copied weights."""
+    torch.manual_seed(42)
+    kwargs = dict(
+        d_model=64,
+        n_heads=4,
+        head_k_dim=8,
+        expand_v=1.0,
+        allow_neg_eigval=True,
+        conv_size=4,
+        use_fla=False,
+        use_q_conv=True,
+        use_k_conv=True,
+        use_v_conv=True,
+        conv_output_contiguous=True,
+    )
+    separate = GatedDeltaNet(**kwargs)
+    packed = GatedDeltaNet(
+        **kwargs,
+        use_packed_qkv_conv=True,
+        use_packed_qkv_proj=True,
+    )
+    packed_state = packed.state_dict()
+    separate_state = separate.state_dict()
+    for key, value in separate_state.items():
+        if key.startswith(("w_q.", "w_k.", "w_v.", "q_conv.", "k_conv.", "v_conv.")):
+            continue
+        packed_state[key] = value.clone()
+    q_dim = separate.w_q.weight.shape[0]
+    k_dim = separate.w_k.weight.shape[0]
+    packed_state["w_qkv.linear.weight"][:q_dim] = separate.w_q.weight.clone()
+    packed_state["w_qkv.linear.weight"][q_dim : q_dim + k_dim] = (
+        separate.w_k.weight.clone()
+    )
+    packed_state["w_qkv.linear.weight"][q_dim + k_dim :] = (
+        separate.w_v.weight.clone()
+    )
+    packed_state["qkv_conv.conv.weight"][:q_dim] = separate.q_conv.conv.weight.clone()
+    packed_state["qkv_conv.conv.weight"][q_dim : q_dim + k_dim] = (
+        separate.k_conv.conv.weight.clone()
+    )
+    packed_state["qkv_conv.conv.weight"][q_dim + k_dim :] = (
+        separate.v_conv.conv.weight.clone()
+    )
+    packed.load_state_dict(packed_state, strict=True)
+    x = torch.randn(2, 32, 64)
+    torch.testing.assert_close(separate(x), packed(x), atol=1e-5, rtol=1e-5)
+    print("  ✓ packed qkv projection+conv matches separate path")
 
 
 def test_gdn_conv_output_contiguous():

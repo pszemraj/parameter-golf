@@ -214,6 +214,59 @@ class CastedLinear(nn.Linear):
         )
 
 
+class PackedCastedLinear(nn.Module):
+    """Single packed projection that can be split into q/k/v feature maps."""
+
+    def __init__(
+        self,
+        in_features: int,
+        dims: tuple[int, int, int],
+        *,
+        bias: bool = False,
+    ):
+        """Initialize the packed q/k/v projection.
+
+        :param int in_features: Input feature width.
+        :param tuple[int, int, int] dims: Output widths for q, k, and v.
+        :param bool bias: Whether to learn a bias term, defaults to False.
+        """
+        super().__init__()
+        self.dims = dims
+        self.linear = CastedLinear(in_features, sum(dims), bias=bias)
+
+    @property
+    def weight(self) -> nn.Parameter:
+        """Expose the packed weight for optimizer routing and test parity.
+
+        :return nn.Parameter: Packed q/k/v projection weight.
+        """
+        return self.linear.weight
+
+    @property
+    def bias(self) -> nn.Parameter | None:
+        """Expose the packed bias parameter when present.
+
+        :return nn.Parameter | None: Optional packed bias.
+        """
+        return self.linear.bias
+
+    def forward_packed(self, x: Tensor) -> Tensor:
+        """Project activations into one packed q/k/v buffer.
+
+        :param Tensor x: Input activations.
+        :return Tensor: Packed projection shaped `(batch, seq, q_dim + k_dim + v_dim)`.
+        """
+        return self.linear(x)
+
+    def forward(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        """Project and split activations into q/k/v tensors.
+
+        :param Tensor x: Input activations.
+        :return tuple[Tensor, Tensor, Tensor]: Split q/k/v projections.
+        """
+        return self.forward_packed(x).split(self.dims, dim=-1)
+
+
 class RMSNorm(nn.Module):
     """Parameter-free RMSNorm wrapper used throughout the hybrid stack."""
 
@@ -303,15 +356,12 @@ class PackedCausalConv1d(nn.Module):
             bias=False,
         )
 
-    def forward(self, q: Tensor, k: Tensor, v: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-        """Apply one packed causal depthwise convolution and split the result.
+    def _forward_packed_impl(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        """Convolve one packed q/k/v tensor and split the result.
 
-        :param Tensor q: Query activations shaped `(batch, seq, q_dim)`.
-        :param Tensor k: Key activations shaped `(batch, seq, k_dim)`.
-        :param Tensor v: Value activations shaped `(batch, seq, v_dim)`.
+        :param Tensor x: Packed activations shaped `(batch, seq, q_dim + k_dim + v_dim)`.
         :return tuple[Tensor, Tensor, Tensor]: Convolved q/k/v activations.
         """
-        x = torch.cat((q, k, v), dim=-1)
         x = x.transpose(1, 2)
         x = self.conv(x)[..., : x.size(-1)]
         x = F.silu(x)
@@ -323,6 +373,24 @@ class PackedCausalConv1d(nn.Module):
             k = k.contiguous()
             v = v.contiguous()
         return q, k, v
+
+    def forward_packed(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        """Apply packed causal depthwise convolution to a packed q/k/v tensor.
+
+        :param Tensor x: Packed activations shaped `(batch, seq, q_dim + k_dim + v_dim)`.
+        :return tuple[Tensor, Tensor, Tensor]: Convolved q/k/v activations.
+        """
+        return self._forward_packed_impl(x)
+
+    def forward(self, q: Tensor, k: Tensor, v: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        """Apply one packed causal depthwise convolution and split the result.
+
+        :param Tensor q: Query activations shaped `(batch, seq, q_dim)`.
+        :param Tensor k: Key activations shaped `(batch, seq, k_dim)`.
+        :param Tensor v: Value activations shaped `(batch, seq, v_dim)`.
+        :return tuple[Tensor, Tensor, Tensor]: Convolved q/k/v activations.
+        """
+        return self._forward_packed_impl(torch.cat((q, k, v), dim=-1))
 
 
 # ── Naive GDN recurrence ─────────────────────────────────────────────
@@ -390,6 +458,7 @@ class GatedDeltaNet(nn.Module):
         use_k_conv: bool = True,
         use_v_conv: bool = True,
         use_packed_qkv_conv: bool = False,
+        use_packed_qkv_proj: bool = False,
         conv_output_contiguous: bool = False,
         q_conv_output_contiguous: bool | None = None,
         k_conv_output_contiguous: bool | None = None,
@@ -410,6 +479,7 @@ class GatedDeltaNet(nn.Module):
         :param bool use_k_conv: Whether to apply the k-path convolution, defaults to True.
         :param bool use_v_conv: Whether to apply the v-path convolution, defaults to True.
         :param bool use_packed_qkv_conv: Whether to replace separate q/k/v depthwise convs with one packed depthwise conv, defaults to False.
+        :param bool use_packed_qkv_proj: Whether to replace separate q/k/v projections with one packed projection, defaults to False.
         :param bool conv_output_contiguous: Whether to materialize contiguous `(batch, seq, dim)` conv outputs before recurrence prep, defaults to False.
         :param bool | None q_conv_output_contiguous: Optional q-path override for contiguous conv outputs, defaults to None.
         :param bool | None k_conv_output_contiguous: Optional k-path override for contiguous conv outputs, defaults to None.
@@ -428,6 +498,7 @@ class GatedDeltaNet(nn.Module):
         self.gates_fp32 = gates_fp32
         self.output_norm_fp32 = output_norm_fp32
         self.use_packed_qkv_conv = use_packed_qkv_conv
+        self.use_packed_qkv_proj = use_packed_qkv_proj
         q_conv_output_contiguous = (
             conv_output_contiguous
             if q_conv_output_contiguous is None
@@ -465,11 +536,22 @@ class GatedDeltaNet(nn.Module):
                 raise ValueError(
                     "use_packed_qkv_conv requires aligned q/k/v output_contiguous settings"
                 )
+        if self.use_packed_qkv_proj and not self.use_packed_qkv_conv:
+            raise ValueError("use_packed_qkv_proj requires use_packed_qkv_conv")
 
         # Feature-map projections → Muon
-        self.w_q = CastedLinear(d_model, total_qk, bias=False)
-        self.w_k = CastedLinear(d_model, total_qk, bias=False)
-        self.w_v = CastedLinear(d_model, total_v, bias=False)
+        if self.use_packed_qkv_proj:
+            self.w_qkv = PackedCastedLinear(
+                d_model, (total_qk, total_qk, total_v), bias=False
+            )
+            self.w_q = None
+            self.w_k = None
+            self.w_v = None
+        else:
+            self.w_qkv = None
+            self.w_q = CastedLinear(d_model, total_qk, bias=False)
+            self.w_k = CastedLinear(d_model, total_qk, bias=False)
+            self.w_v = CastedLinear(d_model, total_v, bias=False)
 
         # Control projections → Adam (tiny: d_model → n_heads each)
         self.w_a = CastedLinear(d_model, n_heads, bias=False)
@@ -533,21 +615,30 @@ class GatedDeltaNet(nn.Module):
         H, Dk, Dv = self.n_heads, self.head_k_dim, self.head_v_dim
 
         with profile_range("gdn.project_qkv"):
-            q = self.w_q(x)
-            k = self.w_k(x)
-            v = self.w_v(x)
-        audit_gdn_boundary(
-            "project_qkv",
-            audit_call_index,
-            q=q,
-            k=k,
-            v=v,
-        )
+            if self.w_qkv is not None:
+                with profile_range("gdn.project_qkv_packed"):
+                    qkv = self.w_qkv.forward_packed(x)
+                q, k, v = qkv.split((H * Dk, H * Dk, H * Dv), dim=-1)
+            else:
+                qkv = None
+                q = self.w_q(x)
+                k = self.w_k(x)
+                v = self.w_v(x)
+            audit_gdn_boundary(
+                "project_qkv",
+                audit_call_index,
+                q=q,
+                k=k,
+                v=v,
+            )
 
         with profile_range("gdn.conv_qkv"):
             if self.qkv_conv is not None:
                 with profile_range("gdn.qkv_conv_packed"):
-                    q, k, v = self.qkv_conv(q, k, v)
+                    if qkv is not None:
+                        q, k, v = self.qkv_conv.forward_packed(qkv)
+                    else:
+                        q, k, v = self.qkv_conv(q, k, v)
             else:
                 with profile_range("gdn.q_conv"):
                     q = self.q_conv(q)
@@ -845,6 +936,7 @@ class GDNBlock(nn.Module):
         use_k_conv: bool = True,
         use_v_conv: bool = True,
         use_packed_qkv_conv: bool = False,
+        use_packed_qkv_proj: bool = False,
         conv_output_contiguous: bool = False,
         q_conv_output_contiguous: bool | None = None,
         k_conv_output_contiguous: bool | None = None,
@@ -869,6 +961,7 @@ class GDNBlock(nn.Module):
         :param bool use_k_conv: Whether to apply the k-path convolution, defaults to True.
         :param bool use_v_conv: Whether to apply the v-path convolution, defaults to True.
         :param bool use_packed_qkv_conv: Whether to replace separate q/k/v depthwise convs with one packed depthwise conv, defaults to False.
+        :param bool use_packed_qkv_proj: Whether to replace separate q/k/v feature-map projections with one packed projection, defaults to False.
         :param bool conv_output_contiguous: Whether to materialize contiguous `(batch, seq, dim)` conv outputs before recurrence prep, defaults to False.
         :param bool | None q_conv_output_contiguous: Optional q-path override for contiguous conv outputs, defaults to None.
         :param bool | None k_conv_output_contiguous: Optional k-path override for contiguous conv outputs, defaults to None.
@@ -897,6 +990,7 @@ class GDNBlock(nn.Module):
             use_k_conv=use_k_conv,
             use_v_conv=use_v_conv,
             use_packed_qkv_conv=use_packed_qkv_conv,
+            use_packed_qkv_proj=use_packed_qkv_proj,
             conv_output_contiguous=conv_output_contiguous,
             q_conv_output_contiguous=q_conv_output_contiguous,
             k_conv_output_contiguous=k_conv_output_contiguous,
@@ -1046,6 +1140,7 @@ class HybridGPT(nn.Module):
         gdn_use_k_conv: bool = True,
         gdn_use_v_conv: bool = True,
         gdn_use_packed_qkv_conv: bool = False,
+        gdn_use_packed_qkv_proj: bool = False,
         gdn_conv_output_contiguous: bool = False,
         gdn_q_conv_output_contiguous: bool | None = None,
         gdn_k_conv_output_contiguous: bool | None = None,
@@ -1080,6 +1175,7 @@ class HybridGPT(nn.Module):
         :param bool gdn_use_k_conv: Whether to apply the k-path convolution, defaults to True.
         :param bool gdn_use_v_conv: Whether to apply the v-path convolution, defaults to True.
         :param bool gdn_use_packed_qkv_conv: Whether to replace separate q/k/v depthwise convs with one packed depthwise conv, defaults to False.
+        :param bool gdn_use_packed_qkv_proj: Whether to replace separate q/k/v feature-map projections with one packed projection, defaults to False.
         :param bool gdn_conv_output_contiguous: Whether to materialize contiguous `(batch, seq, dim)` conv outputs before recurrence prep, defaults to False.
         :param bool | None gdn_q_conv_output_contiguous: Optional q-path override for contiguous conv outputs, defaults to None.
         :param bool | None gdn_k_conv_output_contiguous: Optional k-path override for contiguous conv outputs, defaults to None.
@@ -1142,6 +1238,7 @@ class HybridGPT(nn.Module):
                         gdn_use_k_conv,
                         gdn_use_v_conv,
                         gdn_use_packed_qkv_conv,
+                        gdn_use_packed_qkv_proj,
                         gdn_conv_output_contiguous,
                         gdn_q_conv_output_contiguous,
                         gdn_k_conv_output_contiguous,
