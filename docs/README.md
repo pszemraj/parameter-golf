@@ -32,6 +32,7 @@ What is now true:
 - The initial quality comparison at `TRAIN_SEQ_LEN=2048` favors the hybrid over the matched depth-control baseline.
 - A larger pure-attention depth control (`MLP_MULT=4.0`) was re-run under the same 2k-step contract and still failed to close the hybrid gap.
 - The hybrid stack now has an experimental residual normalization knob: `NORM_STYLE=pre|post|keel`.
+- Large feature-map `CastedLinear` weights now stay in `bf16` after model init; only low-dimensional and explicitly routed control parameters are restored to `fp32`.
 
 ## Norm Placement Aside
 
@@ -111,6 +112,10 @@ The branch now includes the following major changes:
   - `scripts/run_hgdn_cuda_preflight.sh`
   - runs direct single-process `gdn_eager`, `hybrid_eager`, and `hybrid_compiled` checks
   - intended to catch HGDN kernel-path regressions before handing the user longer GPU commands
+- The trainer no longer blanket-promotes every `CastedLinear` module back to `fp32` after `.bfloat16()` model init:
+  - large attention/MLP/GDN feature-map weights remain `bf16`
+  - explicit control-path weights and low-dimensional parameters still get restored to `fp32`
+  - `CastedLinear.forward()` now skips the cast path entirely when weight and activation dtypes already match
 - The branch now exposes per-path GDN conv toggles:
   - `GDN_USE_Q_CONV`
   - `GDN_USE_K_CONV`

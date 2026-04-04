@@ -36,8 +36,10 @@ Ranked optimization checklist:
      - casts around `q/k` normalization
      - casts around `g`, `beta`, and `g_out`
      - any view/contiguous path forcing copies before or after the FLA call
+     - blanket `fp32 -> bf16` recasts in `CastedLinear` on large feature-map weights
    - Current branch support:
      - `GDN_LOG_LAYOUTS=1` prints one-shot tensor dtype/shape/stride summaries at the FLA boundary
+     - large feature-map `CastedLinear` weights now stay `bf16`; only low-dimensional and explicit control parameters are restored to `fp32`
    - Expected upside: high, because this is pure overhead and not model math.
 2. Fuse or rewrite the `q_conv/k_conv/v_conv` preprocessing path.
    - Why: depthwise conv plus its backward path is one of the largest HGDN-only buckets.

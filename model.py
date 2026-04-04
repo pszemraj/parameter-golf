@@ -125,7 +125,7 @@ def l2_norm(x: Tensor, eps: float = 1e-6) -> Tensor:
 
 
 class CastedLinear(nn.Linear):
-    """Linear projection that casts stored weights to the input dtype."""
+    """Linear projection that casts stored weights to the input dtype when needed."""
 
     def forward(self, x: Tensor) -> Tensor:
         """Project activations using weights cast to the input dtype.
@@ -133,10 +133,14 @@ class CastedLinear(nn.Linear):
         :param Tensor x: Input activations.
         :return Tensor: Projected activations.
         """
+        bias = self.bias
+        if self.weight.dtype == x.dtype and self.weight.device == x.device:
+            if bias is None or (bias.dtype == x.dtype and bias.device == x.device):
+                return F.linear(x, self.weight, bias)
         return F.linear(
             x,
             self.weight.to(x.dtype),
-            self.bias.to(x.dtype) if self.bias is not None else None,
+            bias.to(x.dtype) if bias is not None else None,
         )
 
 

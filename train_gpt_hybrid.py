@@ -37,7 +37,7 @@ import torch.distributed as dist
 from torch import Tensor, nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from model import _HAS_FLA, SCALAR_PARAM_PATTERNS, CastedLinear, HybridGPT
+from model import _HAS_FLA, SCALAR_PARAM_PATTERNS, HybridGPT
 
 # ── Optional wandb ────────────────────────────────────────────────────
 _USE_WANDB = bool(int(os.environ.get("USE_WANDB", "1")))
@@ -1039,9 +1039,6 @@ def main() -> None:
         .bfloat16()
     )
 
-    for m in base_model.modules():
-        if isinstance(m, CastedLinear):
-            m.float()
     restore_low_dim_params_to_fp32(base_model)
     compiled_model, compile_stats = prepare_hybrid_compile(
         base_model, enabled=args.compile, strategy=args.compile_strategy
