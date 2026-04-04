@@ -1,6 +1,6 @@
 # HGDN Branch Status
 
-Last updated: 2026-04-03 00:24:09 EDT
+Last updated: 2026-04-04 15:35 EDT
 
 Branch: `exp/hgdn`
 
@@ -85,6 +85,7 @@ What has not been claimed:
 - `scripts/run_h100_single_gpu_hgdn_profile.sh`: 1xH100 helper for compiled and eager-attribution profiler captures
 - `scripts/run_hgdn_cuda_preflight.sh`: single-process CUDA preflight for the HGDN kernel path
 - `scripts/run_laptop_norm_compare.sh`: 1x laptop GPU helper for fixed-step `pre/post/keel` norm screens
+- `docs/HARDWARE_TRANSFER.md`: what does and does not transfer from local 4070 profiling to 1xH100 profiling
 - `docs/REFERENCE.md`: architecture/reference notes
 - `docs/TODO.md`: deferred follow-ups and break-glass items
 
