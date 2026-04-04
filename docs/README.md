@@ -89,6 +89,7 @@ What has not been claimed:
 - `scripts/analyze_hgdn_phase1.py`: bucket-attribution and boundary-audit analyzer for phase-1 bundles
 - `scripts/run_laptop_norm_compare.sh`: 1x laptop GPU helper for fixed-step `pre/post/keel` norm screens
 - `docs/HARDWARE_TRANSFER.md`: what does and does not transfer from local 4070 profiling to 1xH100 profiling
+- `docs/PROFILING_LOG.md`: tracked profiler checkpoints and conclusions that should survive beyond raw `profiles/` bundles
 - `docs/REFERENCE.md`: architecture/reference notes
 - `docs/TODO.md`: deferred follow-ups and break-glass items
 

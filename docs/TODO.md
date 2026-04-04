@@ -43,6 +43,7 @@ Ranked optimization checklist:
      - blanket `fp32 -> bf16` recasts in `CastedLinear` on large feature-map weights
    - Current branch support:
      - `GDN_LOG_LAYOUTS=1` prints one-shot tensor dtype/shape/stride summaries at the FLA boundary
+     - `GDN_AUDIT_BOUNDARIES=1` now records structured boundary layouts through `project_qkv -> conv_qkv -> norm_qkv -> recurrence_inputs -> recurrence_output -> output_gate_inputs -> output_proj_input`
      - large feature-map `CastedLinear` weights now stay `bf16`; only low-dimensional and explicit control parameters are restored to `fp32`
    - Expected upside: high, because this is pure overhead and not model math.
 2. Fuse or rewrite the `q_conv/k_conv/v_conv` preprocessing path.
@@ -90,6 +91,15 @@ Then:
 - inspect `profiles/<run_id>/key_averages.json`
 - inspect the Chrome/Perfetto trace in `profiles/<run_id>/traces/`
 - do one short eager attribution rerun with `COMPILE=0` only if compiled traces remain too anonymous
+
+Latest local attribution checkpoint:
+
+- `rtx4070_phase1` shows that the most concrete next target is the post-conv q/k/v layout path.
+- The boundary audit shows q/k/v start contiguous after projection, become non-contiguous after `q_conv/k_conv/v_conv`, and stay non-contiguous into `recurrence_inputs`.
+- That makes the next semantics-preserving kernel pass:
+  - layout cleanup between `conv_qkv` and recurrence
+  - then `norm_qkv` / `output_gate` glue
+  - not generic trainer-wide `copy_` chasing
 
 ### 1. Norm placement screen (`pre` vs `post` vs `keel`)
 
