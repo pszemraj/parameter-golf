@@ -29,6 +29,7 @@ DEFAULT_BUCKETS = (
     "aten::convolution_backward",
     "aten::_conv_depthwise2d",
     "gdn.norm_qkv",
+    "gdn.gates",
     "gdn.output_gate",
 )
 

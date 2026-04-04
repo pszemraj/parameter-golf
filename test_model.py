@@ -195,6 +195,27 @@ def test_gdn_conv_output_contiguous():
     print("  ✓ GDN contiguous recurrence inputs OK")
 
 
+def test_gdn_gate_and_output_precision_toggles():
+    """Precision toggles should preserve HGDN forward/backward viability."""
+    layer = GatedDeltaNet(
+        64,
+        n_heads=4,
+        head_k_dim=8,
+        expand_v=2.0,
+        use_fla=False,
+        gates_fp32=False,
+        output_norm_fp32=False,
+    ).bfloat16()
+    layer.A_log.data = layer.A_log.data.float()
+    layer.dt_bias.data = layer.dt_bias.data.float()
+    x = torch.randn(2, 16, 64, dtype=torch.bfloat16, requires_grad=True)
+    out = layer(x)
+    assert out.dtype == x.dtype
+    out.float().sum().backward()
+    assert x.grad is not None
+    print("  ✓ GDN precision toggles OK")
+
+
 def test_hybrid_fwd_bwd():
     torch.manual_seed(42)
     m = HybridGPT(

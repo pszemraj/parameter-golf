@@ -169,6 +169,8 @@ def build_hybrid_model() -> HybridGPT:
             gdn_use_k_conv=env_flag("GDN_USE_K_CONV", True),
             gdn_use_v_conv=env_flag("GDN_USE_V_CONV", True),
             gdn_conv_output_contiguous=env_flag("GDN_CONV_OUTPUT_CONTIGUOUS"),
+            gdn_gates_fp32=env_flag("GDN_GATES_FP32", True),
+            gdn_output_norm_fp32=env_flag("GDN_OUTPUT_NORM_FP32", True),
             gdn_ratio=1,
             mlp_mult=3.25,
             norm_style="pre",
@@ -330,6 +332,8 @@ def profile_gdn(
             use_k_conv=env_flag("GDN_USE_K_CONV", True),
             use_v_conv=env_flag("GDN_USE_V_CONV", True),
             conv_output_contiguous=env_flag("GDN_CONV_OUTPUT_CONTIGUOUS"),
+            gates_fp32=env_flag("GDN_GATES_FP32", True),
+            output_norm_fp32=env_flag("GDN_OUTPUT_NORM_FP32", True),
         )
     )
     x = torch.randn(

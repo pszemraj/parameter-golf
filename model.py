@@ -340,6 +340,8 @@ class GatedDeltaNet(nn.Module):
         use_k_conv: bool = True,
         use_v_conv: bool = True,
         conv_output_contiguous: bool = False,
+        gates_fp32: bool = True,
+        output_norm_fp32: bool = True,
     ):
         """Initialize a Gated DeltaNet block.
 
@@ -354,6 +356,8 @@ class GatedDeltaNet(nn.Module):
         :param bool use_k_conv: Whether to apply the k-path convolution, defaults to True.
         :param bool use_v_conv: Whether to apply the v-path convolution, defaults to True.
         :param bool conv_output_contiguous: Whether to materialize contiguous `(batch, seq, dim)` conv outputs before recurrence prep, defaults to False.
+        :param bool gates_fp32: Whether to keep the decay-gate softplus path in fp32, defaults to True.
+        :param bool output_norm_fp32: Whether to keep the post-recurrence RMSNorm in fp32 before casting back to the activation dtype, defaults to True.
         """
         super().__init__()
         self.d_model = d_model
@@ -363,6 +367,8 @@ class GatedDeltaNet(nn.Module):
         assert self.head_v_dim % 2 == 0, f"head_v_dim={self.head_v_dim} must be even"
         self.allow_neg_eigval = allow_neg_eigval
         self.use_fla = use_fla and _HAS_FLA
+        self.gates_fp32 = gates_fp32
+        self.output_norm_fp32 = output_norm_fp32
 
         total_qk = n_heads * head_k_dim
         total_v = n_heads * self.head_v_dim
@@ -461,9 +467,14 @@ class GatedDeltaNet(nn.Module):
         )
 
         with profile_range("gdn.gates"):
-            g = -self.A_log.exp() * F.softplus(
-                self.w_a(x) + self.dt_bias
-            )  # (B,T,H) log-space
+            if self.gates_fp32:
+                g = -self.A_log.exp() * F.softplus(
+                    self.w_a(x).float() + self.dt_bias
+                )  # (B,T,H) log-space
+            else:
+                g = -self.A_log.to(dtype=x.dtype).exp() * F.softplus(
+                    self.w_a(x) + self.dt_bias.to(dtype=x.dtype)
+                )
             beta = torch.sigmoid(self.w_b(x))  # (B,T,H)
         if self.allow_neg_eigval:
             beta = beta * 2.0
@@ -506,7 +517,10 @@ class GatedDeltaNet(nn.Module):
 
             with profile_range("gdn.output_gate"):
                 g_out = self.w_g(x).view(B, T, H, Dv)
-                o = rms_norm(o.float()).to(x.dtype)
+                if self.output_norm_fp32:
+                    o = rms_norm(o.float()).to(x.dtype)
+                else:
+                    o = rms_norm(o).to(dtype=x.dtype)
                 audit_gdn_boundary(
                     "output_gate_inputs", audit_call_index, o=o, g_out=g_out
                 )
@@ -703,6 +717,8 @@ class GDNBlock(nn.Module):
         use_k_conv: bool = True,
         use_v_conv: bool = True,
         conv_output_contiguous: bool = False,
+        gates_fp32: bool = True,
+        output_norm_fp32: bool = True,
         leaky_slope: float = 0.5,
         norm_style: NormStyle = "pre",
         residual_alpha: float = 1.0,
@@ -721,6 +737,8 @@ class GDNBlock(nn.Module):
         :param bool use_k_conv: Whether to apply the k-path convolution, defaults to True.
         :param bool use_v_conv: Whether to apply the v-path convolution, defaults to True.
         :param bool conv_output_contiguous: Whether to materialize contiguous `(batch, seq, dim)` conv outputs before recurrence prep, defaults to False.
+        :param bool gates_fp32: Whether to keep the decay-gate softplus path in fp32, defaults to True.
+        :param bool output_norm_fp32: Whether to keep the post-recurrence RMSNorm in fp32 before casting back to the activation dtype, defaults to True.
         :param float leaky_slope: LeakyReLU slope, defaults to 0.5.
         :param NormStyle norm_style: Residual norm placement, defaults to "pre".
         :param float residual_alpha: Residual scaling factor used by KEEL-style blocks, defaults to 1.0.
@@ -743,6 +761,8 @@ class GDNBlock(nn.Module):
             use_k_conv=use_k_conv,
             use_v_conv=use_v_conv,
             conv_output_contiguous=conv_output_contiguous,
+            gates_fp32=gates_fp32,
+            output_norm_fp32=output_norm_fp32,
         )
         self.mlp = MLP(dim, mlp_mult, leaky_slope)
         self.attn_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
@@ -886,6 +906,8 @@ class HybridGPT(nn.Module):
         gdn_use_k_conv: bool = True,
         gdn_use_v_conv: bool = True,
         gdn_conv_output_contiguous: bool = False,
+        gdn_gates_fp32: bool = True,
+        gdn_output_norm_fp32: bool = True,
         # Shared
         mlp_mult: float = 3.0,
         leaky_slope: float = 0.5,
@@ -914,6 +936,8 @@ class HybridGPT(nn.Module):
         :param bool gdn_use_k_conv: Whether to apply the k-path convolution, defaults to True.
         :param bool gdn_use_v_conv: Whether to apply the v-path convolution, defaults to True.
         :param bool gdn_conv_output_contiguous: Whether to materialize contiguous `(batch, seq, dim)` conv outputs before recurrence prep, defaults to False.
+        :param bool gdn_gates_fp32: Whether to keep the decay-gate softplus path in fp32, defaults to True.
+        :param bool gdn_output_norm_fp32: Whether to keep the post-recurrence RMSNorm in fp32 before casting back to the activation dtype, defaults to True.
         :param float mlp_mult: MLP expansion factor, defaults to 3.0.
         :param float leaky_slope: LeakyReLU slope, defaults to 0.5.
         :param int gdn_ratio: Number of GDN layers per attention layer, defaults to 3.
@@ -970,6 +994,8 @@ class HybridGPT(nn.Module):
                         gdn_use_k_conv,
                         gdn_use_v_conv,
                         gdn_conv_output_contiguous,
+                        gdn_gates_fp32,
+                        gdn_output_norm_fp32,
                         leaky_slope,
                         self.norm_style,
                         self.residual_alpha,

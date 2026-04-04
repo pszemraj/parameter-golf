@@ -87,13 +87,15 @@ git rev-parse HEAD > "$profile_root/git_sha.txt"
     echo "GDN_USE_K_CONV=${GDN_USE_K_CONV:-1}"
     echo "GDN_USE_V_CONV=${GDN_USE_V_CONV:-1}"
     echo "GDN_CONV_OUTPUT_CONTIGUOUS=${GDN_CONV_OUTPUT_CONTIGUOUS:-0}"
+    echo "GDN_GATES_FP32=${GDN_GATES_FP32:-1}"
+    echo "GDN_OUTPUT_NORM_FP32=${GDN_OUTPUT_NORM_FP32:-1}"
 } > "$profile_root/env_snapshot.txt"
 cat > "$profile_root/commands.sh" <<EOF
-USE_WANDB=$USE_WANDB WANDB_MODE=$WANDB_MODE GDN_USE_Q_CONV=${GDN_USE_Q_CONV:-1} GDN_USE_K_CONV=${GDN_USE_K_CONV:-1} GDN_USE_V_CONV=${GDN_USE_V_CONV:-1} GDN_CONV_OUTPUT_CONTIGUOUS=${GDN_CONV_OUTPUT_CONTIGUOUS:-0} bash scripts/run_hgdn_cuda_preflight.sh
-GDN_USE_Q_CONV=${GDN_USE_Q_CONV:-1} GDN_USE_K_CONV=${GDN_USE_K_CONV:-1} GDN_USE_V_CONV=${GDN_USE_V_CONV:-1} GDN_CONV_OUTPUT_CONTIGUOUS=${GDN_CONV_OUTPUT_CONTIGUOUS:-0} python scripts/profile_hgdn_local_hotpath.py --mode gdn --batch-size $local_hotpath_batch_size --seq-len $local_seq_len --output-dir $profile_root/hotpath
-GDN_USE_Q_CONV=${GDN_USE_Q_CONV:-1} GDN_USE_K_CONV=${GDN_USE_K_CONV:-1} GDN_USE_V_CONV=${GDN_USE_V_CONV:-1} GDN_CONV_OUTPUT_CONTIGUOUS=${GDN_CONV_OUTPUT_CONTIGUOUS:-0} GDN_AUDIT_BOUNDARIES=1 GDN_AUDIT_BOUNDARIES_PATH=$boundary_audit_path GDN_AUDIT_BOUNDARIES_LIMIT=1 python scripts/profile_hgdn_local_hotpath.py --mode hybrid-fwd-bwd --batch-size $local_hotpath_batch_size --seq-len $local_seq_len --output-dir $profile_root/hotpath
-GDN_USE_Q_CONV=${GDN_USE_Q_CONV:-1} GDN_USE_K_CONV=${GDN_USE_K_CONV:-1} GDN_USE_V_CONV=${GDN_USE_V_CONV:-1} GDN_CONV_OUTPUT_CONTIGUOUS=${GDN_CONV_OUTPUT_CONTIGUOUS:-0} python scripts/profile_hgdn_local_hotpath.py --mode hybrid-opt --batch-size $local_hotpath_batch_size --seq-len $local_seq_len --output-dir $profile_root/hotpath
-USE_WANDB=0 WANDB_MODE=offline RUN_PREFIX=$run_prefix PROFILE_DIR=$profile_root/trainer GDN_USE_Q_CONV=${GDN_USE_Q_CONV:-1} GDN_USE_K_CONV=${GDN_USE_K_CONV:-1} GDN_USE_V_CONV=${GDN_USE_V_CONV:-1} GDN_CONV_OUTPUT_CONTIGUOUS=${GDN_CONV_OUTPUT_CONTIGUOUS:-0} TRAIN_BATCH_TOKENS=${TRAIN_BATCH_TOKENS:-131072} TRAIN_SEQ_LEN=$trainer_seq_len PROFILE_WAIT=${PROFILE_WAIT:-1} PROFILE_WARMUP=${PROFILE_WARMUP:-1} PROFILE_ACTIVE=${PROFILE_ACTIVE:-2} ITERATIONS=${ITERATIONS:-6} TRAIN_LOG_EVERY=${TRAIN_LOG_EVERY:-1} bash scripts/run_h100_single_gpu_hgdn_profile.sh hybrid-eager
+USE_WANDB=$USE_WANDB WANDB_MODE=$WANDB_MODE GDN_USE_Q_CONV=${GDN_USE_Q_CONV:-1} GDN_USE_K_CONV=${GDN_USE_K_CONV:-1} GDN_USE_V_CONV=${GDN_USE_V_CONV:-1} GDN_CONV_OUTPUT_CONTIGUOUS=${GDN_CONV_OUTPUT_CONTIGUOUS:-0} GDN_GATES_FP32=${GDN_GATES_FP32:-1} GDN_OUTPUT_NORM_FP32=${GDN_OUTPUT_NORM_FP32:-1} bash scripts/run_hgdn_cuda_preflight.sh
+GDN_USE_Q_CONV=${GDN_USE_Q_CONV:-1} GDN_USE_K_CONV=${GDN_USE_K_CONV:-1} GDN_USE_V_CONV=${GDN_USE_V_CONV:-1} GDN_CONV_OUTPUT_CONTIGUOUS=${GDN_CONV_OUTPUT_CONTIGUOUS:-0} GDN_GATES_FP32=${GDN_GATES_FP32:-1} GDN_OUTPUT_NORM_FP32=${GDN_OUTPUT_NORM_FP32:-1} python scripts/profile_hgdn_local_hotpath.py --mode gdn --batch-size $local_hotpath_batch_size --seq-len $local_seq_len --output-dir $profile_root/hotpath
+GDN_USE_Q_CONV=${GDN_USE_Q_CONV:-1} GDN_USE_K_CONV=${GDN_USE_K_CONV:-1} GDN_USE_V_CONV=${GDN_USE_V_CONV:-1} GDN_CONV_OUTPUT_CONTIGUOUS=${GDN_CONV_OUTPUT_CONTIGUOUS:-0} GDN_GATES_FP32=${GDN_GATES_FP32:-1} GDN_OUTPUT_NORM_FP32=${GDN_OUTPUT_NORM_FP32:-1} GDN_AUDIT_BOUNDARIES=1 GDN_AUDIT_BOUNDARIES_PATH=$boundary_audit_path GDN_AUDIT_BOUNDARIES_LIMIT=1 python scripts/profile_hgdn_local_hotpath.py --mode hybrid-fwd-bwd --batch-size $local_hotpath_batch_size --seq-len $local_seq_len --output-dir $profile_root/hotpath
+GDN_USE_Q_CONV=${GDN_USE_Q_CONV:-1} GDN_USE_K_CONV=${GDN_USE_K_CONV:-1} GDN_USE_V_CONV=${GDN_USE_V_CONV:-1} GDN_CONV_OUTPUT_CONTIGUOUS=${GDN_CONV_OUTPUT_CONTIGUOUS:-0} GDN_GATES_FP32=${GDN_GATES_FP32:-1} GDN_OUTPUT_NORM_FP32=${GDN_OUTPUT_NORM_FP32:-1} python scripts/profile_hgdn_local_hotpath.py --mode hybrid-opt --batch-size $local_hotpath_batch_size --seq-len $local_seq_len --output-dir $profile_root/hotpath
+USE_WANDB=0 WANDB_MODE=offline RUN_PREFIX=$run_prefix PROFILE_DIR=$profile_root/trainer GDN_USE_Q_CONV=${GDN_USE_Q_CONV:-1} GDN_USE_K_CONV=${GDN_USE_K_CONV:-1} GDN_USE_V_CONV=${GDN_USE_V_CONV:-1} GDN_CONV_OUTPUT_CONTIGUOUS=${GDN_CONV_OUTPUT_CONTIGUOUS:-0} GDN_GATES_FP32=${GDN_GATES_FP32:-1} GDN_OUTPUT_NORM_FP32=${GDN_OUTPUT_NORM_FP32:-1} TRAIN_BATCH_TOKENS=${TRAIN_BATCH_TOKENS:-131072} TRAIN_SEQ_LEN=$trainer_seq_len PROFILE_WAIT=${PROFILE_WAIT:-1} PROFILE_WARMUP=${PROFILE_WARMUP:-1} PROFILE_ACTIVE=${PROFILE_ACTIVE:-2} ITERATIONS=${ITERATIONS:-6} TRAIN_LOG_EVERY=${TRAIN_LOG_EVERY:-1} bash scripts/run_h100_single_gpu_hgdn_profile.sh hybrid-eager
 python scripts/analyze_hgdn_phase1.py --gdn $profile_root/hotpath/gdn_fwd_bwd.json --hybrid-fwd-bwd $profile_root/hotpath/hybrid_fwd_bwd.json --hybrid-opt $profile_root/hotpath/hybrid_optimizer.json --trainer $trainer_run_dir --boundary-audit $boundary_audit_path --output-dir $profile_root/analysis
 EOF
 
@@ -102,6 +104,8 @@ GDN_USE_Q_CONV="${GDN_USE_Q_CONV:-1}" \
 GDN_USE_K_CONV="${GDN_USE_K_CONV:-1}" \
 GDN_USE_V_CONV="${GDN_USE_V_CONV:-1}" \
 GDN_CONV_OUTPUT_CONTIGUOUS="${GDN_CONV_OUTPUT_CONTIGUOUS:-0}" \
+GDN_GATES_FP32="${GDN_GATES_FP32:-1}" \
+GDN_OUTPUT_NORM_FP32="${GDN_OUTPUT_NORM_FP32:-1}" \
 bash "$repo_root/scripts/run_hgdn_cuda_preflight.sh" | tee "$profile_root/preflight/preflight.log"
 
 echo
@@ -110,6 +114,8 @@ GDN_USE_Q_CONV="${GDN_USE_Q_CONV:-1}" \
 GDN_USE_K_CONV="${GDN_USE_K_CONV:-1}" \
 GDN_USE_V_CONV="${GDN_USE_V_CONV:-1}" \
 GDN_CONV_OUTPUT_CONTIGUOUS="${GDN_CONV_OUTPUT_CONTIGUOUS:-0}" \
+GDN_GATES_FP32="${GDN_GATES_FP32:-1}" \
+GDN_OUTPUT_NORM_FP32="${GDN_OUTPUT_NORM_FP32:-1}" \
 python "$repo_root/scripts/profile_hgdn_local_hotpath.py" \
     --mode gdn \
     --batch-size "$local_hotpath_batch_size" \
@@ -125,6 +131,8 @@ GDN_USE_Q_CONV="${GDN_USE_Q_CONV:-1}" \
 GDN_USE_K_CONV="${GDN_USE_K_CONV:-1}" \
 GDN_USE_V_CONV="${GDN_USE_V_CONV:-1}" \
 GDN_CONV_OUTPUT_CONTIGUOUS="${GDN_CONV_OUTPUT_CONTIGUOUS:-0}" \
+GDN_GATES_FP32="${GDN_GATES_FP32:-1}" \
+GDN_OUTPUT_NORM_FP32="${GDN_OUTPUT_NORM_FP32:-1}" \
 python "$repo_root/scripts/profile_hgdn_local_hotpath.py" \
     --mode hybrid-fwd-bwd \
     --batch-size "$local_hotpath_batch_size" \
@@ -137,6 +145,8 @@ GDN_USE_Q_CONV="${GDN_USE_Q_CONV:-1}" \
 GDN_USE_K_CONV="${GDN_USE_K_CONV:-1}" \
 GDN_USE_V_CONV="${GDN_USE_V_CONV:-1}" \
 GDN_CONV_OUTPUT_CONTIGUOUS="${GDN_CONV_OUTPUT_CONTIGUOUS:-0}" \
+GDN_GATES_FP32="${GDN_GATES_FP32:-1}" \
+GDN_OUTPUT_NORM_FP32="${GDN_OUTPUT_NORM_FP32:-1}" \
 python "$repo_root/scripts/profile_hgdn_local_hotpath.py" \
     --mode hybrid-opt \
     --batch-size "$local_hotpath_batch_size" \
@@ -151,6 +161,8 @@ GDN_USE_Q_CONV="${GDN_USE_Q_CONV:-1}" \
 GDN_USE_K_CONV="${GDN_USE_K_CONV:-1}" \
 GDN_USE_V_CONV="${GDN_USE_V_CONV:-1}" \
 GDN_CONV_OUTPUT_CONTIGUOUS="${GDN_CONV_OUTPUT_CONTIGUOUS:-0}" \
+GDN_GATES_FP32="${GDN_GATES_FP32:-1}" \
+GDN_OUTPUT_NORM_FP32="${GDN_OUTPUT_NORM_FP32:-1}" \
 TRAIN_BATCH_TOKENS="${TRAIN_BATCH_TOKENS:-131072}" \
 TRAIN_SEQ_LEN="$trainer_seq_len" \
 PROFILE_WAIT="${PROFILE_WAIT:-1}" \

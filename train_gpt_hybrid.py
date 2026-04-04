@@ -146,6 +146,8 @@ class Hyperparameters:
     gdn_conv_output_contiguous = bool(
         int(os.environ.get("GDN_CONV_OUTPUT_CONTIGUOUS", "0"))
     )
+    gdn_gates_fp32 = bool(int(os.environ.get("GDN_GATES_FP32", "1")))
+    gdn_output_norm_fp32 = bool(int(os.environ.get("GDN_OUTPUT_NORM_FP32", "1")))
     gdn_ratio = int(os.environ.get("GDN_RATIO", 3))  # 3 GDN : 1 Attn
 
     # Optimizer
@@ -952,7 +954,9 @@ def main() -> None:
         f"profile:{int(args.profile)} "
         f"gdn_convs:q={int(args.gdn_use_q_conv)} k={int(args.gdn_use_k_conv)} "
         f"v={int(args.gdn_use_v_conv)} "
-        f"output_contiguous={int(args.gdn_conv_output_contiguous)}",
+        f"output_contiguous={int(args.gdn_conv_output_contiguous)} "
+        f"gates_fp32={int(args.gdn_gates_fp32)} "
+        f"output_norm_fp32={int(args.gdn_output_norm_fp32)}",
         console=False,
     )
     if args.profile:
@@ -1034,6 +1038,8 @@ def main() -> None:
             gdn_use_k_conv=args.gdn_use_k_conv,
             gdn_use_v_conv=args.gdn_use_v_conv,
             gdn_conv_output_contiguous=args.gdn_conv_output_contiguous,
+            gdn_gates_fp32=args.gdn_gates_fp32,
+            gdn_output_norm_fp32=args.gdn_output_norm_fp32,
             mlp_mult=args.mlp_mult,
             leaky_slope=args.leaky_slope,
             gdn_ratio=args.gdn_ratio,
@@ -1100,6 +1106,8 @@ def main() -> None:
                 "gdn_use_k_conv": args.gdn_use_k_conv,
                 "gdn_use_v_conv": args.gdn_use_v_conv,
                 "gdn_conv_output_contiguous": args.gdn_conv_output_contiguous,
+                "gdn_gates_fp32": args.gdn_gates_fp32,
+                "gdn_output_norm_fp32": args.gdn_output_norm_fp32,
                 "wandb_watch": wandb_watch_mode,
                 "wandb_watch_log_freq": args.wandb_watch_log_freq,
             }
