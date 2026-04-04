@@ -275,6 +275,54 @@ class CausalConv1d(nn.Module):
         return x
 
 
+class PackedCausalConv1d(nn.Module):
+    """Packed depthwise causal conv over concatenated q/k/v feature maps."""
+
+    def __init__(
+        self,
+        dims: tuple[int, int, int],
+        kernel_size: int = 4,
+        output_contiguous: bool = False,
+    ):
+        """Initialize the packed causal depthwise convolution.
+
+        :param tuple[int, int, int] dims: Channel counts for q, k, and v paths.
+        :param int kernel_size: Convolution kernel width, defaults to 4.
+        :param bool output_contiguous: Whether to materialize contiguous `(batch, seq, dim)` outputs, defaults to False.
+        """
+        super().__init__()
+        self.dims = dims
+        self.output_contiguous = output_contiguous
+        total_dim = sum(dims)
+        self.conv = nn.Conv1d(
+            total_dim,
+            total_dim,
+            kernel_size,
+            padding=kernel_size - 1,
+            groups=total_dim,
+            bias=False,
+        )
+
+    def forward(self, q: Tensor, k: Tensor, v: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        """Apply one packed causal depthwise convolution and split the result.
+
+        :param Tensor q: Query activations shaped `(batch, seq, q_dim)`.
+        :param Tensor k: Key activations shaped `(batch, seq, k_dim)`.
+        :param Tensor v: Value activations shaped `(batch, seq, v_dim)`.
+        :return tuple[Tensor, Tensor, Tensor]: Convolved q/k/v activations.
+        """
+        x = torch.cat((q, k, v), dim=-1)
+        x = x.transpose(1, 2)
+        x = self.conv(x)[..., : x.size(-1)]
+        x = F.silu(x)
+        x = x.transpose(1, 2)
+        if self.output_contiguous:
+            x = x.contiguous()
+        q_dim, k_dim, v_dim = self.dims
+        q, k, v = x.split((q_dim, k_dim, v_dim), dim=-1)
+        return q, k, v
+
+
 # ── Naive GDN recurrence ─────────────────────────────────────────────
 
 
@@ -339,6 +387,7 @@ class GatedDeltaNet(nn.Module):
         use_q_conv: bool = True,
         use_k_conv: bool = True,
         use_v_conv: bool = True,
+        use_packed_qkv_conv: bool = False,
         conv_output_contiguous: bool = False,
         q_conv_output_contiguous: bool | None = None,
         k_conv_output_contiguous: bool | None = None,
@@ -358,6 +407,7 @@ class GatedDeltaNet(nn.Module):
         :param bool use_q_conv: Whether to apply the q-path convolution, defaults to True.
         :param bool use_k_conv: Whether to apply the k-path convolution, defaults to True.
         :param bool use_v_conv: Whether to apply the v-path convolution, defaults to True.
+        :param bool use_packed_qkv_conv: Whether to replace separate q/k/v depthwise convs with one packed depthwise conv, defaults to False.
         :param bool conv_output_contiguous: Whether to materialize contiguous `(batch, seq, dim)` conv outputs before recurrence prep, defaults to False.
         :param bool | None q_conv_output_contiguous: Optional q-path override for contiguous conv outputs, defaults to None.
         :param bool | None k_conv_output_contiguous: Optional k-path override for contiguous conv outputs, defaults to None.
@@ -375,6 +425,7 @@ class GatedDeltaNet(nn.Module):
         self.use_fla = use_fla and _HAS_FLA
         self.gates_fp32 = gates_fp32
         self.output_norm_fp32 = output_norm_fp32
+        self.use_packed_qkv_conv = use_packed_qkv_conv
         q_conv_output_contiguous = (
             conv_output_contiguous
             if q_conv_output_contiguous is None
@@ -393,6 +444,25 @@ class GatedDeltaNet(nn.Module):
 
         total_qk = n_heads * head_k_dim
         total_v = n_heads * self.head_v_dim
+
+        if self.use_packed_qkv_conv:
+            if not (use_q_conv and use_k_conv and use_v_conv):
+                raise ValueError(
+                    "use_packed_qkv_conv requires q/k/v convs to all be enabled"
+                )
+            if (
+                len(
+                    {
+                        q_conv_output_contiguous,
+                        k_conv_output_contiguous,
+                        v_conv_output_contiguous,
+                    }
+                )
+                != 1
+            ):
+                raise ValueError(
+                    "use_packed_qkv_conv requires aligned q/k/v output_contiguous settings"
+                )
 
         # Feature-map projections → Muon
         self.w_q = CastedLinear(d_model, total_qk, bias=False)
@@ -415,24 +485,35 @@ class GatedDeltaNet(nn.Module):
         self.dt_bias = nn.Parameter(torch.zeros(n_heads))
 
         # Short causal convolutions
-        self.q_conv = CausalConv1d(
-            total_qk,
-            conv_size,
-            enabled=use_q_conv,
-            output_contiguous=q_conv_output_contiguous,
-        )
-        self.k_conv = CausalConv1d(
-            total_qk,
-            conv_size,
-            enabled=use_k_conv,
-            output_contiguous=k_conv_output_contiguous,
-        )
-        self.v_conv = CausalConv1d(
-            total_v,
-            conv_size,
-            enabled=use_v_conv,
-            output_contiguous=v_conv_output_contiguous,
-        )
+        if self.use_packed_qkv_conv:
+            self.qkv_conv = PackedCausalConv1d(
+                dims=(total_qk, total_qk, total_v),
+                kernel_size=conv_size,
+                output_contiguous=q_conv_output_contiguous,
+            )
+            self.q_conv = None
+            self.k_conv = None
+            self.v_conv = None
+        else:
+            self.qkv_conv = None
+            self.q_conv = CausalConv1d(
+                total_qk,
+                conv_size,
+                enabled=use_q_conv,
+                output_contiguous=q_conv_output_contiguous,
+            )
+            self.k_conv = CausalConv1d(
+                total_qk,
+                conv_size,
+                enabled=use_k_conv,
+                output_contiguous=k_conv_output_contiguous,
+            )
+            self.v_conv = CausalConv1d(
+                total_v,
+                conv_size,
+                enabled=use_v_conv,
+                output_contiguous=v_conv_output_contiguous,
+            )
 
     def _project_recurrence_inputs(
         self,
@@ -462,12 +543,16 @@ class GatedDeltaNet(nn.Module):
         )
 
         with profile_range("gdn.conv_qkv"):
-            with profile_range("gdn.q_conv"):
-                q = self.q_conv(q)
-            with profile_range("gdn.k_conv"):
-                k = self.k_conv(k)
-            with profile_range("gdn.v_conv"):
-                v = self.v_conv(v)
+            if self.qkv_conv is not None:
+                with profile_range("gdn.qkv_conv_packed"):
+                    q, k, v = self.qkv_conv(q, k, v)
+            else:
+                with profile_range("gdn.q_conv"):
+                    q = self.q_conv(q)
+                with profile_range("gdn.k_conv"):
+                    k = self.k_conv(k)
+                with profile_range("gdn.v_conv"):
+                    v = self.v_conv(v)
         audit_gdn_boundary(
             "conv_qkv",
             audit_call_index,
@@ -757,6 +842,7 @@ class GDNBlock(nn.Module):
         use_q_conv: bool = True,
         use_k_conv: bool = True,
         use_v_conv: bool = True,
+        use_packed_qkv_conv: bool = False,
         conv_output_contiguous: bool = False,
         q_conv_output_contiguous: bool | None = None,
         k_conv_output_contiguous: bool | None = None,
@@ -780,6 +866,7 @@ class GDNBlock(nn.Module):
         :param bool use_q_conv: Whether to apply the q-path convolution, defaults to True.
         :param bool use_k_conv: Whether to apply the k-path convolution, defaults to True.
         :param bool use_v_conv: Whether to apply the v-path convolution, defaults to True.
+        :param bool use_packed_qkv_conv: Whether to replace separate q/k/v depthwise convs with one packed depthwise conv, defaults to False.
         :param bool conv_output_contiguous: Whether to materialize contiguous `(batch, seq, dim)` conv outputs before recurrence prep, defaults to False.
         :param bool | None q_conv_output_contiguous: Optional q-path override for contiguous conv outputs, defaults to None.
         :param bool | None k_conv_output_contiguous: Optional k-path override for contiguous conv outputs, defaults to None.
@@ -807,6 +894,7 @@ class GDNBlock(nn.Module):
             use_q_conv=use_q_conv,
             use_k_conv=use_k_conv,
             use_v_conv=use_v_conv,
+            use_packed_qkv_conv=use_packed_qkv_conv,
             conv_output_contiguous=conv_output_contiguous,
             q_conv_output_contiguous=q_conv_output_contiguous,
             k_conv_output_contiguous=k_conv_output_contiguous,
@@ -955,6 +1043,7 @@ class HybridGPT(nn.Module):
         gdn_use_q_conv: bool = True,
         gdn_use_k_conv: bool = True,
         gdn_use_v_conv: bool = True,
+        gdn_use_packed_qkv_conv: bool = False,
         gdn_conv_output_contiguous: bool = False,
         gdn_q_conv_output_contiguous: bool | None = None,
         gdn_k_conv_output_contiguous: bool | None = None,
@@ -988,6 +1077,7 @@ class HybridGPT(nn.Module):
         :param bool gdn_use_q_conv: Whether to apply the q-path convolution, defaults to True.
         :param bool gdn_use_k_conv: Whether to apply the k-path convolution, defaults to True.
         :param bool gdn_use_v_conv: Whether to apply the v-path convolution, defaults to True.
+        :param bool gdn_use_packed_qkv_conv: Whether to replace separate q/k/v depthwise convs with one packed depthwise conv, defaults to False.
         :param bool gdn_conv_output_contiguous: Whether to materialize contiguous `(batch, seq, dim)` conv outputs before recurrence prep, defaults to False.
         :param bool | None gdn_q_conv_output_contiguous: Optional q-path override for contiguous conv outputs, defaults to None.
         :param bool | None gdn_k_conv_output_contiguous: Optional k-path override for contiguous conv outputs, defaults to None.
@@ -1049,6 +1139,7 @@ class HybridGPT(nn.Module):
                         gdn_use_q_conv,
                         gdn_use_k_conv,
                         gdn_use_v_conv,
+                        gdn_use_packed_qkv_conv,
                         gdn_conv_output_contiguous,
                         gdn_q_conv_output_contiguous,
                         gdn_k_conv_output_contiguous,

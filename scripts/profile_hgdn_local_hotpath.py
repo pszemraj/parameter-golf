@@ -165,6 +165,7 @@ def build_hybrid_model() -> HybridGPT:
             gdn_head_k_dim=48,
             gdn_expand_v=1.0,
             gdn_allow_neg_eigval=True,
+            gdn_use_packed_qkv_conv=env_flag("GDN_USE_PACKED_QKV_CONV"),
             gdn_use_q_conv=env_flag("GDN_USE_Q_CONV", True),
             gdn_use_k_conv=env_flag("GDN_USE_K_CONV", True),
             gdn_use_v_conv=env_flag("GDN_USE_V_CONV", True),

@@ -24,6 +24,7 @@ from profiler_report import load_profile_report  # noqa: E402
 DEFAULT_BUCKETS = (
     "aten::copy_",
     "aten::mul",
+    "gdn.qkv_conv_packed",
     "gdn.q_conv",
     "gdn.k_conv",
     "gdn.v_conv",

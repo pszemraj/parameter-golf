@@ -174,6 +174,78 @@ def test_gdn_conv_toggles():
     print("  ✓ GDN conv toggles OK")
 
 
+def test_gdn_packed_qkv_conv_matches_separate_path():
+    """Packed q/k/v conv should match the separate conv path with copied weights."""
+    torch.manual_seed(42)
+    kwargs = dict(
+        d_model=64,
+        n_heads=4,
+        head_k_dim=8,
+        expand_v=1.0,
+        allow_neg_eigval=True,
+        conv_size=4,
+        use_fla=False,
+        use_q_conv=True,
+        use_k_conv=True,
+        use_v_conv=True,
+        conv_output_contiguous=True,
+    )
+    separate = GatedDeltaNet(**kwargs)
+    packed = GatedDeltaNet(**kwargs, use_packed_qkv_conv=True)
+    packed_state = packed.state_dict()
+    separate_state = separate.state_dict()
+    for key, value in separate_state.items():
+        if key.startswith(("q_conv.", "k_conv.", "v_conv.")):
+            continue
+        packed_state[key] = value.clone()
+    q_dim = separate.q_conv.conv.weight.shape[0]
+    k_dim = separate.k_conv.conv.weight.shape[0]
+    packed_state["qkv_conv.conv.weight"][:q_dim] = separate.q_conv.conv.weight.clone()
+    packed_state["qkv_conv.conv.weight"][q_dim : q_dim + k_dim] = (
+        separate.k_conv.conv.weight.clone()
+    )
+    packed_state["qkv_conv.conv.weight"][q_dim + k_dim :] = (
+        separate.v_conv.conv.weight.clone()
+    )
+    packed.load_state_dict(packed_state, strict=True)
+    x = torch.randn(2, 32, 64)
+    torch.testing.assert_close(separate(x), packed(x), atol=1e-5, rtol=1e-5)
+    print("  ✓ packed qkv conv matches separate path")
+
+
+def test_gdn_packed_qkv_conv_requires_aligned_settings():
+    """Packed q/k/v conv should reject mixed enablement or layout settings."""
+    try:
+        GatedDeltaNet(
+            d_model=64,
+            n_heads=4,
+            head_k_dim=8,
+            expand_v=1.0,
+            use_packed_qkv_conv=True,
+            use_v_conv=False,
+        )
+        raise AssertionError("Expected packed qkv conv to reject disabled v conv")
+    except ValueError:
+        pass
+    try:
+        GatedDeltaNet(
+            d_model=64,
+            n_heads=4,
+            head_k_dim=8,
+            expand_v=1.0,
+            use_packed_qkv_conv=True,
+            q_conv_output_contiguous=True,
+            k_conv_output_contiguous=False,
+            v_conv_output_contiguous=True,
+        )
+        raise AssertionError(
+            "Expected packed qkv conv to reject mixed output_contiguous flags"
+        )
+    except ValueError:
+        pass
+    print("  ✓ packed qkv conv rejects incompatible settings")
+
+
 def test_gdn_conv_output_contiguous():
     """Contiguous conv outputs should produce contiguous recurrence inputs."""
     layer = GatedDeltaNet(
@@ -537,6 +609,11 @@ if __name__ == "__main__":
         ("Causal conv", test_causal_conv),
         ("Causal conv disable", test_causal_conv_disable),
         ("GDN conv toggles", test_gdn_conv_toggles),
+        ("Packed qkv conv parity", test_gdn_packed_qkv_conv_matches_separate_path),
+        (
+            "Packed qkv conv validation",
+            test_gdn_packed_qkv_conv_requires_aligned_settings,
+        ),
         ("Hybrid fwd/bwd", test_hybrid_fwd_bwd),
         ("Norm styles", test_norm_styles),
         ("Invalid norm style", test_invalid_norm_style),
