@@ -143,6 +143,7 @@ class Hyperparameters:
     gdn_use_q_conv = bool(int(os.environ.get("GDN_USE_Q_CONV", "1")))
     gdn_use_k_conv = bool(int(os.environ.get("GDN_USE_K_CONV", "1")))
     gdn_use_v_conv = bool(int(os.environ.get("GDN_USE_V_CONV", "1")))
+    gdn_use_packed_qk_conv = bool(int(os.environ.get("GDN_USE_PACKED_QK_CONV", "0")))
     gdn_use_packed_qkv_conv = bool(int(os.environ.get("GDN_USE_PACKED_QKV_CONV", "0")))
     gdn_use_packed_qkv_proj = bool(int(os.environ.get("GDN_USE_PACKED_QKV_PROJ", "0")))
     gdn_conv_output_contiguous = bool(
@@ -996,6 +997,7 @@ def main() -> None:
         f"profile:{int(args.profile)} "
         f"gdn_convs:q={int(args.gdn_use_q_conv)} k={int(args.gdn_use_k_conv)} "
         f"v={int(args.gdn_use_v_conv)} "
+        f"packed_qk_conv={int(args.gdn_use_packed_qk_conv)} "
         f"packed_conv={int(args.gdn_use_packed_qkv_conv)} "
         f"packed_proj={int(args.gdn_use_packed_qkv_proj)} "
         f"output_contiguous={int(args.gdn_conv_output_contiguous)} "
@@ -1087,6 +1089,7 @@ def main() -> None:
             gdn_use_q_conv=args.gdn_use_q_conv,
             gdn_use_k_conv=args.gdn_use_k_conv,
             gdn_use_v_conv=args.gdn_use_v_conv,
+            gdn_use_packed_qk_conv=args.gdn_use_packed_qk_conv,
             gdn_use_packed_qkv_conv=args.gdn_use_packed_qkv_conv,
             gdn_use_packed_qkv_proj=args.gdn_use_packed_qkv_proj,
             gdn_conv_output_contiguous=args.gdn_conv_output_contiguous,
@@ -1164,6 +1167,7 @@ def main() -> None:
                 "gdn_use_q_conv": args.gdn_use_q_conv,
                 "gdn_use_k_conv": args.gdn_use_k_conv,
                 "gdn_use_v_conv": args.gdn_use_v_conv,
+                "gdn_use_packed_qk_conv": args.gdn_use_packed_qk_conv,
                 "gdn_use_packed_qkv_conv": args.gdn_use_packed_qkv_conv,
                 "gdn_use_packed_qkv_proj": args.gdn_use_packed_qkv_proj,
                 "gdn_conv_output_contiguous": args.gdn_conv_output_contiguous,
