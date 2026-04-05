@@ -271,6 +271,8 @@ Latest local attribution checkpoint:
         - packed qkv front-end cost on H100
         - q/k normalization and gate/output glue
         - residual copy/layout churn after the packed-path win
+        - after the rejected `packed_proj + separate conv` trial, prioritize
+          structural gate/output projection work over more front-end decoupling
       - only promote local wins to H100, one run at a time, as before
     - first H100 retune round, once the next kernel tranche stalls:
       - run sequential fixed-step checks for:

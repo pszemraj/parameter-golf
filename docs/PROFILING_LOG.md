@@ -1322,3 +1322,87 @@ Keep the current local winner unchanged:
 
 And move the next step to target-hardware confirmation on 1xH100 rather than
 burning more local iterations on this output-side path.
+
+## 2026-04-05 — Packed projection with separate convs regressed locally (`rtx4070_phase1_packedproj_sepconv_fix1`)
+
+Bundle:
+
+- raw artifacts:
+  - `profiles/rtx4070_phase1_packedproj_sepconv_fix1/hotpath/`
+- experiment-surface working tree was reverted after the screen
+
+Contract:
+
+- GPU: local RTX 4070 Laptop
+- env: `pg`
+- fixed baseline:
+  - `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+  - `GDN_USE_PACKED_QKV_CONV=1`
+  - `GDN_USE_PACKED_QKV_PROJ=1`
+  - `GDN_CONTROL_PROJ_FP32=0`
+- candidate:
+  - `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+  - `GDN_USE_PACKED_QKV_CONV=0`
+  - `GDN_USE_PACKED_QKV_PROJ=1`
+  - `GDN_CONTROL_PROJ_FP32=0`
+- purpose:
+  - test whether the packed projection win could be kept while undoing the
+    H100 packed-conv regression
+
+### Main findings
+
+This candidate passed CUDA preflight but failed the local hotpath gate, so it
+should not be promoted to the local full-step profile or H100.
+
+The hoped-for tradeoff did not happen. Removing packed conv got rid of the
+`gdn.qkv_conv_packed` row, but the replacement front-end and surrounding glue
+got materially worse.
+
+Bare-GDN regressions:
+
+- `gdn.q_conv + gdn.k_conv + gdn.v_conv`: `0.00 + 0.00 + 0.00 -> 16.66 + 0.29 + 1.51 ms`
+- `gdn.q_norm`: `21.34 -> 49.34 ms`
+- `gdn.g_pointwise`: `26.88 -> 64.78 ms`
+- `gdn.output_norm`: `5.24 -> 14.10 ms`
+- `aten::copy_`: `0.24 -> 0.94 ms`
+
+Hybrid forward/backward regressions:
+
+- `gdn.qkv_conv_packed`: `8.00 -> 0.00 ms`
+- `gdn.q_conv + gdn.k_conv + gdn.v_conv`: `0.00 + 0.00 + 0.00 -> 3.72 + 18.54 + 3.22 ms`
+- `gdn.recurrence`: `44.23 -> 35.84 ms`
+- `gdn.output_norm`: `1.00 -> 21.93 ms`
+- `aten::copy_`: `2.75 -> 10.18 ms`
+- `aten::mul`: `2.22 -> 12.07 ms`
+- `aten::mm`: `2.31 -> 27.12 ms`
+
+Interpretation:
+
+- packed projection by itself is not enough
+- on this branch, the separate-conv replacement reintroduced too much front-end
+  and glue overhead
+- the next HGDN kernel candidate should stay on the current winner and attack a
+  different remaining hotspot
+
+### Decision
+
+Reject this candidate and revert it.
+
+It failed the local stop condition:
+
+- intended target did not improve at the hotpath level
+- surrounding `copy_`, `mul`, and `mm` overhead got worse
+- there is no reason to spend a trainer-eager run or H100 run on it
+
+### Next target
+
+Keep the current winner as the systems baseline:
+
+- `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+- `GDN_USE_PACKED_QKV_CONV=1`
+- `GDN_USE_PACKED_QKV_PROJ=1`
+- `GDN_CONTROL_PROJ_FP32=0`
+
+And shift the next local candidate away from front-end decoupling and toward a
+different structural HGDN-native cleanup, with the best current bet being the
+gate/output projection path.

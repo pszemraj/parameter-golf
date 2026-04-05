@@ -702,6 +702,10 @@ if __name__ == "__main__":
             "Packed qkv conv validation",
             test_gdn_packed_qkv_conv_requires_aligned_settings,
         ),
+        (
+            "Packed qkv projection+conv parity",
+            test_gdn_packed_qkv_proj_conv_matches_separate_path,
+        ),
         ("Hybrid fwd/bwd", test_hybrid_fwd_bwd),
         ("Norm styles", test_norm_styles),
         ("Invalid norm style", test_invalid_norm_style),
