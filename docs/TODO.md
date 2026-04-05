@@ -404,14 +404,43 @@ scripts/sweep.sh depth
 - Why it is interesting:
   - cuLA targets Hopper and Blackwell directly with CUDA/CuTe/CUTLASS kernels
   - it is intended to align with the FLA interface, so the eventual integration path may be relatively shallow
+- Relevant repo areas to inspect later:
+  - `csrc/kda/sm90/`
+    - Hopper fused forward CUTLASS path
+  - `cula/kda/hopper_fused_fwd.py`
+    - Hopper `kda_prefill_hopper` wrapper
+  - `cula/kda/chunk.py`
+    - KDA autograd wrapper and current backward path
+  - `cula/ops/chunk_delta_h.py`
+    - modular chunk-delta kernel decomposition
+  - `docs/chunk_delta_h_pipeline.md`
+    - pipeline design notes for the chunk delta-H kernel
 - Why it is not the first move:
   - the current profile says the branch is losing plenty of time outside the recurrence kernel
   - cuLA is early-stage and the README still marks modular GDN forward/backward support as incomplete
   - its published requirements and tested stack differ from this branch's current environment, so it is not a low-friction drop-in today
+  - for H100 training specifically, the current caveats are stronger than the
+    generic “early-stage” warning:
+    - the Hopper fused path is currently forward-only and positioned more like
+      large-batch inference / prefill than a training backend
+    - the modular KDA forward path is Blackwell-only today
+    - the modular backward still delegates to FLA rather than staying inside
+      cuLA
+    - modular GDN forward/backward kernels are still on the roadmap rather than
+      implemented
 - What to do:
   - treat this as an H100-only side experiment, not a portability-preserving branch default
   - make a separate backend wrapper so the code can switch between FLA and cuLA cleanly
-  - benchmark recurrence-heavy HGDN runs against the same FLA baseline on the same Hopper machine
+  - benchmark recurrence-heavy HGDN runs against the same FLA baseline on the
+    same Hopper machine
+  - initial use should be as a design/reference repo first, not as an assumed
+    training dependency:
+    - study the Hopper fused forward path for ideas
+    - study the chunk decomposition/pipeline docs for how they carry state and
+      structure the update
+    - only attempt a direct backend swap if cuLA later lands a real Hopper
+      training path or if we explicitly decide to build our own SM90 training
+      wrapper around the relevant kernels
   - only keep it if it wins materially without introducing integration debt or correctness drift
 - Expected upside: unknown, potentially material, but currently speculative for this exact GDN training path.
 - Expected cost: high. Environment churn plus backend-integration work.
