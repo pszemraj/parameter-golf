@@ -212,8 +212,12 @@ python scripts/hgdn.py preflight --preset current-winner-cuda-output-only --comp
 Current local status:
 
 - local preflight passed with the extension loaded
-- this validates the preset/plumbing, not the performance story
-- the next real gate is still local phase-1
+- local phase-1 completed and lost vs the non-extension current winner
+  - trainer eager self-device total:
+    - `25561.13 -> 25978.10 ms` (`+1.63%`)
+  - trainer eager console step average:
+    - `3320.37 -> 3379.27 ms` (`+1.77%`)
+- this means the output-only fused preset does **not** earn an H100 run
 
 Local gate after that:
 
@@ -221,10 +225,28 @@ Local gate after that:
 conda run -s --name pg python scripts/hgdn.py local-phase1 --preset current-winner-cuda-output-only --run-prefix rtx4070_cuda_output_only
 ```
 
-Only if that local gate is at least neutral should it go back to H100:
+Only if a future local rework is at least neutral should it go back to H100:
 
 ```bash
 python scripts/hgdn.py h100-profile hybrid-eager --preset current-winner-cuda-output-only --run-prefix h100k9
 python scripts/hgdn.py h100-perf perf --preset current-winner-cuda-output-only --run-prefix h100k9 --offline
 python scripts/hgdn.py h100-profile hybrid --preset current-winner-cuda-output-only --run-prefix h100k9
 ```
+
+### Why it lost locally
+
+Output-only fusion did remove the explicit output buckets from the trainer view:
+
+- `gdn.output_norm: 95.59 -> 0.00 ms`
+- `gdn.output_gate_mul: 25.46 -> 0.00 ms`
+
+But that saving was offset by slightly worse costs elsewhere on the current
+winner path:
+
+- `gdn.qkv_conv_depthwise: 228.25 -> 236.92 ms`
+- `gdn.qkv_conv_output_contiguous: 89.32 -> 92.65 ms`
+- `gdn.q_norm: 48.81 -> 50.82 ms`
+- `gdn.k_norm: 49.14 -> 50.95 ms`
+- `gdn.recurrence: 177.23 -> 182.66 ms`
+
+So the output-side win was real but not enough at the full-step level.

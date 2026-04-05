@@ -2432,3 +2432,69 @@ Interpretation:
 - the output-only fused path is now wired as an isolated experiment surface
 - this does **not** mean it is a local or H100 win yet
 - the next actual keep/drop gate is a local phase-1 run against the non-extension current winner
+
+## 2026-04-05 — Output-only fused preset failed the local phase-1 gate
+
+Bundle:
+
+- candidate:
+  - `profiles/rtx4070_cuda_output_only/`
+- structured comparison:
+  - `profiles/rtx4070_cuda_output_only/compare_vs_rtx4070_cuda_base/comparison.md`
+- baseline:
+  - `profiles/rtx4070_cuda_base/`
+
+Contract:
+
+- launcher:
+  - `conda run -s --name pg python scripts/hgdn.py local-phase1 --preset current-winner-cuda-output-only --run-prefix rtx4070_cuda_output_only`
+- candidate flags:
+  - `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+  - `GDN_USE_PACKED_QKV_CONV=1`
+  - `GDN_USE_PACKED_QKV_PROJ=1`
+  - `GDN_CONTROL_PROJ_FP32=0`
+  - `GDN_OUTPUT_NORM_FP32=1`
+  - `GDN_USE_CUDA_FUSED_OUTPUT=1`
+
+Main finding:
+
+The output-only fused preset is a clean local wiring success, but it still loses
+slightly at the full-step level and does **not** earn an H100 run.
+
+Compared against the non-extension current winner:
+
+- trainer eager self-device total:
+  - `25561.13 -> 25978.10 ms` (`+1.63%`)
+- trainer eager console step average:
+  - `3320.37 -> 3379.27 ms` (`+1.77%`)
+- trainer eager peak allocated memory:
+  - `6184 -> 5896 MiB`
+
+What did improve:
+
+- `gdn.output_norm`: `95.59 -> 0.00 ms`
+- `gdn.output_gate_mul`: `25.46 -> 0.00 ms`
+- `aten::copy_`: `785.65 -> 742.30 ms`
+- `aten::mul`: `1012.30 -> 1001.08 ms`
+
+What got worse enough to offset that:
+
+- `gdn.qkv_conv_depthwise`: `228.25 -> 236.92 ms`
+- `gdn.qkv_conv_output_contiguous`: `89.32 -> 92.65 ms`
+- `gdn.q_norm`: `48.81 -> 50.82 ms`
+- `gdn.k_norm`: `49.14 -> 50.95 ms`
+- `gdn.recurrence`: `177.23 -> 182.66 ms`
+
+Interpretation:
+
+- the output-side fusion itself is real
+- but on the current winner path, its local gain is too small to overcome the
+  small regressions it introduces or exposes elsewhere
+- that makes it a local reject for now, not an H100 candidate
+
+Decision:
+
+Do not promote `current-winner-cuda-output-only` to H100.
+
+Keep the preset/config around for future isolated rework if needed, but return
+the active kernel path to the non-extension current winner.

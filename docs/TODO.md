@@ -627,10 +627,14 @@ scripts/sweep.sh depth
   - `current-winner-cuda-output-only`
   - keep the non-extension current winner front-end
   - test only `GDN_USE_CUDA_FUSED_OUTPUT=1` with `GDN_OUTPUT_NORM_FP32=1`
-- Gate for that experiment:
-  1. local preflight
-  2. local phase-1
-  3. only then H100 eager/perf/profile if local is at least neutral
+- Result:
+  - local preflight passed
+  - local phase-1 lost slightly vs the non-extension current winner
+  - do **not** promote it to H100
+- Current extension status:
+  - full fused preset: H100 reject
+  - output-only fused preset: local reject
+  - keep the extension in-tree, but stop using it in the active kernel path
 - If the extension is revisited later, do it in this order:
   1. packed frontend backward
   2. depthwise-conv weight gradient

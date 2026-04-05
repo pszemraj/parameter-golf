@@ -169,9 +169,9 @@ Experimental output-only fused preset:
   - `GDN_OUTPUT_NORM_FP32=1`
   - `GDN_USE_CUDA_FUSED_OUTPUT=1`
 - status:
-  - next isolated salvage experiment
-  - intended to test whether output-side fusion is still useful when the fused
-    frontend stays disabled
+  - local preflight passed
+  - local phase-1 lost slightly vs the non-extension current winner
+  - keep it as a parked experiment surface, not an active H100 candidate
 
 Examples:
 
