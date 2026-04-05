@@ -240,6 +240,30 @@ Latest local attribution checkpoint:
         post-conv split primitive swap
       - do not revisit `split -> narrow` or similar post-conv split
         micro-optimizations unless a later trace gives a much stronger reason
+  - latest rejected local full-bundle screen:
+    - explicit packed-conv input materialization on top of the current winner
+    - idea:
+      - force `x.transpose(1, 2).contiguous()` before the packed depthwise
+        `Conv1d` to attack the remaining compiled `clone + transpose +
+        convolution` style kernels seen on H100
+    - result:
+      - preflight improved, but the real local trainer-eager bundle regressed
+        across the transfer buckets that actually matter:
+        - `aten::copy_`: `510.77 -> 689.51 ms`
+        - `aten::mul`: `659.15 -> 1000.15 ms`
+        - `gdn.qkv_conv_packed`: `234.58 -> 356.32 ms`
+        - `gdn.recurrence`: `114.97 -> 173.27 ms`
+        - `aten::convolution_backward`: `113.86 -> 172.55 ms`
+        - `aten::_conv_depthwise2d`: `91.58 -> 139.24 ms`
+    - take-away:
+      - the remaining packed-front-end tax is not going to yield to an obvious
+        input-side `.contiguous()` either
+      - this is the second straight packed-conv structural tweak that looked
+        better in preflight and worse in the real trainer step
+      - move the next hypothesis away from packed-conv input/output surgery and
+        toward the repeated fp32 shell/control casts that still show up as
+        `to_copy + add + mul + unsqueeze` style kernels in the compiled H100
+        trace
   - latest rejected quick-screen:
     - `GDN_USE_PACKED_QK_NORM=1` on top of the current winner
     - rejected before full local phase-1 promotion

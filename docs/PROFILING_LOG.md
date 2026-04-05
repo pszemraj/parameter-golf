@@ -1661,3 +1661,99 @@ Keep the current winner unchanged:
 And shift the next packed-front-end experiment away from post-conv split
 micro-optimizations and toward the remaining transpose / clone / conv-input
 path around `PackedCausalConv1d`.
+
+## 2026-04-05 — Explicit packed-conv input materialization regressed locally (`rtx4070_phase1_packedconvinput_fix1`)
+
+Bundle:
+
+- raw artifacts:
+  - `profiles/rtx4070_phase1_packedconvinput_fix1/`
+- comparison against the current local winner:
+  - `profiles/rtx4070_phase1_packedconvinput_fix1/compare_vs_ctrlbf16/comparison.md`
+- experiment-surface working tree was reverted after the screen
+
+Contract:
+
+- GPU: local RTX 4070 Laptop
+- env: `pg`
+- fixed baseline:
+  - `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+  - `GDN_USE_PACKED_QKV_CONV=1`
+  - `GDN_USE_PACKED_QKV_PROJ=1`
+  - `GDN_CONTROL_PROJ_FP32=0`
+- candidate:
+  - fixed baseline plus an explicit packed-conv input copy:
+    - materialize `x.transpose(1, 2).contiguous()` before the packed depthwise
+      `Conv1d`
+- purpose:
+  - test whether the remaining H100 `clone + transpose + convolution` kernels
+    were being driven by the non-contiguous packed-conv input rather than the
+    post-conv output split
+
+### Main findings
+
+This candidate improved preflight, but it still failed the real local
+trainer-eager gate and should not be promoted.
+
+The full local phase-1 bundle regressed in the same trainer buckets that matter
+for H100 transfer:
+
+- trainer `aten::copy_`: `510.77 -> 689.51 ms`
+- trainer `aten::mul`: `659.15 -> 1000.15 ms`
+- trainer `gdn.qkv_conv_packed`: `234.58 -> 356.32 ms`
+- trainer `gdn.recurrence`: `114.97 -> 173.27 ms`
+- trainer `aten::convolution_backward`: `113.86 -> 172.55 ms`
+- trainer `aten::_conv_depthwise2d`: `91.58 -> 139.24 ms`
+- trainer `gdn.q_norm`: `31.74 -> 48.31 ms`
+- trainer `gdn.k_norm`: `31.84 -> 48.37 ms`
+
+There were still local screen wins:
+
+- preflight `hybrid_eager`: `146.49 -> 133.88 ms`
+- bare `aten::copy_`: `1.18 -> 0.95 ms`
+- bare `gdn.q_norm`: `54.68 -> 46.28 ms`
+- hybrid optimizer `aten::copy_`: `0.27 -> 0.24 ms`
+
+Interpretation:
+
+- the packed front-end remains a real hotspot, but an explicit input-side
+  `.contiguous()` is not the right fix
+- this is the second straight packed-conv structural tweak that looked better
+  in preflight and worse in the real trainer step
+- the remaining packed-front-end tax is not going to yield to obvious
+  transpose/split micro-surgery
+
+### Boundary read
+
+The recurrence-facing boundary again stayed identical to the current winner:
+
+- packed conv outputs stayed contiguous bf16
+- `norm_qkv` stayed contiguous bf16
+- `recurrence_inputs` stayed contiguous bf16
+- output-gate inputs stayed contiguous bf16
+
+So the loss was not a recurrence-boundary regression. It came from the changed
+kernel mix around the packed-conv front-end and its downstream shell overhead.
+
+### Decision
+
+Reject this candidate and revert it.
+
+It failed the same promotion rule as the `split -> narrow` attempt:
+
+- preflight was not enough
+- hotpath looked interesting enough to escalate
+- the real trainer-eager bundle got materially worse
+
+### Next target
+
+Keep the current winner unchanged:
+
+- `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+- `GDN_USE_PACKED_QKV_CONV=1`
+- `GDN_USE_PACKED_QKV_PROJ=1`
+- `GDN_CONTROL_PROJ_FP32=0`
+
+And move the next hypothesis away from packed-conv input/output surgery and
+toward the repeated fp32 shell/control casts that still show up as
+`to_copy + add + mul + unsqueeze` style kernels in the compiled H100 trace.
