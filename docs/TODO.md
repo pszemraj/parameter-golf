@@ -226,6 +226,20 @@ Latest local attribution checkpoint:
       `aten::copy_`, `aten::mul`, `gdn.qkv_conv_packed`, `gdn.recurrence`,
       `aten::convolution_backward`, and `aten::_conv_depthwise2d`
     - do not send this candidate to H100
+  - latest rejected local full-bundle screen:
+    - packed-conv `split_with_sizes -> narrow` cleanup on top of the current
+      winner
+    - preflight looked directionally interesting, but the real local
+      trainer-eager bundle regressed:
+      - `aten::copy_`: `510.77 -> 653.08 ms`
+      - `aten::mul`: `659.15 -> 785.87 ms`
+      - `gdn.qkv_conv_packed`: `234.58 -> 280.92 ms`
+      - `gdn.recurrence`: `114.97 -> 136.84 ms`
+    - take-away:
+      - the remaining packed-front-end cost is not going to be fixed by a tiny
+        post-conv split primitive swap
+      - do not revisit `split -> narrow` or similar post-conv split
+        micro-optimizations unless a later trace gives a much stronger reason
   - latest rejected quick-screen:
     - `GDN_USE_PACKED_QK_NORM=1` on top of the current winner
     - rejected before full local phase-1 promotion
@@ -287,8 +301,10 @@ Latest local attribution checkpoint:
         - packed qkv front-end cost on H100
         - q/k normalization and gate/output glue
         - residual copy/layout churn after the packed-path win
-        - after the rejected `packed_proj + separate conv` trial, prioritize
-          structural gate/output projection work over more front-end decoupling
+        - after the rejected `packed_proj + separate conv` trial and the
+          rejected `split -> narrow` cleanup, prioritize structural
+          packed-conv transpose / clone cleanup or gate/output projection work
+          over more post-split micro-optimizations
       - only promote local wins to H100, one run at a time, as before
     - first H100 retune round, once the next kernel tranche stalls:
       - run sequential fixed-step checks for:

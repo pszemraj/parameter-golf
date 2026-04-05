@@ -1569,3 +1569,95 @@ Keep the current winner as the systems baseline:
 And shift the next local candidate away from front-end decoupling and toward a
 different structural HGDN-native cleanup, with the best current bet being the
 gate/output projection path.
+
+## 2026-04-05 — Packed-conv `split_with_sizes -> narrow` cleanup regressed locally (`rtx4070_phase1_narrowsplit_fix1`)
+
+Bundle:
+
+- raw artifacts:
+  - `profiles/rtx4070_phase1_narrowsplit_fix1/`
+- comparison against the current local winner:
+  - `profiles/rtx4070_phase1_narrowsplit_fix1/compare_vs_ctrlbf16/comparison.md`
+- experiment-surface working tree was reverted after the screen
+
+Contract:
+
+- GPU: local RTX 4070 Laptop
+- env: `pg`
+- fixed baseline:
+  - `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+  - `GDN_USE_PACKED_QKV_CONV=1`
+  - `GDN_USE_PACKED_QKV_PROJ=1`
+  - `GDN_CONTROL_PROJ_FP32=0`
+- candidate:
+  - fixed baseline plus a packed-conv split cleanup:
+    - replace `x.split(self.dims, dim=-1)` with `narrow(...)` views inside
+      `PackedCausalConv1d`
+- purpose:
+  - test whether the H100 compiled `split_with_sizes` / `clone_transpose`
+    traces could be reduced by swapping the packed-conv output split primitive
+    without changing the packed-path boundary contract
+
+### Main findings
+
+This candidate looked mildly promising in preflight, but it failed the full
+local phase-1 gate and should not be promoted to H100.
+
+The local trainer-eager bundle regressed exactly in the transfer buckets that
+matter:
+
+- trainer `aten::copy_`: `510.77 -> 653.08 ms`
+- trainer `aten::mul`: `659.15 -> 785.87 ms`
+- trainer `gdn.qkv_conv_packed`: `234.58 -> 280.92 ms`
+- trainer `gdn.recurrence`: `114.97 -> 136.84 ms`
+- trainer `aten::convolution_backward`: `113.86 -> 135.11 ms`
+- trainer `aten::_conv_depthwise2d`: `91.58 -> 109.67 ms`
+
+There were a few isolated wins, but they did not survive the real step:
+
+- bare `gdn.q_norm`: `54.68 -> 39.23 ms`
+- hybrid-forward/backward `gdn.qkv_conv_packed`: `25.93 -> 21.86 ms`
+- hybrid optimizer `aten::copy_`: `0.27 -> 0.24 ms`
+
+Interpretation:
+
+- replacing `split_with_sizes` with `narrow` is too small and too local to be
+  the real fix for the packed-conv front-end
+- the H100 compiled `split_with_sizes` rows are real, but this operator swap
+  did not reduce the actual step-level HGDN tax
+- the packed front-end still needs a more structural cleanup than this
+
+### Boundary read
+
+The recurrence-facing layout remained identical to the current winner:
+
+- packed conv outputs stayed contiguous bf16
+- `norm_qkv` stayed contiguous bf16
+- `recurrence_inputs` stayed contiguous bf16
+- output-gate inputs stayed contiguous bf16
+
+So this was not a boundary-layout regression. The loss came from the new
+kernel mix inside the packed-conv front-end and the surrounding trainer shell.
+
+### Decision
+
+Reject this candidate and revert it.
+
+It failed the actual promotion rule:
+
+- preflight alone was not enough
+- the full local trainer-eager bundle got worse
+- there is no reason to spend H100 time on it
+
+### Next target
+
+Keep the current winner unchanged:
+
+- `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+- `GDN_USE_PACKED_QKV_CONV=1`
+- `GDN_USE_PACKED_QKV_PROJ=1`
+- `GDN_CONTROL_PROJ_FP32=0`
+
+And shift the next packed-front-end experiment away from post-conv split
+micro-optimizations and toward the remaining transpose / clone / conv-input
+path around `PackedCausalConv1d`.
