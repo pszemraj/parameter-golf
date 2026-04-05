@@ -226,6 +226,14 @@ Latest local attribution checkpoint:
       `aten::copy_`, `aten::mul`, `gdn.qkv_conv_packed`, `gdn.recurrence`,
       `aten::convolution_backward`, and `aten::_conv_depthwise2d`
     - do not send this candidate to H100
+  - latest rejected quick-screen:
+    - `GDN_USE_PACKED_QK_NORM=1` on top of the current winner
+    - rejected before full local phase-1 promotion
+    - preflight hybrid eager regressed from about `122.89 ms` to `140.21 ms`
+    - bare-GDN self-device total regressed from `227.76 ms` to `552.22 ms`
+    - most concerning delta:
+      - `gdn.recurrence`: `34.71 -> 337.61 ms`
+    - do not send this candidate to H100
       - hybrid remains slower (`915.10 ms` vs `724.72 ms`) but keeps a clear
         quality edge on H100
       - both models are over the 16 MB limit, but hybrid is closer:

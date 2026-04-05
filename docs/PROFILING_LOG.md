@@ -1,9 +1,90 @@
 # Profiling Log
 
-Last updated: 2026-04-05 01:37 EDT
+Last updated: 2026-04-05 01:45 EDT
 
 This file records profiler-driven checkpoints that should survive beyond the raw
 artifacts under `profiles/`.
+
+## 2026-04-05 — Rejected packed q/k normalization (`rtx4070_phase1_packedqknorm_fix1`)
+
+Bundle:
+
+- local hotpath-only artifacts:
+  - `profiles/rtx4070_phase1_packedqknorm_fix1/hotpath/`
+- comparison target:
+  - `profiles/rtx4070_phase1_ctrlbf16_fix1/`
+- commit at experiment start: `281dddc`
+
+Contract:
+
+- GPU: local RTX 4070 laptop
+- baseline winner:
+  - `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+  - `GDN_USE_PACKED_QKV_CONV=1`
+  - `GDN_USE_PACKED_QKV_PROJ=1`
+  - `GDN_CONTROL_PROJ_FP32=0`
+- candidate delta:
+  - `GDN_USE_PACKED_QK_NORM=1`
+- implementation idea:
+  - keep the packed qkv tensor alive through packed conv
+  - normalize q/k together from one packed buffer
+  - avoid separate q- and k-normalization prep
+
+### Main finding
+
+This candidate should be rejected **without** promoting it to a full local
+phase-1 bundle.
+
+The quick gate already failed:
+
+- CUDA preflight hybrid eager:
+  - baseline winner: about `122.89 ms`
+  - candidate: `140.21 ms`
+  - delta: about `+14%`
+
+And the isolated bare-GDN path regressed hard:
+
+- bare GDN self-device total:
+  - baseline: `227.76 ms`
+  - candidate: `552.22 ms`
+  - delta: `+142.46%`
+- `gdn.recurrence`: `34.71 -> 337.61 ms`
+- `gdn.qkv_conv_packed`: `13.45 -> 18.17 ms`
+- new `gdn.qk_norm_packed`: `51.28 ms`
+
+That is enough to stop. The candidate is not a clean front-end win.
+
+### Why it was tempting
+
+It directly targeted the two remaining packed-front-end pain points:
+
+1. packed qkv front-end cost
+2. q/k normalization cost
+
+And it was semantics-preserving in principle: normalize the same vectors, just
+from one packed buffer instead of two split tensors.
+
+### Why it was rejected early
+
+The hotpath views became internally inconsistent:
+
+- bare GDN looked dramatically worse
+- hybrid forward/backward looked superficially better in total self-device time
+- preflight got slower
+
+That is exactly the kind of mixed signal that should **not** be promoted to a
+full local phase-1 run or H100 time. The safe interpretation is:
+
+- the candidate is not robustly better
+- it is disturbing the recurrence/front-end balance in a bad way
+- the measured upside is not trustworthy enough to justify more screening time
+
+### Decision
+
+Reject `GDN_USE_PACKED_QK_NORM`.
+
+Do not keep the code path. Revert it and return to other kernel targets on the
+confirmed winner.
 
 ## 2026-04-05 — Rejected packed `w_a/w_b` gate projection (`rtx4070_phase1_packedab_fix1`)
 
