@@ -45,6 +45,14 @@ HGDN_PRESETS: dict[str, dict[str, str]] = {
         "GDN_USE_CUDA_FUSED_FRONTEND": "1",
         "GDN_USE_CUDA_FUSED_OUTPUT": "1",
     },
+    "current-winner-cuda-output-only": {
+        "GDN_CONV_OUTPUT_CONTIGUOUS": "1",
+        "GDN_USE_PACKED_QKV_CONV": "1",
+        "GDN_USE_PACKED_QKV_PROJ": "1",
+        "GDN_CONTROL_PROJ_FP32": "0",
+        "GDN_OUTPUT_NORM_FP32": "1",
+        "GDN_USE_CUDA_FUSED_OUTPUT": "1",
+    },
 }
 
 COMMON_ENV_ARGS: tuple[tuple[str, str], ...] = (

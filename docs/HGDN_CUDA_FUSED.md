@@ -200,3 +200,31 @@ If this path is revisited later, the first targets are:
 1. packed frontend backward
 2. depthwise-conv weight gradient kernel
 3. only then output-side fusion as an isolated follow-up
+
+## Next isolated experiment
+
+The first salvage attempt should be output-side fusion only:
+
+```bash
+python scripts/hgdn.py preflight --preset current-winner-cuda-output-only --compile-strategy hybrid
+```
+
+Current local status:
+
+- local preflight passed with the extension loaded
+- this validates the preset/plumbing, not the performance story
+- the next real gate is still local phase-1
+
+Local gate after that:
+
+```bash
+conda run -s --name pg python scripts/hgdn.py local-phase1 --preset current-winner-cuda-output-only --run-prefix rtx4070_cuda_output_only
+```
+
+Only if that local gate is at least neutral should it go back to H100:
+
+```bash
+python scripts/hgdn.py h100-profile hybrid-eager --preset current-winner-cuda-output-only --run-prefix h100k9
+python scripts/hgdn.py h100-perf perf --preset current-winner-cuda-output-only --run-prefix h100k9 --offline
+python scripts/hgdn.py h100-profile hybrid --preset current-winner-cuda-output-only --run-prefix h100k9
+```

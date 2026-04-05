@@ -2413,3 +2413,22 @@ If the extension is revisited later, the first targets are:
 1. packed frontend backward
 2. depthwise-conv weight gradient
 3. output fusion only after the frontend backward is no longer dominant
+
+## 2026-04-05 — Output-only fused preset added as the next salvage experiment
+
+Checkpoint:
+
+- preset added:
+  - `current-winner-cuda-output-only`
+- config added:
+  - `configs/hgdn/current_winner_cuda_output_only.toml`
+- local validation:
+  - `conda run -s --name pg python scripts/hgdn.py preflight --preset current-winner-cuda-output-only --compile-strategy hybrid`
+  - extension loaded
+  - preflight passed
+
+Interpretation:
+
+- the output-only fused path is now wired as an isolated experiment surface
+- this does **not** mean it is a local or H100 win yet
+- the next actual keep/drop gate is a local phase-1 run against the non-extension current winner

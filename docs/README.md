@@ -135,6 +135,7 @@ Current named presets:
 - `packed-qkv`
 - `current-winner`
 - `current-winner-cuda-fused`
+- `current-winner-cuda-output-only`
 
 Current best local HGDN kernel preset:
 
@@ -160,6 +161,18 @@ Experimental fused-CUDA HGDN preset:
   - H100 eager and compiled perf both regressed badly
   - keep it experimental only; do not treat it as the active path
 
+Experimental output-only fused preset:
+
+- `current-winner-cuda-output-only`
+- equivalent to:
+  - `current-winner`
+  - `GDN_OUTPUT_NORM_FP32=1`
+  - `GDN_USE_CUDA_FUSED_OUTPUT=1`
+- status:
+  - next isolated salvage experiment
+  - intended to test whether output-side fusion is still useful when the fused
+    frontend stays disabled
+
 Examples:
 
 ```bash
@@ -180,6 +193,10 @@ conda run -s --name pg python scripts/hgdn_cuda_parity.py
 
 ```bash
 python scripts/hgdn.py preflight --preset current-winner-cuda-fused --compile-strategy hybrid
+```
+
+```bash
+python scripts/hgdn.py preflight --preset current-winner-cuda-output-only --compile-strategy hybrid
 ```
 
 ```bash

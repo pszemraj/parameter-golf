@@ -623,6 +623,14 @@ scripts/sweep.sh depth
   - keep the extension in-tree
   - do **not** use `current-winner-cuda-fused` in the active kernel path
   - do **not** run quality/retune work on top of the fused preset
+- Next isolated salvage experiment:
+  - `current-winner-cuda-output-only`
+  - keep the non-extension current winner front-end
+  - test only `GDN_USE_CUDA_FUSED_OUTPUT=1` with `GDN_OUTPUT_NORM_FP32=1`
+- Gate for that experiment:
+  1. local preflight
+  2. local phase-1
+  3. only then H100 eager/perf/profile if local is at least neutral
 - If the extension is revisited later, do it in this order:
   1. packed frontend backward
   2. depthwise-conv weight gradient
