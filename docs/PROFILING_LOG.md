@@ -38,7 +38,7 @@ Compared against the prior H100 baseline `h100k1_fix2`:
   - new: `901.05 ms`, `581,860 tok/s`
   - delta: `-96.61 ms` (`-9.68%`)
   - throughput delta: `+10.72%`
-- depth control compiled perf:
+- attention-only baseline compiled perf:
   - old: `708.95 ms`
   - new: `710.76 ms`
   - delta: `+1.81 ms`
@@ -285,7 +285,7 @@ Interpretation:
 Keep the current winner as the HGDN systems baseline:
 
 - it is confirmed faster on H100
-- it preserves the quality edge over the depth control on H100
+- it preserves the quality edge over the attention-only baseline on H100
 - it is also the less-over-budget of the two matched fixed-step models
 
 ### Next step
@@ -297,7 +297,7 @@ Immediate design question:
 
 1. what is the smallest architecture reduction that recovers about `10%`
    artifact bytes?
-2. does that resized hybrid still beat the depth control at the same fixed-step
+2. does that resized hybrid still beat the attention-only baseline at the same fixed-step
    H100 contract?
 
 ## 2026-04-04 — Local HGDN phase-1 attribution (`rtx4070_phase1`)

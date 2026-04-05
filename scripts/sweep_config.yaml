@@ -16,7 +16,7 @@ parameters:
   MLP_MULT:
     values: [2.75, 3.0, 3.25]
   GDN_RATIO:
-    values: [0, 3, 7]  # 0 = pure attention control
+    values: [0, 3, 7]  # 0 = attention-only baseline
   LEAKY_SLOPE:
     values: [0.3, 0.5]
   # Training (non-size, continuous)

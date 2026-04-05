@@ -23,7 +23,7 @@ Modes:
     - MLP_MULT=3.25
 
   depth
-    Run the pure-attention depth control with all three norm styles:
+    Run the attention-only baseline with all three norm styles:
     - preset: depth
     - MLP_MULT=4.0
 

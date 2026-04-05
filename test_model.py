@@ -13,7 +13,7 @@ from model import (
     gdn_recurrent_naive,
     l2_norm,
     make_baseline_fill,
-    make_depth_control,
+    make_attention_only_baseline,
     make_hybrid_tight,
     make_hybrid_wide,
     validate_norm_style,
@@ -513,7 +513,7 @@ def test_artifact_audit():
         ("hybrid_tight  (8h Dk48 Dv48 mlp3.0)", make_hybrid_tight()),
         ("hybrid_wide   (4h Dk48 Dv96 mlp3.25)", make_hybrid_wide()),
         ("baseline_fill (11L×512d mlp2.75)", make_baseline_fill()),
-        ("depth_control (16L×384d mlp3.75)", make_depth_control()),
+        ("attention_only_baseline (16L×384d mlp3.75)", make_attention_only_baseline()),
     ]:
         total = sum(p.numel() for p in m.parameters())
         _, _, audit = serialize_quantized_state_dict_int8(m.state_dict())

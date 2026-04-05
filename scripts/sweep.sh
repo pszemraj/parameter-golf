@@ -143,15 +143,15 @@ depth)
     export_default ITERATIONS 20000
     export_default VAL_LOSS_EVERY 1000
     export_default TRAIN_LOG_EVERY 200
-    launch_train "Depth control (${NUM_LAYERS}Lx${MODEL_DIM}d 0G+${NUM_LAYERS}A mlp${MLP_MULT})" ;;
+    launch_train "Attention-only baseline (${NUM_LAYERS}Lx${MODEL_DIM}d 0G+${NUM_LAYERS}A mlp${MLP_MULT})" ;;
 
 # ── A/B/C: reviewer-recommended 3-way comparison ──
 abc)
-    echo "=== 3-way A/B/C: hybrid vs baseline vs depth_control ==="
+    echo "=== 3-way A/B/C: hybrid vs width baseline vs attention-only baseline ==="
     echo "Runs execute sequentially with the current env overrides."
     "$0" single   # hybrid
     "$0" baseline  # width baseline
-    "$0" depth     # depth control
+    "$0" depth     # attention-only baseline
     echo "=== Compare all three in wandb ===" ;;
 
 sweep)

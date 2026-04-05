@@ -30,7 +30,7 @@ What is now true:
 - A dedicated profiling harness exists for compiled and eager-attribution H100 traces.
 - A dedicated tiny CUDA preflight now exists for direct HGDN FLA/compile validation without `torchrun`.
 - The initial quality comparison at `TRAIN_SEQ_LEN=2048` favors the hybrid over the matched depth-control baseline.
-- A larger pure-attention depth control (`MLP_MULT=4.0`) was re-run under the same 2k-step contract and still failed to close the hybrid gap.
+- A larger attention-only baseline (`MLP_MULT=4.0`) was re-run under the same 2k-step contract and still failed to close the hybrid gap.
 - The hybrid stack now has an experimental residual normalization knob: `NORM_STYLE=pre|post|keel`.
 - Large feature-map `CastedLinear` weights now stay in `bf16` after model init; only low-dimensional and explicitly routed control parameters are restored to `fp32`.
 
@@ -50,7 +50,7 @@ Important scope note:
 
 - This branch did not mutate the reference [train_gpt.py](/home/pszemraj/workspace/projects/parameter-golf/train_gpt.py) baseline script for this experiment.
 - The cleanest apples-to-apples probe here is within the hybrid trainer itself:
-  - pure attention depth control via `GDN_RATIO=0`
+  - attention-only baseline via `GDN_RATIO=0`
   - mixed HGDN via `GDN_RATIO=1`
 
 Current judgment:
@@ -283,14 +283,14 @@ All throughput screens below were run with:
 
 | Config | Seq | Blocks | Step ms | Tokens/s | Ratio vs depth |
 |---|---:|---|---:|---:|---:|
-| Depth control | 1024 | `0G+16A` | `812.40` | `80,670` | `1.00x` |
+| Attention-only baseline | 1024 | `0G+16A` | `812.40` | `80,670` | `1.00x` |
 | Hybrid `GDN_RATIO=3` | 1024 | `12G+4A` | `1123.78` | `58,317` | `1.38x` |
-| Depth control | 2048 | `0G+16A` | `941.98` | `69,573` | `1.00x` |
+| Attention-only baseline | 2048 | `0G+16A` | `941.98` | `69,573` | `1.00x` |
 | Hybrid `GDN_RATIO=3` | 2048 | `12G+4A` | `1159.84` | `56,504` | `1.23x` |
 
 Interpretation:
 
-- The hybrid penalty shrinks at `2048`, but the pure-attention depth control is still faster on raw throughput.
+- The hybrid penalty shrinks at `2048`, but the attention-only baseline is still faster on raw throughput.
 - The original throughput question is answered: HGDN is viable, but not free.
 
 ### Reduced GDN density
@@ -324,8 +324,8 @@ From the logged 2k quality runs and follow-up controls:
 | Config | Raw `state_dict` bytes | `int8+zlib` bytes | Code bytes | Total artifact |
 |---|---:|---:|---:|---:|
 | Hybrid `GDN_RATIO=1, MLP_MULT=3.25` | `100,338,699` | `10,909,417` | `53,459` | `10,962,876` |
-| Depth control `MLP_MULT=3.75` | `100,047,451` | `9,401,537` | `53,459` | `9,454,996` |
-| Depth control `MLP_MULT=4.0` | `104,766,043` | `9,611,898` | `56,483` | `9,668,381` |
+| Attention-only baseline `MLP_MULT=3.75` | `100,047,451` | `9,401,537` | `53,459` | `9,454,996` |
+| Attention-only baseline `MLP_MULT=4.0` | `104,766,043` | `9,611,898` | `56,483` | `9,668,381` |
 
 ### Exact init-state quantization audit
 
@@ -334,7 +334,7 @@ These numbers use the real `quantize_state_dict_int8 -> torch.save -> zlib.compr
 | Config | Params | Int8 payload | Raw quant `torch.save` | Init `int8+zlib` |
 |---|---:|---:|---:|---:|
 | Hybrid `GDN_RATIO=1, MLP_MULT=3.25` | `25,279,680` | `25,650,944` | `25,750,713` | `8,140,843` |
-| Depth control `MLP_MULT=3.75` | `25,193,600` | `25,374,208` | `25,453,817` | `7,271,843` |
+| Attention-only baseline `MLP_MULT=3.75` | `25,193,600` | `25,374,208` | `25,453,817` | `7,271,843` |
 
 Interpretation:
 
@@ -348,7 +348,7 @@ Current conclusion:
 
 - The old proxy table should not be used for budget decisions.
 - Future size decisions should use the trainer's real artifact audit fields, not a static heuristic.
-- The hybrid is genuinely less compressible than the depth control, so size matching needs to use actual bytes, not only parameter counts.
+- The hybrid is genuinely less compressible than the attention-only baseline, so size matching needs to use actual bytes, not only parameter counts.
 - A 600-second local wallclock screen is good enough to reject obviously bad size candidates, but not good enough to stand in for the fixed-step artifact outcome.
 
 ## Quality Comparison
@@ -383,8 +383,8 @@ Depth follow-up:
 | Config | 500 | 1000 | 1500 | 2000 | Final int8 roundtrip |
 |---|---:|---:|---:|---:|---:|
 | Hybrid `GDN_RATIO=1, MLP_MULT=3.25` | `2.9000` | `2.7492` | `2.6148` | `2.5138` | `2.5209` |
-| Depth control `MLP_MULT=3.75` | `3.0342` | `2.8792` | `2.7660` | `2.6604` | `2.6778` |
-| Depth control `MLP_MULT=4.0` | `3.0298` | `2.8709` | `2.7586` | `2.6550` | `2.6715` |
+| Attention-only baseline `MLP_MULT=3.75` | `3.0342` | `2.8792` | `2.7660` | `2.6604` | `2.6778` |
+| Attention-only baseline `MLP_MULT=4.0` | `3.0298` | `2.8709` | `2.7586` | `2.6550` | `2.6715` |
 
 ### Delta
 
@@ -396,7 +396,7 @@ Depth follow-up:
 | `2000` | `0.1466 BPB` |
 | Final roundtrip | `0.1569 BPB` |
 
-### Delta vs enlarged depth control
+### Delta vs enlarged attention-only baseline
 
 | Checkpoint | Hybrid improvement over depth `MLP_MULT=4.0` |
 |---|---:|
@@ -418,12 +418,12 @@ Interpretation:
 
 - The hybrid wins cleanly at every measured checkpoint.
 - The hybrid also degrades less after the int8 roundtrip than the depth-control baseline.
-- Giving the pure-attention depth control more MLP width from `3.75 -> 4.0` only improved final BPB by about `0.0054`, which is far smaller than the hybrid-vs-depth gap.
+- Giving the attention-only baseline more MLP width from `3.75 -> 4.0` only improved final BPB by about `0.0054`, which is far smaller than the hybrid-vs-baseline gap.
 - The architecture question is currently answered in favor of the hybrid on this local quality comparison.
 
 ## Time-Matched Reindex
 
-The existing quality comparison is step-matched. The hybrid is slower, so the fair wall-clock question is whether the depth control would erase the gap if given its extra steps.
+The existing quality comparison is step-matched. The hybrid is slower, so the fair wall-clock question is whether the attention-only baseline would erase the gap if given its extra steps.
 
 Using the logged depth checkpoints and a log-linear fit of `eval/bpb` against `train_time_ms`, the predicted depth-control BPB at the hybrid's wall times is:
 
@@ -464,7 +464,7 @@ Perf harness contract:
 
 | Config | Blocks | Step ms | Tokens/s | Ratio vs depth |
 |---|---|---:|---:|---:|
-| Depth control `MLP_MULT=4.0` | `0G+16A` | `714.74` | `733,538` | `1.00x` |
+| Attention-only baseline `MLP_MULT=4.0` | `0G+16A` | `714.74` | `733,538` | `1.00x` |
 | Hybrid `GDN_RATIO=1, MLP_MULT=3.25` | `8G+8A` | `1002.72` | `522,866` | `1.40x` |
 
 Interpretation:
@@ -486,12 +486,12 @@ Fixed-step contract:
 
 | Config | Train loss @1000 | Train loss @2000 | Eval BPB @1000 | Eval BPB @1500 | Eval BPB @2000 | Final roundtrip | Artifact bytes |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| Depth control `MLP_MULT=4.0` | `4.4989` | `4.2910` | `2.6662` | `2.6166` | `2.5457` | `2.5950` | `9,991,658` |
+| Attention-only baseline `MLP_MULT=4.0` | `4.4989` | `4.2910` | `2.6662` | `2.6166` | `2.5457` | `2.5950` | `9,991,658` |
 | Hybrid `GDN_RATIO=1, MLP_MULT=3.25` | `4.3018` | `3.9760` | `2.5477` | `2.4594` | `2.3587` | `2.3719` | `10,936,348` |
 
 ### Granular curve comparison
 
-The two H100 runs show the same qualitative pattern on both training and validation metrics: after the noisy startup region, the hybrid stays below the pure-attention depth control.
+The two H100 runs show the same qualitative pattern on both training and validation metrics: after the noisy startup region, the hybrid stays below the attention-only baseline.
 
 Selected training-loss checkpoints:
 
@@ -519,7 +519,7 @@ Interpretation:
 - The hybrid is not merely holding parity while paying a throughput tax; it is learning faster per step on H100 too.
 - The H100 gap is stronger than the earlier laptop comparison on both train loss and validation BPB.
 - The hybrid artifact is still larger by `944,690` bytes, so this is not a perfectly size-matched comparison yet, but the quality gap is also larger than the local branch result.
-- The roundtrip gap widening from `0.1870 -> 0.2231` suggests the hybrid remains at least as quantization-robust as the depth baseline under this contract.
+- The roundtrip gap widening from `0.1870 -> 0.2231` suggests the hybrid remains at least as quantization-robust as the attention-only baseline under this contract.
 
 ## Size-Matching Follow-Up
 
@@ -538,14 +538,14 @@ Two follow-up controls were run to pressure this assumption:
    - result: clearly over budget and therefore invalid as a submission-matched control
 2. `MLP_MULT=4.0`, full 2k-step rerun
    - final total artifact: `9,668,381`
-   - result: still about `11.8%` smaller than the hybrid, but only improves the pure-attention depth baseline by about `0.0054` BPB at step 2000
+   - result: still about `11.8%` smaller than the hybrid, but only improves the attention-only baseline by about `0.0054` BPB at step 2000
 
 Interpretation:
 
 - The old `MLP_MULT=4.7` projection was wrong; init-state compression did not transfer to the trained model.
 - The 600-second local screen was still useful to reject `4.7`, but it should not be treated as a representative fixed-step artifact proxy.
 - The attention-only depth family appears to be relatively insensitive to extra MLP width on this local contract.
-- The hybrid win survives giving the depth control more room, even though exact size matching is still unresolved.
+- The hybrid win survives giving the attention-only baseline more room, even though exact size matching is still unresolved.
 
 This means:
 
@@ -562,13 +562,13 @@ If continuing this branch, the current best path is:
 3. Stop spending time on selective compile unless an H100 result contradicts the 4070 measurements.
 4. Use the hybrid as the current quality winner over the depth-control baseline at this local scale, including after wall-time reindexing.
 5. Treat `MLP_MULT=4.7` as ruled out locally; it overshot the artifact budget badly.
-6. Treat `MLP_MULT=4.0` as a stronger but still underfilled depth control that did not materially reduce the hybrid's advantage.
+6. Treat `MLP_MULT=4.0` as a stronger but still underfilled attention-only baseline that did not materially reduce the hybrid's advantage.
 7. Treat the 1xH100 calibration as a real positive signal for the architecture: the throughput tax is worse than local, but the quality gap is also stronger than local.
 8. After this, move to compute-optimal scaling and H100 calibration instead of spending unlimited time on perfect local size matching.
 
 ## Likely Next Work
 
-- If exact local size matching is still required, bracket the depth control between `MLP_MULT=4.0` and a slightly larger fixed-step candidate. Do not use 600-second local runs as the final size-matching proxy.
+- If exact local size matching is still required, bracket the attention-only baseline between `MLP_MULT=4.0` and a slightly larger fixed-step candidate. Do not use 600-second local runs as the final size-matching proxy.
 - Add the trainer's new byte-audit fields to any future quality-run summaries when comparing branches.
 - Run a small wall-clock-capped HGDN scaling sweep to find the real compute-optimal size.
 - If possible later, re-check throughput and compile strategy on the target H100 environment.

@@ -20,7 +20,7 @@ Modes:
   perf
     Run the current finalist pair with the perf harness:
     - hybrid: GDN_RATIO=1, MLP_MULT=3.25
-    - depth control: MLP_MULT=4.0
+    - attention-only baseline: MLP_MULT=4.0
     Contract:
     - ITERATIONS=50
     - MAX_WALLCLOCK_SECONDS=0
@@ -128,7 +128,7 @@ run_perf_pair() {
         "PERF_SKIP_FINAL_EVAL=1"
 
     run_sweep \
-        "1xH100 perf: depth MLP_MULT=${depth_mlp_mult}" \
+        "1xH100 perf: attention-only baseline MLP_MULT=${depth_mlp_mult}" \
         depth \
         "RUN_ID=${prefix}_perf_depth_mlp${depth_mlp_mult}_seq${perf_seq_len}" \
         "MLP_MULT=${depth_mlp_mult}" \
@@ -171,7 +171,7 @@ run_fixed2k_pair() {
         "PERF_SKIP_FINAL_EVAL=0"
 
     run_sweep \
-        "1xH100 fixed2k: depth MLP_MULT=${depth_mlp_mult}" \
+        "1xH100 fixed2k: attention-only baseline MLP_MULT=${depth_mlp_mult}" \
         depth \
         "RUN_ID=${prefix}_fixed2k_depth_mlp${depth_mlp_mult}_seq${seq_len}" \
         "MLP_MULT=${depth_mlp_mult}" \

@@ -28,7 +28,7 @@ This file tracks follow-up work that is intentionally not enabled by default in 
 - Status: active top priority.
 - Why: the H100 runs confirmed that the architecture is worth optimizing, and the profiler says the current throughput tax is not just "FLA recurrence is slow." A large fraction of the overhead is HGDN-side glue code around the recurrence.
 - Current H100 facts:
-  - throughput: hybrid is about `1.40x` slower than the pure-attention depth control at `seq=2048`
+  - throughput: hybrid is about `1.40x` slower than the attention-only baseline at `seq=2048`
   - quality: hybrid still wins strongly on H100 fixed-2k quality and roundtrip BPB
 - Profiling helper:
   - preferred launch surface:

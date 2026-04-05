@@ -6,7 +6,7 @@ P0 fixes from code review:
   - Split projections: w_q/w_k/w_v (Muon) vs w_a/w_b/w_g (Adam)
   - Correct naive recurrence (no broken grouped-key averaging)
   - kernels.py removed from submission
-  - depth_control config added
+  - attention-only baseline preset added
 """
 
 from __future__ import annotations
@@ -1361,12 +1361,15 @@ def make_baseline_fill(vocab_size: int = 1024) -> HybridGPT:
     )
 
 
-def make_depth_control(vocab_size: int = 1024) -> HybridGPT:
-    """Build the depth-matched pure-attention control preset.
+def make_attention_only_baseline(vocab_size: int = 1024) -> HybridGPT:
+    """Build the depth-matched attention-only baseline preset.
 
     :param int vocab_size: Vocabulary size, defaults to 1024.
-    :return HybridGPT: Pure-attention control with matched depth.
+    :return HybridGPT: Attention-only baseline with matched depth.
     """
     return HybridGPT(
         vocab_size=vocab_size, num_layers=16, d_model=384, gdn_ratio=0, mlp_mult=3.75
     )
+
+
+make_depth_control = make_attention_only_baseline

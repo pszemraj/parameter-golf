@@ -22,7 +22,7 @@ Modes:
     - MLP_MULT=3.25
 
   depth
-    Profile the pure-attention depth control:
+    Profile the attention-only baseline:
     - GDN_RATIO=0 via the `depth` preset
     - MLP_MULT=4.0
 
@@ -34,7 +34,7 @@ Modes:
     Use this for attribution when compiled traces swallow `record_function` labels.
 
   depth-eager
-    Profile the pure-attention depth control with `COMPILE=0`.
+    Profile the attention-only baseline with `COMPILE=0`.
 
   both-eager
     Run eager hybrid first, then eager depth.
@@ -158,7 +158,7 @@ run_depth() {
     fi
 
     run_sweep \
-        "1xH100 profile (${compile_label}): depth MLP_MULT=${depth_mlp_mult}" \
+        "1xH100 profile (${compile_label}): attention-only baseline MLP_MULT=${depth_mlp_mult}" \
         depth \
         "RUN_ID=${prefix}_profile_${compile_label}_depth_mlp${depth_mlp_mult}_seq${seq_len}" \
         "COMPILE=${compile_enabled}" \
