@@ -231,6 +231,10 @@ Latest local attribution checkpoint:
       - recover about `10%` total artifact bytes from the current hybrid
         winner while preserving as much of the `0.1172` fixed-step bpb edge as
         possible
+      - treat that `~10%` cut as a starting bracket, not a claim that the best
+        model must land exactly at the 16 MB ceiling
+      - the size cap is a hard constraint; filling it exactly is only a
+        heuristic until the compute-optimal curve is actually measured
     - allowed search space:
       - architecture can change
       - prioritize CUDA-friendly shapes when proposing resized variants
@@ -247,6 +251,9 @@ Latest local attribution checkpoint:
       - `trim_layers_14`: `-12.24%` total-init proxy vs current
       - `trim_width_320`: `-11.73%` total-init proxy vs current
       - `balanced_14l_mlp3.00`: `-15.57%` total-init proxy vs current
+      - keep some underfilled candidates in the final comparison set on
+        purpose; earlier branch results already suggest the optimum may sit
+        below full artifact utilization
       - mild trims are likely too small by themselves:
         - `trim_mlp_3.00`: `-3.82%`
         - `trim_mlp_2.75`: `-7.60%`

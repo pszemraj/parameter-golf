@@ -548,6 +548,9 @@ Interpretation:
 - The 600-second local screen was still useful to reject `4.7`, but it should not be treated as a representative fixed-step artifact proxy.
 - The attention-only depth family appears to be relatively insensitive to extra MLP width on this local contract.
 - The hybrid win survives giving the attention-only baseline more room, even though exact size matching is still unresolved.
+- The best model does not have to land exactly at `16,000,000` bytes. The cap is
+  a hard constraint, but the compute-optimal point may still sit below the
+  ceiling.
 
 This means:
 
@@ -567,6 +570,7 @@ If continuing this branch, the current best path is:
 6. Treat `MLP_MULT=4.0` as a stronger but still underfilled attention-only baseline that did not materially reduce the hybrid's advantage.
 7. Treat the 1xH100 calibration as a real positive signal for the architecture: the throughput tax is worse than local, but the quality gap is also stronger than local.
 8. After this, move to compute-optimal scaling and H100 calibration instead of spending unlimited time on perfect local size matching.
+9. Use the 16 MB cap as a hard upper bound, not a hard fill target. Finalists should bracket the boundary rather than assuming that exact saturation is automatically optimal.
 
 ## Likely Next Work
 
