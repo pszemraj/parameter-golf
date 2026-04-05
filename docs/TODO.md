@@ -194,6 +194,18 @@ Latest local attribution checkpoint:
       - `GDN_USE_PACKED_QKV_CONV=1`
       - `GDN_USE_PACKED_QKV_PROJ=1`
       - `GDN_CONTROL_PROJ_FP32=0`
+  - update after `h100k5`:
+    - the current local winner now **does** transfer on the compiled H100 perf
+      harness
+    - hybrid perf improved from `997.66 ms` to `901.05 ms` (`-9.68%`)
+    - depth remained effectively flat (`708.95 -> 710.76 ms`)
+    - hybrid-vs-depth ratio improved from `1.41x` slower to `1.27x` slower
+    - eager H100 trace confirms a large recurrence win (`336.60 -> 188.31 ms`)
+      with a more expensive packed qkv front-end
+    - missing follow-up:
+      - rerun the compiled H100 hybrid profile for `h100k5`
+      - the pasted third command accidentally launched `local-phase1` instead of
+        the compiled H100 profile
 
 ### 2. Norm placement screen (`pre` vs `post` vs `keel`)
 

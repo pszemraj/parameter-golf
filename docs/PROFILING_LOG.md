@@ -5,6 +5,119 @@ Last updated: 2026-04-04 20:25 EDT
 This file records profiler-driven checkpoints that should survive beyond the raw
 artifacts under `profiles/`.
 
+## 2026-04-04 — H100 transfer confirmation for the current local winner (`h100k5`)
+
+Bundle:
+
+- raw artifacts: `local-scratch/profiling-out-h100k5-hgdn.7z`
+- extracted eager profile:
+  - `profiles/h100k5_profile_eager_hybrid_r1_mlp3.25_seq2048/`
+- commit at run time: `6ef5c3f`
+
+Contract:
+
+- GPU: 1xH100
+- launcher:
+  - `python scripts/hgdn.py h100-profile hybrid-eager --preset current-winner --run-prefix h100k5`
+  - `python scripts/hgdn.py h100-perf perf --preset current-winner --run-prefix h100k5 --offline`
+- current winner:
+  - `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+  - `GDN_USE_PACKED_QKV_CONV=1`
+  - `GDN_USE_PACKED_QKV_PROJ=1`
+  - `GDN_CONTROL_PROJ_FP32=0`
+
+### Main finding
+
+The current local HGDN kernel winner **does transfer to H100** on compiled
+throughput.
+
+Compared against the prior H100 baseline `h100k1_fix2`:
+
+- hybrid compiled perf:
+  - old: `997.66 ms`, `525,518 tok/s`
+  - new: `901.05 ms`, `581,860 tok/s`
+  - delta: `-96.61 ms` (`-9.68%`)
+  - throughput delta: `+10.72%`
+- depth control compiled perf:
+  - old: `708.95 ms`
+  - new: `710.76 ms`
+  - delta: `+1.81 ms`
+
+Interpretation:
+
+- the speedup is real and not explained by a looser environment or a faster
+  baseline
+- the hybrid-vs-depth ratio improved from `1.41x` slower to `1.27x` slower
+- this is strong enough to keep the packed-path winner alive and move the branch
+  forward from “local-only promising” to “confirmed H100 throughput improvement”
+
+### Eager H100 profile read
+
+The eager H100 profile also moved in the expected direction, but not uniformly.
+
+Clear wins:
+
+- `gdn.recurrence`: `336.60 -> 188.31 ms` (`-44%`)
+- `aten::mul`: `1101 -> 974.59 ms` (`-11%`)
+- `aten::convolution_backward`: `302.25 -> 289.17 ms` (`-4%`)
+
+Mostly flat:
+
+- `aten::copy_`: `1104 -> 1092.31 ms`
+- `aten::_conv_depthwise2d`: `203.99 -> 202.75 ms`
+- `attn.norm_rope`: `296.72 -> 296.52 ms`
+- `aten::_flash_attention_backward`: `420.77 -> 421.25 ms`
+- `gdn.q_norm`: `77.83 -> 77.83 ms`
+- `gdn.k_norm`: `77.94 -> 77.94 ms`
+
+Regression / tradeoff:
+
+- the packed front-end is more expensive than the old conv-only HGDN front-end
+  on this profile:
+  - old `gdn.conv_qkv`: `401.32 ms`
+  - new `gdn.qkv_conv_packed`: `544.76 ms`
+  - plus `gdn.project_qkv_packed`: `26.29 ms`
+
+Interpretation:
+
+- the packed path is not “free”
+- it is winning on H100 because the cheaper recurrence path and reduced
+  step-level glue outweigh the more expensive packed qkv front-end
+- this is a real systems tradeoff, not just local 4070 noise
+
+### Caveat: missing compiled H100 trace
+
+The archive does **not** contain the compiled H100 hybrid profile for `h100k5`.
+Instead, the third command in the pasted run sequence launched a full
+`local-phase1` bundle under `/content/parameter-golf/`, which is not part of
+the 1xH100 confirmation contract.
+
+So at this checkpoint we have:
+
+- H100 eager hybrid profile: yes
+- H100 compiled perf pair: yes
+- H100 compiled hybrid trace: **missing**
+
+### Decision
+
+Keep the current winner:
+
+- `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+- `GDN_USE_PACKED_QKV_CONV=1`
+- `GDN_USE_PACKED_QKV_PROJ=1`
+- `GDN_CONTROL_PROJ_FP32=0`
+
+This is now the first HGDN kernel-path variant that is confirmed to improve the
+compiled H100 perf harness.
+
+### Next step
+
+The remaining immediate follow-up is:
+
+1. rerun the missing compiled H100 hybrid profile
+2. then run fixed-step quality on the current winner only if the compiled trace
+   does not reveal a new regression concern
+
 ## 2026-04-04 — Local HGDN phase-1 attribution (`rtx4070_phase1`)
 
 Bundle:
