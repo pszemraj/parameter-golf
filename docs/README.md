@@ -1,6 +1,6 @@
 # HGDN Branch Status
 
-Last updated: 2026-04-05 11:50 EDT
+Last updated: 2026-04-05 12:10 EDT
 
 Branch: `exp/hgdn`
 
@@ -87,12 +87,12 @@ What has not been claimed:
 ## Important Files
 
 - `scripts/hgdn.py`: preferred structured launcher for HGDN helpers, with subcommands, named presets, and optional TOML env configs
-- `configs/hgdn/current_winner.toml`: reusable config for the current local HGDN kernel winner
-- `configs/hgdn/current_winner_custombwd.toml`: reusable config for the packed depthwise custom-backward candidate layered on the current winner
-- `configs/hgdn/current_winner_cuda_fused.toml`: experimental fused-CUDA variant of the current HGDN kernel winner
+- `configs/hgdn/winner_20260405_11.toml`: reusable config for the active timestamped HGDN kernel winner
+- `configs/hgdn/winner_20260405_11_custombwd.toml`: reusable config for the packed depthwise custom-backward candidate layered on that winner
+- `configs/hgdn/winner_20260405_11_cuda_fused.toml`: experimental fused-CUDA variant of that winner
 - `scripts/screen_hgdn_arch_sizes.py`: CPU-only artifact-proxy screen for resized HGDN architecture candidates
 - `scripts/compare_hgdn_fixed2k.py`: structured W&B comparator for completed HGDN fixed-step H100 runs
-- `configs/hgdn/current_winner_retune.toml`: first-pass retune family around the current HGDN kernel winner
+- `configs/hgdn/winner_20260405_11_retune.toml`: first-pass retune family around the active timestamped HGDN kernel winner
 - `configs/hgdn/retune_*.toml`: named runnable configs for the first resized-HGDN shortlist
 - `model.py`: hybrid HGDN architecture and presets
 - `train_gpt_hybrid.py`: hybrid trainer
@@ -129,30 +129,42 @@ Why:
   overrides
 - the launcher supports TOML configs when a setup should be reused
 
-Current named presets:
+Active timestamped presets:
 
 - `default`
 - `convcontig`
 - `packed-qkv`
-- `current-winner`
-- `current-winner-custom-bwd`
-- `current-winner-cuda-fused`
-- `current-winner-cuda-output-only`
+- `winner-20260405-11`
+- `winner-20260405-11-custom-bwd`
+- `winner-20260405-11-cuda-fused`
+- `winner-20260405-11-cuda-output-only`
+
+Naming note:
+
+- use timestamped winner names going forward so launch commands still make sense later
+- the older `current-*` aliases still exist only so historical notes and old command lines do not hard-break
+- the active reference stamp is `20260405-11`
 
 Current best local HGDN kernel preset:
 
-- `current-winner`
+- `winner-20260405-11`
 - equivalent to:
   - `GDN_CONV_OUTPUT_CONTIGUOUS=1`
   - `GDN_USE_PACKED_QKV_CONV=1`
   - `GDN_USE_PACKED_QKV_PROJ=1`
   - `GDN_CONTROL_PROJ_FP32=0`
 
+Laptop-noise note:
+
+- this local machine is a laptop RTX 4070, not a dedicated bench box
+- treat small local deltas, roughly inside `+/-5%`, as screening only
+- promotion decisions for close calls should be made on H100, not on one laptop run
+
 Experimental fused-CUDA HGDN preset:
 
-- `current-winner-cuda-fused`
+- `winner-20260405-11-cuda-fused`
 - equivalent to:
-  - `current-winner`
+  - `winner-20260405-11`
   - `GDN_OUTPUT_NORM_FP32=1`
   - `GDN_USE_CUDA_FUSED_FRONTEND=1`
   - `GDN_USE_CUDA_FUSED_OUTPUT=1`
@@ -165,9 +177,9 @@ Experimental fused-CUDA HGDN preset:
 
 Experimental output-only fused preset:
 
-- `current-winner-cuda-output-only`
+- `winner-20260405-11-cuda-output-only`
 - equivalent to:
-  - `current-winner`
+  - `winner-20260405-11`
   - `GDN_OUTPUT_NORM_FP32=1`
   - `GDN_USE_CUDA_FUSED_OUTPUT=1`
 - status:
@@ -177,25 +189,26 @@ Experimental output-only fused preset:
 
 Experimental packed depthwise custom-backward preset:
 
-- `current-winner-custom-bwd`
+- `winner-20260405-11-custom-bwd`
 - equivalent to:
-  - `current-winner`
+  - `winner-20260405-11`
   - `GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=1`
 - status:
   - local parity tests pass
   - local hotpath and local phase-1 both show real depthwise-bucket reductions
   - the short phase-1 trainer console average was noisy, so it was re-checked with a stable local compiled perf pair
   - stable local compiled perf on the 4070 with `TORCH_BLAS_PREFER_CUBLASLT=1` improved from `2191.34 ms` to `2126.57 ms` (`-2.96%`)
+  - because that local win is smaller than the laptop-noise guardrail, it needs stricter H100 confirmation than usual
   - H100 confirmation is still pending, so keep it experimental for now
 
 Examples:
 
 ```bash
-python scripts/hgdn.py preflight --preset current-winner
+python scripts/hgdn.py preflight --preset winner-20260405-11
 ```
 
 ```bash
-python scripts/hgdn.py local-phase1 --preset current-winner --run-prefix rtx4070_phase1
+python scripts/hgdn.py local-phase1 --preset winner-20260405-11 --run-prefix rtx4070_phase1
 ```
 
 ```bash
@@ -207,28 +220,28 @@ conda run -s --name pg python scripts/hgdn_cuda_parity.py
 ```
 
 ```bash
-python scripts/hgdn.py preflight --preset current-winner-cuda-fused --compile-strategy hybrid
+python scripts/hgdn.py preflight --preset winner-20260405-11-cuda-fused --compile-strategy hybrid
 ```
 
 ```bash
-python scripts/hgdn.py preflight --preset current-winner-cuda-output-only --compile-strategy hybrid
+python scripts/hgdn.py preflight --preset winner-20260405-11-cuda-output-only --compile-strategy hybrid
 ```
 
 ```bash
-python scripts/hgdn.py preflight --preset current-winner-custom-bwd --compile-strategy model
+python scripts/hgdn.py preflight --preset winner-20260405-11-custom-bwd --compile-strategy model
 ```
 
 ```bash
-python scripts/hgdn.py h100-profile hybrid-eager --preset current-winner --run-prefix h100k5
+python scripts/hgdn.py h100-profile hybrid-eager --preset winner-20260405-11 --run-prefix h100k5
 ```
 
 ```bash
-python scripts/hgdn.py h100-perf perf --preset current-winner --run-prefix h100k5 --offline
+python scripts/hgdn.py h100-perf perf --preset winner-20260405-11 --run-prefix h100k5 --offline
 ```
 
 ```bash
 conda run -s --name pg python scripts/hgdn.py arch-size-screen \
-  --config configs/hgdn/current_winner_retune.toml
+  --config configs/hgdn/winner_20260405_11_retune.toml
 ```
 
 ```bash
@@ -251,14 +264,14 @@ python scripts/hgdn.py h100-perf fixed2k-hybrid \
 Using the reusable TOML config:
 
 ```bash
-python scripts/hgdn.py h100-profile hybrid --config configs/hgdn/current_winner.toml --run-prefix h100k5
+python scripts/hgdn.py h100-profile hybrid --config configs/hgdn/winner_20260405_11.toml --run-prefix h100k5
 ```
 
 For advanced cases that still need one-off passthrough envs, use:
 
 ```bash
 python scripts/hgdn.py h100-profile hybrid-eager \
-  --preset current-winner \
+  --preset winner-20260405-11 \
   --run-prefix h100k5 \
   --set GDN_LOG_LAYOUTS=1 \
   --set PROFILE_ROW_LIMIT=80

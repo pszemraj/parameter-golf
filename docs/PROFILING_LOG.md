@@ -52,6 +52,13 @@ stable compiled local perf pair under the branch's actual compile path:
 That resolves the ambiguity well enough to keep the path as the next H100
 kernel candidate.
 
+Because this branch is being screened on a laptop RTX 4070, that local win
+should still be treated as within the rough `+/-5%` laptop noise band. The
+right interpretation is:
+
+- good enough to justify H100 time
+- not good enough to promote on local data alone
+
 ### Why it is plausible
 
 The custom path keeps the same packed qkv front-end math, but swaps the padded
@@ -87,14 +94,15 @@ the path that produced the stable local perf win.
 
 Keep the code as an experimental preset:
 
-- `current-winner-custom-bwd`
+- `winner-20260405-11-custom-bwd`
 
 Do not make it the default yet. The next required gate is H100:
 
 1. preflight
 2. eager hybrid profile
-3. compiled perf
-4. compiled profile
+3. compiled perf run A
+4. compiled perf run B
+5. compiled profile
 
 ## 2026-04-05 — Current-winner packed front-end subrange breakdown (`current_winner_qkvbreakdown`)
 

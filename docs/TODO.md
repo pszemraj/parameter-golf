@@ -8,7 +8,7 @@ This file tracks follow-up work that is intentionally not enabled by default in 
 
 - Status: active.
 - Current experimental candidate:
-  - `current-winner-custom-bwd`
+  - `winner-20260405-11-custom-bwd`
   - equivalent to:
     - `GDN_CONV_OUTPUT_CONTIGUOUS=1`
     - `GDN_USE_PACKED_QKV_CONV=1`
@@ -19,16 +19,22 @@ This file tracks follow-up work that is intentionally not enabled by default in 
   - it reduces packed depthwise-related buckets in local profiling
   - the short local phase-1 trainer average was ambiguous, so it was re-screened with a stable compiled local perf pair
   - stable local compiled perf on the 4070 with `TORCH_BLAS_PREFER_CUBLASLT=1` improved from `2191.34 ms` to `2126.57 ms` (`-2.96%`)
+- Laptop-noise caveat:
+  - this branch is being screened on a laptop RTX 4070
+  - treat local deltas inside roughly `+/-5%` as noisy enough that they do not earn promotion on their own
 - Important caveat:
   - an earlier tiny preflight with `COMPILE_STRATEGY=hybrid` looked much worse
   - do not over-index on that result because the active branch compile path is `COMPILE_STRATEGY=model`
 - Next exact step:
-  1. H100 preflight with `--preset current-winner-custom-bwd`
+  1. H100 preflight with `--preset winner-20260405-11-custom-bwd`
   2. H100 eager hybrid profile
-  3. H100 compiled perf
-  4. H100 compiled profile
+  3. H100 compiled perf run A
+  4. H100 compiled perf run B
+  5. H100 compiled profile
 - Promotion rule:
   - only promote this path if the H100 perf/profile stack confirms a real gain
+  - because the local win is inside the laptop noise band, do not promote it from one lucky H100 perf run alone
+  - require the repeated H100 compiled perf checks to agree on direction before treating it as the new baseline
   - otherwise revert it and return to the non-extension current winner
 
 ### 0. Interim cleanup checkpoint from the redundancy audit
@@ -445,13 +451,13 @@ Latest local attribution checkpoint:
       - do not undo the packed-path kernel changes unless a new candidate beats
         them on both quality and bytes
     - new helper for this phase:
-      - `conda run -s --name pg python scripts/hgdn.py arch-size-screen --config configs/hgdn/current_winner_retune.toml`
-      - writes structured output to `profiles/arch_size/current_winner_retune/`
+      - `conda run -s --name pg python scripts/hgdn.py arch-size-screen --config configs/hgdn/winner_20260405_11_retune.toml`
+      - writes structured output to `profiles/arch_size/winner_20260405_11_retune/`
       - important caveat:
         - the screen is an initialization-time proxy only
         - use relative deltas to shortlist variants, then validate finalists
           with the trainer
-    - first proxy shortlist from `current_winner_retune`:
+    - first proxy shortlist from `winner_20260405_11_retune`:
       - `trim_layers_14`: `-12.24%` total-init proxy vs current
       - `trim_width_320`: `-11.73%` total-init proxy vs current
       - `balanced_14l_mlp3.00`: `-15.57%` total-init proxy vs current
@@ -648,10 +654,10 @@ scripts/sweep.sh depth
   - `causal_dwconv_weight_backward` is the main named kernel inside that loss
 - Current decision:
   - keep the extension in-tree
-  - do **not** use `current-winner-cuda-fused` in the active kernel path
+  - do **not** use `winner-20260405-11-cuda-fused` in the active kernel path
   - do **not** run quality/retune work on top of the fused preset
 - Next isolated salvage experiment:
-  - `current-winner-cuda-output-only`
+  - `winner-20260405-11-cuda-output-only`
   - keep the non-extension current winner front-end
   - test only `GDN_USE_CUDA_FUSED_OUTPUT=1` with `GDN_OUTPUT_NORM_FP32=1`
 - Result:

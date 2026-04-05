@@ -60,6 +60,36 @@ HGDN_PRESETS: dict[str, dict[str, str]] = {
         "GDN_CONTROL_PROJ_FP32": "0",
         "GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD": "1",
     },
+    "winner-20260405-11": {
+        "GDN_CONV_OUTPUT_CONTIGUOUS": "1",
+        "GDN_USE_PACKED_QKV_CONV": "1",
+        "GDN_USE_PACKED_QKV_PROJ": "1",
+        "GDN_CONTROL_PROJ_FP32": "0",
+    },
+    "winner-20260405-11-cuda-fused": {
+        "GDN_CONV_OUTPUT_CONTIGUOUS": "1",
+        "GDN_USE_PACKED_QKV_CONV": "1",
+        "GDN_USE_PACKED_QKV_PROJ": "1",
+        "GDN_CONTROL_PROJ_FP32": "0",
+        "GDN_OUTPUT_NORM_FP32": "1",
+        "GDN_USE_CUDA_FUSED_FRONTEND": "1",
+        "GDN_USE_CUDA_FUSED_OUTPUT": "1",
+    },
+    "winner-20260405-11-cuda-output-only": {
+        "GDN_CONV_OUTPUT_CONTIGUOUS": "1",
+        "GDN_USE_PACKED_QKV_CONV": "1",
+        "GDN_USE_PACKED_QKV_PROJ": "1",
+        "GDN_CONTROL_PROJ_FP32": "0",
+        "GDN_OUTPUT_NORM_FP32": "1",
+        "GDN_USE_CUDA_FUSED_OUTPUT": "1",
+    },
+    "winner-20260405-11-custom-bwd": {
+        "GDN_CONV_OUTPUT_CONTIGUOUS": "1",
+        "GDN_USE_PACKED_QKV_CONV": "1",
+        "GDN_USE_PACKED_QKV_PROJ": "1",
+        "GDN_CONTROL_PROJ_FP32": "0",
+        "GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD": "1",
+    },
 }
 
 COMMON_ENV_ARGS: tuple[tuple[str, str], ...] = (
@@ -262,13 +292,13 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  python scripts/hgdn.py h100-profile hybrid-eager --preset current-winner --run-prefix h100k5\n"
-            "  python scripts/hgdn.py h100-perf perf --preset current-winner --run-prefix h100k5 --offline\n"
-            "  conda run -s --name pg python scripts/hgdn.py arch-size-screen --config configs/hgdn/current_winner_retune.toml\n"
+            "  python scripts/hgdn.py h100-profile hybrid-eager --preset winner-20260405-11 --run-prefix h100k5\n"
+            "  python scripts/hgdn.py h100-perf perf --preset winner-20260405-11 --run-prefix h100k5 --offline\n"
+            "  conda run -s --name pg python scripts/hgdn.py arch-size-screen --config configs/hgdn/winner_20260405_11_retune.toml\n"
             "  conda run -s --name pg python scripts/hgdn.py fixed2k-compare --name h100k6_fixed2k_hybrid_r1_mlp3.25_seq2048 --name h100k6_fixed2k_depth_mlp4.0_seq2048 --reference h100k6_fixed2k_hybrid_r1_mlp3.25_seq2048\n"
-            "  python scripts/hgdn.py local-phase1 --config configs/hgdn/current_winner.toml --run-prefix rtx4070_phase1\n"
-            "  python scripts/hgdn.py preflight --preset current-winner\n"
-            "  conda run -s --name pg python scripts/hgdn.py preflight --preset current-winner-cuda-fused"
+            "  python scripts/hgdn.py local-phase1 --config configs/hgdn/winner_20260405_11.toml --run-prefix rtx4070_phase1\n"
+            "  python scripts/hgdn.py preflight --preset winner-20260405-11\n"
+            "  conda run -s --name pg python scripts/hgdn.py preflight --preset winner-20260405-11-cuda-fused"
         ),
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -292,7 +322,7 @@ def parse_args() -> argparse.Namespace:
     arch_size.add_argument(
         "--config",
         type=Path,
-        default=REPO_ROOT / "configs" / "hgdn" / "current_winner_retune.toml",
+        default=REPO_ROOT / "configs" / "hgdn" / "winner_20260405_11_retune.toml",
         help="TOML config for scripts/screen_hgdn_arch_sizes.py.",
     )
     arch_size.add_argument(

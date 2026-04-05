@@ -144,10 +144,10 @@ Completed on the H100 box with plain `python`:
 ```bash
 python setup_hgdn_cuda.py build_ext --inplace
 python scripts/hgdn_cuda_parity.py
-python scripts/hgdn.py preflight --preset current-winner-cuda-fused --compile-strategy hybrid
-python scripts/hgdn.py h100-profile hybrid-eager --preset current-winner-cuda-fused --run-prefix h100k8
-python scripts/hgdn.py h100-perf perf --preset current-winner-cuda-fused --run-prefix h100k8 --offline
-python scripts/hgdn.py h100-profile hybrid --preset current-winner-cuda-fused --run-prefix h100k8
+python scripts/hgdn.py preflight --preset winner-20260405-11-cuda-fused --compile-strategy hybrid
+python scripts/hgdn.py h100-profile hybrid-eager --preset winner-20260405-11-cuda-fused --run-prefix h100k8
+python scripts/hgdn.py h100-perf perf --preset winner-20260405-11-cuda-fused --run-prefix h100k8 --offline
+python scripts/hgdn.py h100-profile hybrid --preset winner-20260405-11-cuda-fused --run-prefix h100k8
 ```
 
 ### Result
@@ -190,7 +190,7 @@ especially in backward.
 ### Decision
 
 Keep the extension in-tree for future kernel work, but drop
-`current-winner-cuda-fused` from the active H100 kernel path.
+`winner-20260405-11-cuda-fused` from the active H100 kernel path.
 
 Do **not** promote it, and do **not** use it for architecture retuning or
 quality runs.
@@ -206,7 +206,7 @@ If this path is revisited later, the first targets are:
 The first salvage attempt should be output-side fusion only:
 
 ```bash
-python scripts/hgdn.py preflight --preset current-winner-cuda-output-only --compile-strategy hybrid
+python scripts/hgdn.py preflight --preset winner-20260405-11-cuda-output-only --compile-strategy hybrid
 ```
 
 Current local status:
@@ -222,15 +222,15 @@ Current local status:
 Local gate after that:
 
 ```bash
-conda run -s --name pg python scripts/hgdn.py local-phase1 --preset current-winner-cuda-output-only --run-prefix rtx4070_cuda_output_only
+conda run -s --name pg python scripts/hgdn.py local-phase1 --preset winner-20260405-11-cuda-output-only --run-prefix rtx4070_cuda_output_only
 ```
 
 Only if a future local rework is at least neutral should it go back to H100:
 
 ```bash
-python scripts/hgdn.py h100-profile hybrid-eager --preset current-winner-cuda-output-only --run-prefix h100k9
-python scripts/hgdn.py h100-perf perf --preset current-winner-cuda-output-only --run-prefix h100k9 --offline
-python scripts/hgdn.py h100-profile hybrid --preset current-winner-cuda-output-only --run-prefix h100k9
+python scripts/hgdn.py h100-profile hybrid-eager --preset winner-20260405-11-cuda-output-only --run-prefix h100k9
+python scripts/hgdn.py h100-perf perf --preset winner-20260405-11-cuda-output-only --run-prefix h100k9 --offline
+python scripts/hgdn.py h100-profile hybrid --preset winner-20260405-11-cuda-output-only --run-prefix h100k9
 ```
 
 ### Why it lost locally
