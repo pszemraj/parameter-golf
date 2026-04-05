@@ -1864,3 +1864,43 @@ And move the next hypothesis to a narrower HGDN-native target:
 - either a smaller shell-side carve-out rather than the full residual shell
 - or another packed-front-end / norm / gate path that is still showing up in
   the H100 traces
+
+## 2026-04-05 — Manual fp32 q/k norm regressed at preflight (`GDN_MANUAL_QK_NORM=1`)
+
+Screen:
+
+- type:
+  - local preflight-only quick screen
+- fixed baseline:
+  - `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+  - `GDN_USE_PACKED_QKV_CONV=1`
+  - `GDN_USE_PACKED_QKV_PROJ=1`
+  - `GDN_CONTROL_PROJ_FP32=0`
+- candidate:
+  - fixed baseline plus `GDN_MANUAL_QK_NORM=1`
+  - replace the generic `F.normalize` q/k path with an explicit fp32
+    `square -> sum -> rsqrt -> mul` formulation
+
+### Main findings
+
+This candidate failed at the first gate and was not promoted to hotpath or full
+phase-1.
+
+Preflight deltas versus the current winner:
+
+- `gdn_eager`: `1032.32 -> 1092.91 ms`
+- `hybrid_eager`: `146.49 -> 151.18 ms`
+- `hybrid_compiled`: `3223.56 -> 4966.38 ms`
+
+The compiled preflight regression is especially decisive here. The manual norm
+path did not merely fail to help; it made the compiled path dramatically worse.
+
+### Decision
+
+Reject this candidate at the preflight gate and revert it.
+
+### Interpretation
+
+This rules out the simple "replace `F.normalize` with a manual fp32 rsqrt path"
+version of q/k norm cleanup. If q/k norm gets revisited again, it should be a
+more targeted formulation than this broad manual replacement.

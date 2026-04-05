@@ -272,6 +272,21 @@ Latest local attribution checkpoint:
     - most concerning delta:
       - `gdn.recurrence`: `34.71 -> 337.61 ms`
     - do not send this candidate to H100
+  - latest rejected quick-screen:
+    - `GDN_MANUAL_QK_NORM=1` on top of the current winner
+    - idea:
+      - replace the generic q/k `F.normalize` path with an explicit fp32
+        `square -> sum -> rsqrt -> mul` formulation while keeping the packed
+        front-end otherwise unchanged
+    - result:
+      - rejected at the preflight gate
+      - `gdn_eager`: `1032.32 -> 1092.91 ms`
+      - `hybrid_eager`: `146.49 -> 151.18 ms`
+      - `hybrid_compiled`: `3223.56 -> 4966.38 ms`
+    - take-away:
+      - the simple manual fp32 q/k norm rewrite is not a valid next step
+      - if q/k norm gets revisited again, it should be with a more targeted
+        formulation than this broad `F.normalize` replacement
       - hybrid remains slower (`915.10 ms` vs `724.72 ms`) but keeps a clear
         quality edge on H100
       - both models are over the 16 MB limit, but hybrid is closer:
