@@ -118,6 +118,91 @@ The remaining immediate follow-up is:
 2. then run fixed-step quality on the current winner only if the compiled trace
    does not reveal a new regression concern
 
+## 2026-04-04 — H100 compiled-profile confirmation for `h100k5` (`h100k5v2`)
+
+Bundle:
+
+- raw artifacts: `local-scratch/profiling-out-h100k5v2-hgdn.7z`
+- extracted compiled profile:
+  - `profiles/h100k5_profile_compiled_hybrid_r1_mlp3.25_seq2048/`
+- commit at run time: `6ef5c3f`
+
+Contract:
+
+- GPU: 1xH100
+- launcher:
+  - `python scripts/hgdn.py h100-profile hybrid --preset current-winner --run-prefix h100k5`
+- current winner:
+  - `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+  - `GDN_USE_PACKED_QKV_CONV=1`
+  - `GDN_USE_PACKED_QKV_PROJ=1`
+  - `GDN_CONTROL_PROJ_FP32=0`
+
+### Main finding
+
+The compiled H100 profile confirms the same overall story as the eager H100
+profile and the compiled perf harness:
+
+- the current winner is genuinely better on H100
+- the improvement is especially visible in step-level glue overhead
+- the packed front-end remains a tradeoff rather than a free win
+
+### Named compiled-bucket comparison vs `h100k1_fix2`
+
+Clear wins:
+
+- `aten::copy_`: `507.45 -> 174.42 ms` (`-65.6%`)
+- `aten::mm`: `648.90 -> 618.45 ms` (`-4.7%`)
+- `aten::convolution_backward`: `302.28 -> 288.75 ms` (`-4.5%`)
+- `Optimizer.step#Muon.step`: `285.42 -> 258.46 ms` (`-9.4%`)
+
+Mostly flat:
+
+- `aten::_conv_depthwise2d`: `204.38 -> 202.72 ms`
+- `aten::_flash_attention_backward`: `420.66 -> 420.39 ms`
+- `aten::_flash_attention_forward`: `173.84 -> 174.30 ms`
+- `ChunkGatedDeltaRuleFunctionBackward`: `254.41 -> 252.69 ms`
+- `ChunkGatedDeltaRuleFunction`: `181.78 -> 180.15 ms`
+- `aten::mul`: `54.46 -> 53.99 ms`
+
+Interpretation:
+
+- the compiled trace is even stronger than the eager trace on the key question
+  of step-level data movement: compiled `aten::copy_` collapsed dramatically
+- recurrence itself is not much faster in the compiled trace, which means the
+  packed-path win is not “the recurrence kernel got magically better”
+- instead, the packed path appears to help the compiled training step mostly by
+  cutting glue/copy overhead while leaving the main recurrence and attention
+  kernels roughly stable
+
+### Caveat
+
+The compiled trace is more anonymous than the eager trace because compiled
+regions swallow many `record_function` labels. Several `CompiledFxGraph` entries
+ are therefore large top-level rows.
+
+That limits exact HGDN-subrange attribution, but it does **not** block the main
+ conclusion because the key named buckets we care about are still visible.
+
+### Decision
+
+The current winner is now fully confirmed on H100 for:
+
+- eager profile
+- compiled perf harness
+- compiled profile
+
+So the branch should treat this as the new HGDN perf reference path until a
+better candidate beats it.
+
+### Next step
+
+The next target-hardware question is no longer “does this perf change transfer?”
+It is:
+
+1. does the current winner preserve the fixed-step quality advantage?
+2. if yes, what is the next HGDN kernel target beyond this packed-path win?
+
 ## 2026-04-04 — Local HGDN phase-1 attribution (`rtx4070_phase1`)
 
 Bundle:

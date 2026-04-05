@@ -203,9 +203,17 @@ Latest local attribution checkpoint:
     - eager H100 trace confirms a large recurrence win (`336.60 -> 188.31 ms`)
       with a more expensive packed qkv front-end
     - missing follow-up:
-      - rerun the compiled H100 hybrid profile for `h100k5`
-      - the pasted third command accidentally launched `local-phase1` instead of
-        the compiled H100 profile
+      - done in `h100k5v2`
+      - compiled H100 trace now confirms the same result
+      - strongest named compiled-bucket win:
+        - `aten::copy_`: `507.45 -> 174.42 ms`
+      - other named compiled buckets are mostly flat to mildly better:
+        - `aten::mm`: `648.90 -> 618.45 ms`
+        - `aten::convolution_backward`: `302.28 -> 288.75 ms`
+        - recurrence forward/backward are roughly flat in compiled mode
+  - current decision:
+    - keep the current winner as the HGDN perf reference path
+    - next H100 question is fixed-step quality preservation, not transfer
 
 ### 2. Norm placement screen (`pre` vs `post` vs `keel`)
 
