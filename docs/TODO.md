@@ -662,6 +662,52 @@ scripts/sweep.sh depth
   - do **not** reopen designs that split `v` back out unless they also remove
     the added packing / separate-depthwise overhead
 
+### Depthwise attribution result and next kernel plan
+
+- depthwise attribution screens on the current winner are now done:
+  - fresh local hotpath baseline
+  - `GDN_FREEZE_CONV_WEIGHTS=1` in profiler/preflight only
+  - `CUDNN_BENCHMARK=1`
+- what those screens said:
+  - freezing conv weights did **not** create a clean enough hybrid-path
+    collapse to justify a simplistic "just remove weight grad" story
+  - `CUDNN_BENCHMARK=1` was the only runtime-only knob with a real hotpath win
+    in `hybrid_fwd_bwd`
+- full local phase-1 result for `CUDNN_BENCHMARK=1`:
+  - candidate bundle:
+    - `profiles/rtx4070_phase1_cudnnbench_fix1/`
+  - comparison:
+    - `profiles/rtx4070_phase1_cudnnbench_fix1/compare_vs_rtx4070_cuda_base/comparison.md`
+  - trainer eager self-device total:
+    - `25561.13 -> 26518.46 ms` (`+3.75%`)
+  - trainer eager step average:
+    - `3320.37 -> 3396.07 ms` (`+2.28%`)
+- decision:
+  - do **not** promote `CUDNN_BENCHMARK=1`
+  - stop spending time on runtime toggles for this depthwise tranche
+
+Next execution plan for `gdn.qkv_conv_depthwise` / depthwise backward:
+
+1. Keep the active non-extension current winner unchanged.
+2. Prototype a **packed depthwise causal conv custom autograd path** behind an
+   explicit experiment flag.
+3. Keep the current forward contract:
+   - one packed q/k/v buffer
+   - one packed depthwise conv
+   - one contiguous packed output before split
+4. Change only the backward mechanics first:
+   - target the packed depthwise input-grad / weight-grad path
+   - do **not** reopen split-`v`, output fusion, or extra materialization
+     experiments in the same patch
+5. Gate it in this order:
+   - parity / grad check
+   - local hotpath
+   - local phase-1
+   - only then H100 eager/perf/profile
+
+The first concrete implementation target is a profiling-visible replacement for
+the packed depthwise backward path, not another front-end topology change.
+
 ### 1. Graph-break audit with `TORCH_LOGS` / `tlparse`
 
 - Trigger: hybrid remains worse than `1.3x` the depth-control baseline after the current selective-compile quick hits, or compile-time behavior becomes erratic across repeated runs.

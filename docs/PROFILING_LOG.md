@@ -2577,3 +2577,70 @@ Reject packed `q/k` conv + separate `v` conv as an active kernel path.
 Keep the non-extension current winner unchanged, and avoid future front-end
 experiments that split `v` back out of the packed qkv path unless they also
 eliminate the added `aten::cat` / separate-depthwise cost.
+
+## Depthwise attribution screen and `CUDNN_BENCHMARK=1` promotion
+
+I ran a depthwise-specific attribution tranche on the non-extension current
+winner instead of guessing at another front-end rewrite.
+
+What was screened locally:
+
+- fresh hotpath baseline under current code
+- `GDN_FREEZE_CONV_WEIGHTS=1` in the profiler/preflight only
+- `CUDNN_BENCHMARK=1`
+
+Fresh hotpath baseline vs attribution screens:
+
+- `hybrid_fwd_bwd` total self-device:
+  - baseline: `397.06 ms`
+  - freeze conv weights: `387.22 ms`
+  - `CUDNN_BENCHMARK=1`: `369.45 ms`
+- key `hybrid_fwd_bwd` buckets:
+  - `gdn.conv_depthwise`: `7.56 -> 7.57 -> 6.78 ms`
+  - `aten::convolution_backward`: `3.35 -> 2.18 -> 3.12 ms`
+  - `aten::_conv_depthwise2d`: `2.65 -> 2.67 -> 2.65 ms`
+  - `gdn.q_norm`: `3.46 -> 3.47 -> 2.81 ms`
+  - `gdn.k_norm`: `2.06 -> 1.85 -> 1.34 ms`
+  - `block.gdn`: `58.03 -> 57.96 -> 53.85 ms`
+
+Interpretation:
+
+- freezing conv weights does **not** produce a decisive collapse in the real
+  hybrid path
+- that means the problem is not "just conv weight grad" in isolation
+- `CUDNN_BENCHMARK=1` is the only runtime-only knob that showed a credible
+  hybrid hotpath win, so I promoted it to a full local phase-1 gate
+
+Full local phase-1 result for `CUDNN_BENCHMARK=1`:
+
+- candidate bundle:
+  - `profiles/rtx4070_phase1_cudnnbench_fix1/`
+- comparison:
+  - `profiles/rtx4070_phase1_cudnnbench_fix1/compare_vs_rtx4070_cuda_base/comparison.md`
+- trainer eager self-device total:
+  - `25561.13 -> 26518.46 ms` (`+3.75%`)
+- trainer eager step average:
+  - `3320.37 -> 3396.07 ms` (`+2.28%`)
+
+Why it was rejected:
+
+- the short hotpath slice improved, especially around the packed depthwise
+  front-end
+- the real trainer-eager window still lost:
+  - `aten::copy_`: `785.65 -> 812.82 ms`
+  - `aten::mul`: `1012.30 -> 1048.52 ms`
+  - `gdn.recurrence`: `177.23 -> 182.33 ms`
+  - `aten::convolution_backward`: `174.81 -> 180.83 ms`
+  - `aten::_conv_depthwise2d`: `141.31 -> 145.90 ms`
+
+Decision:
+
+Reject `CUDNN_BENCHMARK=1` as an active runtime setting for the current winner.
+
+The depthwise tranche should now pivot away from runtime knobs and toward a
+targeted implementation effort:
+
+1. keep one packed q/k/v front-end buffer
+2. replace only the packed depthwise causal conv backward path
+3. specifically target the input-grad / weight-grad behavior without reopening
+   split-`v` or output-fusion experiments
