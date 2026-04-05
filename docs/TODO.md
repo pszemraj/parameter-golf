@@ -226,7 +226,10 @@ Latest local attribution checkpoint:
   - next branch pivot:
     - stop spending H100 time proving the packed-path winner again
     - keep the current winner as the HGDN systems baseline
-    - move to artifact-constrained architecture retuning on top of that
+    - keep the current winner as the systems baseline, but do **not** treat the
+      branch as finished with kernel work
+    - architecture retuning is prepared and bracketed, not yet the final branch
+      priority
     - concrete target:
       - recover about `10%` total artifact bytes from the current hybrid
         winner while preserving as much of the `0.1172` fixed-step bpb edge as
@@ -258,7 +261,18 @@ Latest local attribution checkpoint:
         - `trim_mlp_3.00`: `-3.82%`
         - `trim_mlp_2.75`: `-7.60%`
         - `trim_width_320_mlp3.75`: `-6.05%`
-    - first H100 retune round:
+    - architecture-retune status:
+      - the shortlist and launch configs are ready
+      - use them after the next HGDN kernel tranche, not as proof that the
+        kernel side is done
+    - next kernel tranche before size lock:
+      - use the current winner as the H100 profiling baseline
+      - focus on remaining HGDN-native hotspots:
+        - packed qkv front-end cost on H100
+        - q/k normalization and gate/output glue
+        - residual copy/layout churn after the packed-path win
+      - only promote local wins to H100, one run at a time, as before
+    - first H100 retune round, once the next kernel tranche stalls:
       - run sequential fixed-step checks for:
         - `configs/hgdn/retune_trim_layers_14.toml`
         - `configs/hgdn/retune_trim_width_320.toml`

@@ -278,11 +278,13 @@ Interpretation:
 - the branch should not revert to depth on artifact grounds
 - the branch should not revert to the attention-only baseline on artifact
   grounds
-- the right next move is to keep the new HGDN kernel baseline and resize the
-  architecture around the remaining byte gap
+- the current winner is good enough to use as the next kernel/profiling
+  baseline on H100
 - the size target is now concrete: the current winner needs roughly a `10%`
   total artifact reduction without giving back too much of the fixed-step bpb
   advantage
+- that byte target does **not** mean the branch is ready to lock model size yet;
+  the resize shortlist is prepared, but more HGDN kernel work is still justified
 
 Structured comparison bundle:
 
@@ -306,15 +308,25 @@ Keep the current winner as the HGDN systems baseline:
 
 ### Next step
 
-The branch should now pivot from kernel-transfer confirmation to
-artifact-constrained architecture retuning on top of the current winner.
+The next active phase should be another HGDN kernel/profiling tranche, not
+final model-size selection.
+
+Near-term order:
+
+1. keep the current winner as the H100 systems baseline
+2. continue HGDN-native hotspot work, especially:
+   - packed qkv front-end cost on H100
+   - q/k norm and gate/output glue
+   - any remaining copy/layout churn that still shows up after the packed-path
+     win
+3. use the architecture-retune shortlist only as a prepared follow-up once the
+   next kernel tranche stops paying off
 
 Immediate design question:
 
-1. what is the smallest architecture reduction that recovers about `10%`
-   artifact bytes?
-2. does that resized hybrid still beat the attention-only baseline at the same fixed-step
-   H100 contract?
+1. can another HGDN-native kernel pass cut the hybrid penalty further on H100?
+2. only after that, what is the smallest architecture reduction that recovers
+   about `10%` artifact bytes?
 
 ## 2026-04-04 — Local HGDN phase-1 attribution (`rtx4070_phase1`)
 

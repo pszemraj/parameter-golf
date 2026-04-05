@@ -593,14 +593,15 @@ If continuing this branch, the current best path is:
 5. Treat `MLP_MULT=4.7` as ruled out locally; it overshot the artifact budget badly.
 6. Treat `MLP_MULT=4.0` as a stronger but still underfilled attention-only baseline that did not materially reduce the hybrid's advantage.
 7. Treat the 1xH100 calibration as a real positive signal for the architecture: the throughput tax is worse than local, but the quality gap is also stronger than local.
-8. After this, move to compute-optimal scaling and H100 calibration instead of spending unlimited time on perfect local size matching.
+8. Keep the current winner as the H100 systems baseline, but do another HGDN kernel/profiling tranche before treating model-size selection as the main branch priority.
 9. Use the 16 MB cap as a hard upper bound, not a hard fill target. Finalists should bracket the boundary rather than assuming that exact saturation is automatically optimal.
 
 ## Likely Next Work
 
+- Continue HGDN-native hotspot work on top of the current winner, especially the packed qkv front-end and remaining norm/gate/layout glue.
 - If exact local size matching is still required, bracket the attention-only baseline between `MLP_MULT=4.0` and a slightly larger fixed-step candidate. Do not use 600-second local runs as the final size-matching proxy.
 - Add the trainer's new byte-audit fields to any future quality-run summaries when comparing branches.
-- Run a small wall-clock-capped HGDN scaling sweep to find the real compute-optimal size.
+- Once the next kernel tranche stalls, run a small wall-clock-capped HGDN scaling sweep to find the real compute-optimal size.
 - If possible later, re-check throughput and compile strategy on the target H100 environment.
   - The branch now includes `scripts/run_h100_single_gpu_hgdn.sh` for that 1xH100 calibration step.
 
