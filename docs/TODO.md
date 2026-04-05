@@ -213,7 +213,29 @@ Latest local attribution checkpoint:
         - recurrence forward/backward are roughly flat in compiled mode
   - current decision:
     - keep the current winner as the HGDN perf reference path
-    - next H100 question is fixed-step quality preservation, not transfer
+    - `h100k6` now answers the fixed-step quality question too:
+      - hybrid final sampled eval: `2.4201` bpb
+      - depth final sampled eval: `2.5373` bpb
+      - hybrid roundtrip eval: `2.44379288` bpb
+      - depth roundtrip eval: `2.54975979` bpb
+      - hybrid remains slower (`915.10 ms` vs `724.72 ms`) but keeps a clear
+        quality edge on H100
+      - both models are over the 16 MB limit, but hybrid is closer:
+        - hybrid total bytes: `17,580,964` (`+1,580,964` over)
+        - depth total bytes: `18,553,002` (`+2,553,002` over)
+  - next branch pivot:
+    - stop spending H100 time proving the packed-path winner again
+    - keep the current winner as the HGDN systems baseline
+    - move to artifact-constrained architecture retuning on top of that
+    - concrete target:
+      - recover about `10%` total artifact bytes from the current hybrid
+        winner while preserving as much of the `0.1172` fixed-step bpb edge as
+        possible
+    - allowed search space:
+      - architecture can change
+      - prioritize CUDA-friendly shapes when proposing resized variants
+      - do not undo the packed-path kernel changes unless a new candidate beats
+        them on both quality and bytes
 
 ### 2. Norm placement screen (`pre` vs `post` vs `keel`)
 

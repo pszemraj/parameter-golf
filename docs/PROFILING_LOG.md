@@ -1,6 +1,6 @@
 # Profiling Log
 
-Last updated: 2026-04-04 20:25 EDT
+Last updated: 2026-04-05 00:35 EDT
 
 This file records profiler-driven checkpoints that should survive beyond the raw
 artifacts under `profiles/`.
@@ -202,6 +202,103 @@ It is:
 
 1. does the current winner preserve the fixed-step quality advantage?
 2. if yes, what is the next HGDN kernel target beyond this packed-path win?
+
+## 2026-04-05 — H100 fixed-step quality confirmation for the current winner (`h100k6`)
+
+Bundle:
+
+- raw artifacts: `local-scratch/profiling-out-h100k6-hgdn.7z`
+- extracted logs:
+  - `logs/h100k6_fixed2k_hybrid_r1_mlp3.25_seq2048.txt`
+  - `logs/h100k6_fixed2k_depth_mlp4.0_seq2048.txt`
+- commit at run time: `7677396`
+- W&B runs:
+  - hybrid: `46fh5oih`
+  - depth: `inq87cd4`
+
+Contract:
+
+- GPU: 1xH100
+- launcher:
+  - `python scripts/hgdn.py h100-perf fixed2k --preset current-winner --run-prefix h100k6 --online --set WANDB_PROJECT=pg-hconv-ablations --set WANDB_WATCH=gradients`
+- current winner:
+  - `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+  - `GDN_USE_PACKED_QKV_CONV=1`
+  - `GDN_USE_PACKED_QKV_PROJ=1`
+  - `GDN_CONTROL_PROJ_FP32=0`
+
+### Main finding
+
+The current HGDN kernel winner preserves the fixed-step quality advantage on
+H100.
+
+At the matched `2000`-step / `seq=2048` / `train_batch_tokens=524288`
+contract:
+
+- hybrid final sampled eval:
+  - `val_bpb = 2.4201`
+  - `step_avg = 915.10 ms`
+- depth final sampled eval:
+  - `val_bpb = 2.5373`
+  - `step_avg = 724.72 ms`
+
+Quality delta:
+
+- hybrid beats depth by `0.1172` bpb at the final fixed-step eval
+- hybrid also beats depth on the quantized roundtrip eval:
+  - hybrid: `2.44379288`
+  - depth: `2.54975979`
+  - delta: `0.10596691` bpb
+
+Interpretation:
+
+- the packed HGDN path is not just a throughput win
+- the current winner keeps the hybrid quality edge on target hardware
+- the speed/quality trade is still favorable even though hybrid remains about
+  `1.263x` slower than depth at this contract
+
+### Artifact read
+
+Both models are disqualified on bytes, but hybrid is materially closer to the
+limit than depth.
+
+- hybrid artifact:
+  - total bytes: `17,580,964`
+  - over limit by `1,580,964` bytes (`+9.88%`)
+- depth artifact:
+  - total bytes: `18,553,002`
+  - over limit by `2,553,002` bytes (`+15.96%`)
+
+Hybrid is better on bytes by `972,038` bytes (`5.24%` smaller total artifact).
+
+Interpretation:
+
+- the branch should not revert to depth on artifact grounds
+- the right next move is to keep the new HGDN kernel baseline and resize the
+  architecture around the remaining byte gap
+- the size target is now concrete: the current winner needs roughly a `10%`
+  total artifact reduction without giving back too much of the fixed-step bpb
+  advantage
+
+### Decision
+
+Keep the current winner as the HGDN systems baseline:
+
+- it is confirmed faster on H100
+- it preserves the quality edge over the depth control on H100
+- it is also the less-over-budget of the two matched fixed-step models
+
+### Next step
+
+The branch should now pivot from kernel-transfer confirmation to
+artifact-constrained architecture retuning on top of the current winner.
+
+Immediate design question:
+
+1. what is the smallest architecture reduction that recovers about `10%`
+   artifact bytes?
+2. does that resized hybrid still beat the depth control at the same fixed-step
+   H100 contract?
 
 ## 2026-04-04 — Local HGDN phase-1 attribution (`rtx4070_phase1`)
 
