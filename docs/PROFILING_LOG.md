@@ -1904,3 +1904,45 @@ Reject this candidate at the preflight gate and revert it.
 This rules out the simple "replace `F.normalize` with a manual fp32 rsqrt path"
 version of q/k norm cleanup. If q/k norm gets revisited again, it should be a
 more targeted formulation than this broad manual replacement.
+
+## 2026-04-05 — `resid_mix`-only bf16 carve-out regressed at preflight (`RESID_MIX_FP32=0`)
+
+Screen:
+
+- type:
+  - local preflight-only quick screen
+- fixed baseline:
+  - `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+  - `GDN_USE_PACKED_QKV_CONV=1`
+  - `GDN_USE_PACKED_QKV_PROJ=1`
+  - `GDN_CONTROL_PROJ_FP32=0`
+- candidate:
+  - fixed baseline plus `RESID_MIX_FP32=0`
+  - keep `resid_mix` on activation dtype while leaving the rest of the
+    residual shell on the default fp32 restore path
+
+### Main findings
+
+This narrower shell-side carve-out also failed at the first gate and was not
+promoted.
+
+Preflight deltas versus the current winner:
+
+- `gdn_eager`: `1032.32 -> 1076.62 ms`
+- `hybrid_eager`: `146.49 -> 143.97 ms`
+- `hybrid_compiled`: `3223.56 -> 9879.93 ms`
+
+The decisive signal is again the compiled preflight. Even though eager was only
+slightly mixed, compiled performance collapsed hard enough that this is not a
+reasonable next candidate.
+
+### Decision
+
+Reject this candidate at the preflight gate and revert it.
+
+### Interpretation
+
+This is strong evidence that the remaining compiled `add + mul + unsqueeze`
+shell kernels are not going to be solved by simply dropping fp32 restoration on
+`resid_mix`. The next meaningful branch of work should move back toward the
+packed-conv implementation itself rather than more shell-side dtype tweaks.

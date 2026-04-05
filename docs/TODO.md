@@ -287,6 +287,22 @@ Latest local attribution checkpoint:
       - the simple manual fp32 q/k norm rewrite is not a valid next step
       - if q/k norm gets revisited again, it should be with a more targeted
         formulation than this broad `F.normalize` replacement
+  - latest rejected quick-screen:
+    - `RESID_MIX_FP32=0` on top of the current winner
+    - idea:
+      - keep only `resid_mix` on activation dtype while leaving the rest of the
+        residual shell on the default fp32 restore path
+      - test the smallest shell-side carve-out that still directly matches the
+        remaining compiled `add + mul + unsqueeze` kernels
+    - result:
+      - rejected at the preflight gate
+      - `gdn_eager`: `1032.32 -> 1076.62 ms`
+      - `hybrid_eager`: `146.49 -> 143.97 ms`
+      - `hybrid_compiled`: `3223.56 -> 9879.93 ms`
+    - take-away:
+      - even the narrow `resid_mix` carve-out is not a valid next step
+      - stop spending time on shell-side fp32 restore removals for now
+      - move the next candidate back to the packed-conv implementation itself
       - hybrid remains slower (`915.10 ms` vs `724.72 ms`) but keeps a clear
         quality edge on H100
       - both models are over the 16 MB limit, but hybrid is closer:
