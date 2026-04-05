@@ -15,7 +15,6 @@ from typing import Any, Iterable, Sequence
 HGDN_TRANSFER_BUCKETS = (
     "aten::copy_",
     "aten::mul",
-    "gdn.qk_conv_packed",
     "gdn.qkv_conv_packed",
     "gdn.q_conv",
     "gdn.k_conv",

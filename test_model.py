@@ -97,32 +97,6 @@ def _load_packed_qkv_state(
     packed.load_state_dict(packed_state, strict=True)
 
 
-def _load_packed_qk_state(separate: GatedDeltaNet, packed: GatedDeltaNet) -> None:
-    """Copy split q/k/v projection and conv weights into a packed-qk HGDN module.
-
-    :param GatedDeltaNet separate: Reference module with split q/k/v path.
-    :param GatedDeltaNet packed: Packed-qk module to receive copied weights.
-    """
-    packed_state = packed.state_dict()
-    skip_prefixes = ["q_conv.", "k_conv.", "w_q.", "w_k.", "w_v."]
-    for key, value in separate.state_dict().items():
-        if key.startswith(tuple(skip_prefixes)):
-            continue
-        packed_state[key] = value.clone()
-    q_dim = separate.q_conv.conv.weight.shape[0]
-    k_dim = separate.k_conv.conv.weight.shape[0]
-    packed_state["qk_conv.conv.weight"][:q_dim] = separate.q_conv.conv.weight.clone()
-    packed_state["qk_conv.conv.weight"][q_dim : q_dim + k_dim] = (
-        separate.k_conv.conv.weight.clone()
-    )
-    packed_state["w_qkv.linear.weight"][:q_dim] = separate.w_q.weight.clone()
-    packed_state["w_qkv.linear.weight"][q_dim : q_dim + k_dim] = (
-        separate.w_k.weight.clone()
-    )
-    packed_state["w_qkv.linear.weight"][q_dim + k_dim :] = separate.w_v.weight.clone()
-    packed.load_state_dict(packed_state, strict=True)
-
-
 def test_recurrence():
     B, T, H, Dk, Dv = 2, 16, 4, 8, 16
     torch.manual_seed(42)
@@ -326,86 +300,11 @@ def test_gdn_packed_qkv_conv_requires_aligned_settings():
             use_packed_qkv_proj=True,
         )
         raise AssertionError(
-            "Expected packed qkv projection to require a packed conv path"
+            "Expected packed qkv projection to require packed qkv conv"
         )
     except ValueError:
         pass
     print("  ✓ packed qkv conv rejects incompatible settings")
-
-
-def test_gdn_packed_qk_conv_matches_separate_path():
-    """Packed q/k conv should match the separate q/k/v path with copied weights."""
-    torch.manual_seed(42)
-    kwargs = dict(
-        d_model=64,
-        n_heads=4,
-        head_k_dim=8,
-        expand_v=1.0,
-        allow_neg_eigval=True,
-        conv_size=4,
-        use_fla=False,
-        use_q_conv=True,
-        use_k_conv=True,
-        use_v_conv=True,
-        conv_output_contiguous=True,
-    )
-    separate = GatedDeltaNet(**kwargs)
-    packed_qk = GatedDeltaNet(
-        **kwargs,
-        use_packed_qk_conv=True,
-        use_packed_qkv_proj=True,
-    )
-    _load_packed_qk_state(separate, packed_qk)
-    x = torch.randn(2, 32, 64)
-    torch.testing.assert_close(separate(x), packed_qk(x), atol=1e-5, rtol=1e-5)
-    print("  ✓ packed qk conv matches separate path")
-
-
-def test_gdn_packed_qk_conv_requires_aligned_settings():
-    """Packed q/k conv should reject incompatible conv-path settings."""
-    try:
-        GatedDeltaNet(
-            d_model=64,
-            n_heads=4,
-            head_k_dim=8,
-            expand_v=1.0,
-            use_packed_qk_conv=True,
-        )
-        raise AssertionError("Expected packed qk conv to require packed qkv proj")
-    except ValueError:
-        pass
-    try:
-        GatedDeltaNet(
-            d_model=64,
-            n_heads=4,
-            head_k_dim=8,
-            expand_v=1.0,
-            use_packed_qk_conv=True,
-            use_packed_qkv_proj=True,
-            q_conv_output_contiguous=True,
-            k_conv_output_contiguous=False,
-        )
-        raise AssertionError(
-            "Expected packed qk conv to reject mixed q/k output_contiguous flags"
-        )
-    except ValueError:
-        pass
-    try:
-        GatedDeltaNet(
-            d_model=64,
-            n_heads=4,
-            head_k_dim=8,
-            expand_v=1.0,
-            use_packed_qk_conv=True,
-            use_packed_qkv_conv=True,
-            use_packed_qkv_proj=True,
-        )
-        raise AssertionError(
-            "Expected packed qk conv to reject coexistence with packed qkv conv"
-        )
-    except ValueError:
-        pass
-    print("  ✓ packed qk conv rejects incompatible settings")
 
 
 def test_gdn_packed_qkv_proj_conv_matches_separate_path():
@@ -925,11 +824,6 @@ if __name__ == "__main__":
         ("Causal conv", test_causal_conv),
         ("Causal conv disable", test_causal_conv_disable),
         ("GDN conv toggles", test_gdn_conv_toggles),
-        ("Packed qk conv parity", test_gdn_packed_qk_conv_matches_separate_path),
-        (
-            "Packed qk conv validation",
-            test_gdn_packed_qk_conv_requires_aligned_settings,
-        ),
         ("Packed qkv conv parity", test_gdn_packed_qkv_conv_matches_separate_path),
         (
             "Packed qkv conv validation",
