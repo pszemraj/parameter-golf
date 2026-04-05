@@ -994,6 +994,7 @@ def main() -> None:
     log0(f"PyTorch {torch.__version__}", console=False)
     log0(
         f"compile:{int(args.compile)} compile_strategy:{args.compile_strategy} "
+        f"seed:{args.seed} pythonhashseed:{os.environ.get('PYTHONHASHSEED', '<unset>')} "
         f"sdp_backend:{sdp_backend} fla_available:{int(_HAS_FLA)} "
         f"cudnn_benchmark:{int(args.cudnn_benchmark)} "
         f"wandb_watch:{wandb_watch_mode} wandb_watch_log_freq:{args.wandb_watch_log_freq} "

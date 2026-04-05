@@ -171,6 +171,21 @@ Laptop-noise note:
 - treat small local deltas, roughly inside `+/-5%`, as screening only
 - promotion decisions for close calls should be made on H100, not on one laptop run
 
+Empirical contract note:
+
+- the trainer seeds Python/NumPy/Torch/CUDA from `SEED`, and the launch helpers now pin:
+  - `SEED=1337`
+  - `PYTHONHASHSEED=$SEED`
+  - `CUDNN_BENCHMARK=0`
+  unless explicitly overridden
+- `scripts/sweep.sh` now prints `seed`, `pythonhashseed`, and `cudnn_benchmark` in the launch summary
+- perf/profile/fixed-step H100 helpers now isolate compile caches per `RUN_ID` and clear those per-run cache directories before launch
+- `scripts/run_hgdn_cuda_preflight.sh` now prints its seed/cache contract too
+- practical read for the completed `h100k10` batch:
+  - no rerun is required just for cache hygiene
+  - the perf/profile runs already used isolated per-run compile caches and unique run ids
+  - these changes make that contract explicit and extend the same discipline to future fixed-step runs
+
 Experimental fused-CUDA HGDN preset:
 
 - `winner-20260405-11-cuda-fused`

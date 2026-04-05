@@ -24,6 +24,7 @@ export COMPILE_STRATEGY="${COMPILE_STRATEGY:-model}"
 chmod +x "$sweep_agent_path"
 
 setup_perf_env() {
+    unset TORCHINDUCTOR_CACHE_DIR TRITON_CACHE_DIR TORCHINDUCTOR_FORCE_DISABLE_CACHES
     if [[ "${PERF_ISOLATE_COMPILE_CACHE:-0}" == "1" ]]; then
         local cache_root="$repo_root/.cache/perf/${RUN_ID}"
         export TORCHINDUCTOR_CACHE_DIR="$cache_root/inductor"
@@ -46,6 +47,7 @@ print_launch_summary() {
     echo "=== $label: $RUN_ID ==="
     echo "planned_train_tokens=$planned_train_tokens train_batch_tokens=$TRAIN_BATCH_TOKENS train_seq_len=$TRAIN_SEQ_LEN"
     echo "ngpu=$NGPU grad_accum_steps=$grad_accum_steps local_batch_size=$local_batch_size iterations=$ITERATIONS max_wallclock_seconds=$wallclock"
+    echo "seed=$SEED pythonhashseed=$PYTHONHASHSEED cudnn_benchmark=$CUDNN_BENCHMARK"
     echo "data_path=$DATA_PATH"
     echo "tokenizer_path=$TOKENIZER_PATH"
     echo "compile_strategy=$COMPILE_STRATEGY perf_timing=${PERF_TIMING:-0} perf_ignore_steps=${PERF_IGNORE_STEPS:-0}"
@@ -59,6 +61,9 @@ print_launch_summary() {
 }
 
 launch_train() {
+    export_default SEED 1337
+    export_default PYTHONHASHSEED "$SEED"
+    export_default CUDNN_BENCHMARK 0
     setup_perf_env
     print_launch_summary "$1"
     torchrun --standalone --nproc_per_node="$NGPU" "$trainer_path"

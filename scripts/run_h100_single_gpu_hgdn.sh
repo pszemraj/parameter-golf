@@ -37,17 +37,23 @@ Modes:
     - TRAIN_SEQ_LEN=2048
     - TRAIN_BATCH_TOKENS=524288
     - VAL_LOSS_EVERY=500
+    - PERF_ISOLATE_COMPILE_CACHE=1
 
   fixed2k-hybrid
     Run only the hybrid side of the same fixed-step quality contract.
     Use this for architecture retune candidates after the attention-only
     baseline has already been established separately.
+    Contract also forces:
+    - PERF_ISOLATE_COMPILE_CACHE=1
 
   all
     Run perf first, then fixed2k.
 
 Environment overrides:
   RUN_PREFIX                 Base prefix for run ids.
+  SEED                       Defaults to 1337.
+  PYTHONHASHSEED             Defaults to SEED.
+  CUDNN_BENCHMARK            Defaults to 0.
   USE_WANDB                  Defaults to 1.
   WANDB_MODE                 Defaults to online.
   WANDB_WATCH                Defaults to none.
@@ -174,6 +180,7 @@ run_fixed2k_pair() {
         "VAL_LOSS_EVERY=${val_loss_every}" \
         "TRAIN_LOG_EVERY=${train_log_every}" \
         "PERF_TIMING=0" \
+        "PERF_ISOLATE_COMPILE_CACHE=1" \
         "PERF_SKIP_FINAL_EVAL=0"
 
     run_sweep \
@@ -188,6 +195,7 @@ run_fixed2k_pair() {
         "VAL_LOSS_EVERY=${val_loss_every}" \
         "TRAIN_LOG_EVERY=${train_log_every}" \
         "PERF_TIMING=0" \
+        "PERF_ISOLATE_COMPILE_CACHE=1" \
         "PERF_SKIP_FINAL_EVAL=0"
 }
 

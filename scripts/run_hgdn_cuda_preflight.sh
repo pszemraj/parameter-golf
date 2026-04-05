@@ -17,6 +17,9 @@ Defaults:
   - USE_WANDB=0
   - WANDB_MODE=offline
   - PYTHON_BIN=python
+  - SEED=1337
+  - PYTHONHASHSEED=1337
+  - CUDNN_BENCHMARK=0
 
 Example:
   scripts/run_hgdn_cuda_preflight.sh
@@ -40,4 +43,7 @@ esac
 
 export USE_WANDB="${USE_WANDB:-0}"
 export WANDB_MODE="${WANDB_MODE:-offline}"
+export SEED="${SEED:-1337}"
+export PYTHONHASHSEED="${PYTHONHASHSEED:-$SEED}"
+export CUDNN_BENCHMARK="${CUDNN_BENCHMARK:-0}"
 "${PYTHON_BIN:-python}" "$repo_root/scripts/hgdn_cuda_preflight.py"

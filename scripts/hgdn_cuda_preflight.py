@@ -204,13 +204,21 @@ def main() -> None:
     os.environ.setdefault("USE_WANDB", "0")
     os.environ.setdefault("WANDB_MODE", "offline")
     os.environ.setdefault("TORCHINDUCTOR_FORCE_DISABLE_CACHES", "1")
+    seed = int(os.environ.get("SEED", "1337"))
 
-    torch.manual_seed(1337)
-    torch.cuda.manual_seed_all(1337)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
     torch.backends.cudnn.benchmark = env_flag("CUDNN_BENCHMARK")
     print(f"hgdn_cuda_extension:{extension_status()}")
+    print(
+        "preflight_contract:"
+        f"seed={seed} "
+        f"pythonhashseed={os.environ.get('PYTHONHASHSEED', '<unset>')} "
+        f"cudnn_benchmark={int(env_flag('CUDNN_BENCHMARK'))} "
+        f"inductor_force_disable_caches={os.environ.get('TORCHINDUCTOR_FORCE_DISABLE_CACHES', '<unset>')}"
+    )
 
     results = [
         run_gdn_eager(),
