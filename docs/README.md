@@ -78,13 +78,15 @@ What has not been claimed:
 
 ## Important Files
 
+- `scripts/hgdn.py`: preferred structured launcher for HGDN helpers, with subcommands, named presets, and optional TOML env configs
+- `configs/hgdn/current_winner.toml`: reusable config for the current local HGDN kernel winner
 - `model.py`: hybrid HGDN architecture and presets
 - `train_gpt_hybrid.py`: hybrid trainer
 - `scripts/sweep.sh`: launch helper and perf-harness env contract
-- `scripts/run_h100_single_gpu_hgdn.sh`: 1xH100 helper for perf and fixed-step target-hardware calibration
-- `scripts/run_h100_single_gpu_hgdn_profile.sh`: 1xH100 helper for compiled and eager-attribution profiler captures
-- `scripts/run_hgdn_cuda_preflight.sh`: single-process CUDA preflight for the HGDN kernel path
-- `scripts/run_hgdn_local_phase1.sh`: sequential local 4070 phase-1 investigation bundle
+- `scripts/run_h100_single_gpu_hgdn.sh`: 1xH100 helper backend for perf and fixed-step target-hardware calibration
+- `scripts/run_h100_single_gpu_hgdn_profile.sh`: 1xH100 helper backend for compiled and eager-attribution profiler captures
+- `scripts/run_hgdn_cuda_preflight.sh`: single-process CUDA preflight backend for the HGDN kernel path
+- `scripts/run_hgdn_local_phase1.sh`: sequential local 4070 phase-1 investigation backend
 - `scripts/profile_hgdn_local_hotpath.py`: bare-GDN / hybrid-FB / optimizer-only local profiler
 - `scripts/analyze_hgdn_phase1.py`: bucket-attribution and boundary-audit analyzer for phase-1 bundles
 - `scripts/compare_hgdn_phase1.py`: structured before/after comparator for two local phase-1 bundles
@@ -94,6 +96,70 @@ What has not been claimed:
 - `docs/PROFILING_LOG.md`: tracked profiler checkpoints and conclusions that should survive beyond raw `profiles/` bundles
 - `docs/REFERENCE.md`: architecture/reference notes
 - `docs/TODO.md`: deferred follow-ups and break-glass items
+
+## Preferred Launch Interface
+
+The shell helpers remain the execution backend, but the preferred entrypoint is
+now [scripts/hgdn.py](/home/pszemraj/workspace/projects/parameter-golf/scripts/hgdn.py).
+
+Why:
+
+- the old workflow required long inline env blocks
+- the launcher gives named subcommands instead of remembering which shell helper
+  to call
+- the launcher gives named HGDN presets instead of repeating the same `GDN_*`
+  overrides
+- the launcher supports TOML configs when a setup should be reused
+
+Current named presets:
+
+- `default`
+- `convcontig`
+- `packed-qkv`
+- `current-winner`
+
+Current best local HGDN kernel preset:
+
+- `current-winner`
+- equivalent to:
+  - `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+  - `GDN_USE_PACKED_QKV_CONV=1`
+  - `GDN_USE_PACKED_QKV_PROJ=1`
+  - `GDN_CONTROL_PROJ_FP32=0`
+
+Examples:
+
+```bash
+python scripts/hgdn.py preflight --preset current-winner
+```
+
+```bash
+python scripts/hgdn.py local-phase1 --preset current-winner --run-prefix rtx4070_phase1
+```
+
+```bash
+python scripts/hgdn.py h100-profile hybrid-eager --preset current-winner --run-prefix h100k5
+```
+
+```bash
+python scripts/hgdn.py h100-perf perf --preset current-winner --run-prefix h100k5 --offline
+```
+
+Using the reusable TOML config:
+
+```bash
+python scripts/hgdn.py h100-profile hybrid --config configs/hgdn/current_winner.toml --run-prefix h100k5
+```
+
+For advanced cases that still need one-off passthrough envs, use:
+
+```bash
+python scripts/hgdn.py h100-profile hybrid-eager \
+  --preset current-winner \
+  --run-prefix h100k5 \
+  --set GDN_LOG_LAYOUTS=1 \
+  --set PROFILE_ROW_LIMIT=80
+```
 
 ## Key Implementation Changes
 

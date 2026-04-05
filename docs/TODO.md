@@ -31,6 +31,8 @@ This file tracks follow-up work that is intentionally not enabled by default in 
   - throughput: hybrid is about `1.40x` slower than the pure-attention depth control at `seq=2048`
   - quality: hybrid still wins strongly on H100 fixed-2k quality and roundtrip BPB
 - Profiling helper:
+  - preferred launch surface:
+    - `python scripts/hgdn.py ...`
   - `scripts/run_h100_single_gpu_hgdn_profile.sh {hybrid|depth|both|both-eager}`
   - default is now `USE_WANDB=0`
   - eager modes force `COMPILE=0` for attribution-only traces when compiled graphs hide the `record_function` labels
