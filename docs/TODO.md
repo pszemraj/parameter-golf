@@ -303,6 +303,23 @@ Latest local attribution checkpoint:
       - even the narrow `resid_mix` carve-out is not a valid next step
       - stop spending time on shell-side fp32 restore removals for now
       - move the next candidate back to the packed-conv implementation itself
+  - latest rejected quick-screen:
+    - `GDN_USE_MANUAL_PACKED_QKV_CONV=1` on top of the current winner
+    - idea:
+      - replace the packed depthwise `Conv1d` with an explicit causal
+        shift-and-sum implementation while reusing the same packed conv
+        weights
+      - test a real packed-front-end rewrite rather than another shell-side
+        dtype change
+    - result:
+      - rejected at the preflight gate
+      - `gdn_eager`: `1032.32 -> 1136.29 ms`
+      - `hybrid_eager`: `146.49 -> 150.94 ms`
+      - `hybrid_compiled`: `3223.56 -> 7863.94 ms`
+    - take-away:
+      - the simple high-level shift-and-sum rewrite is not a valid next step
+      - the next packed-front-end attempt should be lower-level and closer to
+        the actual kernel/memory behavior we are trying to fix
       - hybrid remains slower (`915.10 ms` vs `724.72 ms`) but keeps a clear
         quality edge on H100
       - both models are over the 16 MB limit, but hybrid is closer:

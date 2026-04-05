@@ -1946,3 +1946,46 @@ This is strong evidence that the remaining compiled `add + mul + unsqueeze`
 shell kernels are not going to be solved by simply dropping fp32 restoration on
 `resid_mix`. The next meaningful branch of work should move back toward the
 packed-conv implementation itself rather than more shell-side dtype tweaks.
+
+## 2026-04-05 — Manual packed-qkv shift-conv regressed at preflight (`GDN_USE_MANUAL_PACKED_QKV_CONV=1`)
+
+Screen:
+
+- type:
+  - local preflight-only quick screen
+- fixed baseline:
+  - `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+  - `GDN_USE_PACKED_QKV_CONV=1`
+  - `GDN_USE_PACKED_QKV_PROJ=1`
+  - `GDN_CONTROL_PROJ_FP32=0`
+- candidate:
+  - fixed baseline plus `GDN_USE_MANUAL_PACKED_QKV_CONV=1`
+  - replace the packed depthwise `Conv1d` with an explicit causal
+    shift-and-sum implementation that reuses the same packed conv weights
+
+### Main findings
+
+This was the first real packed-front-end rewrite candidate after the shell-side
+ and q/k-norm failures, and it still failed immediately at preflight.
+
+Preflight deltas versus the current winner:
+
+- `gdn_eager`: `1032.32 -> 1136.29 ms`
+- `hybrid_eager`: `146.49 -> 150.94 ms`
+- `hybrid_compiled`: `3223.56 -> 7863.94 ms`
+
+The compiled preflight regression is again decisive. The manual packed shift
+kernel did not reduce the packed-front-end tax; it made the compiled path much
+worse.
+
+### Decision
+
+Reject this candidate at the preflight gate and revert it.
+
+### Interpretation
+
+This rules out the simple high-level shift-and-sum rewrite of the packed
+depthwise conv. If the next packed-front-end attempt stays in-repo, it likely
+needs to be lower-level or otherwise much closer to the actual kernel/memory
+behavior we are trying to fix, rather than another high-level algebraic rewrite
+of the same operation.
