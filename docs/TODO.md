@@ -277,6 +277,30 @@ Latest local attribution checkpoint:
       - both models are over the 16 MB limit, but hybrid is closer:
         - hybrid total bytes: `17,580,964` (`+1,580,964` over)
         - depth total bytes: `18,553,002` (`+2,553,002` over)
+  - latest rejected local full-bundle screen:
+    - `BLOCK_SHELL_FP32=0` on top of the current winner
+    - idea:
+      - keep the residual shell on activation dtype instead of restoring
+        `attn_scale/mlp_scale/resid_mix/q_gain/skip_weights` to fp32
+      - target the remaining compiled H100 `to_copy + add + mul + unsqueeze`
+        style kernels
+    - result:
+      - preflight and hotpath both looked promising enough to escalate, but the
+        real trainer-eager bundle regressed badly:
+        - `aten::copy_`: `510.77 -> 771.96 ms`
+        - `aten::mul`: `659.15 -> 1000.82 ms`
+        - `gdn.qkv_conv_packed`: `234.58 -> 357.30 ms`
+        - `gdn.recurrence`: `114.97 -> 173.41 ms`
+        - `aten::convolution_backward`: `113.86 -> 173.00 ms`
+        - `aten::_conv_depthwise2d`: `91.58 -> 139.65 ms`
+        - `gdn.q_norm`: `31.74 -> 48.22 ms`
+        - `gdn.k_norm`: `31.84 -> 48.20 ms`
+    - take-away:
+      - the broad residual-shell bf16 move is not a valid promotion candidate
+      - the remaining shell-side compiled kernels, by themselves, are not
+        enough reason to remove fp32 restoration wholesale
+      - if the shell side gets revisited, it should be as a much narrower carve
+        out, not an all-at-once flag
   - next branch pivot:
     - stop spending H100 time proving the packed-path winner again
     - keep the current winner as the HGDN systems baseline

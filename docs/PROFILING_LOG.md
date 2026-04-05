@@ -1757,3 +1757,110 @@ Keep the current winner unchanged:
 And move the next hypothesis away from packed-conv input/output surgery and
 toward the repeated fp32 shell/control casts that still show up as
 `to_copy + add + mul + unsqueeze` style kernels in the compiled H100 trace.
+
+## 2026-04-05 — Residual-shell bf16 candidate regressed locally (`rtx4070_phase1_blockshellbf16_fix1`)
+
+Bundle:
+
+- raw artifacts:
+  - `profiles/rtx4070_phase1_blockshellbf16_fix1/`
+- comparison against the current local winner:
+  - `profiles/rtx4070_phase1_blockshellbf16_fix1/compare_vs_ctrlbf16/comparison.md`
+- experiment-surface working tree was reverted after the screen
+
+Contract:
+
+- GPU: local RTX 4070 Laptop
+- env: `pg`
+- fixed baseline:
+  - `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+  - `GDN_USE_PACKED_QKV_CONV=1`
+  - `GDN_USE_PACKED_QKV_PROJ=1`
+  - `GDN_CONTROL_PROJ_FP32=0`
+- candidate:
+  - fixed baseline plus `BLOCK_SHELL_FP32=0`
+  - keep residual-shell control params on activation dtype instead of
+    restoring them to fp32:
+    - `attn_scale`
+    - `mlp_scale`
+    - `resid_mix`
+    - `q_gain`
+    - `skip_weights`
+- purpose:
+  - test whether the remaining compiled H100 `to_copy + add + mul +
+    unsqueeze` style kernels were being driven by repeated forward-side casts
+    of the residual shell rather than the HGDN recurrence path itself
+
+### Main findings
+
+This candidate looked real in preflight and hotpath, then failed the actual
+trainer-eager gate.
+
+Local screens that looked promising:
+
+- preflight:
+  - `hybrid_eager`: `146.49 -> 124.23 ms`
+  - `hybrid_compiled`: `3223.56 -> 1689.94 ms`
+- hotpath:
+  - bare GDN total: `227.76 -> 221.99 ms`
+  - hybrid forward/backward total: `1467.43 -> 336.86 ms`
+  - hybrid optimizer total: `190.68 -> 134.76 ms`
+
+But the real local trainer-eager bundle regressed across the transfer buckets
+that decide promotion:
+
+- trainer `aten::copy_`: `510.77 -> 771.96 ms`
+- trainer `aten::mul`: `659.15 -> 1000.82 ms`
+- trainer `gdn.qkv_conv_packed`: `234.58 -> 357.30 ms`
+- trainer `gdn.recurrence`: `114.97 -> 173.41 ms`
+- trainer `aten::convolution_backward`: `113.86 -> 173.00 ms`
+- trainer `aten::_conv_depthwise2d`: `91.58 -> 139.65 ms`
+- trainer `gdn.q_norm`: `31.74 -> 48.22 ms`
+- trainer `gdn.k_norm`: `31.84 -> 48.20 ms`
+
+### Boundary read
+
+The recurrence-facing layout stayed identical to the current winner:
+
+- packed conv outputs stayed contiguous bf16
+- `norm_qkv` stayed contiguous bf16
+- `recurrence_inputs` stayed contiguous bf16
+- output-gate inputs stayed contiguous bf16
+
+So this was not a layout-boundary failure. The regression came from the changed
+kernel mix and/or numerics after removing fp32 restoration from the residual
+shell.
+
+### Interpretation
+
+The residual shell is not a free cast-elimination target.
+
+Two conclusions matter:
+
+- the remaining compiled `to_copy + add + mul + unsqueeze` style kernels are
+  not evidence that the whole residual shell should simply be moved to bf16
+- preflight plus hotpath wins are still insufficient when the true trainer step
+  says the shell change made the real training path worse
+
+This result does **not** prove that every smaller shell-side change is bad. It
+does rule out the broad "`BLOCK_SHELL_FP32=0`" version as a promotion
+candidate.
+
+### Decision
+
+Reject this candidate and revert it.
+
+### Next target
+
+Keep the current winner unchanged:
+
+- `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+- `GDN_USE_PACKED_QKV_CONV=1`
+- `GDN_USE_PACKED_QKV_PROJ=1`
+- `GDN_CONTROL_PROJ_FP32=0`
+
+And move the next hypothesis to a narrower HGDN-native target:
+
+- either a smaller shell-side carve-out rather than the full residual shell
+- or another packed-front-end / norm / gate path that is still showing up in
+  the H100 traces
