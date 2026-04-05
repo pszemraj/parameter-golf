@@ -134,6 +134,7 @@ Active timestamped presets:
 - `default`
 - `convcontig`
 - `packed-qkv`
+- `winner-20260405-19`
 - `winner-20260405-11`
 - `winner-20260405-11-custom-bwd`
 - `winner-20260405-11-cuda-fused`
@@ -143,16 +144,26 @@ Naming note:
 
 - use timestamped winner names going forward so launch commands still make sense later
 - the older `current-*` aliases still exist only so historical notes and old command lines do not hard-break
-- the active reference stamp is `20260405-11`
+- the active reference stamp is `20260405-19`
 
-Current best local HGDN kernel preset:
+Current best H100-confirmed HGDN kernel preset:
 
-- `winner-20260405-11`
+- `winner-20260405-19`
 - equivalent to:
   - `GDN_CONV_OUTPUT_CONTIGUOUS=1`
   - `GDN_USE_PACKED_QKV_CONV=1`
   - `GDN_USE_PACKED_QKV_PROJ=1`
   - `GDN_CONTROL_PROJ_FP32=0`
+  - `GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=1`
+- promotion basis:
+  - repeated H100 controls:
+    - `904.80 ms`
+    - `904.12 ms`
+  - repeated H100 candidate runs:
+    - `853.23 ms`
+    - `853.20 ms`
+  - promoted delta:
+    - `904.46 -> 853.21 ms` (`-5.67%`)
 
 Laptop-noise note:
 
@@ -185,6 +196,9 @@ Experimental output-only fused preset:
 - status:
   - local preflight passed
   - local phase-1 lost slightly vs the non-extension current winner
+  - H100 follow-up also lost:
+    - compiled hybrid perf:
+      - `904.46 -> 944.37 ms` (`+4.41%`)
   - keep it as a parked experiment surface, not an active H100 candidate
 
 Experimental packed depthwise custom-backward preset:
@@ -198,17 +212,18 @@ Experimental packed depthwise custom-backward preset:
   - local hotpath and local phase-1 both show real depthwise-bucket reductions
   - the short phase-1 trainer console average was noisy, so it was re-checked with a stable local compiled perf pair
   - stable local compiled perf on the 4070 with `TORCH_BLAS_PREFER_CUBLASLT=1` improved from `2191.34 ms` to `2126.57 ms` (`-2.96%`)
-  - because that local win is smaller than the laptop-noise guardrail, it needs stricter H100 confirmation than usual
-  - H100 confirmation is still pending, so keep it experimental for now
+  - because that local win was smaller than the laptop-noise guardrail, it was forced through repeated H100 controls plus repeated candidate perf
+  - that H100 gate passed, so this path is now promoted as:
+    - `winner-20260405-19`
 
 Examples:
 
 ```bash
-python scripts/hgdn.py preflight --preset winner-20260405-11
+python scripts/hgdn.py preflight --preset winner-20260405-19
 ```
 
 ```bash
-python scripts/hgdn.py local-phase1 --preset winner-20260405-11 --run-prefix rtx4070_phase1
+python scripts/hgdn.py local-phase1 --preset winner-20260405-19 --run-prefix rtx4070_phase1
 ```
 
 ```bash
@@ -232,11 +247,11 @@ python scripts/hgdn.py preflight --preset winner-20260405-11-custom-bwd --compil
 ```
 
 ```bash
-python scripts/hgdn.py h100-profile hybrid-eager --preset winner-20260405-11 --run-prefix h100k5
+python scripts/hgdn.py h100-profile hybrid-eager --preset winner-20260405-19 --run-prefix h100k10a
 ```
 
 ```bash
-python scripts/hgdn.py h100-perf perf --preset winner-20260405-11 --run-prefix h100k5 --offline
+python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k10a --offline
 ```
 
 ```bash
@@ -264,15 +279,15 @@ python scripts/hgdn.py h100-perf fixed2k-hybrid \
 Using the reusable TOML config:
 
 ```bash
-python scripts/hgdn.py h100-profile hybrid --config configs/hgdn/winner_20260405_11.toml --run-prefix h100k5
+python scripts/hgdn.py h100-profile hybrid --config configs/hgdn/winner_20260405_19.toml --run-prefix h100k10a
 ```
 
 For advanced cases that still need one-off passthrough envs, use:
 
 ```bash
 python scripts/hgdn.py h100-profile hybrid-eager \
-  --preset winner-20260405-11 \
-  --run-prefix h100k5 \
+  --preset winner-20260405-19 \
+  --run-prefix h100k10a \
   --set GDN_LOG_LAYOUTS=1 \
   --set PROFILE_ROW_LIMIT=80
 ```

@@ -1,9 +1,102 @@
 # Profiling Log
 
-Last updated: 2026-04-05 11:50 EDT
+Last updated: 2026-04-05 19:40 EDT
 
 This file records profiler-driven checkpoints that should survive beyond the raw
 artifacts under `profiles/`.
+
+## 2026-04-05 — Packed depthwise custom backward promoted to active H100 winner (`h100k10`)
+
+Bundle:
+
+- raw artifacts:
+  - `local-scratch/profiling-out-h100k10-hgdn.7z`
+- extracted review directory:
+  - `local-scratch/_inspect_h100k10/`
+- control references:
+  - `local-scratch/_inspect_h100k5/`
+  - `local-scratch/_inspect_h100k5v2/`
+
+Contract:
+
+- promoted winner name:
+  - `winner-20260405-19`
+- promoted env delta relative to `winner-20260405-11`:
+  - `GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=1`
+- same-day H100 controls:
+  - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-11 --run-prefix h100k10ctl_a --offline`
+  - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-11 --run-prefix h100k10ctl_b --offline`
+- candidate validation stack:
+  - `python scripts/hgdn.py preflight --preset winner-20260405-11-custom-bwd --compile-strategy model`
+  - `python scripts/hgdn.py h100-profile hybrid-eager --preset winner-20260405-11-custom-bwd --run-prefix h100k10a`
+  - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-11-custom-bwd --run-prefix h100k10a --offline`
+  - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-11-custom-bwd --run-prefix h100k10b --offline`
+  - `python scripts/hgdn.py h100-profile hybrid --preset winner-20260405-11-custom-bwd --run-prefix h100k10a`
+
+### Main finding
+
+The repeated H100 controls were tight enough to make the custom-backward result
+decisive. This path is now the active non-extension winner.
+
+Compiled perf:
+
+- H100 controls:
+  - `904.80 ms`
+  - `904.12 ms`
+- H100 custom-backward candidate:
+  - `853.23 ms`
+  - `853.20 ms`
+- promoted delta:
+  - `904.46 -> 853.21 ms` (`-5.67%`)
+  - `579,671 -> 614,486 tok/s` (`+6.01%`)
+
+Profiles:
+
+- eager profile step average:
+  - `1670.55 -> 1643.53 ms` (`-1.62%`)
+- compiled profile step average:
+  - `922.04 -> 874.83 ms` (`-5.12%`)
+
+Memory:
+
+- compiled perf peak memory stayed flat:
+  - `19601 MiB allocated`
+  - `20234 MiB reserved`
+- eager profile memory also stayed effectively flat:
+  - `23947 -> 23946 MiB allocated`
+
+### Bucket read
+
+The strongest H100 win is step-level copy reduction in compiled mode, not a big
+change in the raw depthwise kernels themselves.
+
+Compiled profile vs `h100k5v2`:
+
+- `aten::copy_`: `174.42 -> 57.72 ms`
+- direct-copy kernel: `160.69 -> 43.90 ms`
+- `aten::convolution_backward`: `288.74 -> 287.23 ms`
+- `aten::_conv_depthwise2d`: `202.72 -> 201.08 ms`
+- `aten::mm`: `618.45 -> 620.45 ms` (flat)
+- flash-attention backward: `420.39 -> 420.27 ms` (flat)
+
+So the custom packed depthwise backward is a real H100 win, but the mechanism
+is not "depthwise math got much cheaper." The dominant effect is that the new
+path removes a large amount of copy churn around the packed front-end.
+
+### Decision
+
+Promote the custom-backward path as the active HGDN kernel winner:
+
+- `winner-20260405-19`
+- config:
+  - `configs/hgdn/winner_20260405_19.toml`
+
+Keep the older names for historical reproducibility:
+
+- `winner-20260405-11`
+- `winner-20260405-11-custom-bwd`
+
+but use `winner-20260405-19` going forward in docs and launch commands.
 
 ## 2026-04-05 — Packed depthwise custom backward promoted to H100-candidate status (`rtx4070_phase1_custombwd_fix1`)
 
@@ -2597,6 +2690,42 @@ Do not promote `current-winner-cuda-output-only` to H100.
 
 Keep the preset/config around for future isolated rework if needed, but return
 the active kernel path to the non-extension current winner.
+
+## 2026-04-05 — Output-only fused preset also failed the H100 check (`h100k10out`)
+
+Bundle:
+
+- raw artifacts:
+  - `local-scratch/profiling-out-h100k10-hgdn.7z`
+- extracted review directory:
+  - `local-scratch/_inspect_h100k10/`
+
+Contract:
+
+- launcher:
+  - `python scripts/hgdn.py preflight --preset winner-20260405-11-cuda-output-only --compile-strategy hybrid`
+  - `python scripts/hgdn.py h100-profile hybrid-eager --preset winner-20260405-11-cuda-output-only --run-prefix h100k10out`
+  - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-11-cuda-output-only --run-prefix h100k10out --offline`
+
+Main finding:
+
+The output-only fused sidecar did not flip on target hardware. It is a clean
+build/parity path, but it remains an H100 perf regression.
+
+Compared against the same-day H100 control mean (`904.46 ms`):
+
+- compiled hybrid perf:
+  - `904.46 -> 944.37 ms` (`+4.41%`)
+  - `579,671 -> 555,174 tok/s` (`-4.23%`)
+- eager profile step average:
+  - `1670.55 -> 1644.61 ms` (`-1.55%`)
+
+Interpretation:
+
+- the small eager improvement is not enough to matter because compiled perf is
+  the real decision surface for this branch
+- do not spend more H100 time on the output-only fused preset until its
+  implementation changes materially
 
 ## 2026-04-05 — Packed q/k conv + separate v conv regressed locally (`rtx4070_phase1_packedqkconv_fix2`)
 

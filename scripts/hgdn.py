@@ -90,6 +90,13 @@ HGDN_PRESETS: dict[str, dict[str, str]] = {
         "GDN_CONTROL_PROJ_FP32": "0",
         "GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD": "1",
     },
+    "winner-20260405-19": {
+        "GDN_CONV_OUTPUT_CONTIGUOUS": "1",
+        "GDN_USE_PACKED_QKV_CONV": "1",
+        "GDN_USE_PACKED_QKV_PROJ": "1",
+        "GDN_CONTROL_PROJ_FP32": "0",
+        "GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD": "1",
+    },
 }
 
 COMMON_ENV_ARGS: tuple[tuple[str, str], ...] = (
@@ -292,12 +299,12 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  python scripts/hgdn.py h100-profile hybrid-eager --preset winner-20260405-11 --run-prefix h100k5\n"
-            "  python scripts/hgdn.py h100-perf perf --preset winner-20260405-11 --run-prefix h100k5 --offline\n"
+            "  python scripts/hgdn.py h100-profile hybrid-eager --preset winner-20260405-19 --run-prefix h100k10a\n"
+            "  python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k10a --offline\n"
             "  conda run -s --name pg python scripts/hgdn.py arch-size-screen --config configs/hgdn/winner_20260405_11_retune.toml\n"
             "  conda run -s --name pg python scripts/hgdn.py fixed2k-compare --name h100k6_fixed2k_hybrid_r1_mlp3.25_seq2048 --name h100k6_fixed2k_depth_mlp4.0_seq2048 --reference h100k6_fixed2k_hybrid_r1_mlp3.25_seq2048\n"
-            "  python scripts/hgdn.py local-phase1 --config configs/hgdn/winner_20260405_11.toml --run-prefix rtx4070_phase1\n"
-            "  python scripts/hgdn.py preflight --preset winner-20260405-11\n"
+            "  python scripts/hgdn.py local-phase1 --config configs/hgdn/winner_20260405_19.toml --run-prefix rtx4070_phase1\n"
+            "  python scripts/hgdn.py preflight --preset winner-20260405-19\n"
             "  conda run -s --name pg python scripts/hgdn.py preflight --preset winner-20260405-11-cuda-fused"
         ),
     )

@@ -217,7 +217,7 @@ Current local status:
     - `25561.13 -> 25978.10 ms` (`+1.63%`)
   - trainer eager console step average:
     - `3320.37 -> 3379.27 ms` (`+1.77%`)
-- this means the output-only fused preset does **not** earn an H100 run
+- that was the correct local read; the follow-up H100 probe also lost
 
 Local gate after that:
 
@@ -225,13 +225,26 @@ Local gate after that:
 conda run -s --name pg python scripts/hgdn.py local-phase1 --preset winner-20260405-11-cuda-output-only --run-prefix rtx4070_cuda_output_only
 ```
 
-Only if a future local rework is at least neutral should it go back to H100:
+The later H100 probe confirmed the reject:
 
 ```bash
-python scripts/hgdn.py h100-profile hybrid-eager --preset winner-20260405-11-cuda-output-only --run-prefix h100k9
-python scripts/hgdn.py h100-perf perf --preset winner-20260405-11-cuda-output-only --run-prefix h100k9 --offline
-python scripts/hgdn.py h100-profile hybrid --preset winner-20260405-11-cuda-output-only --run-prefix h100k9
+python scripts/hgdn.py preflight --preset winner-20260405-11-cuda-output-only --compile-strategy hybrid
+python scripts/hgdn.py h100-profile hybrid-eager --preset winner-20260405-11-cuda-output-only --run-prefix h100k10out
+python scripts/hgdn.py h100-perf perf --preset winner-20260405-11-cuda-output-only --run-prefix h100k10out --offline
 ```
+
+H100 result:
+
+- compiled perf:
+  - `904.46 -> 944.37 ms` (`+4.41%`)
+  - `579,671 -> 555,174 tok/s` (`-4.23%`)
+- eager profile step average:
+  - `1670.55 -> 1644.61 ms` (`-1.55%`)
+
+Decision:
+
+- keep the preset for future isolated rework
+- do **not** use it in the active H100 kernel path
 
 ### Why it lost locally
 

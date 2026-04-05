@@ -6,36 +6,36 @@ This file tracks follow-up work that is intentionally not enabled by default in 
 
 ### Immediate kernel gate
 
-- Status: active.
-- Current experimental candidate:
-  - `winner-20260405-11-custom-bwd`
+- Status: promoted.
+- Active H100-confirmed winner:
+  - `winner-20260405-19`
   - equivalent to:
     - `GDN_CONV_OUTPUT_CONTIGUOUS=1`
     - `GDN_USE_PACKED_QKV_CONV=1`
     - `GDN_USE_PACKED_QKV_PROJ=1`
     - `GDN_CONTROL_PROJ_FP32=0`
     - `GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=1`
-- Why it stays alive:
-  - it reduces packed depthwise-related buckets in local profiling
-  - the short local phase-1 trainer average was ambiguous, so it was re-screened with a stable compiled local perf pair
-  - stable local compiled perf on the 4070 with `TORCH_BLAS_PREFER_CUBLASLT=1` improved from `2191.34 ms` to `2126.57 ms` (`-2.96%`)
+- Why it was promoted:
+  - the local 4070 signal was borderline, so it was forced through repeated H100 controls plus repeated candidate perf
+  - same-day H100 controls were tight:
+    - `904.80 ms`
+    - `904.12 ms`
+  - repeated H100 custom-backward candidate runs agreed exactly on direction:
+    - `853.23 ms`
+    - `853.20 ms`
+  - confirmed H100 compiled perf delta:
+    - `904.46 -> 853.21 ms` (`-5.67%`)
+  - H100 eager profile also improved:
+    - `1670.55 -> 1643.53 ms` (`-1.62%`)
+  - H100 compiled profile improved:
+    - `922.04 -> 874.83 ms` (`-5.12%`)
 - Laptop-noise caveat:
   - this branch is being screened on a laptop RTX 4070
-  - treat local deltas inside roughly `+/-5%` as noisy enough that they do not earn promotion on their own
-- Important caveat:
-  - an earlier tiny preflight with `COMPILE_STRATEGY=hybrid` looked much worse
-  - do not over-index on that result because the active branch compile path is `COMPILE_STRATEGY=model`
+  - treat small local deltas as screening only; the H100 result is the promotion source of truth
 - Next exact step:
-  1. H100 preflight with `--preset winner-20260405-11-custom-bwd`
-  2. H100 eager hybrid profile
-  3. H100 compiled perf run A
-  4. H100 compiled perf run B
-  5. H100 compiled profile
-- Promotion rule:
-  - only promote this path if the H100 perf/profile stack confirms a real gain
-  - because the local win is inside the laptop noise band, do not promote it from one lucky H100 perf run alone
-  - require the repeated H100 compiled perf checks to agree on direction before treating it as the new baseline
-  - otherwise revert it and return to the non-extension current winner
+  1. use `winner-20260405-19` as the active non-extension HGDN baseline
+  2. continue profiler-driven kernel work from this promoted baseline, not from `winner-20260405-11`
+  3. do not spend more H100 time on `winner-20260405-11-cuda-output-only` unless its implementation changes materially
 
 ### 0. Interim cleanup checkpoint from the redundancy audit
 
