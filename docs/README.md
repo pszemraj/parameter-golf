@@ -6,6 +6,14 @@ Branch: `exp/hgdn`
 
 This file is the branch-local status writeup for the hybrid Gated DeltaNet (HGDN) integration work. It summarizes what has been implemented, what has been measured, what is currently believed, and what should happen next.
 
+## Local Env Standard
+
+For this local WSL/laptop checkout, the standard conda env is `pg`.
+
+- Use `conda run -s --name pg ...` for local Python-dependent commands.
+- The old `train` env name came from a different machine and should not be used
+  on this checkout.
+
 ## Scope
 
 This branch is not redesigning the model family. The architecture remains an interleaved hybrid of:
