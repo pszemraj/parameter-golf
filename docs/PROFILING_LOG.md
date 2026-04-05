@@ -1,6 +1,6 @@
 # Profiling Log
 
-Last updated: 2026-04-04 19:25 EDT
+Last updated: 2026-04-04 20:15 EDT
 
 This file records profiler-driven checkpoints that should survive beyond the raw
 artifacts under `profiles/`.
@@ -836,3 +836,83 @@ And move the next local-first investigation to the output-side path:
    not the older conv-only baseline
 2. if it still loses, stop spending time on dtype-only output-norm changes and
    move to a more structural output-gate consolidation
+
+## 2026-04-04 — Output-norm bf16 retest on the packed-path winner (`rtx4070_phase1_outputnormbf16_packed_fix1`)
+
+Bundle:
+
+- raw artifacts: `profiles/rtx4070_phase1_outputnormbf16_packed_fix1/`
+- structured comparison:
+  - `profiles/rtx4070_phase1_outputnormbf16_packed_fix1/compare_vs_ctrlbf16/comparison.md`
+- experiment-surface commit at run time: `6609643`
+
+Contract:
+
+- GPU: local RTX 4070 Laptop
+- env: `pg`
+- fixed baseline:
+  - `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+  - `GDN_USE_PACKED_QKV_CONV=1`
+  - `GDN_USE_PACKED_QKV_PROJ=1`
+  - `GDN_CONTROL_PROJ_FP32=0`
+- candidate:
+  - fixed baseline plus `GDN_OUTPUT_NORM_FP32=0`
+- purpose:
+  - re-test the old output-norm precision idea on the **current** local winner,
+    not on the older conv-only baseline
+
+### Main findings
+
+This candidate still loses on the real trainer step.
+
+It does exactly what it is supposed to do locally inside the narrow target:
+
+- bare `gdn.output_norm`: `9.29 -> 0.11 ms`
+- hybrid `gdn.output_norm`: `7.72 -> 0.88 ms`
+- trainer `gdn.output_norm`: `62.05 -> 49.78 ms`
+
+But the step-level regressions elsewhere are large enough to swamp that win:
+
+- trainer `aten::copy_`: `510.77 -> 728.00 ms`
+- trainer `aten::mul`: `659.15 -> 1030.60 ms`
+- trainer `gdn.qkv_conv_packed`: `234.58 -> 368.55 ms`
+- trainer `gdn.recurrence`: `114.97 -> 179.07 ms`
+- trainer `gdn.output_gate_proj`: `13.45 -> 21.13 ms`
+- trainer `gdn.output_gate_mul`: `16.57 -> 26.30 ms`
+
+### Boundary read
+
+The boundary audit is unchanged:
+
+- `conv_qkv`, `norm_qkv`, and `recurrence_inputs` stay contiguous bf16
+- the output-side tensors stay contiguous bf16 too
+
+So again, this is not fixing a bad layout boundary. It is just changing the
+internal kernel mix around the output side, and the overall step gets worse.
+
+### Decision
+
+Reject `GDN_OUTPUT_NORM_FP32=0` again.
+
+What this means:
+
+- dtype-only output-norm changes are not paying off in this branch
+- we should stop spending local iterations on output-norm precision toggles
+- the next local target needs to be a structural path change, not another fp32
+  switch
+
+### Next target
+
+Stay on the current winner:
+
+- `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+- `GDN_USE_PACKED_QKV_CONV=1`
+- `GDN_USE_PACKED_QKV_PROJ=1`
+- `GDN_CONTROL_PROJ_FP32=0`
+
+And move the next local experiment to a structural path cleanup:
+
+1. in-place or otherwise consolidated SiLU work on the packed conv path and/or
+   output-gate path
+2. if that does not win locally, stop local output-side tuning and spend the
+   next budget on H100 confirmation of the current winner

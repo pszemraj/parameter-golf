@@ -177,11 +177,16 @@ Latest local attribution checkpoint:
     - but it materially regressed the full trainer-eager step
     - result is logged at `profiles/rtx4070_phase1_qknorm_fix1/`
   - immediate next local step:
-    - re-screen `GDN_OUTPUT_NORM_FP32=0` on the current packed-path winner
-      before spending H100 time
-  - next target if that still loses:
-    - stop chasing dtype-only norm swaps and move to a more structural
-      output-gate/output-norm consolidation
+    - `GDN_OUTPUT_NORM_FP32=0` has now also been re-screened on the current
+      packed-path winner and still loses overall
+    - result is logged at
+      `profiles/rtx4070_phase1_outputnormbf16_packed_fix1/`
+  - next local target:
+    - structural output-side or packed-conv cleanup, such as in-place SiLU /
+      output-gate consolidation
+  - escalation gate:
+    - if the next structural local candidate does not win, stop local
+      output-side tuning and move to 1xH100 confirmation of the current winner
 
 ### 2. Norm placement screen (`pre` vs `post` vs `keel`)
 
