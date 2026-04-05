@@ -236,6 +236,21 @@ Latest local attribution checkpoint:
       - prioritize CUDA-friendly shapes when proposing resized variants
       - do not undo the packed-path kernel changes unless a new candidate beats
         them on both quality and bytes
+    - new helper for this phase:
+      - `conda run -s --name pg python scripts/screen_hgdn_arch_sizes.py --config configs/hgdn/current_winner_retune.toml`
+      - writes structured output to `profiles/arch_size/current_winner_retune/`
+      - important caveat:
+        - the screen is an initialization-time proxy only
+        - use relative deltas to shortlist variants, then validate finalists
+          with the trainer
+    - first proxy shortlist from `current_winner_retune`:
+      - `trim_layers_14`: `-12.24%` total-init proxy vs current
+      - `trim_width_320`: `-11.73%` total-init proxy vs current
+      - `balanced_14l_mlp3.00`: `-15.57%` total-init proxy vs current
+      - mild trims are likely too small by themselves:
+        - `trim_mlp_3.00`: `-3.82%`
+        - `trim_mlp_2.75`: `-7.60%`
+        - `trim_width_320_mlp3.75`: `-6.05%`
 
 ### 2. Norm placement screen (`pre` vs `post` vs `keel`)
 

@@ -80,6 +80,8 @@ What has not been claimed:
 
 - `scripts/hgdn.py`: preferred structured launcher for HGDN helpers, with subcommands, named presets, and optional TOML env configs
 - `configs/hgdn/current_winner.toml`: reusable config for the current local HGDN kernel winner
+- `scripts/screen_hgdn_arch_sizes.py`: CPU-only artifact-proxy screen for resized HGDN architecture candidates
+- `configs/hgdn/current_winner_retune.toml`: first-pass retune family around the current HGDN kernel winner
 - `model.py`: hybrid HGDN architecture and presets
 - `train_gpt_hybrid.py`: hybrid trainer
 - `scripts/sweep.sh`: launch helper and perf-harness env contract
