@@ -218,6 +218,14 @@ Latest local attribution checkpoint:
       - depth final sampled eval: `2.5373` bpb
       - hybrid roundtrip eval: `2.44379288` bpb
       - depth roundtrip eval: `2.54975979` bpb
+  - latest rejected local follow-up:
+    - `GDN_USE_PACKED_AB_PROJ=1` on top of the current winner
+    - hotpath looked promising enough to screen, but the real local trainer
+      eager step regressed from `16588.06 ms` to `21463.22 ms` (`+29.39%`)
+    - the main regressions landed exactly in the transfer buckets that matter:
+      `aten::copy_`, `aten::mul`, `gdn.qkv_conv_packed`, `gdn.recurrence`,
+      `aten::convolution_backward`, and `aten::_conv_depthwise2d`
+    - do not send this candidate to H100
       - hybrid remains slower (`915.10 ms` vs `724.72 ms`) but keeps a clear
         quality edge on H100
       - both models are over the 16 MB limit, but hybrid is closer:

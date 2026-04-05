@@ -1,9 +1,91 @@
 # Profiling Log
 
-Last updated: 2026-04-05 00:35 EDT
+Last updated: 2026-04-05 01:37 EDT
 
 This file records profiler-driven checkpoints that should survive beyond the raw
 artifacts under `profiles/`.
+
+## 2026-04-05 — Rejected packed `w_a/w_b` gate projection (`rtx4070_phase1_packedab_fix1`)
+
+Bundle:
+
+- local candidate bundle:
+  - `profiles/rtx4070_phase1_packedab_fix1/`
+- direct comparison against current local winner:
+  - `profiles/rtx4070_phase1_packedab_fix1/compare_vs_ctrlbf16/comparison.md`
+- commit at experiment start: `bf6ab3a`
+
+Contract:
+
+- GPU: local RTX 4070 laptop
+- baseline winner:
+  - `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+  - `GDN_USE_PACKED_QKV_CONV=1`
+  - `GDN_USE_PACKED_QKV_PROJ=1`
+  - `GDN_CONTROL_PROJ_FP32=0`
+- candidate delta:
+  - `GDN_USE_PACKED_AB_PROJ=1`
+
+### Main finding
+
+Packing the gate-side `w_a`/`w_b` projections into one shared projection is a
+**full-step regression** and should not be kept.
+
+Compared against `rtx4070_phase1_ctrlbf16_fix1`:
+
+- trainer eager self-device total:
+  - baseline: `16,588.06 ms`
+  - candidate: `21,463.22 ms`
+  - delta: `+4,875.17 ms` (`+29.39%`)
+
+This is strong enough to reject the candidate without spending any H100 time on
+it.
+
+### Why the candidate was tempting
+
+The isolated hotpath views looked good enough to merit one full local
+confirmation:
+
+- hybrid forward/backward:
+  - `gdn.recurrence`: `48.46 -> 46.87 ms`
+  - `gdn.q_norm`: `51.48 -> 47.17 ms`
+  - `aten::mul`: `11.82 -> 10.83 ms`
+- hybrid optimizer:
+  - `aten::mm`: `14.54 -> 13.84 ms`
+  - `Optimizer.step#Muon.step`: `115.43 -> 107.09 ms`
+
+So this was a legitimate candidate to screen, not random churn.
+
+### Why it was rejected
+
+The real trainer step got materially worse in the transfer buckets that matter:
+
+- `aten::copy_`: `510.77 -> 756.97 ms`
+- `aten::mul`: `659.15 -> 975.56 ms`
+- `gdn.qkv_conv_packed`: `234.58 -> 354.25 ms`
+- `gdn.recurrence`: `114.97 -> 170.67 ms`
+- `aten::convolution_backward`: `113.86 -> 167.50 ms`
+- `aten::_conv_depthwise2d`: `91.58 -> 138.70 ms`
+
+Boundary layouts stayed identical across the qkv-to-recurrence path, so this is
+not a layout-fix candidate. The packed gate projection simply made the real
+training step more expensive.
+
+### Decision
+
+Reject `GDN_USE_PACKED_AB_PROJ`.
+
+Do not promote it to H100. Revert the code-path and keep the current local/H100
+winner unchanged.
+
+### Next step
+
+Return to the remaining kernel backlog on the confirmed winner:
+
+1. packed qkv front-end cost on H100
+2. q/k norm
+3. gate/output glue that does not disturb the packed qkv win
+4. residual copy/layout churn after the packed-path improvements
 
 ## 2026-04-04 — H100 transfer confirmation for the current local winner (`h100k5`)
 
