@@ -1,6 +1,6 @@
 # Profiling Log
 
-Last updated: 2026-04-04 18:41 EDT
+Last updated: 2026-04-04 19:25 EDT
 
 This file records profiler-driven checkpoints that should survive beyond the raw
 artifacts under `profiles/`.
@@ -738,9 +738,101 @@ Current local winning HGDN speed candidate:
 
 ### Next target
 
-This candidate has earned target-hardware confirmation.
+This candidate has earned target-hardware confirmation, but local work can
+still continue first.
 
-The next remaining HGDN-native hotspot on the local winner is now `gdn.q_norm`
-(with `gdn.k_norm` close behind), so the next local follow-up after H100
-confirmation should be a normalization-path experiment rather than another
-trainer-shell copy chase.
+The next remaining HGDN-native hotspots on the local winner are:
+
+- `gdn.output_norm`
+- `gdn.q_norm`
+- `gdn.k_norm`
+
+The first normalization-path follow-up was a manual q/k norm experiment, and it
+lost on the real training step. That means the next local follow-up should
+shift away from hand-rolled q/k normalization and toward the remaining
+output-side path before we spend H100 time.
+
+## 2026-04-04 — Manual q/k norm regression (`rtx4070_phase1_qknorm_fix1`)
+
+Bundle:
+
+- raw artifacts: `profiles/rtx4070_phase1_qknorm_fix1/`
+- structured comparison:
+  - `profiles/rtx4070_phase1_qknorm_fix1/compare_vs_ctrlbf16/comparison.md`
+- experiment-surface commit at run time: working tree after `9cb9f25`
+
+Contract:
+
+- GPU: local RTX 4070 Laptop
+- env: `pg`
+- fixed baseline:
+  - `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+  - `GDN_USE_PACKED_QKV_CONV=1`
+  - `GDN_USE_PACKED_QKV_PROJ=1`
+  - `GDN_CONTROL_PROJ_FP32=0`
+- candidate:
+  - fixed baseline plus a manual bf16 `q/k` L2 normalization path
+- purpose:
+  - test whether replacing `F.normalize` with an explicit bf16 pointwise
+    normalization path would reduce the remaining `gdn.q_norm` / `gdn.k_norm`
+    cost on the local winner
+
+### Main findings
+
+This candidate improved the isolated `q_norm` bucket but lost on the real
+trainer step, so it should not remain in the branch.
+
+Bare-GDN and hybrid-forward/backward wins:
+
+- bare `gdn.q_norm`: `54.68 -> 47.86 ms`
+- hybrid `gdn.q_norm`: `51.48 -> 46.80 ms`
+- hybrid `gdn.recurrence`: `48.46 -> 44.96 ms`
+
+But the full trainer-eager step regressed materially:
+
+- trainer `aten::copy_`: `510.77 -> 791.84 ms`
+- trainer `aten::mul`: `659.15 -> 1176.39 ms`
+- trainer `gdn.qkv_conv_packed`: `234.58 -> 374.79 ms`
+- trainer `gdn.recurrence`: `114.97 -> 183.09 ms`
+- trainer `gdn.output_norm`: `62.05 -> 98.79 ms`
+- trainer `gdn.q_norm`: `31.74 -> 63.04 ms`
+- trainer `gdn.k_norm`: `31.84 -> 63.33 ms`
+
+### Boundary read
+
+The recurrence-facing layout did not improve at all:
+
+- `conv_qkv` stayed contiguous bf16
+- `norm_qkv` stayed contiguous bf16
+- `recurrence_inputs` stayed contiguous bf16
+
+So the manual q/k path did not buy anything at the boundary level. It only
+changed kernel selection inside the normalization path, and the full-step side
+effects were strongly negative.
+
+### Decision
+
+Reject this candidate and revert it.
+
+What this means:
+
+- `gdn.q_norm` and `gdn.k_norm` are still important buckets
+- but a hand-written bf16 replacement for `F.normalize` is not the right fix
+- future work on the norm path should preserve the current operator family
+  unless a new experiment shows a step-level win
+
+### Next target
+
+Stay on the current winner:
+
+- `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+- `GDN_USE_PACKED_QKV_CONV=1`
+- `GDN_USE_PACKED_QKV_PROJ=1`
+- `GDN_CONTROL_PROJ_FP32=0`
+
+And move the next local-first investigation to the output-side path:
+
+1. re-screen `GDN_OUTPUT_NORM_FP32=0` on the **current** packed-path winner,
+   not the older conv-only baseline
+2. if it still loses, stop spending time on dtype-only output-norm changes and
+   move to a more structural output-gate consolidation

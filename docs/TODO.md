@@ -172,10 +172,16 @@ Latest local attribution checkpoint:
     - `GDN_USE_PACKED_QKV_CONV=1`
     - `GDN_USE_PACKED_QKV_PROJ=1`
     - `GDN_CONTROL_PROJ_FP32=0`
-  - immediate next step:
-    - run 1xH100 confirmation on the new winner before changing the default path
-  - next local hotspot after that:
-    - `gdn.q_norm` / `gdn.k_norm`
+  - q/k normalization follow-up on the winner is now screened and rejected:
+    - manual bf16 q/k norm improved the isolated `q_norm` bucket
+    - but it materially regressed the full trainer-eager step
+    - result is logged at `profiles/rtx4070_phase1_qknorm_fix1/`
+  - immediate next local step:
+    - re-screen `GDN_OUTPUT_NORM_FP32=0` on the current packed-path winner
+      before spending H100 time
+  - next target if that still loses:
+    - stop chasing dtype-only norm swaps and move to a more structural
+      output-gate/output-norm consolidation
 
 ### 2. Norm placement screen (`pre` vs `post` vs `keel`)
 
