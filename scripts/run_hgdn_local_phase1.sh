@@ -65,7 +65,6 @@ hybrid_mlp_mult="${HYBRID_MLP_MULT:-3.25}"
 trainer_run_dir="$profile_root/trainer/${run_prefix}_profile_eager_hybrid_r${hybrid_gdn_ratio}_mlp${hybrid_mlp_mult}_seq${trainer_seq_len}"
 boundary_audit_path="$profile_root/hybrid_fwd_bwd.boundaries.jsonl"
 gdn_env=(
-    "GDN_USE_PACKED_QK_CONV=${GDN_USE_PACKED_QK_CONV:-0}"
     "GDN_USE_PACKED_QKV_CONV=${GDN_USE_PACKED_QKV_CONV:-0}"
     "GDN_USE_PACKED_QKV_PROJ=${GDN_USE_PACKED_QKV_PROJ:-0}"
     "GDN_USE_Q_CONV=${GDN_USE_Q_CONV:-1}"
