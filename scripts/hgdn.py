@@ -275,7 +275,7 @@ def parse_args() -> argparse.Namespace:
         "mode",
         nargs="?",
         default="perf",
-        choices=("perf", "fixed2k", "all"),
+        choices=("perf", "fixed2k", "fixed2k-hybrid", "all"),
         help="Backend mode for scripts/run_h100_single_gpu_hgdn.sh.",
     )
 

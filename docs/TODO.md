@@ -264,6 +264,10 @@ Latest local attribution checkpoint:
         - `configs/hgdn/retune_trim_width_320.toml`
       - keep `configs/hgdn/retune_balanced_14l_mlp3.toml` as the next fallback
         if both primary cuts land too conservative or too weak
+      - use the hybrid-only helper mode so the attention-only baseline does not
+        get rerun every time:
+        - `python scripts/hgdn.py h100-perf fixed2k-hybrid --config configs/hgdn/retune_trim_layers_14.toml --run-prefix h100k7a --online --set WANDB_PROJECT=pg-hconv-ablations --set WANDB_WATCH=gradients`
+        - `python scripts/hgdn.py h100-perf fixed2k-hybrid --config configs/hgdn/retune_trim_width_320.toml --run-prefix h100k7b --online --set WANDB_PROJECT=pg-hconv-ablations --set WANDB_WATCH=gradients`
 
 ### 2. Norm placement screen (`pre` vs `post` vs `keel`)
 

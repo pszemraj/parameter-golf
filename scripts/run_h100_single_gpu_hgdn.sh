@@ -9,7 +9,7 @@ mode="${1:-perf}"
 
 usage() {
     cat <<'EOF'
-Usage: scripts/run_h100_single_gpu_hgdn.sh {perf|fixed2k|all|help}
+Usage: scripts/run_h100_single_gpu_hgdn.sh {perf|fixed2k|fixed2k-hybrid|all|help}
 
 Purpose:
   Single-GPU H100 helper for HGDN target-hardware calibration.
@@ -37,6 +37,11 @@ Modes:
     - TRAIN_SEQ_LEN=2048
     - TRAIN_BATCH_TOKENS=524288
     - VAL_LOSS_EVERY=500
+
+  fixed2k-hybrid
+    Run only the hybrid side of the same fixed-step quality contract.
+    Use this for architecture retune candidates after the attention-only
+    baseline has already been established separately.
 
   all
     Run perf first, then fixed2k.
@@ -67,6 +72,7 @@ Environment overrides:
 Examples:
   scripts/run_h100_single_gpu_hgdn.sh perf
   RUN_PREFIX=h100a scripts/run_h100_single_gpu_hgdn.sh fixed2k
+  RUN_PREFIX=h100a scripts/run_h100_single_gpu_hgdn.sh fixed2k-hybrid
   USE_WANDB=0 WANDB_MODE=offline scripts/run_h100_single_gpu_hgdn.sh perf
 EOF
 }
@@ -185,6 +191,32 @@ run_fixed2k_pair() {
         "PERF_SKIP_FINAL_EVAL=0"
 }
 
+run_fixed2k_hybrid() {
+    local prefix="$1"
+    local train_batch_tokens="${TRAIN_BATCH_TOKENS:-524288}"
+    local seq_len="${FIXED2K_SEQ_LEN:-2048}"
+    local iterations="${FIXED2K_ITERATIONS:-2000}"
+    local val_loss_every="${FIXED2K_VAL_LOSS_EVERY:-500}"
+    local train_log_every="${FIXED2K_TRAIN_LOG_EVERY:-200}"
+    local hybrid_gdn_ratio="${HYBRID_GDN_RATIO:-1}"
+    local hybrid_mlp_mult="${HYBRID_MLP_MULT:-3.25}"
+
+    run_sweep \
+        "1xH100 fixed2k: hybrid GDN_RATIO=${hybrid_gdn_ratio} MLP_MULT=${hybrid_mlp_mult}" \
+        single \
+        "RUN_ID=${prefix}_fixed2k_hybrid_r${hybrid_gdn_ratio}_mlp${hybrid_mlp_mult}_seq${seq_len}" \
+        "GDN_RATIO=${hybrid_gdn_ratio}" \
+        "MLP_MULT=${hybrid_mlp_mult}" \
+        "ITERATIONS=${iterations}" \
+        "MAX_WALLCLOCK_SECONDS=0" \
+        "TRAIN_BATCH_TOKENS=${train_batch_tokens}" \
+        "TRAIN_SEQ_LEN=${seq_len}" \
+        "VAL_LOSS_EVERY=${val_loss_every}" \
+        "TRAIN_LOG_EVERY=${train_log_every}" \
+        "PERF_TIMING=0" \
+        "PERF_SKIP_FINAL_EVAL=0"
+}
+
 require_cmd bash
 require_cmd torchrun
 
@@ -197,6 +229,9 @@ perf)
     ;;
 fixed2k)
     run_fixed2k_pair "$run_prefix"
+    ;;
+fixed2k-hybrid)
+    run_fixed2k_hybrid "$run_prefix"
     ;;
 all)
     run_perf_pair "$run_prefix"
