@@ -82,6 +82,7 @@ What has not been claimed:
 - `configs/hgdn/current_winner.toml`: reusable config for the current local HGDN kernel winner
 - `scripts/screen_hgdn_arch_sizes.py`: CPU-only artifact-proxy screen for resized HGDN architecture candidates
 - `configs/hgdn/current_winner_retune.toml`: first-pass retune family around the current HGDN kernel winner
+- `configs/hgdn/retune_*.toml`: named runnable configs for the first resized-HGDN shortlist
 - `model.py`: hybrid HGDN architecture and presets
 - `train_gpt_hybrid.py`: hybrid trainer
 - `scripts/sweep.sh`: launch helper and perf-harness env contract
@@ -145,6 +146,11 @@ python scripts/hgdn.py h100-profile hybrid-eager --preset current-winner --run-p
 
 ```bash
 python scripts/hgdn.py h100-perf perf --preset current-winner --run-prefix h100k5 --offline
+```
+
+```bash
+conda run -s --name pg python scripts/hgdn.py arch-size-screen \
+  --config configs/hgdn/current_winner_retune.toml
 ```
 
 Using the reusable TOML config:

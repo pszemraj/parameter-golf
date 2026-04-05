@@ -241,7 +241,7 @@ Latest local attribution checkpoint:
       - do not undo the packed-path kernel changes unless a new candidate beats
         them on both quality and bytes
     - new helper for this phase:
-      - `conda run -s --name pg python scripts/screen_hgdn_arch_sizes.py --config configs/hgdn/current_winner_retune.toml`
+      - `conda run -s --name pg python scripts/hgdn.py arch-size-screen --config configs/hgdn/current_winner_retune.toml`
       - writes structured output to `profiles/arch_size/current_winner_retune/`
       - important caveat:
         - the screen is an initialization-time proxy only
@@ -258,6 +258,12 @@ Latest local attribution checkpoint:
         - `trim_mlp_3.00`: `-3.82%`
         - `trim_mlp_2.75`: `-7.60%`
         - `trim_width_320_mlp3.75`: `-6.05%`
+    - first H100 retune round:
+      - run sequential fixed-step checks for:
+        - `configs/hgdn/retune_trim_layers_14.toml`
+        - `configs/hgdn/retune_trim_width_320.toml`
+      - keep `configs/hgdn/retune_balanced_14l_mlp3.toml` as the next fallback
+        if both primary cuts land too conservative or too weak
 
 ### 2. Norm placement screen (`pre` vs `post` vs `keel`)
 

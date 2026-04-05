@@ -220,6 +220,7 @@ def parse_args() -> argparse.Namespace:
             "Examples:\n"
             "  python scripts/hgdn.py h100-profile hybrid-eager --preset current-winner --run-prefix h100k5\n"
             "  python scripts/hgdn.py h100-perf perf --preset current-winner --run-prefix h100k5 --offline\n"
+            "  conda run -s --name pg python scripts/hgdn.py arch-size-screen --config configs/hgdn/current_winner_retune.toml\n"
             "  python scripts/hgdn.py local-phase1 --config configs/hgdn/current_winner.toml --run-prefix rtx4070_phase1\n"
             "  python scripts/hgdn.py preflight --preset current-winner"
         ),
@@ -237,6 +238,33 @@ def parse_args() -> argparse.Namespace:
         help="Run the local RTX 4070 phase-1 bundle sequentially.",
     )
     add_common_args(local_phase1)
+
+    arch_size = subparsers.add_parser(
+        "arch-size-screen",
+        help="Run the CPU-only HGDN architecture size screen.",
+    )
+    arch_size.add_argument(
+        "--config",
+        type=Path,
+        default=REPO_ROOT / "configs" / "hgdn" / "current_winner_retune.toml",
+        help="TOML config for scripts/screen_hgdn_arch_sizes.py.",
+    )
+    arch_size.add_argument(
+        "--output-dir",
+        type=Path,
+        help="Optional output directory for the screen bundle.",
+    )
+    arch_size.add_argument(
+        "--row-limit",
+        type=int,
+        default=20,
+        help="Maximum number of candidates to print to stdout.",
+    )
+    arch_size.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the resolved backend command without executing it.",
+    )
 
     h100_perf = subparsers.add_parser(
         "h100-perf",
@@ -322,6 +350,18 @@ def command_for_args(args: argparse.Namespace) -> list[str]:
         return ["bash", str(REPO_ROOT / "scripts" / "run_hgdn_cuda_preflight.sh")]
     if args.command == "local-phase1":
         return ["bash", str(REPO_ROOT / "scripts" / "run_hgdn_local_phase1.sh")]
+    if args.command == "arch-size-screen":
+        command = [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "screen_hgdn_arch_sizes.py"),
+            "--config",
+            str(args.config),
+            "--row-limit",
+            str(args.row_limit),
+        ]
+        if args.output_dir is not None:
+            command.extend(["--output-dir", str(args.output_dir)])
+        return command
     if args.command == "h100-perf":
         return [
             "bash",
@@ -358,7 +398,7 @@ def main() -> int:
     """
     args = parse_args()
     try:
-        env_overrides = build_env(args)
+        env_overrides = {} if args.command == "arch-size-screen" else build_env(args)
     except Exception as exc:  # pragma: no cover - CLI error path
         print(f"error: {exc}", file=sys.stderr)
         return 2
