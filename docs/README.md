@@ -1,6 +1,6 @@
 # HGDN Branch Status
 
-Last updated: 2026-04-04 17:20 EDT
+Last updated: 2026-04-05 01:05 EDT
 
 Branch: `exp/hgdn`
 
@@ -81,6 +81,7 @@ What has not been claimed:
 - `scripts/hgdn.py`: preferred structured launcher for HGDN helpers, with subcommands, named presets, and optional TOML env configs
 - `configs/hgdn/current_winner.toml`: reusable config for the current local HGDN kernel winner
 - `scripts/screen_hgdn_arch_sizes.py`: CPU-only artifact-proxy screen for resized HGDN architecture candidates
+- `scripts/compare_hgdn_fixed2k.py`: structured W&B comparator for completed HGDN fixed-step H100 runs
 - `configs/hgdn/current_winner_retune.toml`: first-pass retune family around the current HGDN kernel winner
 - `configs/hgdn/retune_*.toml`: named runnable configs for the first resized-HGDN shortlist
 - `model.py`: hybrid HGDN architecture and presets
@@ -151,6 +152,14 @@ python scripts/hgdn.py h100-perf perf --preset current-winner --run-prefix h100k
 ```bash
 conda run -s --name pg python scripts/hgdn.py arch-size-screen \
   --config configs/hgdn/current_winner_retune.toml
+```
+
+```bash
+conda run -s --name pg python scripts/hgdn.py fixed2k-compare \
+  --name h100k6_fixed2k_hybrid_r1_mlp3.25_seq2048 \
+  --name h100k6_fixed2k_depth_mlp4.0_seq2048 \
+  --reference h100k6_fixed2k_hybrid_r1_mlp3.25_seq2048 \
+  --output-dir profiles/fixed2k_compare/h100k6_pair
 ```
 
 ```bash

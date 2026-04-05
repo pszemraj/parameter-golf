@@ -221,6 +221,7 @@ def parse_args() -> argparse.Namespace:
             "  python scripts/hgdn.py h100-profile hybrid-eager --preset current-winner --run-prefix h100k5\n"
             "  python scripts/hgdn.py h100-perf perf --preset current-winner --run-prefix h100k5 --offline\n"
             "  conda run -s --name pg python scripts/hgdn.py arch-size-screen --config configs/hgdn/current_winner_retune.toml\n"
+            "  conda run -s --name pg python scripts/hgdn.py fixed2k-compare --name h100k6_fixed2k_hybrid_r1_mlp3.25_seq2048 --name h100k6_fixed2k_depth_mlp4.0_seq2048 --reference h100k6_fixed2k_hybrid_r1_mlp3.25_seq2048\n"
             "  python scripts/hgdn.py local-phase1 --config configs/hgdn/current_winner.toml --run-prefix rtx4070_phase1\n"
             "  python scripts/hgdn.py preflight --preset current-winner"
         ),
@@ -261,6 +262,46 @@ def parse_args() -> argparse.Namespace:
         help="Maximum number of candidates to print to stdout.",
     )
     arch_size.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the resolved backend command without executing it.",
+    )
+
+    fixed2k_compare = subparsers.add_parser(
+        "fixed2k-compare",
+        help="Compare completed HGDN fixed-step W&B runs into a structured bundle.",
+    )
+    fixed2k_compare.add_argument("--entity", default="pszemraj")
+    fixed2k_compare.add_argument("--project", default="pg-hconv-ablations")
+    fixed2k_compare.add_argument(
+        "--name",
+        action="append",
+        default=[],
+        help="Exact run name to include. Repeatable.",
+    )
+    fixed2k_compare.add_argument(
+        "--contains",
+        action="append",
+        default=[],
+        help="Substring filter for run names. Repeatable.",
+    )
+    fixed2k_compare.add_argument(
+        "--reference",
+        help="Exact run name to treat as the comparison reference.",
+    )
+    fixed2k_compare.add_argument(
+        "--output-dir",
+        type=Path,
+        help="Optional bundle directory for the comparison report.",
+    )
+    fixed2k_compare.add_argument(
+        "--eval-step",
+        action="append",
+        type=int,
+        default=[],
+        help="Sampled eval step to include. Repeatable.",
+    )
+    fixed2k_compare.add_argument(
         "--dry-run",
         action="store_true",
         help="Print the resolved backend command without executing it.",
@@ -362,6 +403,26 @@ def command_for_args(args: argparse.Namespace) -> list[str]:
         if args.output_dir is not None:
             command.extend(["--output-dir", str(args.output_dir)])
         return command
+    if args.command == "fixed2k-compare":
+        command = [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "compare_hgdn_fixed2k.py"),
+            "--entity",
+            args.entity,
+            "--project",
+            args.project,
+        ]
+        for name in args.name:
+            command.extend(["--name", name])
+        for value in args.contains:
+            command.extend(["--contains", value])
+        if args.reference is not None:
+            command.extend(["--reference", args.reference])
+        if args.output_dir is not None:
+            command.extend(["--output-dir", str(args.output_dir)])
+        for step in args.eval_step:
+            command.extend(["--eval-step", str(step)])
+        return command
     if args.command == "h100-perf":
         return [
             "bash",
@@ -398,7 +459,11 @@ def main() -> int:
     """
     args = parse_args()
     try:
-        env_overrides = {} if args.command == "arch-size-screen" else build_env(args)
+        env_overrides = (
+            {}
+            if args.command in {"arch-size-screen", "fixed2k-compare"}
+            else build_env(args)
+        )
     except Exception as exc:  # pragma: no cover - CLI error path
         print(f"error: {exc}", file=sys.stderr)
         return 2

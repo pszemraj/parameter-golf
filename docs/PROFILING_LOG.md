@@ -238,16 +238,18 @@ contract:
 - hybrid final sampled eval:
   - `val_bpb = 2.4201`
   - `step_avg = 915.10 ms`
-- depth final sampled eval:
+- attention-only baseline final sampled eval:
   - `val_bpb = 2.5373`
   - `step_avg = 724.72 ms`
 
 Quality delta:
 
-- hybrid beats depth by `0.1172` bpb at the final fixed-step eval
-- hybrid also beats depth on the quantized roundtrip eval:
+- hybrid beats the attention-only baseline by `0.1172` bpb at the final
+  fixed-step eval
+- hybrid also beats the attention-only baseline on the quantized roundtrip
+  eval:
   - hybrid: `2.44379288`
-  - depth: `2.54975979`
+  - attention-only baseline: `2.54975979`
   - delta: `0.10596691` bpb
 
 Interpretation:
@@ -260,12 +262,12 @@ Interpretation:
 ### Artifact read
 
 Both models are disqualified on bytes, but hybrid is materially closer to the
-limit than depth.
+limit than the attention-only baseline.
 
 - hybrid artifact:
   - total bytes: `17,580,964`
   - over limit by `1,580,964` bytes (`+9.88%`)
-- depth artifact:
+- attention-only baseline artifact:
   - total bytes: `18,553,002`
   - over limit by `2,553,002` bytes (`+15.96%`)
 
@@ -274,11 +276,25 @@ Hybrid is better on bytes by `972,038` bytes (`5.24%` smaller total artifact).
 Interpretation:
 
 - the branch should not revert to depth on artifact grounds
+- the branch should not revert to the attention-only baseline on artifact
+  grounds
 - the right next move is to keep the new HGDN kernel baseline and resize the
   architecture around the remaining byte gap
 - the size target is now concrete: the current winner needs roughly a `10%`
   total artifact reduction without giving back too much of the fixed-step bpb
   advantage
+
+Structured comparison bundle:
+
+- `profiles/fixed2k_compare/h100k6_pair/comparison.md`
+- `profiles/fixed2k_compare/h100k6_pair/rows.csv`
+
+One W&B logging quirk to keep in mind for future retune comparisons:
+
+- the final sampled eval and summary metrics are reliable
+- the intermediate console evals at `500` and `1500` were not retained in W&B
+  history for `h100k6`, so the structured comparison bundle only has `1000` and
+  `2000` sampled-eval points
 
 ### Decision
 

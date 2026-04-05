@@ -268,6 +268,11 @@ Latest local attribution checkpoint:
         get rerun every time:
         - `python scripts/hgdn.py h100-perf fixed2k-hybrid --config configs/hgdn/retune_trim_layers_14.toml --run-prefix h100k7a --online --set WANDB_PROJECT=pg-hconv-ablations --set WANDB_WATCH=gradients`
         - `python scripts/hgdn.py h100-perf fixed2k-hybrid --config configs/hgdn/retune_trim_width_320.toml --run-prefix h100k7b --online --set WANDB_PROJECT=pg-hconv-ablations --set WANDB_WATCH=gradients`
+      - compare each completed retune back to the `h100k6` hybrid reference via:
+        - `conda run -s --name pg python scripts/hgdn.py fixed2k-compare --contains h100k7 --name h100k6_fixed2k_hybrid_r1_mlp3.25_seq2048 --reference h100k6_fixed2k_hybrid_r1_mlp3.25_seq2048 --output-dir profiles/fixed2k_compare/h100k7_round1`
+      - known W&B quirk from `h100k6`:
+        - summary metrics and final eval points are reliable
+        - intermediate sampled eval checkpoints at `500` and `1500` were present in console logs but not retained in W&B history, so the comparison tool currently treats missing checkpoints as missing data rather than fabricating them
 
 ### 2. Norm placement screen (`pre` vs `post` vs `keel`)
 

@@ -1,3 +1,5 @@
+"""Export selected HGDN W&B runs into structured JSON/CSV tables."""
+
 from __future__ import annotations
 
 import argparse
@@ -36,15 +38,19 @@ DEFAULT_SUMMARY_KEYS = [
     "system/peak_mem_alloc_mib",
     "system/peak_mem_reserved_mib",
 ]
+DEFAULT_PROJECT = "pg-hconv-ablations"
 
 
 def parse_args() -> argparse.Namespace:
-    """Parse command line arguments for W&B run export."""
+    """Parse command line arguments for W&B run export.
+
+    :return argparse.Namespace: Parsed CLI arguments.
+    """
     parser = argparse.ArgumentParser(
         description="Export selected W&B runs for HGDN analysis.",
     )
     parser.add_argument("--entity", default="pszemraj")
-    parser.add_argument("--project", default="param-golf-hybrid")
+    parser.add_argument("--project", default=DEFAULT_PROJECT)
     parser.add_argument(
         "--name",
         action="append",
@@ -85,7 +91,13 @@ def parse_args() -> argparse.Namespace:
 
 
 def matches(run_name: str, exact_names: set[str], substrings: list[str]) -> bool:
-    """Return whether a run name matches the provided exact or substring filters."""
+    """Return whether a run name matches the provided exact or substring filters.
+
+    :param str run_name: Candidate W&B run name.
+    :param set[str] exact_names: Exact-match filters.
+    :param list[str] substrings: Substring filters.
+    :return bool: ``True`` when the run should be selected.
+    """
     if exact_names and run_name in exact_names:
         return True
     if substrings and any(substr in run_name for substr in substrings):
@@ -94,7 +106,11 @@ def matches(run_name: str, exact_names: set[str], substrings: list[str]) -> bool
 
 
 def flatten_config(config: dict[str, Any]) -> dict[str, Any]:
-    """Drop internal W&B config keys from a run config mapping."""
+    """Drop internal W&B config keys from a run config mapping.
+
+    :param dict[str, Any] config: Raw W&B config mapping.
+    :return dict[str, Any]: Public config entries only.
+    """
     return {k: v for k, v in config.items() if not k.startswith("_")}
 
 
@@ -103,7 +119,13 @@ def iter_history_rows(
     keys: list[str],
     max_rows: int,
 ) -> Iterable[dict[str, Any]]:
-    """Yield selected history rows from a W&B run."""
+    """Yield selected history rows from a W&B run.
+
+    :param Any run: W&B run object.
+    :param list[str] keys: History keys to request.
+    :param int max_rows: Optional row cap. ``0`` means unlimited.
+    :return Iterable[dict[str, Any]]: Stream of selected history rows.
+    """
     count = 0
     for row in run.scan_history(keys=keys, page_size=500):
         yield row
@@ -113,12 +135,22 @@ def iter_history_rows(
 
 
 def write_json(path: Path, payload: Any) -> None:
-    """Serialize a JSON payload to disk."""
+    """Serialize a JSON payload to disk.
+
+    :param Path path: Output path.
+    :param Any payload: JSON-serializable payload.
+    :return None: Writes `payload` to `path`.
+    """
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
-    """Write a heterogeneous list of dict rows to CSV."""
+    """Write a heterogeneous list of dict rows to CSV.
+
+    :param Path path: Output path.
+    :param list[dict[str, Any]] rows: Heterogeneous row payload.
+    :return None: Writes `rows` to `path`.
+    """
     if not rows:
         path.write_text("", encoding="utf-8")
         return
@@ -136,7 +168,10 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
 
 
 def main() -> int:
-    """Export summary and history tables for selected runs."""
+    """Export summary and history tables for selected runs.
+
+    :return int: Process exit code.
+    """
     args = parse_args()
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = args.output_dir or Path("wandb_exports") / f"hgdn_{timestamp}"
