@@ -53,7 +53,24 @@ def prepare_module(module: torch.nn.Module) -> torch.nn.Module:
     restore_low_dim_params_to_fp32(
         module, gdn_control_proj_fp32=env_flag("GDN_CONTROL_PROJ_FP32", True)
     )
+    maybe_freeze_gdn_conv_weights(module)
     return module
+
+
+def maybe_freeze_gdn_conv_weights(module: torch.nn.Module) -> None:
+    """Optionally freeze wrapped GDN depthwise-conv weights for attribution screens.
+
+    :param torch.nn.Module module: Module tree to mutate in place.
+    """
+    if not env_flag("GDN_FREEZE_CONV_WEIGHTS"):
+        return
+    for submodule in module.modules():
+        conv = getattr(submodule, "conv", None)
+        if (
+            isinstance(conv, torch.nn.Conv1d)
+            and submodule.__class__.__name__ in {"CausalConv1d", "PackedCausalConv1d"}
+        ):
+            conv.weight.requires_grad_(False)
 
 
 def run_gdn_eager() -> PreflightResult:
@@ -186,6 +203,7 @@ def main() -> None:
     torch.cuda.manual_seed_all(1337)
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
+    torch.backends.cudnn.benchmark = env_flag("CUDNN_BENCHMARK")
     print(f"hgdn_cuda_extension:{extension_status()}")
 
     results = [

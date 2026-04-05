@@ -181,6 +181,7 @@ class Hyperparameters:
     gdn_use_cuda_fused_output = bool(
         int(os.environ.get("GDN_USE_CUDA_FUSED_OUTPUT", "0"))
     )
+    cudnn_benchmark = bool(int(os.environ.get("CUDNN_BENCHMARK", "0")))
     gdn_ratio = int(os.environ.get("GDN_RATIO", 3))  # 3 GDN : 1 Attn
 
     # Optimizer
@@ -930,6 +931,7 @@ def main() -> None:
 
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
+    torch.backends.cudnn.benchmark = args.cudnn_benchmark
     from torch.backends.cuda import (
         enable_cudnn_sdp,
         enable_flash_sdp,
@@ -990,6 +992,7 @@ def main() -> None:
     log0(
         f"compile:{int(args.compile)} compile_strategy:{args.compile_strategy} "
         f"sdp_backend:{sdp_backend} fla_available:{int(_HAS_FLA)} "
+        f"cudnn_benchmark:{int(args.cudnn_benchmark)} "
         f"wandb_watch:{wandb_watch_mode} wandb_watch_log_freq:{args.wandb_watch_log_freq} "
         f"perf_timing:{int(args.perf_timing)} perf_ignore_steps:{args.perf_ignore_steps} "
         f"perf_skip_final_eval:{int(args.perf_skip_final_eval)} "
@@ -1150,6 +1153,7 @@ def main() -> None:
                 "artifact_limit_bytes": args.artifact_limit_bytes,
                 "compile": args.compile,
                 "compile_strategy": args.compile_strategy,
+                "cudnn_benchmark": args.cudnn_benchmark,
                 "fla_available": _HAS_FLA,
                 "local_batch_size": local_batch_size,
                 "compile_gdn_disabled": compile_stats["gdn_disabled"],

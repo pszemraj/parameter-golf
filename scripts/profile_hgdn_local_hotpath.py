@@ -115,6 +115,7 @@ def configure_cuda(seed: int) -> None:
     torch.cuda.manual_seed_all(seed)
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
+    torch.backends.cudnn.benchmark = env_flag("CUDNN_BENCHMARK")
 
 
 def configure_boundary_audit(args: argparse.Namespace) -> None:
@@ -138,7 +139,27 @@ def prepare_model(module: torch.nn.Module) -> torch.nn.Module:
     module = module.cuda().bfloat16()
     load_repo_symbols()
     restore_low_dim_params_to_fp32(module)
+    maybe_freeze_gdn_conv_weights(module)
     return module
+
+
+def maybe_freeze_gdn_conv_weights(module: torch.nn.Module) -> None:
+    """Optionally freeze wrapped GDN depthwise-conv weights for attribution screens.
+
+    This is a profiling-only knob used to isolate how much of the packed front-end
+    loss comes from depthwise-conv weight gradients versus everything else.
+
+    :param torch.nn.Module module: Module tree to mutate in place.
+    """
+    if not env_flag("GDN_FREEZE_CONV_WEIGHTS"):
+        return
+    for submodule in module.modules():
+        conv = getattr(submodule, "conv", None)
+        if (
+            isinstance(conv, torch.nn.Conv1d)
+            and submodule.__class__.__name__ in {"CausalConv1d", "PackedCausalConv1d"}
+        ):
+            conv.weight.requires_grad_(False)
 
 
 def build_hybrid_model() -> HybridGPT:
