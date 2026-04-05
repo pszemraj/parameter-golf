@@ -257,6 +257,19 @@ Latest local attribution checkpoint:
     - remaining copy/layout churn after the packed-path win
       - do not revisit `split -> narrow` or similar post-conv split
         micro-optimizations unless a later trace gives a much stronger reason
+  - packed-front-end subrange attribution on the current winner is now logged at
+    `profiles/current_winner_qkvbreakdown/`
+    - real remaining front-end costs:
+      - `gdn.qkv_conv_depthwise`
+      - `gdn.qkv_conv_output_contiguous`
+    - near-zero bookkeeping ranges:
+      - `gdn.qkv_conv_input_transpose`
+      - `gdn.qkv_conv_trim`
+      - `gdn.qkv_conv_output_transpose`
+      - `gdn.qkv_conv_split`
+    - implication:
+      - do not spend more time on tiny packed split/trim cleanup unless a later
+        H100 trace contradicts this
   - latest rejected local full-bundle screen:
     - explicit packed-conv input materialization on top of the current winner
     - idea:

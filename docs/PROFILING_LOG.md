@@ -1,9 +1,82 @@
 # Profiling Log
 
-Last updated: 2026-04-05 01:45 EDT
+Last updated: 2026-04-05 05:00 EDT
 
 This file records profiler-driven checkpoints that should survive beyond the raw
 artifacts under `profiles/`.
+
+## 2026-04-05 — Current-winner packed front-end subrange breakdown (`current_winner_qkvbreakdown`)
+
+Bundle:
+
+- local hotpath-only artifacts:
+  - `profiles/current_winner_qkvbreakdown/`
+- commit at profiling time:
+  - `939a7e7`
+
+Contract:
+
+- GPU: local RTX 4070 laptop
+- current confirmed winner:
+  - `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+  - `GDN_USE_PACKED_QKV_CONV=1`
+  - `GDN_USE_PACKED_QKV_PROJ=1`
+  - `GDN_CONTROL_PROJ_FP32=0`
+- scope:
+  - instrumentation-only profiler subranges inside `CausalConv1d` and
+    `PackedCausalConv1d`
+  - no math change, no new kernel path
+
+### Main finding
+
+The remaining packed front-end tax is **not** in transpose, trim, or split view
+ops. On the current winner, the real costs are:
+
+- `gdn.qkv_conv_depthwise`
+- then `gdn.qkv_conv_output_contiguous`
+
+Everything else in that front-end is small enough that it should not be the
+next blind optimization target.
+
+### Hybrid forward/backward read
+
+From `profiles/current_winner_qkvbreakdown/hybrid_fwd_bwd.json`:
+
+- `gdn.q_norm`: `51.07 ms`
+- `gdn.recurrence`: `46.64 ms`
+- `gdn.g_pointwise`: `27.87 ms`
+- `gdn.qkv_conv_depthwise`: `13.76 ms`
+- `aten::copy_`: `13.91 ms`
+- `aten::mul`: `10.91 ms`
+- `gdn.output_norm`: `7.74 ms`
+- `gdn.qkv_conv_output_contiguous`: `3.76 ms`
+- `gdn.qkv_conv_silu`: `0.42 ms`
+
+Near-zero packed-front-end subranges:
+
+- `gdn.qkv_conv_input_transpose`
+- `gdn.qkv_conv_trim`
+- `gdn.qkv_conv_output_transpose`
+- `gdn.qkv_conv_split`
+
+Interpretation:
+
+- the packed front-end cost is dominated by real kernel work and forced
+  materialization
+- transpose/trim/split cleanup alone is not going to pay for the remaining
+  H100 gap
+- the next valid kernel targets stay:
+  - packed qkv front-end depthwise work
+  - q/k norm
+  - gate/output glue
+  - remaining copy/materialization churn after those
+
+### Checkpoint policy result
+
+An unfinished follow-up experiment (`packed qk conv + separate v conv`) was
+screened after this attribution pass but **not** carried into the stable
+checkpoint. The codebase keeps the subrange instrumentation and the confirmed
+winner only; the partial candidate was reverted before checkpointing.
 
 ## 2026-04-05 — Rejected packed q/k normalization (`rtx4070_phase1_packedqknorm_fix1`)
 

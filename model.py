@@ -319,12 +319,19 @@ class CausalConv1d(nn.Module):
         """
         if not self.enabled:
             return x
-        x = x.transpose(1, 2)
-        x = self.conv(x)[..., : x.size(-1)]
-        x = F.silu(x)
-        x = x.transpose(1, 2)
+        with profile_range("gdn.conv_input_transpose"):
+            x = x.transpose(1, 2)
+        with profile_range("gdn.conv_depthwise"):
+            x = self.conv(x)
+        with profile_range("gdn.conv_trim"):
+            x = x[..., : x.size(-1) - (self.conv.kernel_size[0] - 1)]
+        with profile_range("gdn.conv_silu"):
+            x = F.silu(x)
+        with profile_range("gdn.conv_output_transpose"):
+            x = x.transpose(1, 2)
         if self.output_contiguous:
-            return x.contiguous()
+            with profile_range("gdn.conv_output_contiguous"):
+                x = x.contiguous()
         return x
 
 
@@ -362,16 +369,24 @@ class PackedCausalConv1d(nn.Module):
         :param Tensor x: Packed activations shaped `(batch, seq, q_dim + k_dim + v_dim)`.
         :return tuple[Tensor, Tensor, Tensor]: Convolved q/k/v activations.
         """
-        x = x.transpose(1, 2)
-        x = self.conv(x)[..., : x.size(-1)]
-        x = F.silu(x)
-        x = x.transpose(1, 2)
-        q_dim, k_dim, v_dim = self.dims
-        q, k, v = x.split((q_dim, k_dim, v_dim), dim=-1)
+        with profile_range("gdn.qkv_conv_input_transpose"):
+            x = x.transpose(1, 2)
+        with profile_range("gdn.qkv_conv_depthwise"):
+            x = self.conv(x)
+        with profile_range("gdn.qkv_conv_trim"):
+            x = x[..., : x.size(-1) - (self.conv.kernel_size[0] - 1)]
+        with profile_range("gdn.qkv_conv_silu"):
+            x = F.silu(x)
+        with profile_range("gdn.qkv_conv_output_transpose"):
+            x = x.transpose(1, 2)
+        with profile_range("gdn.qkv_conv_split"):
+            q_dim, k_dim, v_dim = self.dims
+            q, k, v = x.split((q_dim, k_dim, v_dim), dim=-1)
         if self.output_contiguous:
-            q = q.contiguous()
-            k = k.contiguous()
-            v = v.contiguous()
+            with profile_range("gdn.qkv_conv_output_contiguous"):
+                q = q.contiguous()
+                k = k.contiguous()
+                v = v.contiguous()
         return q, k, v
 
     def forward_packed(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor]:
