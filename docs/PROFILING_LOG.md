@@ -1989,3 +1989,49 @@ depthwise conv. If the next packed-front-end attempt stays in-repo, it likely
 needs to be lower-level or otherwise much closer to the actual kernel/memory
 behavior we are trying to fix, rather than another high-level algebraic rewrite
 of the same operation.
+
+## 2026-04-05 — Delayed packed qkv split regressed at preflight (`GDN_DELAY_QKV_SPLIT=1`)
+
+Screen:
+
+- type:
+  - local preflight-only quick screen
+- fixed baseline:
+  - `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+  - `GDN_USE_PACKED_QKV_CONV=1`
+  - `GDN_USE_PACKED_QKV_PROJ=1`
+  - `GDN_CONTROL_PROJ_FP32=0`
+- candidate:
+  - fixed baseline plus `GDN_DELAY_QKV_SPLIT=1`
+  - keep one packed q/k/v buffer through the packed depthwise conv and delay
+    the q/k/v split until recurrence prep
+
+### Main findings
+
+This was the first structural packed-front-end candidate that explicitly tried
+to remove the immediate post-conv q/k/v clone tax without changing the
+normalization operator family. It still failed decisively at the preflight
+gate.
+
+Preflight deltas versus the current winner:
+
+- `gdn_eager`: `1032.32 -> 1546.84 ms`
+- `hybrid_eager`: `146.49 -> 211.45 ms`
+- `hybrid_compiled`: `3223.56 -> 5258.08 ms`
+
+### Decision
+
+Reject this candidate at the preflight gate and revert it.
+
+### Interpretation
+
+Even though the H100 compiled trace still contains `clone/split/transposed`
+front-end rows, delaying the q/k/v split inside the current Python-level packed
+path is not the right fix. The current packed front-end appears to rely on the
+existing post-conv materialization pattern more than expected.
+
+This shifts the next front-end attempt away from split timing and toward either:
+
+- a lower-level packed conv implementation, or
+- a different HGDN-native path entirely, such as a projection/gate-side
+  structural cleanup that does not disturb the current packed conv contract

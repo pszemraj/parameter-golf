@@ -320,6 +320,24 @@ Latest local attribution checkpoint:
       - the simple high-level shift-and-sum rewrite is not a valid next step
       - the next packed-front-end attempt should be lower-level and closer to
         the actual kernel/memory behavior we are trying to fix
+  - latest rejected quick-screen:
+    - `GDN_DELAY_QKV_SPLIT=1` on top of the current winner
+    - idea:
+      - keep one packed q/k/v buffer through the packed depthwise conv and
+        delay the q/k/v split until recurrence prep
+      - remove the immediate post-conv q/k/v clone tax without changing the
+        `F.normalize` operator family
+    - result:
+      - rejected at the preflight gate
+      - `gdn_eager`: `1032.32 -> 1546.84 ms`
+      - `hybrid_eager`: `146.49 -> 211.45 ms`
+      - `hybrid_compiled`: `3223.56 -> 5258.08 ms`
+    - take-away:
+      - the current packed front-end depends on the existing post-conv
+        materialization contract more than expected
+      - do not revisit split timing as the next packed-front-end experiment
+      - move the next structural attempt either lower-level or away from this
+        exact front-end boundary
       - hybrid remains slower (`915.10 ms` vs `724.72 ms`) but keeps a clear
         quality edge on H100
       - both models are over the 16 MB limit, but hybrid is closer:
