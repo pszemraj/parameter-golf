@@ -2210,3 +2210,141 @@ packed-path win:
 - packed qkv front-end cost
 - gate/output glue
 - remaining copy/layout churn
+
+## 2026-04-05 — Optional fused CUDA front-end/output path imported and passed the local phase-1 gate
+
+Bundles:
+
+- baseline:
+  - `profiles/rtx4070_cuda_base/`
+- fused candidate:
+  - `profiles/rtx4070_cuda_fused/`
+- structured comparison:
+  - `profiles/rtx4070_cuda_fused/compare_vs_rtx4070_cuda_base/comparison.md`
+
+Implementation surface:
+
+- optional extension package:
+  - `hgdn_cuda/`
+- build entrypoint:
+  - `setup_hgdn_cuda.py`
+- validation helpers:
+  - `scripts/build_hgdn_cuda.sh`
+  - `scripts/hgdn_cuda_parity.py`
+- preset:
+  - `configs/hgdn/current_winner_cuda_fused.toml`
+
+Flags:
+
+- baseline:
+  - `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+  - `GDN_USE_PACKED_QKV_CONV=1`
+  - `GDN_USE_PACKED_QKV_PROJ=1`
+  - `GDN_CONTROL_PROJ_FP32=0`
+- fused candidate:
+  - baseline plus:
+    - `GDN_OUTPUT_NORM_FP32=1`
+    - `GDN_USE_CUDA_FUSED_FRONTEND=1`
+    - `GDN_USE_CUDA_FUSED_OUTPUT=1`
+
+### What was imported
+
+The external branch added two optional fused paths:
+
+- packed HGDN front-end:
+  - packed post-projection qkv buffer
+  - depthwise causal conv
+  - SiLU
+  - split
+  - q/k normalization
+- output glue:
+  - `RMSNorm(o) * SiLU(g_out)`
+
+This branch adaptation kept the extension optional and added compile-safe
+eager-island wrapping so TorchDynamo does not try to trace the raw pybind
+extension directly.
+
+### Local validation
+
+Passed locally in `pg`:
+
+- `python setup_hgdn_cuda.py build_ext --inplace`
+- `python scripts/hgdn_cuda_parity.py`
+- `python test_model.py`
+
+The direct parity script passed with the extension loaded. CPU fallback and
+flag-validation coverage were also added to `test_model.py`.
+
+### Main findings
+
+This candidate passed the local phase-1 gate and is worth H100 validation.
+
+Local trainer-eager result:
+
+- self-device total:
+  - `25561.13 -> 21352.84 ms` (`-16.46%`)
+- console step average:
+  - `3320.37 -> 2804.76 ms` (`-15.53%`)
+- peak allocated memory:
+  - `6184 -> 5696 MiB`
+
+The most important trainer-eager replacement on the current winner was the
+front-end/output glue cluster:
+
+- baseline cluster:
+  - `gdn.qkv_conv_depthwise = 228.25 ms`
+  - `gdn.qkv_conv_output_contiguous = 89.32 ms`
+  - `gdn.q_norm = 48.81 ms`
+  - `gdn.k_norm = 49.14 ms`
+  - `gdn.output_norm = 95.59 ms`
+  - `gdn.output_gate_mul = 25.46 ms`
+  - total `536.57 ms`
+- fused replacement:
+  - `gdn.qkv_frontend_fused = 158.06 ms`
+  - `gdn.output_fused = 68.34 ms`
+  - total `226.40 ms`
+
+Trainer-eager glue buckets also moved materially:
+
+- `aten::copy_`: `785.65 -> 137.73 ms`
+- `aten::mul`: `1012.30 -> 837.35 ms`
+
+The hybrid forward/backward hotpath also improved overall:
+
+- self-device total:
+  - `1354.73 -> 1258.45 ms` (`-7.11%`)
+
+Important nuance:
+
+- the hotpath view still shows `gdn.q_norm` prominently
+- the real local keep/drop call came from the trainer-eager step-level result,
+  not from a clean disappearance of every HGDN-native micro-bucket
+
+### Compile note
+
+The raw external pybind integration is not acceptable as-is.
+
+Before adapting the branch-local integration, the same fused path produced:
+
+- TorchDynamo tracing warnings
+- a large compiled-preflight regression on the local machine
+
+The accepted branch version wraps the extension dispatch in
+`torch._dynamo.disable(...)`, which restored a compile-safe local path and let
+the fused candidate pass the real local gate.
+
+### Decision
+
+Keep the optional fused CUDA path in-tree as an experimental candidate.
+
+Do not promote it to the default winner yet.
+
+### Next gate
+
+H100, one job at a time:
+
+1. rebuild the extension on the H100 machine
+2. run direct parity there
+3. run fused preflight
+4. run H100 eager hybrid profile
+5. run H100 compiled perf/profile only if eager results are at least neutral

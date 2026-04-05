@@ -21,6 +21,8 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from hgdn_cuda import fused_packed_qkv_frontend, fused_rmsnorm_silu_gate
+
 _HAS_FLA = False
 try:
     from fla.ops.gated_delta_rule import chunk_gated_delta_rule
@@ -480,6 +482,8 @@ class GatedDeltaNet(nn.Module):
         v_conv_output_contiguous: bool | None = None,
         gates_fp32: bool = True,
         output_norm_fp32: bool = True,
+        use_cuda_fused_frontend: bool = False,
+        use_cuda_fused_output: bool = False,
     ):
         """Initialize a Gated DeltaNet block.
 
@@ -501,6 +505,8 @@ class GatedDeltaNet(nn.Module):
         :param bool | None v_conv_output_contiguous: Optional v-path override for contiguous conv outputs, defaults to None.
         :param bool gates_fp32: Whether to keep the decay-gate softplus path in fp32, defaults to True.
         :param bool output_norm_fp32: Whether to keep the post-recurrence RMSNorm in fp32 before casting back to the activation dtype, defaults to True.
+        :param bool use_cuda_fused_frontend: Whether to route the packed qkv post-projection conv+q/k norm front-end through the optional CUDA extension, defaults to False.
+        :param bool use_cuda_fused_output: Whether to route the output RMSNorm*SiLU(gate) path through the optional CUDA extension, defaults to False.
         """
         super().__init__()
         self.d_model = d_model
@@ -512,6 +518,8 @@ class GatedDeltaNet(nn.Module):
         self.use_fla = use_fla and _HAS_FLA
         self.gates_fp32 = gates_fp32
         self.output_norm_fp32 = output_norm_fp32
+        self.use_cuda_fused_frontend = use_cuda_fused_frontend
+        self.use_cuda_fused_output = use_cuda_fused_output
         self.use_packed_qkv_conv = use_packed_qkv_conv
         self.use_packed_qkv_proj = use_packed_qkv_proj
         q_conv_output_contiguous = (
@@ -553,6 +561,14 @@ class GatedDeltaNet(nn.Module):
                 )
         if self.use_packed_qkv_proj and not self.use_packed_qkv_conv:
             raise ValueError("use_packed_qkv_proj requires use_packed_qkv_conv")
+        if self.use_cuda_fused_frontend and not (
+            self.use_packed_qkv_proj and self.use_packed_qkv_conv
+        ):
+            raise ValueError(
+                "use_cuda_fused_frontend requires use_packed_qkv_proj and use_packed_qkv_conv"
+            )
+        if self.use_cuda_fused_output and not self.output_norm_fp32:
+            raise ValueError("use_cuda_fused_output requires output_norm_fp32=True")
 
         # Feature-map projections → Muon
         if self.use_packed_qkv_proj:
@@ -626,65 +642,92 @@ class GatedDeltaNet(nn.Module):
         :param int | None audit_call_index: Optional structured audit call index.
         :return tuple[Tensor, Tensor, Tensor, Tensor, Tensor]: Normalized q/k, values, decay logits, and write gates.
         """
-        B, T, D = x.shape
+        B, T, _ = x.shape
         H, Dk, Dv = self.n_heads, self.head_k_dim, self.head_v_dim
+        q: Tensor | None = None
+        k: Tensor | None = None
+        v: Tensor | None = None
 
         with profile_range("gdn.project_qkv"):
             if self.w_qkv is not None:
                 with profile_range("gdn.project_qkv_packed"):
                     qkv = self.w_qkv.forward_packed(x)
-                q, k, v = qkv.split((H * Dk, H * Dk, H * Dv), dim=-1)
+                if (not self.use_cuda_fused_frontend) or audit_call_index is not None:
+                    q, k, v = qkv.split((H * Dk, H * Dk, H * Dv), dim=-1)
             else:
                 qkv = None
                 q = self.w_q(x)
                 k = self.w_k(x)
                 v = self.w_v(x)
-            audit_gdn_boundary(
-                "project_qkv",
-                audit_call_index,
-                q=q,
-                k=k,
-                v=v,
-            )
+            if q is not None and k is not None and v is not None:
+                audit_gdn_boundary(
+                    "project_qkv",
+                    audit_call_index,
+                    q=q,
+                    k=k,
+                    v=v,
+                )
 
         with profile_range("gdn.conv_qkv"):
-            if self.qkv_conv is not None:
-                with profile_range("gdn.qkv_conv_packed"):
-                    if qkv is not None:
-                        q, k, v = self.qkv_conv.forward_packed(qkv)
-                    else:
-                        q, k, v = self.qkv_conv(q, k, v)
+            if (
+                self.use_cuda_fused_frontend
+                and qkv is not None
+                and self.qkv_conv is not None
+                and audit_call_index is None
+            ):
+                weight = self.qkv_conv.conv.weight.view(
+                    self.qkv_conv.conv.weight.shape[0], -1
+                )
+                with profile_range("gdn.qkv_frontend_fused"):
+                    q, k, v = fused_packed_qkv_frontend(
+                        qkv,
+                        weight,
+                        n_heads=H,
+                        head_k_dim=Dk,
+                        head_v_dim=Dv,
+                        eps=1e-6,
+                        enabled=True,
+                    )
             else:
-                with profile_range("gdn.q_conv"):
-                    q = self.q_conv(q)
-                with profile_range("gdn.k_conv"):
-                    k = self.k_conv(k)
-                with profile_range("gdn.v_conv"):
-                    v = self.v_conv(v)
-        audit_gdn_boundary(
-            "conv_qkv",
-            audit_call_index,
-            q=q,
-            k=k,
-            v=v,
-        )
+                if self.qkv_conv is not None:
+                    with profile_range("gdn.qkv_conv_packed"):
+                        if qkv is not None:
+                            q, k, v = self.qkv_conv.forward_packed(qkv)
+                        else:
+                            q, k, v = self.qkv_conv(q, k, v)
+                else:
+                    with profile_range("gdn.q_conv"):
+                        q = self.q_conv(q)
+                    with profile_range("gdn.k_conv"):
+                        k = self.k_conv(k)
+                    with profile_range("gdn.v_conv"):
+                        v = self.v_conv(v)
+                audit_gdn_boundary(
+                    "conv_qkv",
+                    audit_call_index,
+                    q=q,
+                    k=k,
+                    v=v,
+                )
 
-        with profile_range("gdn.norm_qkv"):
-            # Keep the recurrence inputs on one activation dtype across PyTorch /
-            # platform variants. Some stacks promote F.normalize to fp32 here.
-            with profile_range("gdn.q_norm"):
-                q = l2_norm(q.view(B, T, H, Dk)).to(dtype=x.dtype)
-            with profile_range("gdn.k_norm"):
-                k = l2_norm(k.view(B, T, H, Dk)).to(dtype=x.dtype)
-            with profile_range("gdn.v_reshape"):
-                v = v.view(B, T, H, Dv).to(dtype=x.dtype)
-        audit_gdn_boundary(
-            "norm_qkv",
-            audit_call_index,
-            q=q,
-            k=k,
-            v=v,
-        )
+                with profile_range("gdn.norm_qkv"):
+                    # Keep the recurrence inputs on one activation dtype across PyTorch /
+                    # platform variants. Some stacks promote F.normalize to fp32 here.
+                    with profile_range("gdn.q_norm"):
+                        q = l2_norm(q.view(B, T, H, Dk)).to(dtype=x.dtype)
+                    with profile_range("gdn.k_norm"):
+                        k = l2_norm(k.view(B, T, H, Dk)).to(dtype=x.dtype)
+                    with profile_range("gdn.v_reshape"):
+                        v = v.view(B, T, H, Dv).to(dtype=x.dtype)
+                audit_gdn_boundary(
+                    "norm_qkv",
+                    audit_call_index,
+                    q=q,
+                    k=k,
+                    v=v,
+                )
+
+        assert q is not None and k is not None and v is not None
 
         with profile_range("gdn.gates"):
             if self.gates_fp32:
@@ -749,16 +792,37 @@ class GatedDeltaNet(nn.Module):
             with profile_range("gdn.output_gate"):
                 with profile_range("gdn.output_gate_proj"):
                     g_out = self.w_g(x).view(B, T, H, Dv)
-                with profile_range("gdn.output_norm"):
-                    if self.output_norm_fp32:
-                        o = rms_norm(o.float()).to(x.dtype)
-                    else:
-                        o = rms_norm(o).to(dtype=x.dtype)
-                audit_gdn_boundary(
-                    "output_gate_inputs", audit_call_index, o=o, g_out=g_out
-                )
-                with profile_range("gdn.output_gate_mul"):
-                    o = o * F.silu(g_out)
+                if self.use_cuda_fused_output:
+                    if audit_call_index is not None:
+                        if self.output_norm_fp32:
+                            audit_o = rms_norm(o.float()).to(x.dtype)
+                        else:
+                            audit_o = rms_norm(o).to(dtype=x.dtype)
+                        audit_gdn_boundary(
+                            "output_gate_inputs",
+                            audit_call_index,
+                            o=audit_o,
+                            g_out=g_out,
+                        )
+                    with profile_range("gdn.output_fused"):
+                        o = fused_rmsnorm_silu_gate(
+                            o,
+                            g_out,
+                            eps=1e-6,
+                            fp32_accum=self.output_norm_fp32,
+                            enabled=True,
+                        )
+                else:
+                    with profile_range("gdn.output_norm"):
+                        if self.output_norm_fp32:
+                            o = rms_norm(o.float()).to(x.dtype)
+                        else:
+                            o = rms_norm(o).to(dtype=x.dtype)
+                    audit_gdn_boundary(
+                        "output_gate_inputs", audit_call_index, o=o, g_out=g_out
+                    )
+                    with profile_range("gdn.output_gate_mul"):
+                        o = o * F.silu(g_out)
             audit_gdn_boundary("output_proj_input", audit_call_index, o=o)
 
             with profile_range("gdn.output_proj"):
@@ -958,6 +1022,8 @@ class GDNBlock(nn.Module):
         v_conv_output_contiguous: bool | None = None,
         gates_fp32: bool = True,
         output_norm_fp32: bool = True,
+        use_cuda_fused_frontend: bool = False,
+        use_cuda_fused_output: bool = False,
         leaky_slope: float = 0.5,
         norm_style: NormStyle = "pre",
         residual_alpha: float = 1.0,
@@ -983,6 +1049,8 @@ class GDNBlock(nn.Module):
         :param bool | None v_conv_output_contiguous: Optional v-path override for contiguous conv outputs, defaults to None.
         :param bool gates_fp32: Whether to keep the decay-gate softplus path in fp32, defaults to True.
         :param bool output_norm_fp32: Whether to keep the post-recurrence RMSNorm in fp32 before casting back to the activation dtype, defaults to True.
+        :param bool use_cuda_fused_frontend: Whether to route the packed qkv post-projection conv+q/k norm front-end through the optional CUDA extension, defaults to False.
+        :param bool use_cuda_fused_output: Whether to route the output RMSNorm*SiLU(gate) path through the optional CUDA extension, defaults to False.
         :param float leaky_slope: LeakyReLU slope, defaults to 0.5.
         :param NormStyle norm_style: Residual norm placement, defaults to "pre".
         :param float residual_alpha: Residual scaling factor used by KEEL-style blocks, defaults to 1.0.
@@ -1012,6 +1080,8 @@ class GDNBlock(nn.Module):
             v_conv_output_contiguous=v_conv_output_contiguous,
             gates_fp32=gates_fp32,
             output_norm_fp32=output_norm_fp32,
+            use_cuda_fused_frontend=use_cuda_fused_frontend,
+            use_cuda_fused_output=use_cuda_fused_output,
         )
         self.mlp = MLP(dim, mlp_mult, leaky_slope)
         self.attn_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
@@ -1162,6 +1232,8 @@ class HybridGPT(nn.Module):
         gdn_v_conv_output_contiguous: bool | None = None,
         gdn_gates_fp32: bool = True,
         gdn_output_norm_fp32: bool = True,
+        gdn_use_cuda_fused_frontend: bool = False,
+        gdn_use_cuda_fused_output: bool = False,
         # Shared
         mlp_mult: float = 3.0,
         leaky_slope: float = 0.5,
@@ -1197,6 +1269,8 @@ class HybridGPT(nn.Module):
         :param bool | None gdn_v_conv_output_contiguous: Optional v-path override for contiguous conv outputs, defaults to None.
         :param bool gdn_gates_fp32: Whether to keep the decay-gate softplus path in fp32, defaults to True.
         :param bool gdn_output_norm_fp32: Whether to keep the post-recurrence RMSNorm in fp32 before casting back to the activation dtype, defaults to True.
+        :param bool gdn_use_cuda_fused_frontend: Whether to route packed qkv post-projection conv+q/k norm front-ends through the optional CUDA extension, defaults to False.
+        :param bool gdn_use_cuda_fused_output: Whether to route the GDN output RMSNorm*SiLU(gate) path through the optional CUDA extension, defaults to False.
         :param float mlp_mult: MLP expansion factor, defaults to 3.0.
         :param float leaky_slope: LeakyReLU slope, defaults to 0.5.
         :param int gdn_ratio: Number of GDN layers per attention layer, defaults to 3.
@@ -1260,6 +1334,8 @@ class HybridGPT(nn.Module):
                         gdn_v_conv_output_contiguous,
                         gdn_gates_fp32,
                         gdn_output_norm_fp32,
+                        gdn_use_cuda_fused_frontend,
+                        gdn_use_cuda_fused_output,
                         leaky_slope,
                         self.norm_style,
                         self.residual_alpha,

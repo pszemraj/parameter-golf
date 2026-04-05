@@ -3,6 +3,8 @@ __pycache__/
 .DS_Store
 modded-nanogpt/
 modded-nanogpt
+build/
+hgdn_cuda_ext*.so
 data/datasets
 data/manifest.json
 data/docs_selected.jsonl

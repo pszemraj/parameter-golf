@@ -598,6 +598,31 @@ scripts/sweep.sh depth
 
 ## Break-Glass Items
 
+## Current HGDN CUDA fused follow-up
+
+- The optional fused CUDA extension is now in-tree behind:
+  - `GDN_USE_CUDA_FUSED_FRONTEND=1`
+  - `GDN_USE_CUDA_FUSED_OUTPUT=1`
+- Current local status:
+  - build passed in `pg`
+  - direct parity passed
+  - local phase-1 beat the current HGDN winner at the trainer-eager gate
+    - self-device total: `25561.13 -> 21352.84 ms`
+    - console step average: `3320.37 -> 2804.76 ms`
+    - peak allocated memory: `6184 -> 5696 MiB`
+- Keep it experimental until H100 says otherwise.
+- Next H100 sequence, one run at a time:
+  1. `conda run -s --name pg python setup_hgdn_cuda.py build_ext --inplace`
+  2. `conda run -s --name pg python scripts/hgdn_cuda_parity.py`
+  3. `python scripts/hgdn.py preflight --preset current-winner-cuda-fused --compile-strategy hybrid`
+  4. `python scripts/hgdn.py h100-profile hybrid-eager --preset current-winner-cuda-fused --run-prefix h100k8`
+  5. `python scripts/hgdn.py h100-perf perf --preset current-winner-cuda-fused --run-prefix h100k8 --offline`
+  6. `python scripts/hgdn.py h100-profile hybrid --preset current-winner-cuda-fused --run-prefix h100k8`
+- If H100 eager/perf loses, keep the extension in-tree but drop it from the
+  active kernel path and go back to the non-extension current winner.
+- If H100 wins, the next fixed-step quality check should be run on the fused
+  preset before any architecture retune resumes.
+
 ### 1. Graph-break audit with `TORCH_LOGS` / `tlparse`
 
 - Trigger: hybrid remains worse than `1.3x` the depth-control baseline after the current selective-compile quick hits, or compile-time behavior becomes erratic across repeated runs.

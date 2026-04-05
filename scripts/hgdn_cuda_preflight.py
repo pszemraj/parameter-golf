@@ -18,6 +18,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from hgdn_cuda import extension_status  # noqa: E402
 from local_env import env_flag  # noqa: E402
 from model import GatedDeltaNet, HybridGPT  # noqa: E402
 from train_gpt_hybrid import (  # noqa: E402
@@ -89,6 +90,8 @@ def run_gdn_eager() -> PreflightResult:
             ),
             gates_fp32=env_flag("GDN_GATES_FP32", True),
             output_norm_fp32=env_flag("GDN_OUTPUT_NORM_FP32", True),
+            use_cuda_fused_frontend=env_flag("GDN_USE_CUDA_FUSED_FRONTEND"),
+            use_cuda_fused_output=env_flag("GDN_USE_CUDA_FUSED_OUTPUT"),
         )
     )
     x = torch.randn(
@@ -147,6 +150,8 @@ def run_hybrid_case(*, compiled: bool) -> PreflightResult:
             ),
             gdn_gates_fp32=env_flag("GDN_GATES_FP32", True),
             gdn_output_norm_fp32=env_flag("GDN_OUTPUT_NORM_FP32", True),
+            gdn_use_cuda_fused_frontend=env_flag("GDN_USE_CUDA_FUSED_FRONTEND"),
+            gdn_use_cuda_fused_output=env_flag("GDN_USE_CUDA_FUSED_OUTPUT"),
             gdn_ratio=1,
             mlp_mult=2.0,
             norm_style="pre",
@@ -181,6 +186,7 @@ def main() -> None:
     torch.cuda.manual_seed_all(1337)
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
+    print(f"hgdn_cuda_extension:{extension_status()}")
 
     results = [
         run_gdn_eager(),

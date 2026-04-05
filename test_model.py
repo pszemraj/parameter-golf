@@ -4,6 +4,9 @@ import tempfile
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
+
+from hgdn_cuda import packed_qkv_frontend_reference, rmsnorm_silu_gate_reference
 
 from model import (
     SCALAR_PARAM_PATTERNS,
@@ -12,6 +15,7 @@ from model import (
     HybridGPT,
     gdn_recurrent_naive,
     l2_norm,
+    rms_norm,
     make_baseline_fill,
     make_attention_only_baseline,
     make_hybrid_tight,
@@ -329,6 +333,129 @@ def test_gdn_packed_qkv_proj_conv_matches_separate_path():
     x = torch.randn(2, 32, 64)
     torch.testing.assert_close(separate(x), packed(x), atol=1e-5, rtol=1e-5)
     print("  ✓ packed qkv projection+conv matches separate path")
+
+
+def test_packed_qkv_frontend_reference_matches_eager_ops():
+    """Reference packed front-end should match the eager packed conv + q/k norm path."""
+    torch.manual_seed(42)
+    layer = GatedDeltaNet(
+        d_model=64,
+        n_heads=4,
+        head_k_dim=8,
+        expand_v=1.0,
+        allow_neg_eigval=True,
+        conv_size=4,
+        use_fla=False,
+        use_packed_qkv_conv=True,
+        use_packed_qkv_proj=True,
+        conv_output_contiguous=True,
+    )
+    x = torch.randn(2, 32, 64)
+    qkv = layer.w_qkv.forward_packed(x)
+    q_ref, k_ref, v_ref = packed_qkv_frontend_reference(
+        qkv,
+        layer.qkv_conv.conv.weight.view(layer.qkv_conv.conv.weight.shape[0], -1),
+        n_heads=layer.n_heads,
+        head_k_dim=layer.head_k_dim,
+        head_v_dim=layer.head_v_dim,
+    )
+    q_eager, k_eager, v_eager = layer.qkv_conv.forward_packed(qkv)
+    q_eager = l2_norm(
+        q_eager.view(x.size(0), x.size(1), layer.n_heads, layer.head_k_dim)
+    )
+    k_eager = l2_norm(
+        k_eager.view(x.size(0), x.size(1), layer.n_heads, layer.head_k_dim)
+    )
+    v_eager = v_eager.view(x.size(0), x.size(1), layer.n_heads, layer.head_v_dim)
+    torch.testing.assert_close(q_ref, q_eager, atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(k_ref, k_eager, atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(v_ref, v_eager, atol=1e-6, rtol=1e-6)
+    print("  ✓ packed qkv frontend reference matches eager ops")
+
+
+def test_rmsnorm_silu_gate_reference_matches_eager_ops():
+    """Reference output fuse should match RMSNorm(o) * SiLU(gate)."""
+    torch.manual_seed(42)
+    o = torch.randn(2, 16, 4, 8, requires_grad=True)
+    gate = torch.randn(2, 16, 4, 8, requires_grad=True)
+    ref = rmsnorm_silu_gate_reference(o, gate, fp32_accum=True)
+    eager = rms_norm(o.float()).to(o.dtype) * F.silu(gate)
+    torch.testing.assert_close(ref, eager, atol=1e-6, rtol=1e-6)
+
+    grad = torch.randn_like(ref)
+    ref.backward(grad, retain_graph=True)
+    ref_go, ref_gg = o.grad.clone(), gate.grad.clone()
+    o.grad = None
+    gate.grad = None
+    eager.backward(grad)
+    torch.testing.assert_close(ref_go, o.grad, atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(ref_gg, gate.grad, atol=1e-6, rtol=1e-6)
+    print("  ✓ rmsnorm*silu reference matches eager ops")
+
+
+def test_gdn_cuda_fused_flags_validate_requirements():
+    """Reject fused HGDN settings that the CUDA kernels do not implement."""
+    try:
+        GatedDeltaNet(
+            d_model=64,
+            n_heads=4,
+            head_k_dim=8,
+            expand_v=1.0,
+            use_cuda_fused_frontend=True,
+        )
+        raise AssertionError("Expected fused frontend to require packed qkv proj+conv")
+    except ValueError:
+        pass
+    try:
+        GatedDeltaNet(
+            d_model=64,
+            n_heads=4,
+            head_k_dim=8,
+            expand_v=1.0,
+            use_cuda_fused_output=True,
+            output_norm_fp32=False,
+        )
+        raise AssertionError("Expected fused output to require output_norm_fp32")
+    except ValueError:
+        pass
+    print("  ✓ fused HGDN flag validation OK")
+
+
+def test_gdn_cuda_fused_cpu_fallback_matches_packed_path():
+    """CPU fallback for fused HGDN paths should preserve outputs and gradients."""
+    torch.manual_seed(42)
+    kwargs = dict(
+        d_model=64,
+        n_heads=4,
+        head_k_dim=8,
+        expand_v=1.0,
+        allow_neg_eigval=True,
+        conv_size=4,
+        use_fla=False,
+        use_packed_qkv_conv=True,
+        use_packed_qkv_proj=True,
+        conv_output_contiguous=True,
+        output_norm_fp32=True,
+    )
+    eager = GatedDeltaNet(**kwargs)
+    fused = GatedDeltaNet(
+        **kwargs,
+        use_cuda_fused_frontend=True,
+        use_cuda_fused_output=True,
+    )
+    fused.load_state_dict(eager.state_dict(), strict=True)
+
+    x_eager = torch.randn(2, 32, 64, requires_grad=True)
+    x_fused = x_eager.detach().clone().requires_grad_(True)
+    y_eager = eager(x_eager)
+    y_fused = fused(x_fused)
+    torch.testing.assert_close(y_fused, y_eager, atol=1e-5, rtol=1e-5)
+
+    grad = torch.randn_like(y_eager)
+    y_eager.backward(grad, retain_graph=True)
+    y_fused.backward(grad)
+    torch.testing.assert_close(x_fused.grad, x_eager.grad, atol=1e-5, rtol=1e-5)
+    print("  ✓ fused HGDN CPU fallback matches packed path")
 
 
 def test_gdn_conv_output_contiguous():
@@ -705,6 +832,22 @@ if __name__ == "__main__":
         (
             "Packed qkv projection+conv parity",
             test_gdn_packed_qkv_proj_conv_matches_separate_path,
+        ),
+        (
+            "Packed qkv frontend reference parity",
+            test_packed_qkv_frontend_reference_matches_eager_ops,
+        ),
+        (
+            "RMSNorm*SiLU reference parity",
+            test_rmsnorm_silu_gate_reference_matches_eager_ops,
+        ),
+        (
+            "Fused HGDN flag validation",
+            test_gdn_cuda_fused_flags_validate_requirements,
+        ),
+        (
+            "Fused HGDN CPU fallback parity",
+            test_gdn_cuda_fused_cpu_fallback_matches_packed_path,
         ),
         ("Hybrid fwd/bwd", test_hybrid_fwd_bwd),
         ("Norm styles", test_norm_styles),

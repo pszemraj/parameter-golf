@@ -36,6 +36,15 @@ HGDN_PRESETS: dict[str, dict[str, str]] = {
         "GDN_USE_PACKED_QKV_PROJ": "1",
         "GDN_CONTROL_PROJ_FP32": "0",
     },
+    "current-winner-cuda-fused": {
+        "GDN_CONV_OUTPUT_CONTIGUOUS": "1",
+        "GDN_USE_PACKED_QKV_CONV": "1",
+        "GDN_USE_PACKED_QKV_PROJ": "1",
+        "GDN_CONTROL_PROJ_FP32": "0",
+        "GDN_OUTPUT_NORM_FP32": "1",
+        "GDN_USE_CUDA_FUSED_FRONTEND": "1",
+        "GDN_USE_CUDA_FUSED_OUTPUT": "1",
+    },
 }
 
 COMMON_ENV_ARGS: tuple[tuple[str, str], ...] = (
@@ -195,6 +204,21 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
         help="Set GDN_CONTROL_PROJ_FP32=0.",
     )
     parser.add_argument(
+        "--cuda-fused-frontend",
+        action="store_true",
+        help="Set GDN_USE_CUDA_FUSED_FRONTEND=1.",
+    )
+    parser.add_argument(
+        "--cuda-fused-output",
+        action="store_true",
+        help="Set GDN_USE_CUDA_FUSED_OUTPUT=1.",
+    )
+    parser.add_argument(
+        "--cuda-jit-build",
+        action="store_true",
+        help="Set GDN_CUDA_ALLOW_JIT_BUILD=1.",
+    )
+    parser.add_argument(
         "--set",
         metavar="KEY=VALUE",
         action="append",
@@ -223,7 +247,8 @@ def parse_args() -> argparse.Namespace:
             "  conda run -s --name pg python scripts/hgdn.py arch-size-screen --config configs/hgdn/current_winner_retune.toml\n"
             "  conda run -s --name pg python scripts/hgdn.py fixed2k-compare --name h100k6_fixed2k_hybrid_r1_mlp3.25_seq2048 --name h100k6_fixed2k_depth_mlp4.0_seq2048 --reference h100k6_fixed2k_hybrid_r1_mlp3.25_seq2048\n"
             "  python scripts/hgdn.py local-phase1 --config configs/hgdn/current_winner.toml --run-prefix rtx4070_phase1\n"
-            "  python scripts/hgdn.py preflight --preset current-winner"
+            "  python scripts/hgdn.py preflight --preset current-winner\n"
+            "  conda run -s --name pg python scripts/hgdn.py preflight --preset current-winner-cuda-fused"
         ),
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -374,6 +399,12 @@ def build_env(args: argparse.Namespace) -> dict[str, str]:
         env["GDN_CONV_OUTPUT_CONTIGUOUS"] = "1"
     if args.control_proj_bf16:
         env["GDN_CONTROL_PROJ_FP32"] = "0"
+    if args.cuda_fused_frontend:
+        env["GDN_USE_CUDA_FUSED_FRONTEND"] = "1"
+    if args.cuda_fused_output:
+        env["GDN_USE_CUDA_FUSED_OUTPUT"] = "1"
+    if args.cuda_jit_build:
+        env["GDN_CUDA_ALLOW_JIT_BUILD"] = "1"
 
     for raw in args.set:
         key, value = parse_kv_assignment(raw)

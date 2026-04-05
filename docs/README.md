@@ -88,6 +88,7 @@ What has not been claimed:
 
 - `scripts/hgdn.py`: preferred structured launcher for HGDN helpers, with subcommands, named presets, and optional TOML env configs
 - `configs/hgdn/current_winner.toml`: reusable config for the current local HGDN kernel winner
+- `configs/hgdn/current_winner_cuda_fused.toml`: experimental fused-CUDA variant of the current HGDN kernel winner
 - `scripts/screen_hgdn_arch_sizes.py`: CPU-only artifact-proxy screen for resized HGDN architecture candidates
 - `scripts/compare_hgdn_fixed2k.py`: structured W&B comparator for completed HGDN fixed-step H100 runs
 - `configs/hgdn/current_winner_retune.toml`: first-pass retune family around the current HGDN kernel winner
@@ -103,6 +104,10 @@ What has not been claimed:
 - `scripts/analyze_hgdn_phase1.py`: bucket-attribution and boundary-audit analyzer for phase-1 bundles
 - `scripts/compare_hgdn_phase1.py`: structured before/after comparator for two local phase-1 bundles
 - `scripts/run_laptop_norm_compare.sh`: 1x laptop GPU helper for fixed-step `pre/post/keel` norm screens
+- `setup_hgdn_cuda.py`: in-repo build entrypoint for the optional HGDN fused CUDA extension
+- `scripts/build_hgdn_cuda.sh`: thin shell wrapper around the HGDN fused CUDA build
+- `scripts/hgdn_cuda_parity.py`: direct CUDA-vs-reference parity checks for the HGDN fused extension
+- `docs/HGDN_CUDA_FUSED.md`: extension layout, build notes, parity commands, and staged validation guidance
 - `docs/HARDWARE_TRANSFER.md`: what does and does not transfer from local 4070 profiling to 1xH100 profiling
 - `docs/REDUNDANCY_AUDIT.md`: interim audit of duplication, dead code, and consolidation targets before more kernel work
 - `docs/PROFILING_LOG.md`: tracked profiler checkpoints and conclusions that should survive beyond raw `profiles/` bundles
@@ -129,6 +134,7 @@ Current named presets:
 - `convcontig`
 - `packed-qkv`
 - `current-winner`
+- `current-winner-cuda-fused`
 
 Current best local HGDN kernel preset:
 
@@ -139,6 +145,19 @@ Current best local HGDN kernel preset:
   - `GDN_USE_PACKED_QKV_PROJ=1`
   - `GDN_CONTROL_PROJ_FP32=0`
 
+Experimental fused-CUDA HGDN preset:
+
+- `current-winner-cuda-fused`
+- equivalent to:
+  - `current-winner`
+  - `GDN_OUTPUT_NORM_FP32=1`
+  - `GDN_USE_CUDA_FUSED_FRONTEND=1`
+  - `GDN_USE_CUDA_FUSED_OUTPUT=1`
+- status:
+  - local build/parity passed in `pg`
+  - local phase-1 improved the current winner on trainer eager step time
+  - still waiting on H100 validation before promotion
+
 Examples:
 
 ```bash
@@ -147,6 +166,18 @@ python scripts/hgdn.py preflight --preset current-winner
 
 ```bash
 python scripts/hgdn.py local-phase1 --preset current-winner --run-prefix rtx4070_phase1
+```
+
+```bash
+conda run -s --name pg python setup_hgdn_cuda.py build_ext --inplace
+```
+
+```bash
+conda run -s --name pg python scripts/hgdn_cuda_parity.py
+```
+
+```bash
+python scripts/hgdn.py preflight --preset current-winner-cuda-fused --compile-strategy hybrid
 ```
 
 ```bash

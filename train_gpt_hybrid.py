@@ -175,6 +175,12 @@ class Hyperparameters:
     gdn_control_proj_fp32 = bool(int(os.environ.get("GDN_CONTROL_PROJ_FP32", "1")))
     gdn_gates_fp32 = bool(int(os.environ.get("GDN_GATES_FP32", "1")))
     gdn_output_norm_fp32 = bool(int(os.environ.get("GDN_OUTPUT_NORM_FP32", "1")))
+    gdn_use_cuda_fused_frontend = bool(
+        int(os.environ.get("GDN_USE_CUDA_FUSED_FRONTEND", "0"))
+    )
+    gdn_use_cuda_fused_output = bool(
+        int(os.environ.get("GDN_USE_CUDA_FUSED_OUTPUT", "0"))
+    )
     gdn_ratio = int(os.environ.get("GDN_RATIO", 3))  # 3 GDN : 1 Attn
 
     # Optimizer
@@ -998,7 +1004,9 @@ def main() -> None:
         f"v_output_contiguous={int(args.gdn_v_conv_output_contiguous)} "
         f"control_proj_fp32={int(args.gdn_control_proj_fp32)} "
         f"gates_fp32={int(args.gdn_gates_fp32)} "
-        f"output_norm_fp32={int(args.gdn_output_norm_fp32)}",
+        f"output_norm_fp32={int(args.gdn_output_norm_fp32)} "
+        f"cuda_fused_frontend={int(args.gdn_use_cuda_fused_frontend)} "
+        f"cuda_fused_output={int(args.gdn_use_cuda_fused_output)}",
         console=False,
     )
     if args.profile:
@@ -1087,6 +1095,8 @@ def main() -> None:
             gdn_v_conv_output_contiguous=args.gdn_v_conv_output_contiguous,
             gdn_gates_fp32=args.gdn_gates_fp32,
             gdn_output_norm_fp32=args.gdn_output_norm_fp32,
+            gdn_use_cuda_fused_frontend=args.gdn_use_cuda_fused_frontend,
+            gdn_use_cuda_fused_output=args.gdn_use_cuda_fused_output,
             mlp_mult=args.mlp_mult,
             leaky_slope=args.leaky_slope,
             gdn_ratio=args.gdn_ratio,
@@ -1163,6 +1173,8 @@ def main() -> None:
                 "gdn_control_proj_fp32": args.gdn_control_proj_fp32,
                 "gdn_gates_fp32": args.gdn_gates_fp32,
                 "gdn_output_norm_fp32": args.gdn_output_norm_fp32,
+                "gdn_use_cuda_fused_frontend": args.gdn_use_cuda_fused_frontend,
+                "gdn_use_cuda_fused_output": args.gdn_use_cuda_fused_output,
                 "wandb_watch": wandb_watch_mode,
                 "wandb_watch_log_freq": args.wandb_watch_log_freq,
             }
