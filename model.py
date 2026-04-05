@@ -20,6 +20,7 @@ from typing import Literal, Optional
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
+from torch.nn import grad as nn_grad
 
 from hgdn_cuda import fused_packed_qkv_frontend, fused_rmsnorm_silu_gate
 
@@ -345,16 +346,19 @@ class PackedCausalConv1d(nn.Module):
         dims: tuple[int, int, int],
         kernel_size: int = 4,
         output_contiguous: bool = False,
+        use_custom_backward: bool = False,
     ):
         """Initialize the packed causal depthwise convolution.
 
         :param tuple[int, int, int] dims: Channel counts for q, k, and v paths.
         :param int kernel_size: Convolution kernel width, defaults to 4.
         :param bool output_contiguous: Whether to materialize contiguous `(batch, seq, dim)` outputs, defaults to False.
+        :param bool use_custom_backward: Whether to route the packed depthwise conv through an exact-length custom autograd path, defaults to False.
         """
         super().__init__()
         self.dims = dims
         self.output_contiguous = output_contiguous
+        self.use_custom_backward = use_custom_backward
         total_dim = sum(dims)
         self.conv = nn.Conv1d(
             total_dim,
@@ -365,22 +369,115 @@ class PackedCausalConv1d(nn.Module):
             bias=False,
         )
 
+    @staticmethod
+    def _silu_backward(preact: Tensor, grad_output: Tensor) -> Tensor:
+        """Differentiate SiLU with respect to its pre-activation.
+
+        :param Tensor preact: Saved pre-activation tensor.
+        :param Tensor grad_output: Upstream gradient after SiLU.
+        :return Tensor: Gradient with respect to ``preact``.
+        """
+        sigma = torch.sigmoid(preact)
+        return grad_output * sigma * (1.0 + preact * (1.0 - sigma))
+
+    class _PackedDepthwiseCustomBackward(torch.autograd.Function):
+        """Exact-length packed causal depthwise conv with custom backward."""
+
+        @staticmethod
+        def forward(
+            ctx: torch.autograd.function.FunctionCtx,
+            packed: Tensor,
+            weight: Tensor,
+        ) -> Tensor:
+            """Run one packed causal depthwise conv without padded tail outputs.
+
+            :param torch.autograd.function.FunctionCtx ctx: Autograd context.
+            :param Tensor packed: Packed q/k/v tensor shaped ``(batch, seq, channels)``.
+            :param Tensor weight: Depthwise conv weights shaped ``(channels, 1, kernel)``.
+            :return Tensor: Packed convolved tensor shaped ``(batch, seq, channels)``.
+            """
+            kernel = weight.shape[-1]
+            groups = weight.shape[0]
+            with profile_range("gdn.qkv_conv_input_transpose"):
+                packed_t = packed.transpose(1, 2)
+            with profile_range("gdn.qkv_conv_left_pad"):
+                packed_pad = F.pad(packed_t, (kernel - 1, 0))
+            with profile_range("gdn.qkv_conv_depthwise"):
+                preact = F.conv1d(packed_pad, weight, groups=groups)
+            with profile_range("gdn.qkv_conv_silu"):
+                packed_out = F.silu(preact)
+            with profile_range("gdn.qkv_conv_output_transpose"):
+                packed_out = packed_out.transpose(1, 2)
+            ctx.save_for_backward(packed_pad, weight, preact)
+            return packed_out
+
+        @staticmethod
+        def backward(
+            ctx: torch.autograd.function.FunctionCtx,
+            grad_packed_out: Tensor,
+        ) -> tuple[Tensor | None, Tensor | None]:
+            """Backprop through the exact-length packed causal depthwise conv.
+
+            :param torch.autograd.function.FunctionCtx ctx: Autograd context.
+            :param Tensor grad_packed_out: Upstream packed gradient.
+            :return tuple[Tensor | None, Tensor | None]: Gradients for packed input and conv weights.
+            """
+            packed_pad, weight, preact = ctx.saved_tensors
+            grad_packed = None
+            grad_weight = None
+            with profile_range("gdn.qkv_conv_bwd_output_transpose"):
+                grad_out_t = grad_packed_out.transpose(1, 2).contiguous()
+            with profile_range("gdn.qkv_conv_bwd_silu"):
+                grad_preact = PackedCausalConv1d._silu_backward(preact, grad_out_t)
+            groups = weight.shape[0]
+            kernel = weight.shape[-1]
+            if ctx.needs_input_grad[0]:
+                with profile_range("gdn.qkv_conv_bwd_input_grad"):
+                    grad_pad = nn_grad.conv1d_input(
+                        packed_pad.shape,
+                        weight,
+                        grad_preact,
+                        stride=1,
+                        padding=0,
+                        dilation=1,
+                        groups=groups,
+                    )
+                with profile_range("gdn.qkv_conv_bwd_input_trim"):
+                    grad_packed = (
+                        grad_pad[..., kernel - 1 :].transpose(1, 2).contiguous()
+                    )
+            if ctx.needs_input_grad[1]:
+                with profile_range("gdn.qkv_conv_bwd_weight_grad"):
+                    grad_weight = nn_grad.conv1d_weight(
+                        packed_pad,
+                        weight.shape,
+                        grad_preact,
+                        stride=1,
+                        padding=0,
+                        dilation=1,
+                        groups=groups,
+                    )
+            return grad_packed, grad_weight
+
     def _forward_packed_impl(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor]:
         """Convolve one packed q/k/v tensor and split the result.
 
         :param Tensor x: Packed activations shaped `(batch, seq, q_dim + k_dim + v_dim)`.
         :return tuple[Tensor, Tensor, Tensor]: Convolved q/k/v activations.
         """
-        with profile_range("gdn.qkv_conv_input_transpose"):
-            x = x.transpose(1, 2)
-        with profile_range("gdn.qkv_conv_depthwise"):
-            x = self.conv(x)
-        with profile_range("gdn.qkv_conv_trim"):
-            x = x[..., : x.size(-1) - (self.conv.kernel_size[0] - 1)]
-        with profile_range("gdn.qkv_conv_silu"):
-            x = F.silu(x)
-        with profile_range("gdn.qkv_conv_output_transpose"):
-            x = x.transpose(1, 2)
+        if self.use_custom_backward:
+            x = self._PackedDepthwiseCustomBackward.apply(x, self.conv.weight)
+        else:
+            with profile_range("gdn.qkv_conv_input_transpose"):
+                x = x.transpose(1, 2)
+            with profile_range("gdn.qkv_conv_depthwise"):
+                x = self.conv(x)
+            with profile_range("gdn.qkv_conv_trim"):
+                x = x[..., : x.size(-1) - (self.conv.kernel_size[0] - 1)]
+            with profile_range("gdn.qkv_conv_silu"):
+                x = F.silu(x)
+            with profile_range("gdn.qkv_conv_output_transpose"):
+                x = x.transpose(1, 2)
         with profile_range("gdn.qkv_conv_split"):
             q_dim, k_dim, v_dim = self.dims
             q, k, v = x.split((q_dim, k_dim, v_dim), dim=-1)
@@ -484,6 +581,7 @@ class GatedDeltaNet(nn.Module):
         output_norm_fp32: bool = True,
         use_cuda_fused_frontend: bool = False,
         use_cuda_fused_output: bool = False,
+        use_packed_qkv_conv_custom_backward: bool = False,
     ):
         """Initialize a Gated DeltaNet block.
 
@@ -507,6 +605,7 @@ class GatedDeltaNet(nn.Module):
         :param bool output_norm_fp32: Whether to keep the post-recurrence RMSNorm in fp32 before casting back to the activation dtype, defaults to True.
         :param bool use_cuda_fused_frontend: Whether to route the packed qkv post-projection conv+q/k norm front-end through the optional CUDA extension, defaults to False.
         :param bool use_cuda_fused_output: Whether to route the output RMSNorm*SiLU(gate) path through the optional CUDA extension, defaults to False.
+        :param bool use_packed_qkv_conv_custom_backward: Whether to route the packed depthwise qkv conv through an exact-length custom autograd path, defaults to False.
         """
         super().__init__()
         self.d_model = d_model
@@ -522,6 +621,7 @@ class GatedDeltaNet(nn.Module):
         self.use_cuda_fused_output = use_cuda_fused_output
         self.use_packed_qkv_conv = use_packed_qkv_conv
         self.use_packed_qkv_proj = use_packed_qkv_proj
+        self.use_packed_qkv_conv_custom_backward = use_packed_qkv_conv_custom_backward
         q_conv_output_contiguous = (
             conv_output_contiguous
             if q_conv_output_contiguous is None
@@ -561,11 +661,19 @@ class GatedDeltaNet(nn.Module):
                 )
         if self.use_packed_qkv_proj and not self.use_packed_qkv_conv:
             raise ValueError("use_packed_qkv_proj requires use_packed_qkv_conv")
+        if self.use_packed_qkv_conv_custom_backward and not self.use_packed_qkv_conv:
+            raise ValueError(
+                "use_packed_qkv_conv_custom_backward requires use_packed_qkv_conv"
+            )
         if self.use_cuda_fused_frontend and not (
             self.use_packed_qkv_proj and self.use_packed_qkv_conv
         ):
             raise ValueError(
                 "use_cuda_fused_frontend requires use_packed_qkv_proj and use_packed_qkv_conv"
+            )
+        if self.use_cuda_fused_frontend and self.use_packed_qkv_conv_custom_backward:
+            raise ValueError(
+                "use_cuda_fused_frontend is incompatible with use_packed_qkv_conv_custom_backward"
             )
         if self.use_cuda_fused_output and not self.output_norm_fp32:
             raise ValueError("use_cuda_fused_output requires output_norm_fp32=True")
@@ -605,6 +713,7 @@ class GatedDeltaNet(nn.Module):
                 dims=(total_qk, total_qk, total_v),
                 kernel_size=conv_size,
                 output_contiguous=q_conv_output_contiguous,
+                use_custom_backward=use_packed_qkv_conv_custom_backward,
             )
             self.q_conv = None
             self.k_conv = None
@@ -1024,6 +1133,7 @@ class GDNBlock(nn.Module):
         output_norm_fp32: bool = True,
         use_cuda_fused_frontend: bool = False,
         use_cuda_fused_output: bool = False,
+        use_packed_qkv_conv_custom_backward: bool = False,
         leaky_slope: float = 0.5,
         norm_style: NormStyle = "pre",
         residual_alpha: float = 1.0,
@@ -1051,6 +1161,7 @@ class GDNBlock(nn.Module):
         :param bool output_norm_fp32: Whether to keep the post-recurrence RMSNorm in fp32 before casting back to the activation dtype, defaults to True.
         :param bool use_cuda_fused_frontend: Whether to route the packed qkv post-projection conv+q/k norm front-end through the optional CUDA extension, defaults to False.
         :param bool use_cuda_fused_output: Whether to route the output RMSNorm*SiLU(gate) path through the optional CUDA extension, defaults to False.
+        :param bool use_packed_qkv_conv_custom_backward: Whether to route the packed depthwise qkv conv through an exact-length custom autograd path, defaults to False.
         :param float leaky_slope: LeakyReLU slope, defaults to 0.5.
         :param NormStyle norm_style: Residual norm placement, defaults to "pre".
         :param float residual_alpha: Residual scaling factor used by KEEL-style blocks, defaults to 1.0.
@@ -1082,6 +1193,7 @@ class GDNBlock(nn.Module):
             output_norm_fp32=output_norm_fp32,
             use_cuda_fused_frontend=use_cuda_fused_frontend,
             use_cuda_fused_output=use_cuda_fused_output,
+            use_packed_qkv_conv_custom_backward=use_packed_qkv_conv_custom_backward,
         )
         self.mlp = MLP(dim, mlp_mult, leaky_slope)
         self.attn_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
@@ -1234,6 +1346,7 @@ class HybridGPT(nn.Module):
         gdn_output_norm_fp32: bool = True,
         gdn_use_cuda_fused_frontend: bool = False,
         gdn_use_cuda_fused_output: bool = False,
+        gdn_use_packed_qkv_conv_custom_backward: bool = False,
         # Shared
         mlp_mult: float = 3.0,
         leaky_slope: float = 0.5,
@@ -1271,6 +1384,7 @@ class HybridGPT(nn.Module):
         :param bool gdn_output_norm_fp32: Whether to keep the post-recurrence RMSNorm in fp32 before casting back to the activation dtype, defaults to True.
         :param bool gdn_use_cuda_fused_frontend: Whether to route packed qkv post-projection conv+q/k norm front-ends through the optional CUDA extension, defaults to False.
         :param bool gdn_use_cuda_fused_output: Whether to route the GDN output RMSNorm*SiLU(gate) path through the optional CUDA extension, defaults to False.
+        :param bool gdn_use_packed_qkv_conv_custom_backward: Whether to route the packed depthwise qkv conv through an exact-length custom autograd path, defaults to False.
         :param float mlp_mult: MLP expansion factor, defaults to 3.0.
         :param float leaky_slope: LeakyReLU slope, defaults to 0.5.
         :param int gdn_ratio: Number of GDN layers per attention layer, defaults to 3.
@@ -1336,6 +1450,7 @@ class HybridGPT(nn.Module):
                         gdn_output_norm_fp32,
                         gdn_use_cuda_fused_frontend,
                         gdn_use_cuda_fused_output,
+                        gdn_use_packed_qkv_conv_custom_backward,
                         leaky_slope,
                         self.norm_style,
                         self.residual_alpha,

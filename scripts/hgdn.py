@@ -53,6 +53,13 @@ HGDN_PRESETS: dict[str, dict[str, str]] = {
         "GDN_OUTPUT_NORM_FP32": "1",
         "GDN_USE_CUDA_FUSED_OUTPUT": "1",
     },
+    "current-winner-custom-bwd": {
+        "GDN_CONV_OUTPUT_CONTIGUOUS": "1",
+        "GDN_USE_PACKED_QKV_CONV": "1",
+        "GDN_USE_PACKED_QKV_PROJ": "1",
+        "GDN_CONTROL_PROJ_FP32": "0",
+        "GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD": "1",
+    },
 }
 
 COMMON_ENV_ARGS: tuple[tuple[str, str], ...] = (
@@ -225,6 +232,11 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
         "--cuda-jit-build",
         action="store_true",
         help="Set GDN_CUDA_ALLOW_JIT_BUILD=1.",
+    )
+    parser.add_argument(
+        "--packed-qkv-conv-custom-backward",
+        action="store_true",
+        help="Set GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=1.",
     )
     parser.add_argument(
         "--set",
@@ -413,6 +425,8 @@ def build_env(args: argparse.Namespace) -> dict[str, str]:
         env["GDN_USE_CUDA_FUSED_OUTPUT"] = "1"
     if args.cuda_jit_build:
         env["GDN_CUDA_ALLOW_JIT_BUILD"] = "1"
+    if args.packed_qkv_conv_custom_backward:
+        env["GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD"] = "1"
 
     for raw in args.set:
         key, value = parse_kv_assignment(raw)

@@ -1,6 +1,6 @@
 # HGDN Branch Status
 
-Last updated: 2026-04-05 01:05 EDT
+Last updated: 2026-04-05 11:50 EDT
 
 Branch: `exp/hgdn`
 
@@ -88,6 +88,7 @@ What has not been claimed:
 
 - `scripts/hgdn.py`: preferred structured launcher for HGDN helpers, with subcommands, named presets, and optional TOML env configs
 - `configs/hgdn/current_winner.toml`: reusable config for the current local HGDN kernel winner
+- `configs/hgdn/current_winner_custombwd.toml`: reusable config for the packed depthwise custom-backward candidate layered on the current winner
 - `configs/hgdn/current_winner_cuda_fused.toml`: experimental fused-CUDA variant of the current HGDN kernel winner
 - `scripts/screen_hgdn_arch_sizes.py`: CPU-only artifact-proxy screen for resized HGDN architecture candidates
 - `scripts/compare_hgdn_fixed2k.py`: structured W&B comparator for completed HGDN fixed-step H100 runs
@@ -134,6 +135,7 @@ Current named presets:
 - `convcontig`
 - `packed-qkv`
 - `current-winner`
+- `current-winner-custom-bwd`
 - `current-winner-cuda-fused`
 - `current-winner-cuda-output-only`
 
@@ -173,6 +175,19 @@ Experimental output-only fused preset:
   - local phase-1 lost slightly vs the non-extension current winner
   - keep it as a parked experiment surface, not an active H100 candidate
 
+Experimental packed depthwise custom-backward preset:
+
+- `current-winner-custom-bwd`
+- equivalent to:
+  - `current-winner`
+  - `GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=1`
+- status:
+  - local parity tests pass
+  - local hotpath and local phase-1 both show real depthwise-bucket reductions
+  - the short phase-1 trainer console average was noisy, so it was re-checked with a stable local compiled perf pair
+  - stable local compiled perf on the 4070 with `TORCH_BLAS_PREFER_CUBLASLT=1` improved from `2191.34 ms` to `2126.57 ms` (`-2.96%`)
+  - H100 confirmation is still pending, so keep it experimental for now
+
 Examples:
 
 ```bash
@@ -197,6 +212,10 @@ python scripts/hgdn.py preflight --preset current-winner-cuda-fused --compile-st
 
 ```bash
 python scripts/hgdn.py preflight --preset current-winner-cuda-output-only --compile-strategy hybrid
+```
+
+```bash
+python scripts/hgdn.py preflight --preset current-winner-custom-bwd --compile-strategy model
 ```
 
 ```bash

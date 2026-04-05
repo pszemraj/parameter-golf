@@ -1,9 +1,100 @@
 # Profiling Log
 
-Last updated: 2026-04-05 05:00 EDT
+Last updated: 2026-04-05 11:50 EDT
 
 This file records profiler-driven checkpoints that should survive beyond the raw
 artifacts under `profiles/`.
+
+## 2026-04-05 — Packed depthwise custom backward promoted to H100-candidate status (`rtx4070_phase1_custombwd_fix1`)
+
+Bundle:
+
+- local candidate bundle:
+  - `profiles/rtx4070_phase1_custombwd_fix1/`
+- direct comparison against the active non-extension winner:
+  - `profiles/rtx4070_phase1_custombwd_fix1/compare_vs_rtx4070_cuda_base/comparison.md`
+- stable local compiled perf pair:
+  - baseline run id: `rtx4070_perf_currentwinner_cmp`
+  - candidate run id: `rtx4070_perf_custombwd_cmp`
+
+Contract:
+
+- GPU: local RTX 4070 laptop
+- active baseline:
+  - `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+  - `GDN_USE_PACKED_QKV_CONV=1`
+  - `GDN_USE_PACKED_QKV_PROJ=1`
+  - `GDN_CONTROL_PROJ_FP32=0`
+- candidate delta:
+  - `GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=1`
+- important local perf guardrail:
+  - `TORCH_BLAS_PREFER_CUBLASLT=1`
+- compile mode used for the decision pass:
+  - `COMPILE_STRATEGY=model`
+
+### Main finding
+
+This candidate stays alive and is worth H100 confirmation.
+
+The first local read was mixed:
+
+- local phase-1 trainer eager self-device total improved materially
+- the short phase-1 trainer console step average moved only slightly and looked inconclusive
+- an earlier tiny preflight under `COMPILE_STRATEGY=hybrid` looked much worse
+
+That was not strong enough to promote on its own, so it was re-checked with a
+stable compiled local perf pair under the branch's actual compile path:
+
+- baseline compiled perf: `2191.34 ms`
+- candidate compiled perf: `2126.57 ms`
+- delta: `-64.77 ms` (`-2.96%`)
+
+That resolves the ambiguity well enough to keep the path as the next H100
+kernel candidate.
+
+### Why it is plausible
+
+The custom path keeps the same packed qkv front-end math, but swaps the padded
+tail-trimmed packed depthwise conv for an exact-length custom autograd path
+with explicit input-grad and weight-grad attribution.
+
+Local phase-1 and hotpath reads both show the expected depthwise reductions:
+
+- trainer eager:
+  - `aten::copy_`: `785.65 -> 535.24 ms`
+  - `gdn.recurrence`: `177.23 -> 131.03 ms`
+  - `aten::convolution_backward`: `174.81 -> 132.06 ms`
+  - `aten::_conv_depthwise2d`: `141.31 -> 100.63 ms`
+- hybrid forward/backward:
+  - `aten::copy_`: `13.58 -> 10.68 ms`
+  - `gdn.recurrence`: `46.06 -> 35.17 ms`
+
+The new explicit backward subranges now identify where the packed front-end
+backward time is going:
+
+- `gdn.qkv_conv_bwd_silu`
+- `gdn.qkv_conv_bwd_input_grad`
+- `gdn.qkv_conv_bwd_weight_grad`
+- `gdn.qkv_conv_bwd_input_trim`
+
+### Important caveat
+
+Do not treat the earlier `COMPILE_STRATEGY=hybrid` preflight regression as the
+main decision signal. The branch-standard compile path is `model`, and that is
+the path that produced the stable local perf win.
+
+### Decision
+
+Keep the code as an experimental preset:
+
+- `current-winner-custom-bwd`
+
+Do not make it the default yet. The next required gate is H100:
+
+1. preflight
+2. eager hybrid profile
+3. compiled perf
+4. compiled profile
 
 ## 2026-04-05 — Current-winner packed front-end subrange breakdown (`current_winner_qkvbreakdown`)
 

@@ -335,6 +335,88 @@ def test_gdn_packed_qkv_proj_conv_matches_separate_path():
     print("  ✓ packed qkv projection+conv matches separate path")
 
 
+def test_gdn_packed_qkv_custom_backward_matches_default_path():
+    """Packed qkv custom backward should preserve forward and gradient parity."""
+    torch.manual_seed(42)
+    kwargs = dict(
+        d_model=64,
+        n_heads=4,
+        head_k_dim=8,
+        expand_v=1.0,
+        allow_neg_eigval=True,
+        conv_size=4,
+        use_fla=False,
+        use_packed_qkv_conv=True,
+        use_packed_qkv_proj=True,
+        conv_output_contiguous=True,
+    )
+    eager = GatedDeltaNet(**kwargs)
+    custom = GatedDeltaNet(**kwargs, use_packed_qkv_conv_custom_backward=True)
+    custom.load_state_dict(eager.state_dict(), strict=True)
+
+    x_eager = torch.randn(2, 32, 64, requires_grad=True)
+    x_custom = x_eager.detach().clone().requires_grad_(True)
+    grad = torch.randn_like(x_eager)
+
+    out_eager = eager(x_eager)
+    out_custom = custom(x_custom)
+    torch.testing.assert_close(out_custom, out_eager, atol=1e-6, rtol=1e-6)
+
+    out_eager.backward(grad, retain_graph=True)
+    out_custom.backward(grad)
+    torch.testing.assert_close(x_custom.grad, x_eager.grad, atol=1e-5, rtol=1e-5)
+
+    eager_grads = dict(eager.named_parameters())
+    custom_grads = dict(custom.named_parameters())
+    for name in [
+        "w_qkv.linear.weight",
+        "qkv_conv.conv.weight",
+        "w_a.weight",
+        "w_out.weight",
+    ]:
+        torch.testing.assert_close(
+            custom_grads[name].grad,
+            eager_grads[name].grad,
+            atol=1e-5,
+            rtol=1e-5,
+        )
+    print("  ✓ packed qkv custom backward matches default path")
+
+
+def test_gdn_packed_qkv_custom_backward_validation():
+    """Packed qkv custom backward should only run on the non-fused packed path."""
+    try:
+        GatedDeltaNet(
+            d_model=64,
+            n_heads=4,
+            head_k_dim=8,
+            expand_v=1.0,
+            use_packed_qkv_conv_custom_backward=True,
+        )
+        raise AssertionError(
+            "Expected packed qkv custom backward to require packed qkv conv"
+        )
+    except ValueError:
+        pass
+    try:
+        GatedDeltaNet(
+            d_model=64,
+            n_heads=4,
+            head_k_dim=8,
+            expand_v=1.0,
+            use_packed_qkv_conv=True,
+            use_packed_qkv_proj=True,
+            use_packed_qkv_conv_custom_backward=True,
+            use_cuda_fused_frontend=True,
+        )
+        raise AssertionError(
+            "Expected packed qkv custom backward to reject the CUDA fused frontend"
+        )
+    except ValueError:
+        pass
+    print("  ✓ packed qkv custom backward validates requirements")
+
+
 def test_packed_qkv_frontend_reference_matches_eager_ops():
     """Reference packed front-end should match the eager packed conv + q/k norm path."""
     torch.manual_seed(42)
@@ -832,6 +914,14 @@ if __name__ == "__main__":
         (
             "Packed qkv projection+conv parity",
             test_gdn_packed_qkv_proj_conv_matches_separate_path,
+        ),
+        (
+            "Packed qkv custom backward parity",
+            test_gdn_packed_qkv_custom_backward_matches_default_path,
+        ),
+        (
+            "Packed qkv custom backward validation",
+            test_gdn_packed_qkv_custom_backward_validation,
         ),
         (
             "Packed qkv frontend reference parity",

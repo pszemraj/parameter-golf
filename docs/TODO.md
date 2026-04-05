@@ -4,6 +4,33 @@ This file tracks follow-up work that is intentionally not enabled by default in 
 
 ## Active next steps
 
+### Immediate kernel gate
+
+- Status: active.
+- Current experimental candidate:
+  - `current-winner-custom-bwd`
+  - equivalent to:
+    - `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+    - `GDN_USE_PACKED_QKV_CONV=1`
+    - `GDN_USE_PACKED_QKV_PROJ=1`
+    - `GDN_CONTROL_PROJ_FP32=0`
+    - `GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=1`
+- Why it stays alive:
+  - it reduces packed depthwise-related buckets in local profiling
+  - the short local phase-1 trainer average was ambiguous, so it was re-screened with a stable compiled local perf pair
+  - stable local compiled perf on the 4070 with `TORCH_BLAS_PREFER_CUBLASLT=1` improved from `2191.34 ms` to `2126.57 ms` (`-2.96%`)
+- Important caveat:
+  - an earlier tiny preflight with `COMPILE_STRATEGY=hybrid` looked much worse
+  - do not over-index on that result because the active branch compile path is `COMPILE_STRATEGY=model`
+- Next exact step:
+  1. H100 preflight with `--preset current-winner-custom-bwd`
+  2. H100 eager hybrid profile
+  3. H100 compiled perf
+  4. H100 compiled profile
+- Promotion rule:
+  - only promote this path if the H100 perf/profile stack confirms a real gain
+  - otherwise revert it and return to the non-extension current winner
+
 ### 0. Interim cleanup checkpoint from the redundancy audit
 
 - Status: first low-risk consolidation pass done.

@@ -66,10 +66,10 @@ def maybe_freeze_gdn_conv_weights(module: torch.nn.Module) -> None:
         return
     for submodule in module.modules():
         conv = getattr(submodule, "conv", None)
-        if (
-            isinstance(conv, torch.nn.Conv1d)
-            and submodule.__class__.__name__ in {"CausalConv1d", "PackedCausalConv1d"}
-        ):
+        if isinstance(conv, torch.nn.Conv1d) and submodule.__class__.__name__ in {
+            "CausalConv1d",
+            "PackedCausalConv1d",
+        }:
             conv.weight.requires_grad_(False)
 
 
@@ -109,6 +109,9 @@ def run_gdn_eager() -> PreflightResult:
             output_norm_fp32=env_flag("GDN_OUTPUT_NORM_FP32", True),
             use_cuda_fused_frontend=env_flag("GDN_USE_CUDA_FUSED_FRONTEND"),
             use_cuda_fused_output=env_flag("GDN_USE_CUDA_FUSED_OUTPUT"),
+            use_packed_qkv_conv_custom_backward=env_flag(
+                "GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD"
+            ),
         )
     )
     x = torch.randn(
@@ -169,6 +172,9 @@ def run_hybrid_case(*, compiled: bool) -> PreflightResult:
             gdn_output_norm_fp32=env_flag("GDN_OUTPUT_NORM_FP32", True),
             gdn_use_cuda_fused_frontend=env_flag("GDN_USE_CUDA_FUSED_FRONTEND"),
             gdn_use_cuda_fused_output=env_flag("GDN_USE_CUDA_FUSED_OUTPUT"),
+            gdn_use_packed_qkv_conv_custom_backward=env_flag(
+                "GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD"
+            ),
             gdn_ratio=1,
             mlp_mult=2.0,
             norm_style="pre",

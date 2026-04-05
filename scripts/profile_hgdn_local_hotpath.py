@@ -155,10 +155,10 @@ def maybe_freeze_gdn_conv_weights(module: torch.nn.Module) -> None:
         return
     for submodule in module.modules():
         conv = getattr(submodule, "conv", None)
-        if (
-            isinstance(conv, torch.nn.Conv1d)
-            and submodule.__class__.__name__ in {"CausalConv1d", "PackedCausalConv1d"}
-        ):
+        if isinstance(conv, torch.nn.Conv1d) and submodule.__class__.__name__ in {
+            "CausalConv1d",
+            "PackedCausalConv1d",
+        }:
             conv.weight.requires_grad_(False)
 
 
@@ -198,6 +198,9 @@ def build_hybrid_model() -> HybridGPT:
             ),
             gdn_gates_fp32=env_flag("GDN_GATES_FP32", True),
             gdn_output_norm_fp32=env_flag("GDN_OUTPUT_NORM_FP32", True),
+            gdn_use_packed_qkv_conv_custom_backward=env_flag(
+                "GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD"
+            ),
             gdn_ratio=1,
             mlp_mult=3.25,
             norm_style="pre",
@@ -375,6 +378,9 @@ def profile_gdn(
             ),
             gates_fp32=env_flag("GDN_GATES_FP32", True),
             output_norm_fp32=env_flag("GDN_OUTPUT_NORM_FP32", True),
+            use_packed_qkv_conv_custom_backward=env_flag(
+                "GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD"
+            ),
         )
     )
     x = torch.randn(
