@@ -1,6 +1,6 @@
 # Profiling Log
 
-Last updated: 2026-04-04 20:15 EDT
+Last updated: 2026-04-04 20:25 EDT
 
 This file records profiler-driven checkpoints that should survive beyond the raw
 artifacts under `profiles/`.
@@ -916,3 +916,86 @@ And move the next local experiment to a structural path cleanup:
    output-gate path
 2. if that does not win locally, stop local output-side tuning and spend the
    next budget on H100 confirmation of the current winner
+
+## 2026-04-04 — In-place SiLU structural candidate regressed (`rtx4070_phase1_inplacesilu_fix1`)
+
+Bundle:
+
+- raw artifacts: `profiles/rtx4070_phase1_inplacesilu_fix1/`
+- structured comparison:
+  - `profiles/rtx4070_phase1_inplacesilu_fix1/compare_vs_ctrlbf16/comparison.md`
+- experiment-surface commit at run time: `118aca8`
+
+Contract:
+
+- GPU: local RTX 4070 Laptop
+- env: `pg`
+- fixed baseline:
+  - `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+  - `GDN_USE_PACKED_QKV_CONV=1`
+  - `GDN_USE_PACKED_QKV_PROJ=1`
+  - `GDN_CONTROL_PROJ_FP32=0`
+- candidate:
+  - fixed baseline plus structural in-place SiLU on:
+    - packed conv activation
+    - output-gate activation
+- purpose:
+  - test whether a small structural cleanup could reduce activation traffic in
+    the packed conv path and the output-gate path without changing math
+
+### Main findings
+
+This candidate improved some isolated HGDN buckets but still lost on the real
+trainer step.
+
+Local hotpath wins:
+
+- bare `gdn.g_pointwise`: `49.85 -> 36.91 ms`
+- bare `gdn.recurrence`: `34.71 -> 30.19 ms`
+- bare `gdn.q_norm`: `54.68 -> 27.76 ms`
+- hybrid `gdn.recurrence`: `48.46 -> 38.73 ms`
+- hybrid `gdn.qkv_conv_packed`: `25.93 -> 21.29 ms`
+- hybrid `gdn.output_gate_mul`: `0.33 -> 0.12 ms`
+
+But the full trainer-eager step still regressed materially:
+
+- trainer `aten::copy_`: `510.77 -> 1033.81 ms`
+- trainer `aten::mul`: `659.15 -> 1051.13 ms`
+- trainer `gdn.qkv_conv_packed`: `234.58 -> 431.57 ms`
+- trainer `gdn.recurrence`: `114.97 -> 181.37 ms`
+- trainer `gdn.output_norm`: `62.05 -> 98.47 ms`
+- trainer `gdn.q_norm`: `31.74 -> 50.31 ms`
+- trainer `gdn.k_norm`: `31.84 -> 50.53 ms`
+
+### Boundary read
+
+The boundary audit remained identical to the current winner:
+
+- packed conv outputs stayed contiguous bf16
+- `norm_qkv` and `recurrence_inputs` stayed contiguous bf16
+- output-gate inputs stayed contiguous bf16
+
+So the loss is not a boundary-layout regression. It is another case where a
+micro-level kernel mix change looks promising in isolation but gets worse once
+it is inside the real training shell.
+
+### Decision
+
+Reject this candidate and revert it.
+
+This hits the local stop condition for the current output-side loop:
+
+- dtype-only output-norm change lost
+- structural in-place SiLU cleanup also lost
+
+### Next target
+
+Keep the current local winner unchanged:
+
+- `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+- `GDN_USE_PACKED_QKV_CONV=1`
+- `GDN_USE_PACKED_QKV_PROJ=1`
+- `GDN_CONTROL_PROJ_FP32=0`
+
+And move the next step to target-hardware confirmation on 1xH100 rather than
+burning more local iterations on this output-side path.

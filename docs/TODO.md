@@ -183,10 +183,15 @@ Latest local attribution checkpoint:
       `profiles/rtx4070_phase1_outputnormbf16_packed_fix1/`
   - next local target:
     - structural output-side or packed-conv cleanup, such as in-place SiLU /
-      output-gate consolidation
-  - escalation gate:
-    - if the next structural local candidate does not win, stop local
-      output-side tuning and move to 1xH100 confirmation of the current winner
+      output-gate consolidation, is now also screened and rejected
+    - result is logged at `profiles/rtx4070_phase1_inplacesilu_fix1/`
+  - next step:
+    - stop local output-side tuning for now
+    - move to 1xH100 confirmation of the current local winner:
+      - `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+      - `GDN_USE_PACKED_QKV_CONV=1`
+      - `GDN_USE_PACKED_QKV_PROJ=1`
+      - `GDN_CONTROL_PROJ_FP32=0`
 
 ### 2. Norm placement screen (`pre` vs `post` vs `keel`)
 
