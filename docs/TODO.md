@@ -603,25 +603,30 @@ scripts/sweep.sh depth
 - The optional fused CUDA extension is now in-tree behind:
   - `GDN_USE_CUDA_FUSED_FRONTEND=1`
   - `GDN_USE_CUDA_FUSED_OUTPUT=1`
-- Current local status:
-  - build passed in `pg`
-  - direct parity passed
+- Current validated status:
+  - local build passed in `pg`
+  - local direct parity passed
   - local phase-1 beat the current HGDN winner at the trainer-eager gate
-    - self-device total: `25561.13 -> 21352.84 ms`
-    - console step average: `3320.37 -> 2804.76 ms`
-    - peak allocated memory: `6184 -> 5696 MiB`
-- Keep it experimental until H100 says otherwise.
-- Next H100 sequence, one run at a time:
-  1. `conda run -s --name pg python setup_hgdn_cuda.py build_ext --inplace`
-  2. `conda run -s --name pg python scripts/hgdn_cuda_parity.py`
-  3. `python scripts/hgdn.py preflight --preset current-winner-cuda-fused --compile-strategy hybrid`
-  4. `python scripts/hgdn.py h100-profile hybrid-eager --preset current-winner-cuda-fused --run-prefix h100k8`
-  5. `python scripts/hgdn.py h100-perf perf --preset current-winner-cuda-fused --run-prefix h100k8 --offline`
-  6. `python scripts/hgdn.py h100-profile hybrid --preset current-winner-cuda-fused --run-prefix h100k8`
-- If H100 eager/perf loses, keep the extension in-tree but drop it from the
-  active kernel path and go back to the non-extension current winner.
-- If H100 wins, the next fixed-step quality check should be run on the fused
-  preset before any architecture retune resumes.
+  - H100 build passed
+  - H100 direct parity passed
+  - H100 fused preflight passed
+- H100 outcome:
+  - eager hybrid profile lost badly vs `h100k5`
+    - `1670.55 -> 2248.98 ms`
+  - compiled perf lost badly vs `h100k5`
+    - `901.05 -> 1863.41 ms`
+    - `581,860 -> 281,359 tok/s`
+- Root cause:
+  - `_PackedQKVFrontendFunctionBackward` dominates both eager and compiled H100 traces
+  - `causal_dwconv_weight_backward` is the main named kernel inside that loss
+- Current decision:
+  - keep the extension in-tree
+  - do **not** use `current-winner-cuda-fused` in the active kernel path
+  - do **not** run quality/retune work on top of the fused preset
+- If the extension is revisited later, do it in this order:
+  1. packed frontend backward
+  2. depthwise-conv weight gradient
+  3. output fusion in isolation, only after the frontend backward is under control
 
 ### 1. Graph-break audit with `TORCH_LOGS` / `tlparse`
 

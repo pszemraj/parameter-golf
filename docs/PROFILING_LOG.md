@@ -2339,12 +2339,77 @@ Keep the optional fused CUDA path in-tree as an experimental candidate.
 
 Do not promote it to the default winner yet.
 
-### Next gate
+### H100 gate (`h100k8`)
 
-H100, one job at a time:
+Bundle:
 
-1. rebuild the extension on the H100 machine
-2. run direct parity there
-3. run fused preflight
-4. run H100 eager hybrid profile
-5. run H100 compiled perf/profile only if eager results are at least neutral
+- raw artifacts: `local-scratch/profiling-out-h100k8-hgdn.7z`
+- extracted profiles:
+  - `local-scratch/_inspect_h100k8/profiles/h100k8_profile_eager_hybrid_r1_mlp3.25_seq2048/`
+  - `local-scratch/_inspect_h100k8/profiles/h100k8_profile_compiled_hybrid_r1_mlp3.25_seq2048/`
+- extracted logs:
+  - `local-scratch/_inspect_h100k8/logs/h100k8_profile_eager_hybrid_r1_mlp3.25_seq2048.txt`
+  - `local-scratch/_inspect_h100k8/logs/h100k8_perf_hybrid_r1_mlp3.25_seq2048.txt`
+  - `local-scratch/_inspect_h100k8/logs/h100k8_profile_compiled_hybrid_r1_mlp3.25_seq2048.txt`
+
+Contract:
+
+- H100 build/parity:
+  - `python setup_hgdn_cuda.py build_ext --inplace`
+  - `python scripts/hgdn_cuda_parity.py`
+- H100 fused preset:
+  - `python scripts/hgdn.py preflight --preset current-winner-cuda-fused --compile-strategy hybrid`
+  - `python scripts/hgdn.py h100-profile hybrid-eager --preset current-winner-cuda-fused --run-prefix h100k8`
+  - `python scripts/hgdn.py h100-perf perf --preset current-winner-cuda-fused --run-prefix h100k8 --offline`
+  - `python scripts/hgdn.py h100-profile hybrid --preset current-winner-cuda-fused --run-prefix h100k8`
+
+Main finding:
+
+- build passed on H100
+- direct parity passed on H100
+- fused preflight passed on H100
+- the fused preset is still a **clear H100 performance regression**
+
+Compared against the current winner `h100k5`:
+
+- eager hybrid profile step average:
+  - `1670.55 -> 2248.98 ms` (`+34.6%`)
+- compiled hybrid perf:
+  - `901.05 -> 1863.41 ms` (`+106.8%`)
+  - `581,860 -> 281,359 tok/s` (`-51.6%`)
+
+Named-bucket read:
+
+- things that did get cheaper:
+  - eager `aten::copy_`: `1092.31 -> 184.25 ms`
+  - compiled `aten::copy_`: `174.42 -> 34.37 ms`
+  - eager `aten::_fused_rms_norm`: `293.18 -> 188.02 ms`
+  - eager `aten::_fused_rms_norm_backward`: `293.42 -> 203.51 ms`
+- but the fused frontend backward exploded and dominated the step:
+  - eager `_PackedQKVFrontendFunctionBackward = 4341.02 ms`
+  - eager `causal_dwconv_weight_backward = 3983.38 ms`
+  - compiled `_PackedQKVFrontendFunctionBackward = 4316.51 ms`
+  - compiled `causal_dwconv_weight_backward = 3959.04 ms`
+
+Interpretation:
+
+- this is not just a compile-mode problem
+- the fused packed frontend itself is currently too expensive on H100,
+  especially in backward
+- output-side fusion may still be individually salvageable, but the combined
+  frontend+output preset is not competitive
+
+Decision:
+
+Keep the optional fused CUDA extension in-tree for future work, but reject
+`current-winner-cuda-fused` as an active H100 candidate.
+
+Next step:
+
+Return to the non-extension current winner for the active kernel path.
+
+If the extension is revisited later, the first targets are:
+
+1. packed frontend backward
+2. depthwise-conv weight gradient
+3. output fusion only after the frontend backward is no longer dominant

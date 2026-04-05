@@ -137,30 +137,66 @@ Interpretation:
 - the fused path is still experimental
 - the next gate is H100 validation, not default promotion
 
-## Next H100 sequence
+## H100 gate (`h100k8`)
 
-Run these one at a time on the H100 box after pulling the checkpoint:
-
-```bash
-conda run -s --name pg python setup_hgdn_cuda.py build_ext --inplace
-```
+Completed on the H100 box with plain `python`:
 
 ```bash
-conda run -s --name pg python scripts/hgdn_cuda_parity.py
-```
-
-```bash
+python setup_hgdn_cuda.py build_ext --inplace
+python scripts/hgdn_cuda_parity.py
 python scripts/hgdn.py preflight --preset current-winner-cuda-fused --compile-strategy hybrid
-```
-
-```bash
 python scripts/hgdn.py h100-profile hybrid-eager --preset current-winner-cuda-fused --run-prefix h100k8
-```
-
-```bash
 python scripts/hgdn.py h100-perf perf --preset current-winner-cuda-fused --run-prefix h100k8 --offline
-```
-
-```bash
 python scripts/hgdn.py h100-profile hybrid --preset current-winner-cuda-fused --run-prefix h100k8
 ```
+
+### Result
+
+Build, parity, and preflight all passed on H100.
+
+The fused preset did **not** transfer as a performance win.
+
+Compared against the current H100 winner `h100k5`:
+
+- eager hybrid profile step average:
+  - `1670.55 -> 2248.98 ms` (`+34.6%`)
+- compiled hybrid perf:
+  - `901.05 -> 1863.41 ms` (`+106.8%`)
+  - `581,860 -> 281,359 tok/s` (`-51.6%`)
+
+### Root cause from the H100 profiles
+
+The regression is dominated by the fused packed-front-end backward path, not by
+build issues and not primarily by TorchDynamo.
+
+Largest compiled-profile regressors on `h100k8`:
+
+- `_PackedQKVFrontendFunctionBackward = 4316.51 ms`
+- `causal_dwconv_weight_backward = 3959.04 ms`
+- `_PackedQKVFrontendFunction = 291.11 ms`
+- `_RMSNormSiluGateFunctionBackward = 105.65 ms`
+
+The eager profile shows the same pattern:
+
+- `_PackedQKVFrontendFunctionBackward = 4341.02 ms`
+- `causal_dwconv_weight_backward = 3983.38 ms`
+- `gdn.qkv_frontend_fused = 291.47 ms`
+- `gdn.output_fused = 102.59 ms`
+
+This matters because it rules out the simple story that “compile interaction
+made it slow.” The fused frontend itself is currently too expensive on H100,
+especially in backward.
+
+### Decision
+
+Keep the extension in-tree for future kernel work, but drop
+`current-winner-cuda-fused` from the active H100 kernel path.
+
+Do **not** promote it, and do **not** use it for architecture retuning or
+quality runs.
+
+If this path is revisited later, the first targets are:
+
+1. packed frontend backward
+2. depthwise-conv weight gradient kernel
+3. only then output-side fusion as an isolated follow-up

@@ -156,7 +156,9 @@ Experimental fused-CUDA HGDN preset:
 - status:
   - local build/parity passed in `pg`
   - local phase-1 improved the current winner on trainer eager step time
-  - still waiting on H100 validation before promotion
+  - H100 build/parity also passed
+  - H100 eager and compiled perf both regressed badly
+  - keep it experimental only; do not treat it as the active path
 
 Examples:
 
