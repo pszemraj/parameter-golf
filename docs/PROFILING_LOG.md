@@ -2498,3 +2498,82 @@ Do not promote `current-winner-cuda-output-only` to H100.
 
 Keep the preset/config around for future isolated rework if needed, but return
 the active kernel path to the non-extension current winner.
+
+## 2026-04-05 — Packed q/k conv + separate v conv regressed locally (`rtx4070_phase1_packedqkconv_fix2`)
+
+Bundle:
+
+- candidate:
+  - `profiles/rtx4070_phase1_packedqkconv_fix2/`
+- structured comparison:
+  - `profiles/rtx4070_phase1_packedqkconv_fix2/compare_vs_rtx4070_cuda_base/comparison.md`
+- baseline:
+  - `profiles/rtx4070_cuda_base/`
+
+Contract:
+
+- launcher:
+  - `conda run -s --name pg python scripts/hgdn.py local-phase1 --preset current-winner --run-prefix rtx4070_phase1_packedqkconv_fix2 --set GDN_USE_PACKED_QKV_CONV=0 --set GDN_USE_PACKED_QK_CONV=1`
+- candidate flags:
+  - `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+  - `GDN_USE_PACKED_QKV_CONV=0`
+  - `GDN_USE_PACKED_QK_CONV=1`
+  - `GDN_USE_PACKED_QKV_PROJ=1`
+  - `GDN_CONTROL_PROJ_FP32=0`
+
+Main finding:
+
+The packed `q/k` conv idea worked mechanically but lost at the full local
+phase-1 gate, so it does **not** stay in the branch.
+
+Compared against `rtx4070_cuda_base`:
+
+- trainer eager self-device total:
+  - `25561.13 -> 26367.32 ms` (`+3.15%`)
+- trainer eager console step average:
+  - `3320.37 -> 3422.05 ms` (`+3.06%`)
+- trainer eager peak allocated memory:
+  - `6184 -> 6184 MiB`
+
+What did improve:
+
+- `gdn.qk_conv_output_contiguous` replaced the old three-way materialization path:
+  - baseline `gdn.qkv_conv_output_contiguous = 89.32 ms`
+  - candidate `gdn.qk_conv_output_contiguous = 59.47 ms`
+- `aten::copy_`: `785.65 -> 750.49 ms`
+
+What made it lose anyway:
+
+- the front-end stopped being one packed qkv conv and turned into:
+  - packed `qk` conv
+  - separate `v_conv`
+  - extra packing work via `aten::cat`
+- that changed the trainer front-end subtotal from:
+  - baseline:
+    - `gdn.qkv_conv_depthwise + gdn.qkv_conv_output_contiguous`
+    - `228.25 + 89.32 = 317.57 ms`
+  - candidate:
+    - `gdn.qk_conv_depthwise + gdn.qk_conv_output_contiguous + gdn.conv_depthwise + aten::cat`
+    - `157.64 + 59.47 + 74.58 + 87.84 = 379.53 ms`
+    - net `+61.96 ms`
+- secondary regressions followed:
+  - `gdn.q_norm`: `48.81 -> 50.62 ms`
+  - `gdn.k_norm`: `49.14 -> 50.89 ms`
+  - `gdn.recurrence`: `177.23 -> 182.28 ms`
+  - `aten::mul`: `1012.30 -> 1050.52 ms`
+
+Boundary read:
+
+- the intended boundary change did happen:
+  - `conv_qkv.q/k` are non-contiguous after the packed-`qk` conv
+  - `norm_qkv.q/k` are contiguous again after normalization
+- that means the design goal was achieved
+- it just was not worth the extra packing + separate-`v` cost
+
+Decision:
+
+Reject packed `q/k` conv + separate `v` conv as an active kernel path.
+
+Keep the non-extension current winner unchanged, and avoid future front-end
+experiments that split `v` back out of the packed qkv path unless they also
+eliminate the added `aten::cat` / separate-depthwise cost.

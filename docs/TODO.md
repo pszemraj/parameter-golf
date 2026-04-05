@@ -640,6 +640,28 @@ scripts/sweep.sh depth
   2. depthwise-conv weight gradient
   3. output fusion in isolation, only after the frontend backward is under control
 
+### Packed `q/k` conv + separate `v` conv result
+
+- `GDN_USE_PACKED_QK_CONV=1` is now screened and rejected at the full local
+  phase-1 gate:
+  - candidate bundle:
+    - `profiles/rtx4070_phase1_packedqkconv_fix2/`
+  - comparison:
+    - `profiles/rtx4070_phase1_packedqkconv_fix2/compare_vs_rtx4070_cuda_base/comparison.md`
+- main result vs the non-extension current winner:
+  - trainer eager self-device total:
+    - `25561.13 -> 26367.32 ms` (`+3.15%`)
+  - trainer eager step average:
+    - `3320.37 -> 3422.05 ms` (`+3.06%`)
+- why it lost:
+  - it reduced the old packed-qkv materialization bucket
+  - but the required separate `v_conv` plus extra `aten::cat` made the total
+    front-end subtotal worse by about `61.96 ms`
+- practical consequence:
+  - stay on one packed qkv front-end
+  - do **not** reopen designs that split `v` back out unless they also remove
+    the added packing / separate-depthwise overhead
+
 ### 1. Graph-break audit with `TORCH_LOGS` / `tlparse`
 
 - Trigger: hybrid remains worse than `1.3x` the depth-control baseline after the current selective-compile quick hits, or compile-time behavior becomes erratic across repeated runs.
