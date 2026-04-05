@@ -238,6 +238,23 @@ Latest local attribution checkpoint:
     - take-away:
       - the remaining packed-front-end cost is not going to be fixed by a tiny
         post-conv split primitive swap
+  - latest rejected local full-bundle screen:
+    - FLA in-kernel q/k l2 normalization on top of the current winner
+      (`GDN_QK_L2NORM_IN_KERNEL=1`)
+    - steady-state preflight looked interesting enough to promote, but the real
+      local trainer-eager bundle regressed hard:
+      - `aten::copy_`: `510.77 -> 662.86 ms`
+      - `aten::mul`: `659.15 -> 888.74 ms`
+      - `gdn.qkv_conv_packed`: `234.58 -> 365.93 ms`
+      - `gdn.recurrence`: `114.97 -> 204.03 ms`
+    - take-away:
+      - moving q/k l2 normalization into the FLA kernel is not a valid free
+        win for this HGDN training path
+      - do not send this candidate to H100
+  - next kernel focus remains:
+    - packed qkv front-end cost on H100
+    - gate/output glue
+    - remaining copy/layout churn after the packed-path win
       - do not revisit `split -> narrow` or similar post-conv split
         micro-optimizations unless a later trace gives a much stronger reason
   - latest rejected local full-bundle screen:

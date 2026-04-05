@@ -2035,3 +2035,105 @@ This shifts the next front-end attempt away from split timing and toward either:
 - a lower-level packed conv implementation, or
 - a different HGDN-native path entirely, such as a projection/gate-side
   structural cleanup that does not disturb the current packed conv contract
+
+## 2026-04-05 — FLA in-kernel q/k l2 norm regressed locally (`GDN_QK_L2NORM_IN_KERNEL=1`)
+
+Bundle:
+
+- raw artifacts:
+  - `profiles/rtx4070_phase1_qknorminkernel_fix1/`
+- comparison against the current local winner:
+  - `profiles/rtx4070_phase1_qknorminkernel_fix1/compare_vs_ctrlbf16/comparison.md`
+- experiment-surface working tree was reverted after the screen
+
+Contract:
+
+- GPU: local RTX 4070 Laptop
+- env: `pg`
+- fixed baseline:
+  - `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+  - `GDN_USE_PACKED_QKV_CONV=1`
+  - `GDN_USE_PACKED_QKV_PROJ=1`
+  - `GDN_CONTROL_PROJ_FP32=0`
+- candidate:
+  - fixed baseline plus `GDN_QK_L2NORM_IN_KERNEL=1`
+  - skip Python-side `l2_norm(q)` / `l2_norm(k)` and delegate q/k
+    normalization to the FLA kernel via
+    `use_qk_l2norm_in_kernel=True`
+- purpose:
+  - test whether moving q/k normalization into the recurrence backend would
+    reduce HGDN glue overhead and improve the packed-path winner without
+    disturbing the current recurrence-facing layout
+
+### Main findings
+
+This candidate looked promising at steady-state preflight, then failed
+decisively at the full local phase-1 gate.
+
+Preflight versus the current winner:
+
+- `gdn_eager`: `1032.32 -> 1064.78 ms`
+- `hybrid_eager`: `146.49 -> 153.04 ms`
+- `hybrid_compiled`: `3223.56 -> 1808.31 ms`
+
+The preflight compiled number was directionally interesting, but the real
+trainer-eager bundle regressed badly:
+
+- trainer `aten::copy_`: `510.77 -> 662.86 ms`
+- trainer `aten::mul`: `659.15 -> 888.74 ms`
+- trainer `gdn.qkv_conv_packed`: `234.58 -> 365.93 ms`
+- trainer `gdn.recurrence`: `114.97 -> 204.03 ms`
+- trainer `aten::convolution_backward`: `113.86 -> 177.45 ms`
+- trainer `aten::_conv_depthwise2d`: `91.58 -> 143.26 ms`
+- trainer step timing from the console moved from the accepted winner's
+  sub-`1s` regime to roughly `3.0s` per step on the same local phase-1
+  contract
+
+The hybrid forward/backward microprofile also showed the same failure mode:
+
+- `gdn.recurrence`: `48.46 -> 5136.19 ms`
+
+### Boundary read
+
+The recurrence-facing layout stayed unchanged:
+
+- packed conv outputs stayed contiguous bf16
+- `norm_qkv` stayed contiguous bf16
+- `recurrence_inputs` stayed contiguous bf16
+- output-side tensors stayed contiguous bf16
+
+So this was not a layout-fix candidate that accidentally broke contiguity. It
+changed the kernel mix behind the recurrence call and made the actual training
+path much worse.
+
+### Interpretation
+
+The FLA in-kernel q/k normalization switch is not a free replacement for the
+current Python-side `l2_norm` path in this HGDN training stack.
+
+Two conclusions matter:
+
+- the current packed-path winner is relying on the existing q/k normalization
+  behavior more than the preflight alone suggested
+- for this branch, a better compiled micro-case is irrelevant if the true
+  trainer-eager step gets much slower
+
+### Decision
+
+Reject this candidate and revert it.
+
+### Next target
+
+Keep the current winner unchanged:
+
+- `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+- `GDN_USE_PACKED_QKV_CONV=1`
+- `GDN_USE_PACKED_QKV_PROJ=1`
+- `GDN_CONTROL_PROJ_FP32=0`
+
+And return to the remaining HGDN-native targets that are still open after the
+packed-path win:
+
+- packed qkv front-end cost
+- gate/output glue
+- remaining copy/layout churn
