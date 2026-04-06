@@ -347,6 +347,7 @@ class PackedCausalConv1d(nn.Module):
         kernel_size: int = 4,
         output_contiguous: bool = False,
         use_custom_backward: bool = False,
+        use_single_packed_contiguous: bool = False,
     ):
         """Initialize the packed causal depthwise convolution.
 
@@ -354,11 +355,13 @@ class PackedCausalConv1d(nn.Module):
         :param int kernel_size: Convolution kernel width, defaults to 4.
         :param bool output_contiguous: Whether to materialize contiguous `(batch, seq, dim)` outputs, defaults to False.
         :param bool use_custom_backward: Whether to route the packed depthwise conv through an exact-length custom autograd path, defaults to False.
+        :param bool use_single_packed_contiguous: Whether to materialize one contiguous packed `(batch, seq, q_dim + k_dim + v_dim)` tensor before splitting, defaults to False.
         """
         super().__init__()
         self.dims = dims
         self.output_contiguous = output_contiguous
         self.use_custom_backward = use_custom_backward
+        self.use_single_packed_contiguous = use_single_packed_contiguous
         total_dim = sum(dims)
         self.conv = nn.Conv1d(
             total_dim,
@@ -478,10 +481,13 @@ class PackedCausalConv1d(nn.Module):
                 x = F.silu(x)
             with profile_range("gdn.qkv_conv_output_transpose"):
                 x = x.transpose(1, 2)
+        if self.output_contiguous and self.use_single_packed_contiguous:
+            with profile_range("gdn.qkv_conv_output_contiguous_packed"):
+                x = x.contiguous()
         with profile_range("gdn.qkv_conv_split"):
             q_dim, k_dim, v_dim = self.dims
             q, k, v = x.split((q_dim, k_dim, v_dim), dim=-1)
-        if self.output_contiguous:
+        if self.output_contiguous and not self.use_single_packed_contiguous:
             with profile_range("gdn.qkv_conv_output_contiguous"):
                 q = q.contiguous()
                 k = k.contiguous()
@@ -582,6 +588,7 @@ class GatedDeltaNet(nn.Module):
         use_cuda_fused_frontend: bool = False,
         use_cuda_fused_output: bool = False,
         use_packed_qkv_conv_custom_backward: bool = False,
+        use_packed_qkv_single_contig: bool = False,
     ):
         """Initialize a Gated DeltaNet block.
 
@@ -606,6 +613,7 @@ class GatedDeltaNet(nn.Module):
         :param bool use_cuda_fused_frontend: Whether to route the packed qkv post-projection conv+q/k norm front-end through the optional CUDA extension, defaults to False.
         :param bool use_cuda_fused_output: Whether to route the output RMSNorm*SiLU(gate) path through the optional CUDA extension, defaults to False.
         :param bool use_packed_qkv_conv_custom_backward: Whether to route the packed depthwise qkv conv through an exact-length custom autograd path, defaults to False.
+        :param bool use_packed_qkv_single_contig: Whether to materialize one contiguous packed q/k/v tensor before splitting the packed conv output, defaults to False.
         """
         super().__init__()
         self.d_model = d_model
@@ -622,6 +630,7 @@ class GatedDeltaNet(nn.Module):
         self.use_packed_qkv_conv = use_packed_qkv_conv
         self.use_packed_qkv_proj = use_packed_qkv_proj
         self.use_packed_qkv_conv_custom_backward = use_packed_qkv_conv_custom_backward
+        self.use_packed_qkv_single_contig = use_packed_qkv_single_contig
         q_conv_output_contiguous = (
             conv_output_contiguous
             if q_conv_output_contiguous is None
@@ -665,6 +674,14 @@ class GatedDeltaNet(nn.Module):
             raise ValueError(
                 "use_packed_qkv_conv_custom_backward requires use_packed_qkv_conv"
             )
+        if self.use_packed_qkv_single_contig and not self.use_packed_qkv_conv:
+            raise ValueError(
+                "use_packed_qkv_single_contig requires use_packed_qkv_conv"
+            )
+        if self.use_packed_qkv_single_contig and not q_conv_output_contiguous:
+            raise ValueError(
+                "use_packed_qkv_single_contig requires packed qkv output_contiguous"
+            )
         if self.use_cuda_fused_frontend and not (
             self.use_packed_qkv_proj and self.use_packed_qkv_conv
         ):
@@ -674,6 +691,10 @@ class GatedDeltaNet(nn.Module):
         if self.use_cuda_fused_frontend and self.use_packed_qkv_conv_custom_backward:
             raise ValueError(
                 "use_cuda_fused_frontend is incompatible with use_packed_qkv_conv_custom_backward"
+            )
+        if self.use_cuda_fused_frontend and self.use_packed_qkv_single_contig:
+            raise ValueError(
+                "use_cuda_fused_frontend is incompatible with use_packed_qkv_single_contig"
             )
         if self.use_cuda_fused_output and not self.output_norm_fp32:
             raise ValueError("use_cuda_fused_output requires output_norm_fp32=True")
@@ -714,6 +735,7 @@ class GatedDeltaNet(nn.Module):
                 kernel_size=conv_size,
                 output_contiguous=q_conv_output_contiguous,
                 use_custom_backward=use_packed_qkv_conv_custom_backward,
+                use_single_packed_contiguous=use_packed_qkv_single_contig,
             )
             self.q_conv = None
             self.k_conv = None
@@ -827,7 +849,11 @@ class GatedDeltaNet(nn.Module):
                     with profile_range("gdn.k_norm"):
                         k = l2_norm(k.view(B, T, H, Dk)).to(dtype=x.dtype)
                     with profile_range("gdn.v_reshape"):
-                        v = v.view(B, T, H, Dv).to(dtype=x.dtype)
+                        v = v.view(B, T, H, Dv)
+                        if self.use_packed_qkv_single_contig and not v.is_contiguous():
+                            with profile_range("gdn.v_contiguous"):
+                                v = v.contiguous()
+                        v = v.to(dtype=x.dtype)
                 audit_gdn_boundary(
                     "norm_qkv",
                     audit_call_index,
@@ -1134,6 +1160,7 @@ class GDNBlock(nn.Module):
         use_cuda_fused_frontend: bool = False,
         use_cuda_fused_output: bool = False,
         use_packed_qkv_conv_custom_backward: bool = False,
+        use_packed_qkv_single_contig: bool = False,
         leaky_slope: float = 0.5,
         norm_style: NormStyle = "pre",
         residual_alpha: float = 1.0,
@@ -1162,6 +1189,7 @@ class GDNBlock(nn.Module):
         :param bool use_cuda_fused_frontend: Whether to route the packed qkv post-projection conv+q/k norm front-end through the optional CUDA extension, defaults to False.
         :param bool use_cuda_fused_output: Whether to route the output RMSNorm*SiLU(gate) path through the optional CUDA extension, defaults to False.
         :param bool use_packed_qkv_conv_custom_backward: Whether to route the packed depthwise qkv conv through an exact-length custom autograd path, defaults to False.
+        :param bool use_packed_qkv_single_contig: Whether to materialize one contiguous packed q/k/v tensor before splitting the packed conv output, defaults to False.
         :param float leaky_slope: LeakyReLU slope, defaults to 0.5.
         :param NormStyle norm_style: Residual norm placement, defaults to "pre".
         :param float residual_alpha: Residual scaling factor used by KEEL-style blocks, defaults to 1.0.
@@ -1194,6 +1222,7 @@ class GDNBlock(nn.Module):
             use_cuda_fused_frontend=use_cuda_fused_frontend,
             use_cuda_fused_output=use_cuda_fused_output,
             use_packed_qkv_conv_custom_backward=use_packed_qkv_conv_custom_backward,
+            use_packed_qkv_single_contig=use_packed_qkv_single_contig,
         )
         self.mlp = MLP(dim, mlp_mult, leaky_slope)
         self.attn_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
@@ -1347,6 +1376,7 @@ class HybridGPT(nn.Module):
         gdn_use_cuda_fused_frontend: bool = False,
         gdn_use_cuda_fused_output: bool = False,
         gdn_use_packed_qkv_conv_custom_backward: bool = False,
+        gdn_use_packed_qkv_single_contig: bool = False,
         # Shared
         mlp_mult: float = 3.0,
         leaky_slope: float = 0.5,
@@ -1385,6 +1415,7 @@ class HybridGPT(nn.Module):
         :param bool gdn_use_cuda_fused_frontend: Whether to route packed qkv post-projection conv+q/k norm front-ends through the optional CUDA extension, defaults to False.
         :param bool gdn_use_cuda_fused_output: Whether to route the GDN output RMSNorm*SiLU(gate) path through the optional CUDA extension, defaults to False.
         :param bool gdn_use_packed_qkv_conv_custom_backward: Whether to route the packed depthwise qkv conv through an exact-length custom autograd path, defaults to False.
+        :param bool gdn_use_packed_qkv_single_contig: Whether to materialize one contiguous packed q/k/v tensor before splitting the packed conv output, defaults to False.
         :param float mlp_mult: MLP expansion factor, defaults to 3.0.
         :param float leaky_slope: LeakyReLU slope, defaults to 0.5.
         :param int gdn_ratio: Number of GDN layers per attention layer, defaults to 3.
@@ -1451,6 +1482,7 @@ class HybridGPT(nn.Module):
                         gdn_use_cuda_fused_frontend,
                         gdn_use_cuda_fused_output,
                         gdn_use_packed_qkv_conv_custom_backward,
+                        gdn_use_packed_qkv_single_contig,
                         leaky_slope,
                         self.norm_style,
                         self.residual_alpha,

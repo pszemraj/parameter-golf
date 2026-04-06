@@ -98,6 +98,20 @@ Keep the older names for historical reproducibility:
 
 but use `winner-20260405-19` going forward in docs and launch commands.
 
+Next prepared front-end candidate on top of the promoted winner:
+
+- `winner-20260405-19-single-contig`
+- delta:
+  - `GDN_PACKED_QKV_SINGLE_CONTIG=1`
+- intended mechanism:
+  - replace three post-conv q/k/v contiguous materializations with one packed
+    contiguous materialization before split
+  - keep the promoted packed qkv front-end, custom backward, and Python-side
+    `l2_norm` path unchanged otherwise
+- status:
+  - implementation and tests are in-tree
+  - not yet screened locally or on H100
+
 ## 2026-04-05 — Packed depthwise custom backward promoted to H100-candidate status (`rtx4070_phase1_custombwd_fix1`)
 
 Bundle:

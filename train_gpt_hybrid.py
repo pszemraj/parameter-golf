@@ -184,6 +184,9 @@ class Hyperparameters:
     gdn_use_packed_qkv_conv_custom_backward = bool(
         int(os.environ.get("GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD", "0"))
     )
+    gdn_use_packed_qkv_single_contig = bool(
+        int(os.environ.get("GDN_PACKED_QKV_SINGLE_CONTIG", "0"))
+    )
     cudnn_benchmark = bool(int(os.environ.get("CUDNN_BENCHMARK", "0")))
     gdn_ratio = int(os.environ.get("GDN_RATIO", 3))  # 3 GDN : 1 Attn
 
@@ -1006,6 +1009,7 @@ def main() -> None:
         f"packed_conv={int(args.gdn_use_packed_qkv_conv)} "
         f"packed_proj={int(args.gdn_use_packed_qkv_proj)} "
         f"packed_custom_bwd={int(args.gdn_use_packed_qkv_conv_custom_backward)} "
+        f"packed_single_contig={int(args.gdn_use_packed_qkv_single_contig)} "
         f"output_contiguous={int(args.gdn_conv_output_contiguous)} "
         f"q_output_contiguous={int(args.gdn_q_conv_output_contiguous)} "
         f"k_output_contiguous={int(args.gdn_k_conv_output_contiguous)} "
@@ -1106,6 +1110,7 @@ def main() -> None:
             gdn_use_cuda_fused_frontend=args.gdn_use_cuda_fused_frontend,
             gdn_use_cuda_fused_output=args.gdn_use_cuda_fused_output,
             gdn_use_packed_qkv_conv_custom_backward=args.gdn_use_packed_qkv_conv_custom_backward,
+            gdn_use_packed_qkv_single_contig=args.gdn_use_packed_qkv_single_contig,
             mlp_mult=args.mlp_mult,
             leaky_slope=args.leaky_slope,
             gdn_ratio=args.gdn_ratio,
@@ -1186,6 +1191,7 @@ def main() -> None:
                 "gdn_use_cuda_fused_frontend": args.gdn_use_cuda_fused_frontend,
                 "gdn_use_cuda_fused_output": args.gdn_use_cuda_fused_output,
                 "gdn_use_packed_qkv_conv_custom_backward": args.gdn_use_packed_qkv_conv_custom_backward,
+                "gdn_use_packed_qkv_single_contig": args.gdn_use_packed_qkv_single_contig,
                 "wandb_watch": wandb_watch_mode,
                 "wandb_watch_log_freq": args.wandb_watch_log_freq,
             }

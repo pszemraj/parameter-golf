@@ -201,6 +201,7 @@ def build_hybrid_model() -> HybridGPT:
             gdn_use_packed_qkv_conv_custom_backward=env_flag(
                 "GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD"
             ),
+            gdn_use_packed_qkv_single_contig=env_flag("GDN_PACKED_QKV_SINGLE_CONTIG"),
             gdn_ratio=1,
             mlp_mult=3.25,
             norm_style="pre",
@@ -381,6 +382,7 @@ def profile_gdn(
             use_packed_qkv_conv_custom_backward=env_flag(
                 "GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD"
             ),
+            use_packed_qkv_single_contig=env_flag("GDN_PACKED_QKV_SINGLE_CONTIG"),
         )
     )
     x = torch.randn(

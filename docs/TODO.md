@@ -36,6 +36,19 @@ This file tracks follow-up work that is intentionally not enabled by default in 
   1. use `winner-20260405-19` as the active non-extension HGDN baseline
   2. continue profiler-driven kernel work from this promoted baseline, not from `winner-20260405-11`
   3. do not spend more H100 time on `winner-20260405-11-cuda-output-only` unless its implementation changes materially
+- Next prepared screening candidate:
+  - `winner-20260405-19-single-contig`
+  - equivalent to:
+    - `winner-20260405-19`
+    - `GDN_PACKED_QKV_SINGLE_CONTIG=1`
+  - purpose:
+    - keep the promoted packed qkv front-end and custom backward
+    - replace three post-conv q/k/v contiguous materializations with one packed contiguous materialization before split
+    - keep the q/k normalization operator family unchanged
+  - validation order:
+    1. local hotpath
+    2. local phase-1
+    3. only if the local signal is strong enough, H100 eager/profile/perf confirmation
 
 ### 0. Interim cleanup checkpoint from the redundancy audit
 

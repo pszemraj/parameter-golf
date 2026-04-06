@@ -417,6 +417,117 @@ def test_gdn_packed_qkv_custom_backward_validation():
     print("  ✓ packed qkv custom backward validates requirements")
 
 
+def test_gdn_packed_qkv_single_contig_matches_default_path():
+    """Single packed materialization should preserve packed qkv outputs and grads."""
+    torch.manual_seed(42)
+    kwargs = dict(
+        d_model=64,
+        n_heads=4,
+        head_k_dim=8,
+        expand_v=1.0,
+        allow_neg_eigval=True,
+        conv_size=4,
+        use_fla=False,
+        use_packed_qkv_conv=True,
+        use_packed_qkv_proj=True,
+        use_packed_qkv_conv_custom_backward=True,
+        conv_output_contiguous=True,
+    )
+    eager = GatedDeltaNet(**kwargs)
+    single = GatedDeltaNet(**kwargs, use_packed_qkv_single_contig=True)
+    single.load_state_dict(eager.state_dict(), strict=True)
+
+    x_eager = torch.randn(2, 32, 64, requires_grad=True)
+    x_single = x_eager.detach().clone().requires_grad_(True)
+    grad = torch.randn_like(x_eager)
+
+    out_eager = eager(x_eager)
+    out_single = single(x_single)
+    torch.testing.assert_close(out_single, out_eager, atol=1e-6, rtol=1e-6)
+
+    out_eager.backward(grad, retain_graph=True)
+    out_single.backward(grad)
+    torch.testing.assert_close(x_single.grad, x_eager.grad, atol=1e-5, rtol=1e-5)
+
+    eager_grads = dict(eager.named_parameters())
+    single_grads = dict(single.named_parameters())
+    for name in [
+        "w_qkv.linear.weight",
+        "qkv_conv.conv.weight",
+        "w_a.weight",
+        "w_out.weight",
+    ]:
+        torch.testing.assert_close(
+            single_grads[name].grad,
+            eager_grads[name].grad,
+            atol=1e-5,
+            rtol=1e-5,
+        )
+    single_bf16 = _make_bf16_gdn(
+        use_packed_qkv_conv=True,
+        use_packed_qkv_proj=True,
+        use_packed_qkv_conv_custom_backward=True,
+        use_packed_qkv_single_contig=True,
+        conv_output_contiguous=True,
+    )
+    q, k, v, _, _ = single_bf16._project_recurrence_inputs(
+        torch.randn(2, 16, 64, dtype=torch.bfloat16)
+    )
+    assert q.is_contiguous()
+    assert k.is_contiguous()
+    assert v.is_contiguous()
+    print("  ✓ packed qkv single-contig matches default path")
+
+
+def test_gdn_packed_qkv_single_contig_validation():
+    """Single packed materialization should only run on the non-fused packed path."""
+    try:
+        GatedDeltaNet(
+            d_model=64,
+            n_heads=4,
+            head_k_dim=8,
+            expand_v=1.0,
+            use_packed_qkv_single_contig=True,
+        )
+        raise AssertionError(
+            "Expected packed qkv single-contig to require packed qkv conv"
+        )
+    except ValueError:
+        pass
+    try:
+        GatedDeltaNet(
+            d_model=64,
+            n_heads=4,
+            head_k_dim=8,
+            expand_v=1.0,
+            use_packed_qkv_conv=True,
+            use_packed_qkv_single_contig=True,
+        )
+        raise AssertionError(
+            "Expected packed qkv single-contig to require packed qkv output_contiguous"
+        )
+    except ValueError:
+        pass
+    try:
+        GatedDeltaNet(
+            d_model=64,
+            n_heads=4,
+            head_k_dim=8,
+            expand_v=1.0,
+            use_packed_qkv_conv=True,
+            use_packed_qkv_proj=True,
+            conv_output_contiguous=True,
+            use_packed_qkv_single_contig=True,
+            use_cuda_fused_frontend=True,
+        )
+        raise AssertionError(
+            "Expected packed qkv single-contig to reject the CUDA fused frontend"
+        )
+    except ValueError:
+        pass
+    print("  ✓ packed qkv single-contig validates requirements")
+
+
 def test_packed_qkv_frontend_reference_matches_eager_ops():
     """Reference packed front-end should match the eager packed conv + q/k norm path."""
     torch.manual_seed(42)
@@ -922,6 +1033,14 @@ if __name__ == "__main__":
         (
             "Packed qkv custom backward validation",
             test_gdn_packed_qkv_custom_backward_validation,
+        ),
+        (
+            "Packed qkv single-contig parity",
+            test_gdn_packed_qkv_single_contig_matches_default_path,
+        ),
+        (
+            "Packed qkv single-contig validation",
+            test_gdn_packed_qkv_single_contig_validation,
         ),
         (
             "Packed qkv frontend reference parity",

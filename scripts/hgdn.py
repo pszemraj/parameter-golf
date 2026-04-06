@@ -97,6 +97,14 @@ HGDN_PRESETS: dict[str, dict[str, str]] = {
         "GDN_CONTROL_PROJ_FP32": "0",
         "GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD": "1",
     },
+    "winner-20260405-19-single-contig": {
+        "GDN_CONV_OUTPUT_CONTIGUOUS": "1",
+        "GDN_USE_PACKED_QKV_CONV": "1",
+        "GDN_USE_PACKED_QKV_PROJ": "1",
+        "GDN_CONTROL_PROJ_FP32": "0",
+        "GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD": "1",
+        "GDN_PACKED_QKV_SINGLE_CONTIG": "1",
+    },
 }
 
 COMMON_ENV_ARGS: tuple[tuple[str, str], ...] = (
@@ -276,6 +284,11 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
         help="Set GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=1.",
     )
     parser.add_argument(
+        "--packed-qkv-single-contig",
+        action="store_true",
+        help="Set GDN_PACKED_QKV_SINGLE_CONTIG=1.",
+    )
+    parser.add_argument(
         "--set",
         metavar="KEY=VALUE",
         action="append",
@@ -301,6 +314,7 @@ def parse_args() -> argparse.Namespace:
             "Examples:\n"
             "  python scripts/hgdn.py h100-profile hybrid-eager --preset winner-20260405-19 --run-prefix h100k10a\n"
             "  python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k10a --offline\n"
+            "  python scripts/hgdn.py local-phase1 --preset winner-20260405-19-single-contig --run-prefix rtx4070_singlecontig\n"
             "  conda run -s --name pg python scripts/hgdn.py arch-size-screen --config configs/hgdn/winner_20260405_11_retune.toml\n"
             "  conda run -s --name pg python scripts/hgdn.py fixed2k-compare --name h100k6_fixed2k_hybrid_r1_mlp3.25_seq2048 --name h100k6_fixed2k_depth_mlp4.0_seq2048 --reference h100k6_fixed2k_hybrid_r1_mlp3.25_seq2048\n"
             "  python scripts/hgdn.py local-phase1 --config configs/hgdn/winner_20260405_19.toml --run-prefix rtx4070_phase1\n"
@@ -464,6 +478,8 @@ def build_env(args: argparse.Namespace) -> dict[str, str]:
         env["GDN_CUDA_ALLOW_JIT_BUILD"] = "1"
     if args.packed_qkv_conv_custom_backward:
         env["GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD"] = "1"
+    if args.packed_qkv_single_contig:
+        env["GDN_PACKED_QKV_SINGLE_CONTIG"] = "1"
 
     for raw in args.set:
         key, value = parse_kv_assignment(raw)

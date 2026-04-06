@@ -87,6 +87,8 @@ What has not been claimed:
 ## Important Files
 
 - `scripts/hgdn.py`: preferred structured launcher for HGDN helpers, with subcommands, named presets, and optional TOML env configs
+- `configs/hgdn/winner_20260405_19.toml`: reusable config for the active H100-confirmed HGDN kernel winner
+- `configs/hgdn/winner_20260405_19_single_contig.toml`: prepared next-step front-end candidate that replaces three post-conv q/k/v contiguous materializations with one packed contiguous materialization
 - `configs/hgdn/winner_20260405_11.toml`: reusable config for the active timestamped HGDN kernel winner
 - `configs/hgdn/winner_20260405_11_custombwd.toml`: reusable config for the packed depthwise custom-backward candidate layered on that winner
 - `configs/hgdn/winner_20260405_11_cuda_fused.toml`: experimental fused-CUDA variant of that winner
@@ -135,6 +137,7 @@ Active timestamped presets:
 - `convcontig`
 - `packed-qkv`
 - `winner-20260405-19`
+- `winner-20260405-19-single-contig`
 - `winner-20260405-11`
 - `winner-20260405-11-custom-bwd`
 - `winner-20260405-11-cuda-fused`
@@ -164,6 +167,21 @@ Current best H100-confirmed HGDN kernel preset:
     - `853.20 ms`
   - promoted delta:
     - `904.46 -> 853.21 ms` (`-5.67%`)
+
+Prepared next front-end screening candidate:
+
+- `winner-20260405-19-single-contig`
+- equivalent to:
+  - `winner-20260405-19`
+  - `GDN_PACKED_QKV_SINGLE_CONTIG=1`
+- purpose:
+  - keep the promoted packed qkv front-end and custom backward
+  - reduce post-conv clone/materialization by doing one packed `.contiguous()` before the q/k/v split instead of three per-output contiguous calls
+  - keep q/k normalization on the same Python-side `l2_norm` path
+- status:
+  - implementation and tests are in-tree
+  - not screened yet
+  - next gate is local hotpath, then local phase-1, then H100 only if the local signal is strong enough
 
 Laptop-noise note:
 
