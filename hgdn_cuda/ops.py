@@ -12,7 +12,11 @@ from typing import Any, Callable
 import torch
 from torch import Tensor
 
-from .reference import packed_qkv_frontend_reference, rmsnorm_silu_gate_reference
+from .reference import (
+    packed_qkv_frontend_reference,
+    packed_qkv_split_l2norm_reference,
+    rmsnorm_silu_gate_reference,
+)
 
 _EXTENSION_NAME = "hgdn_cuda_ext"
 _WARNED_KEYS: set[str] = set()
@@ -230,6 +234,75 @@ class _RMSNormSiluGateFunction(torch.autograd.Function):
         return grad_o, grad_gate, None, None
 
 
+class _PackedQKVSplitL2NormFunction(torch.autograd.Function):
+    """CUDA autograd wrapper for packed split plus q/k L2 normalization."""
+
+    @staticmethod
+    def forward(
+        ctx: torch.autograd.function.FunctionCtx,
+        packed: Tensor,
+        n_heads: int,
+        head_k_dim: int,
+        head_v_dim: int,
+        eps: float,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        """Run packed split plus q/k L2 normalization on post-conv activations.
+
+        :param torch.autograd.function.FunctionCtx ctx: Autograd context.
+        :param Tensor packed: Packed post-conv activations.
+        :param int n_heads: HGDN head count.
+        :param int head_k_dim: Per-head q/k width.
+        :param int head_v_dim: Per-head value width.
+        :param float eps: L2-normalization epsilon.
+        :raises RuntimeError: If the HGDN CUDA extension is unavailable.
+        :return tuple[Tensor, Tensor, Tensor]: Normalized q/k and reshaped v.
+        """
+        ext = _load_extension()
+        if ext is None:
+            raise RuntimeError("HGDN CUDA extension is not available")
+        packed_c = packed.contiguous()
+        q, k, v, inv_q, inv_k = ext.packed_qkv_split_l2norm_forward(
+            packed_c,
+            int(n_heads),
+            int(head_k_dim),
+            int(head_v_dim),
+            float(eps),
+        )
+        ctx.save_for_backward(q, k, inv_q, inv_k)
+        return q, k, v
+
+    @staticmethod
+    def backward(
+        ctx: torch.autograd.function.FunctionCtx,
+        grad_q: Tensor,
+        grad_k: Tensor,
+        grad_v: Tensor,
+    ) -> tuple[Tensor | None, None, None, None, None]:
+        """Run the packed split plus q/k L2 normalization backward pass.
+
+        :param torch.autograd.function.FunctionCtx ctx: Autograd context.
+        :param Tensor grad_q: Query gradients.
+        :param Tensor grad_k: Key gradients.
+        :param Tensor grad_v: Value gradients.
+        :raises RuntimeError: If the HGDN CUDA extension is unavailable.
+        :return tuple[Tensor | None, None, None, None, None]: Gradient for the packed input only.
+        """
+        ext = _load_extension()
+        if ext is None:
+            raise RuntimeError("HGDN CUDA extension is not available")
+        q, k, inv_q, inv_k = ctx.saved_tensors
+        grad_packed = ext.packed_qkv_split_l2norm_backward(
+            grad_q.contiguous(),
+            grad_k.contiguous(),
+            grad_v.contiguous(),
+            q,
+            k,
+            inv_q,
+            inv_k,
+        )
+        return grad_packed, None, None, None, None
+
+
 @_dynamo_disable
 def extension_loaded() -> bool:
     """Return whether the HGDN CUDA extension is available in this process.
@@ -327,3 +400,47 @@ def fused_rmsnorm_silu_gate(
             "using the PyTorch reference path instead.",
         )
     return rmsnorm_silu_gate_reference(o, gate, eps=eps, fp32_accum=fp32_accum)
+
+
+@_dynamo_disable
+def fused_packed_qkv_split_l2norm(
+    packed: Tensor,
+    *,
+    n_heads: int,
+    head_k_dim: int,
+    head_v_dim: int,
+    eps: float = 1e-6,
+    enabled: bool = True,
+) -> tuple[Tensor, Tensor, Tensor]:
+    """Run packed split plus q/k L2 normalization through CUDA or reference ops.
+
+    :param Tensor packed: Packed post-conv q/k/v activations shaped ``(batch, seq, channels)``.
+    :param int n_heads: Number of HGDN heads.
+    :param int head_k_dim: Per-head q/k width.
+    :param int head_v_dim: Per-head value width.
+    :param float eps: L2-normalization epsilon.
+    :param bool enabled: Whether the caller wants the CUDA path when available.
+    :return tuple[Tensor, Tensor, Tensor]: Normalized q/k and reshaped v.
+    """
+    use_cuda_ext = enabled and packed.is_cuda and extension_loaded()
+    if use_cuda_ext:
+        return _PackedQKVSplitL2NormFunction.apply(
+            packed,
+            int(n_heads),
+            int(head_k_dim),
+            int(head_v_dim),
+            float(eps),
+        )
+    if enabled and packed.is_cuda:
+        _warn_once(
+            "hgdn_cuda_split_norm_fallback",
+            "GDN CUDA split+l2norm path requested but the extension is unavailable; "
+            "using the PyTorch reference path instead.",
+        )
+    return packed_qkv_split_l2norm_reference(
+        packed,
+        n_heads=n_heads,
+        head_k_dim=head_k_dim,
+        head_v_dim=head_v_dim,
+        eps=eps,
+    )

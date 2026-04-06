@@ -20,8 +20,10 @@ if str(REPO_ROOT) not in sys.path:
 from hgdn_cuda import (  # noqa: E402
     extension_status,
     fused_packed_qkv_frontend,
+    fused_packed_qkv_split_l2norm,
     fused_rmsnorm_silu_gate,
     packed_qkv_frontend_reference,
+    packed_qkv_split_l2norm_reference,
     rmsnorm_silu_gate_reference,
 )
 
@@ -184,6 +186,63 @@ def check_output(dtype: torch.dtype) -> None:
     )
 
 
+def check_split_norm(dtype: torch.dtype) -> None:
+    """Check packed split+l2norm forward and backward parity.
+
+    :param torch.dtype dtype: CUDA dtype under test.
+    """
+    bsz, seq, n_heads, head_k_dim, head_v_dim = 2, 32, 4, 8, 8
+    channels = n_heads * (2 * head_k_dim + head_v_dim)
+    atol, rtol = tolerances(dtype)
+
+    torch.manual_seed(2027)
+    packed_ref = torch.randn(
+        bsz, seq, channels, device="cuda", dtype=dtype, requires_grad=True
+    )
+    packed_ext = packed_ref.detach().clone().requires_grad_(True)
+
+    q_ref, k_ref, v_ref = packed_qkv_split_l2norm_reference(
+        packed_ref,
+        n_heads=n_heads,
+        head_k_dim=head_k_dim,
+        head_v_dim=head_v_dim,
+    )
+    q_ext, k_ext, v_ext = fused_packed_qkv_split_l2norm(
+        packed_ext,
+        n_heads=n_heads,
+        head_k_dim=head_k_dim,
+        head_v_dim=head_v_dim,
+        enabled=True,
+    )
+
+    torch.testing.assert_close(q_ext.float(), q_ref.float(), atol=atol, rtol=rtol)
+    torch.testing.assert_close(k_ext.float(), k_ref.float(), atol=atol, rtol=rtol)
+    torch.testing.assert_close(v_ext.float(), v_ref.float(), atol=atol, rtol=rtol)
+
+    grad_q = torch.randn_like(q_ref)
+    grad_k = torch.randn_like(k_ref)
+    grad_v = torch.randn_like(v_ref)
+    (q_ref * grad_q).sum().backward(retain_graph=True)
+    (k_ref * grad_k).sum().backward(retain_graph=True)
+    (v_ref * grad_v).sum().backward()
+    grad_ref = packed_ref.grad.detach().clone()
+
+    (q_ext * grad_q).sum().backward(retain_graph=True)
+    (k_ext * grad_k).sum().backward(retain_graph=True)
+    (v_ext * grad_v).sum().backward()
+    grad_ext = packed_ext.grad.detach().clone()
+
+    torch.testing.assert_close(grad_ext.float(), grad_ref.float(), atol=atol, rtol=rtol)
+    print(
+        "split_norm_parity:"
+        f" dtype={dtype}"
+        f" q={max_abs_diff(q_ext.float(), q_ref.float()):.6f}"
+        f" k={max_abs_diff(k_ext.float(), k_ref.float()):.6f}"
+        f" v={max_abs_diff(v_ext.float(), v_ref.float()):.6f}"
+        f" grad_packed={max_abs_diff(grad_ext.float(), grad_ref.float()):.6f}"
+    )
+
+
 def main() -> None:
     """Run the CUDA parity suite."""
     if not torch.cuda.is_available():
@@ -200,6 +259,7 @@ def main() -> None:
 
     dtype = parse_dtype()
     check_frontend(dtype)
+    check_split_norm(dtype)
     check_output(dtype)
     print("HGDN CUDA parity passed")
 

@@ -26,6 +26,22 @@ std::vector<torch::Tensor> packed_qkv_frontend_backward_cuda(
     torch::Tensor inv_q,
     torch::Tensor inv_k);
 
+std::vector<torch::Tensor> packed_qkv_split_l2norm_forward_cuda(
+    torch::Tensor packed,
+    int64_t n_heads,
+    int64_t head_k_dim,
+    int64_t head_v_dim,
+    double eps);
+
+torch::Tensor packed_qkv_split_l2norm_backward_cuda(
+    torch::Tensor grad_q,
+    torch::Tensor grad_k,
+    torch::Tensor grad_v,
+    torch::Tensor q_norm,
+    torch::Tensor k_norm,
+    torch::Tensor inv_q,
+    torch::Tensor inv_k);
+
 std::vector<torch::Tensor> rmsnorm_silu_gate_forward_cuda(
     torch::Tensor o,
     torch::Tensor gate,
@@ -139,6 +155,48 @@ std::vector<torch::Tensor> rmsnorm_silu_gate_backward(
   return rmsnorm_silu_gate_backward_cuda(grad_out, normalized, gate, inv_rms);
 }
 
+std::vector<torch::Tensor> packed_qkv_split_l2norm_forward(
+    torch::Tensor packed,
+    int64_t n_heads,
+    int64_t head_k_dim,
+    int64_t head_v_dim,
+    double eps) {
+  CHECK_CUDA(packed);
+  CHECK_CONTIGUOUS(packed);
+  CHECK_DIM(packed, 3);
+  TORCH_CHECK(n_heads > 0, "n_heads must be positive");
+  TORCH_CHECK(head_k_dim > 0, "head_k_dim must be positive");
+  TORCH_CHECK(head_v_dim > 0, "head_v_dim must be positive");
+  return packed_qkv_split_l2norm_forward_cuda(
+      packed, n_heads, head_k_dim, head_v_dim, eps);
+}
+
+torch::Tensor packed_qkv_split_l2norm_backward(
+    torch::Tensor grad_q,
+    torch::Tensor grad_k,
+    torch::Tensor grad_v,
+    torch::Tensor q_norm,
+    torch::Tensor k_norm,
+    torch::Tensor inv_q,
+    torch::Tensor inv_k) {
+  CHECK_CUDA(grad_q);
+  CHECK_CUDA(grad_k);
+  CHECK_CUDA(grad_v);
+  CHECK_CUDA(q_norm);
+  CHECK_CUDA(k_norm);
+  CHECK_CUDA(inv_q);
+  CHECK_CUDA(inv_k);
+  CHECK_CONTIGUOUS(grad_q);
+  CHECK_CONTIGUOUS(grad_k);
+  CHECK_CONTIGUOUS(grad_v);
+  CHECK_CONTIGUOUS(q_norm);
+  CHECK_CONTIGUOUS(k_norm);
+  CHECK_CONTIGUOUS(inv_q);
+  CHECK_CONTIGUOUS(inv_k);
+  return packed_qkv_split_l2norm_backward_cuda(
+      grad_q, grad_k, grad_v, q_norm, k_norm, inv_q, inv_k);
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def(
       "packed_qkv_frontend_forward",
@@ -148,6 +206,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       "packed_qkv_frontend_backward",
       &packed_qkv_frontend_backward,
       "HGDN packed qkv frontend backward (CUDA)");
+  m.def(
+      "packed_qkv_split_l2norm_forward",
+      &packed_qkv_split_l2norm_forward,
+      "HGDN packed qkv split+l2norm forward (CUDA)");
+  m.def(
+      "packed_qkv_split_l2norm_backward",
+      &packed_qkv_split_l2norm_backward,
+      "HGDN packed qkv split+l2norm backward (CUDA)");
   m.def(
       "rmsnorm_silu_gate_forward",
       &rmsnorm_silu_gate_forward,

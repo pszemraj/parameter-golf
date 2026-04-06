@@ -6,7 +6,11 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 
-from hgdn_cuda import packed_qkv_frontend_reference, rmsnorm_silu_gate_reference
+from hgdn_cuda import (
+    packed_qkv_frontend_reference,
+    packed_qkv_split_l2norm_reference,
+    rmsnorm_silu_gate_reference,
+)
 
 from model import (
     SCALAR_PARAM_PATTERNS,
@@ -664,6 +668,128 @@ def test_gdn_packed_qkv_split_copy_validation():
     print("  ✓ packed qkv split-copy validates requirements")
 
 
+def test_packed_qkv_split_l2norm_reference_matches_eager_ops():
+    """Reference packed split+l2norm should match eager split plus q/k normalization."""
+    torch.manual_seed(42)
+    packed = torch.randn(2, 32, 96, requires_grad=True)
+    packed_ref = packed.detach().clone().requires_grad_(True)
+    q_ref, k_ref, v_ref = packed_qkv_split_l2norm_reference(
+        packed_ref,
+        n_heads=4,
+        head_k_dim=8,
+        head_v_dim=8,
+    )
+    q_eager, k_eager, v_eager = packed.split((32, 32, 32), dim=-1)
+    q_eager = l2_norm(q_eager.view(2, 32, 4, 8))
+    k_eager = l2_norm(k_eager.view(2, 32, 4, 8))
+    v_eager = v_eager.view(2, 32, 4, 8)
+    torch.testing.assert_close(q_ref, q_eager, atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(k_ref, k_eager, atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(v_ref, v_eager, atol=1e-6, rtol=1e-6)
+
+    grad_q = torch.randn_like(q_eager)
+    grad_k = torch.randn_like(k_eager)
+    (q_ref * grad_q).sum().backward(retain_graph=True)
+    (k_ref * grad_k).sum().backward()
+    ref_grad = packed_ref.grad.detach().clone()
+
+    packed_grad = None
+    packed_eager = packed.detach().clone().requires_grad_(True)
+    q_eager, k_eager, _ = packed_eager.split((32, 32, 32), dim=-1)
+    q_eager = l2_norm(q_eager.view(2, 32, 4, 8))
+    k_eager = l2_norm(k_eager.view(2, 32, 4, 8))
+    (q_eager * grad_q).sum().backward(retain_graph=True)
+    (k_eager * grad_k).sum().backward()
+    packed_grad = packed_eager.grad.detach().clone()
+    torch.testing.assert_close(ref_grad, packed_grad, atol=1e-5, rtol=1e-5)
+    print("  ✓ packed split+l2norm reference matches eager ops")
+
+
+def test_gdn_cuda_split_norm_cpu_fallback_matches_packed_path():
+    """CPU fallback for CUDA split+l2norm should preserve packed-path outputs and gradients."""
+    torch.manual_seed(42)
+    kwargs = dict(
+        d_model=64,
+        n_heads=4,
+        head_k_dim=8,
+        expand_v=1.0,
+        allow_neg_eigval=True,
+        conv_size=4,
+        use_fla=False,
+        use_packed_qkv_conv=True,
+        use_packed_qkv_proj=True,
+        use_packed_qkv_conv_custom_backward=True,
+        conv_output_contiguous=True,
+    )
+    eager = GatedDeltaNet(**kwargs)
+    split_norm = GatedDeltaNet(**kwargs, use_cuda_split_norm=True)
+    split_norm.load_state_dict(eager.state_dict(), strict=True)
+
+    x_eager = torch.randn(2, 32, 64, requires_grad=True)
+    x_split = x_eager.detach().clone().requires_grad_(True)
+    y_eager = eager(x_eager)
+    y_split = split_norm(x_split)
+    torch.testing.assert_close(y_split, y_eager, atol=1e-5, rtol=1e-5)
+
+    grad = torch.randn_like(y_eager)
+    y_eager.backward(grad, retain_graph=True)
+    y_split.backward(grad)
+    torch.testing.assert_close(x_split.grad, x_eager.grad, atol=1e-5, rtol=1e-5)
+    print("  ✓ CUDA split+l2norm CPU fallback matches packed path")
+
+
+def test_gdn_cuda_split_norm_validation():
+    """CUDA split+l2norm should only run on the non-fused packed-projection path."""
+    try:
+        GatedDeltaNet(
+            d_model=64,
+            n_heads=4,
+            head_k_dim=8,
+            expand_v=1.0,
+            use_cuda_split_norm=True,
+        )
+        raise AssertionError(
+            "Expected CUDA split+l2norm to require packed qkv proj+conv"
+        )
+    except ValueError:
+        pass
+    try:
+        GatedDeltaNet(
+            d_model=64,
+            n_heads=4,
+            head_k_dim=8,
+            expand_v=1.0,
+            use_packed_qkv_conv=True,
+            use_packed_qkv_proj=True,
+            conv_output_contiguous=True,
+            use_cuda_split_norm=True,
+            use_cuda_fused_frontend=True,
+        )
+        raise AssertionError(
+            "Expected CUDA split+l2norm to reject the CUDA fused frontend"
+        )
+    except ValueError:
+        pass
+    try:
+        GatedDeltaNet(
+            d_model=64,
+            n_heads=4,
+            head_k_dim=8,
+            expand_v=1.0,
+            use_packed_qkv_conv=True,
+            use_packed_qkv_proj=True,
+            conv_output_contiguous=True,
+            use_cuda_split_norm=True,
+            use_packed_qkv_split_copy=True,
+        )
+        raise AssertionError(
+            "Expected CUDA split+l2norm to reject split-copy materialization"
+        )
+    except ValueError:
+        pass
+    print("  ✓ CUDA split+l2norm validates requirements")
+
+
 def test_packed_qkv_frontend_reference_matches_eager_ops():
     """Reference packed front-end should match the eager packed conv + q/k norm path."""
     torch.manual_seed(42)
@@ -1187,6 +1313,10 @@ if __name__ == "__main__":
             test_gdn_packed_qkv_split_copy_validation,
         ),
         (
+            "Packed split+l2norm reference parity",
+            test_packed_qkv_split_l2norm_reference_matches_eager_ops,
+        ),
+        (
             "Packed qkv frontend reference parity",
             test_packed_qkv_frontend_reference_matches_eager_ops,
         ),
@@ -1201,6 +1331,14 @@ if __name__ == "__main__":
         (
             "Fused HGDN CPU fallback parity",
             test_gdn_cuda_fused_cpu_fallback_matches_packed_path,
+        ),
+        (
+            "CUDA split+l2norm CPU fallback parity",
+            test_gdn_cuda_split_norm_cpu_fallback_matches_packed_path,
+        ),
+        (
+            "CUDA split+l2norm validation",
+            test_gdn_cuda_split_norm_validation,
         ),
         ("Hybrid fwd/bwd", test_hybrid_fwd_bwd),
         ("Norm styles", test_norm_styles),

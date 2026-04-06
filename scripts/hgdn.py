@@ -113,6 +113,14 @@ HGDN_PRESETS: dict[str, dict[str, str]] = {
         "GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD": "1",
         "GDN_PACKED_QKV_SPLIT_COPY": "1",
     },
+    "winner-20260405-19-cuda-split-norm": {
+        "GDN_CONV_OUTPUT_CONTIGUOUS": "1",
+        "GDN_USE_PACKED_QKV_CONV": "1",
+        "GDN_USE_PACKED_QKV_PROJ": "1",
+        "GDN_CONTROL_PROJ_FP32": "0",
+        "GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD": "1",
+        "GDN_USE_CUDA_SPLIT_NORM": "1",
+    },
 }
 
 COMMON_ENV_ARGS: tuple[tuple[str, str], ...] = (
@@ -300,6 +308,11 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
         "--packed-qkv-split-copy",
         action="store_true",
         help="Set GDN_PACKED_QKV_SPLIT_COPY=1.",
+    )
+    parser.add_argument(
+        "--cuda-split-norm",
+        action="store_true",
+        help="Set GDN_USE_CUDA_SPLIT_NORM=1.",
     )
     parser.add_argument(
         "--set",
@@ -496,6 +509,8 @@ def build_env(args: argparse.Namespace) -> dict[str, str]:
         env["GDN_PACKED_QKV_SINGLE_CONTIG"] = "1"
     if args.packed_qkv_split_copy:
         env["GDN_PACKED_QKV_SPLIT_COPY"] = "1"
+    if args.cuda_split_norm:
+        env["GDN_USE_CUDA_SPLIT_NORM"] = "1"
 
     for raw in args.set:
         key, value = parse_kv_assignment(raw)

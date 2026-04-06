@@ -90,6 +90,57 @@ def packed_qkv_frontend_reference(
     return q.contiguous(), k.contiguous(), v.contiguous()
 
 
+def packed_qkv_split_l2norm_reference(
+    packed: Tensor,
+    *,
+    n_heads: int,
+    head_k_dim: int,
+    head_v_dim: int,
+    eps: float = 1e-6,
+) -> tuple[Tensor, Tensor, Tensor]:
+    """Reference post-conv packed split plus q/k L2 normalization.
+
+    This matches the active packed HGDN front-end contract after the packed
+    depthwise conv and SiLU have already been applied.
+
+    :param Tensor packed: Packed post-conv activations shaped ``(batch, seq, channels)``.
+    :param int n_heads: Number of HGDN heads.
+    :param int head_k_dim: Per-head q/k width.
+    :param int head_v_dim: Per-head value width.
+    :param float eps: Numerical stability epsilon.
+    :raises ValueError: If the packed tensor shape is unsupported.
+    :return tuple[Tensor, Tensor, Tensor]: Normalized q/k and reshaped v.
+    """
+    if packed.ndim != 3:
+        raise ValueError(f"Expected packed.ndim == 3, got {packed.ndim}")
+
+    batch, seq, channels = packed.shape
+    q_dim = n_heads * head_k_dim
+    k_dim = n_heads * head_k_dim
+    v_dim = n_heads * head_v_dim
+    if channels != q_dim + k_dim + v_dim:
+        raise ValueError(
+            f"Packed split/norm channel mismatch: got {channels}, expected {q_dim + k_dim + v_dim}"
+        )
+
+    q_pre, k_pre, v = packed.split((q_dim, k_dim, v_dim), dim=-1)
+    accum_dtype = _norm_accum_dtype(q_pre)
+    q = F.normalize(
+        q_pre.view(batch, seq, n_heads, head_k_dim).to(dtype=accum_dtype),
+        p=2,
+        dim=-1,
+        eps=eps,
+    ).to(dtype=packed.dtype)
+    k = F.normalize(
+        k_pre.view(batch, seq, n_heads, head_k_dim).to(dtype=accum_dtype),
+        p=2,
+        dim=-1,
+        eps=eps,
+    ).to(dtype=packed.dtype)
+    v = v.view(batch, seq, n_heads, head_v_dim).to(dtype=packed.dtype)
+    return q.contiguous(), k.contiguous(), v.contiguous()
+
+
 def rmsnorm_silu_gate_reference(
     o: Tensor,
     gate: Tensor,

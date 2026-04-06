@@ -109,6 +109,7 @@ def run_gdn_eager() -> PreflightResult:
             output_norm_fp32=env_flag("GDN_OUTPUT_NORM_FP32", True),
             use_cuda_fused_frontend=env_flag("GDN_USE_CUDA_FUSED_FRONTEND"),
             use_cuda_fused_output=env_flag("GDN_USE_CUDA_FUSED_OUTPUT"),
+            use_cuda_split_norm=env_flag("GDN_USE_CUDA_SPLIT_NORM"),
             use_packed_qkv_conv_custom_backward=env_flag(
                 "GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD"
             ),
@@ -174,6 +175,7 @@ def run_hybrid_case(*, compiled: bool) -> PreflightResult:
             gdn_output_norm_fp32=env_flag("GDN_OUTPUT_NORM_FP32", True),
             gdn_use_cuda_fused_frontend=env_flag("GDN_USE_CUDA_FUSED_FRONTEND"),
             gdn_use_cuda_fused_output=env_flag("GDN_USE_CUDA_FUSED_OUTPUT"),
+            gdn_use_cuda_split_norm=env_flag("GDN_USE_CUDA_SPLIT_NORM"),
             gdn_use_packed_qkv_conv_custom_backward=env_flag(
                 "GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD"
             ),
