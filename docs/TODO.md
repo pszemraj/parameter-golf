@@ -48,57 +48,66 @@ This file tracks follow-up work that is intentionally not enabled by default in 
     - target lower-level ATen, Triton, CUDA, or other generated-path changes
       instead
 - Latest screened candidate:
+  - `winner-20260405-19-cuda-frontend-nct-custom-bwd`
+  - equivalent to:
+    - `winner-20260405-19`
+    - `GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=1`
+    - `GDN_USE_CUDA_FRONTEND_NCT=1`
+  - purpose:
+    - compose the promoted exact-length packed custom-backward conv path with
+      the compile-visible NCT frontend op
+    - expose `preact_nct` directly to the frontend op so `SiLU + split + q/k
+      norm` stay compile-visible without giving back the k10 conv-backward win
+  - local result:
+    - same-day sequential local phase-1 rerun is clearly positive against the
+      active winner
+    - versus `profiles/rtx4070_phase1_winner20260405_19_r3/`:
+      - console step average:
+        - `3479.42 -> 3042.16 ms` (`-12.57%`)
+    - boundary audit stayed clean through `conv_qkv`, `norm_qkv`, and
+      `recurrence_inputs`
+    - trainer buckets moved in the right direction:
+      - `aten::copy_`: `469.96 -> 236.48 ms`
+      - `aten::mul`: `794.53 -> 511.73 ms`
+      - `gdn.recurrence`: `115.13 -> 103.36 ms`
+      - `aten::convolution_backward`: `116.08 -> 104.93 ms`
+      - `aten::_conv_depthwise2d`: `88.44 -> 80.11 ms`
+  - current decision:
+    - keep `winner-20260405-19` active until H100 confirmation
+    - this supersedes both the standalone `cuda-frontend-nct` H100 reject and
+      the older `cuda-packed-conv` local sidecar as the next H100 batch
+  - H100 batch:
+    - `python setup_hgdn_cuda.py build_ext --inplace`
+    - `python scripts/hgdn_cuda_parity.py`
+    - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k14ctl_a --offline`
+    - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k14ctl_b --offline`
+    - `python scripts/hgdn.py preflight --preset winner-20260405-19-cuda-frontend-nct-custom-bwd --compile-strategy model`
+    - `python scripts/hgdn.py h100-profile hybrid-eager --preset winner-20260405-19-cuda-frontend-nct-custom-bwd --run-prefix h100k14a`
+    - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-cuda-frontend-nct-custom-bwd --run-prefix h100k14a --offline`
+    - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-cuda-frontend-nct-custom-bwd --run-prefix h100k14b --offline`
+    - `python scripts/hgdn.py h100-profile hybrid --preset winner-20260405-19-cuda-frontend-nct-custom-bwd --run-prefix h100k14a`
+- Older screened candidate:
   - `winner-20260405-19-cuda-frontend-nct`
   - equivalent to:
     - `winner-20260405-19`
     - `GDN_USE_CUDA_FRONTEND_NCT=1`
-  - purpose:
-    - move the post-conv `SiLU + q/k/v split + q/k L2 norm` stage one boundary
-      earlier into a compile-visible `torch.library` op over `preact_nct`
-    - keep the depthwise conv and its gradients in the normal ATen path
-    - avoid the old k12 failure mode:
-      - no packed BTC `.contiguous()` at the extension boundary
-      - no `_dynamo_disable(...)` eager-island wrapper around the frontend op
-  - local result:
-    - directionally strong against `profiles/rtx4070_cuda_base/`
-    - and also stronger than the earlier `cuda-packed-conv` sidecar under the
-      same local phase-1 contract
-    - versus `profiles/rtx4070_cuda_base/`:
-      - console step average:
-        - `3320.37 -> 2944.81 ms` (`-11.31%`)
-      - `ProfilerStep*` self-device total:
-        - `6610.92 -> 5913.20 ms` (`-10.56%`)
-    - versus `profiles/rtx4070_phase1_cuda_packedconv_fix1/`:
-      - console step average:
-        - `3065.44 -> 2944.81 ms` (`-3.94%`)
-      - `ProfilerStep*` self-device total:
-        - `6126.34 -> 5913.20 ms` (`-3.48%`)
-    - boundary audit stayed clean through `conv_qkv`, `norm_qkv`, and
-      `recurrence_inputs`
-    - trainer buckets versus the older local base moved in the right direction:
-      - `aten::copy_`: `785.65 -> 591.96 ms`
-      - `aten::mul`: `1012.30 -> 850.40 ms`
-      - `gdn.recurrence`: `177.23 -> 172.20 ms`
-    - important nuance versus `cuda-packed-conv`:
-      - `aten::copy_` got worse:
-        - `369.11 -> 591.96 ms`
-      - `aten::mul` got better:
-        - `977.57 -> 850.40 ms`
-      - the local trainer step still improved overall
-  - current decision:
-    - keep `winner-20260405-19` active until H100 confirmation
-    - this supersedes `winner-20260405-19-cuda-packed-conv` as the next H100
-      sidecar batch
-  - H100 batch:
-    - `python setup_hgdn_cuda.py build_ext --inplace`
-    - `python scripts/hgdn_cuda_parity.py`
-    - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k13ctl_a --offline`
-    - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k13ctl_b --offline`
-    - `python scripts/hgdn.py preflight --preset winner-20260405-19-cuda-frontend-nct --compile-strategy model`
-    - `python scripts/hgdn.py h100-profile hybrid-eager --preset winner-20260405-19-cuda-frontend-nct --run-prefix h100k13a`
-    - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-cuda-frontend-nct --run-prefix h100k13a --offline`
-    - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-cuda-frontend-nct --run-prefix h100k13b --offline`
-    - `python scripts/hgdn.py h100-profile hybrid --preset winner-20260405-19-cuda-frontend-nct --run-prefix h100k13a`
+  - H100 result:
+    - hard reject
+    - same-day controls:
+      - `883.57 ms`
+      - `883.29 ms`
+    - candidate:
+      - `1050.79 ms`
+      - `1051.40 ms`
+    - mean delta:
+      - `883.43 -> 1051.10 ms` (`+18.98%`)
+  - reason:
+    - it dropped `GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=1`, so it was not a
+      true `k10 + k13` composition
+    - compiled copy tax and custom-op overhead reopened badly on H100
+  - decision:
+    - reject this standalone sidecar on H100
+    - keep only the compile-visible NCT frontend idea as a building block
 - Older screened candidate:
   - `winner-20260405-19-cuda-packed-conv`
   - equivalent to:
@@ -123,7 +132,7 @@ This file tracks follow-up work that is intentionally not enabled by default in 
       - `gdn.recurrence`: `177.23 -> 169.22 ms`
   - current decision:
     - keep `winner-20260405-19` active until H100 confirmation of the stronger
-      NCT sidecar
+      composed NCT sidecar
     - keep this in-tree as a building block
 - Older screened candidate:
   - `winner-20260405-19-cuda-split-norm`

@@ -1,6 +1,6 @@
 # HGDN Branch Status
 
-Last updated: 2026-04-06 12:51 EDT
+Last updated: 2026-04-06 18:02 EDT
 
 Branch: `exp/hgdn`
 
@@ -88,6 +88,7 @@ What has not been claimed:
 
 - `scripts/hgdn.py`: preferred structured launcher for HGDN helpers, with subcommands, named presets, and optional TOML env configs
 - `configs/hgdn/winner_20260405_19.toml`: reusable config for the active H100-confirmed HGDN kernel winner
+- `configs/hgdn/winner_20260405_19_cuda_frontend_nct_custombwd.toml`: composed sidecar candidate that keeps the promoted exact-length packed custom-backward conv path and layers the compile-visible NCT frontend op above `preact_nct`
 - `configs/hgdn/winner_20260405_19_cuda_frontend_nct.toml`: compile-visible NCT frontend sidecar candidate that keeps depthwise conv in ATen and moves post-conv `SiLU + split + q/k norm` one boundary earlier
 - `configs/hgdn/winner_20260405_19_cuda_packed_conv.toml`: exact-length CUDA packed-conv sidecar candidate that replaces the packed qkv causal depthwise conv family itself
 - `configs/hgdn/winner_20260405_19_cuda_split_norm.toml`: real-kernel H100 sidecar candidate that replaces only the post-conv packed split+q/k norm stage
@@ -141,6 +142,7 @@ Active timestamped presets:
 - `convcontig`
 - `packed-qkv`
 - `winner-20260405-19`
+- `winner-20260405-19-cuda-frontend-nct-custom-bwd`
 - `winner-20260405-19-cuda-frontend-nct`
 - `winner-20260405-19-cuda-packed-conv`
 - `winner-20260405-19-single-contig`
@@ -191,48 +193,81 @@ Kernel-work guardrail:
   - the generated-path `split-copy` attempt also lost locally
   - the real CUDA post-conv split+q/k norm kernel also lost on compiled H100
   - the first exact-length CUDA packed-conv replacement was locally strong
-  - the compile-visible NCT frontend follow-up now looks stronger locally than
-    that older packed-conv sidecar
+  - the standalone compile-visible NCT frontend follow-up lost badly on H100
+    because it reopened copy tax and dropped the promoted custom-backward win
+  - the composed `k10 + k13` path, which keeps the promoted custom-backward
+    conv path and layers the compile-visible NCT frontend above `preact_nct`,
+    now looks strongest locally
   - the next front-end pass should therefore stay on real kernel replacement,
     not another front-end extension island layered above the compiled path or
     another layout-only rearrangement
 
 Latest screened front-end candidate:
 
+- `winner-20260405-19-cuda-frontend-nct-custom-bwd`
+- equivalent to:
+  - `winner-20260405-19`
+  - `GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=1`
+  - `GDN_USE_CUDA_FRONTEND_NCT=1`
+- purpose:
+  - keep the promoted exact-length packed depthwise custom-backward path from
+    `winner-20260405-19`
+  - expose `preact_nct` to a compile-visible frontend op that performs
+    `SiLU + q/k/v split + q/k L2 norm`
+  - preserve the ATen conv gradient path that won on H100 while fixing the bad
+    standalone k13 boundary choice
+- status:
+  - implementation and tests are in-tree
+  - same-day local phase-1 rerun is directionally strong enough to justify H100
+  - compared against `profiles/rtx4070_phase1_winner20260405_19_r3/`:
+    - console step average: `3479.42 -> 3042.16 ms` (`-12.57%`)
+    - trainer `aten::copy_`: `469.96 -> 236.48 ms`
+    - trainer `aten::mul`: `794.53 -> 511.73 ms`
+    - trainer `gdn.recurrence`: `115.13 -> 103.36 ms`
+    - trainer `aten::convolution_backward`: `116.08 -> 104.93 ms`
+    - trainer `aten::_conv_depthwise2d`: `88.44 -> 80.11 ms`
+  - mechanism read:
+    - the recurrence-facing boundary stayed contiguous through `conv_qkv`,
+      `norm_qkv`, and `recurrence_inputs`
+    - the new frontend op is visible in the trace:
+      - `gdn.qkv_frontend_nct_cuda`
+    - the standalone `q_norm` bucket disappears from the trainer view because
+      that work is now inside the custom op, but the trainer shell cost also
+      drops materially
+  - decision:
+    - keep `winner-20260405-19` active until H100 confirms or rejects it
+    - this supersedes both `winner-20260405-19-cuda-frontend-nct` and
+      `winner-20260405-19-cuda-packed-conv` as the next H100 sidecar batch
+
+Older screened front-end candidate:
+
 - `winner-20260405-19-cuda-frontend-nct`
 - equivalent to:
   - `winner-20260405-19`
   - `GDN_USE_CUDA_FRONTEND_NCT=1`
 - purpose:
-  - keep the packed qkv projection
-  - keep the depthwise conv itself in the normal ATen path
   - move the post-conv `SiLU + q/k/v split + q/k L2 norm` stage one boundary
     earlier into a compile-visible `torch.library` op over `preact_nct`
-  - avoid the old k12 failure mode:
-    - no packed BTC `.contiguous()` at the extension boundary
-    - no `_dynamo_disable(...)` eager-island wrapper around the new frontend op
-- status:
-  - implementation and tests are in-tree
-  - local phase-1 is directionally strong enough to justify H100
-  - compared against `profiles/rtx4070_cuda_base/`:
-    - console step average: `3320.37 -> 2944.81 ms` (`-11.31%`)
-    - `ProfilerStep*` self-device total: `6610.92 -> 5913.20 ms` (`-10.56%`)
-  - compared against `profiles/rtx4070_phase1_cuda_packedconv_fix1/`:
-    - console step average: `3065.44 -> 2944.81 ms` (`-3.94%`)
-    - `ProfilerStep*` self-device total: `6126.34 -> 5913.20 ms` (`-3.48%`)
-  - mechanism read:
-    - the recurrence-facing boundary stayed contiguous through `conv_qkv`,
-      `norm_qkv`, and `recurrence_inputs`
-    - trainer `aten::copy_` improved versus the older local base:
-      - `785.65 -> 591.96 ms`
-    - trainer `aten::mul` improved versus the older local base:
-      - `1012.30 -> 850.40 ms`
-    - versus `cuda-packed-conv`, `aten::copy_` reopened while `aten::mul`
-      improved enough for the full local step to still win
-  - decision:
-    - keep `winner-20260405-19` active until H100 confirms or rejects it
-    - this supersedes `winner-20260405-19-cuda-packed-conv` as the next H100
-      sidecar batch
+  - keep the depthwise conv itself in the normal ATen path
+- H100 result:
+  - hard reject
+  - same-day controls:
+    - `883.57 ms`
+    - `883.29 ms`
+  - candidate:
+    - `1050.79 ms`
+    - `1051.40 ms`
+  - mean delta:
+    - `883.43 -> 1051.10 ms` (`+18.98%`)
+- failure mode:
+  - this was not a true `k10 + k13` composition
+  - the path dropped `GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=1`, so it gave
+    back the promoted exact-length conv backward win
+  - compiled H100 reopened copy tax and paid large frontend-op overhead
+- decision:
+  - reject this standalone sidecar on H100
+  - keep only the compile-visible NCT frontend idea as a building block inside
+    the stronger combined candidate
 
 Older screened front-end candidate:
 

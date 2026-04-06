@@ -1,9 +1,165 @@
 # Profiling Log
 
-Last updated: 2026-04-06 12:51 EDT
+Last updated: 2026-04-06 18:02 EDT
 
 This file records profiler-driven checkpoints that should survive beyond the raw
 artifacts under `profiles/`.
+
+## 2026-04-06 — Standalone compile-visible NCT frontend is a hard H100 reject (`h100k13`)
+
+Bundle:
+
+- H100 bundle:
+  - `local-scratch/profiling-out-h100k13-hgdn.7z`
+
+Contract:
+
+- active H100 baseline:
+  - `winner-20260405-19`
+- candidate delta:
+  - `GDN_USE_CUDA_FRONTEND_NCT=1`
+- important caveat:
+  - this candidate did **not** include
+    `GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=1`
+  - so `h100k13` was not a true `k10 + k13` composition
+
+### Main finding
+
+Reject `winner-20260405-19-cuda-frontend-nct` on H100.
+
+Same-day H100 compiled perf:
+
+- controls:
+  - `883.57 ms`
+  - `883.29 ms`
+- candidate:
+  - `1050.79 ms`
+  - `1051.40 ms`
+- mean delta:
+  - `883.43 -> 1051.10 ms` (`+18.98%`)
+
+### What went wrong
+
+The compile-visible NCT frontend idea by itself was not enough. The standalone
+path gave back the promoted exact-length custom-backward conv win and reopened
+the compiled front-end tax.
+
+Important compiled-profile read:
+
+- `aten::copy_` reopened materially
+- `hgdn_cuda_v2::preact_silu_split_l2norm_nct`
+- `hgdn_cuda_v2::preact_silu_split_l2norm_nct_backward`
+
+So the correct lesson from `h100k13` is not “the NCT frontend idea is bad.” The
+correct lesson is:
+
+- standalone `frontend_nct` was the wrong composition
+- keep the compile-visible NCT frontend as an ingredient
+- pair it with the promoted exact-length packed custom-backward conv path
+
+### Decision
+
+Keep `winner-20260405-19` active.
+
+Reject `winner-20260405-19-cuda-frontend-nct` as a standalone H100 sidecar.
+
+Treat the compile-visible NCT frontend as a building block for a stronger
+composed candidate, not as a path to promote by itself.
+
+## 2026-04-06 — Composed custom-backward + compile-visible NCT frontend is the next H100 sidecar locally (`rtx4070_phase1_cuda_frontendnctcustom_fix2`)
+
+Bundle:
+
+- local control bundle:
+  - `profiles/rtx4070_phase1_winner20260405_19_r3/`
+- local candidate bundle:
+  - `profiles/rtx4070_phase1_cuda_frontendnctcustom_fix2/`
+- direct comparison:
+  - `profiles/rtx4070_phase1_cuda_frontendnctcustom_fix2/compare_vs_rtx4070_phase1_winner20260405_19_r3/comparison.md`
+
+Contract:
+
+- active H100 baseline:
+  - `winner-20260405-19`
+- candidate delta:
+  - `GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=1`
+  - `GDN_USE_CUDA_FRONTEND_NCT=1`
+- implementation idea:
+  - keep the promoted exact-length packed custom-backward conv path
+  - expose `preact_nct` directly to the compile-visible frontend op
+  - let the frontend op perform `SiLU + q/k/v split + q/k L2 norm`
+  - preserve the recurrence-facing contiguous contract
+
+### Main finding
+
+This is the first true `k10 + k13` composition.
+
+The earlier local result looked promising but had an ambiguous same-day read
+because the comparison control was stale. A fresh sequential rerun resolved that
+ambiguity.
+
+Same-day local phase-1 result:
+
+- console step average:
+  - `3479.42 -> 3042.16 ms` (`-12.57%`)
+- peak allocated memory:
+  - `6184 -> 5983 MiB`
+
+### What it got right
+
+The recurrence-facing boundary stayed clean:
+
+- `conv_qkv q/k/v` stayed contiguous
+- `norm_qkv q/k/v` stayed contiguous
+- `recurrence_inputs q/k/v` stayed contiguous
+
+And the trainer buckets moved in the right direction against the same-day
+control:
+
+- `aten::copy_`:
+  - `469.96 -> 236.48 ms`
+- `aten::mul`:
+  - `794.53 -> 511.73 ms`
+- `gdn.recurrence`:
+  - `115.13 -> 103.36 ms`
+- `aten::convolution_backward`:
+  - `116.08 -> 104.93 ms`
+- `aten::_conv_depthwise2d`:
+  - `88.44 -> 80.11 ms`
+
+### Important nuance
+
+The short hybrid forward/backward slice still shows some bucket reshaping:
+
+- `gdn.qkv_frontend_nct_cuda` is now visible
+- `gdn.q_norm` moved inside the custom frontend path rather than disappearing
+  from the work entirely
+- `bare_gdn` recurrence and pointwise buckets are not the main decision source
+  here; the real local trainer step is
+
+That is acceptable. The main question is no longer “did the trace move around?”
+The main question is whether the composed path reduces the real trainer shell on
+target hardware. The same-day local rerun is strong enough to justify asking
+H100 that question.
+
+### Decision
+
+Keep `winner-20260405-19` active until H100 confirms or rejects this.
+
+Promote `winner-20260405-19-cuda-frontend-nct-custom-bwd` to the next H100
+sidecar.
+
+### H100 validation
+
+- `python setup_hgdn_cuda.py build_ext --inplace`
+- `python scripts/hgdn_cuda_parity.py`
+- `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k14ctl_a --offline`
+- `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k14ctl_b --offline`
+- `python scripts/hgdn.py preflight --preset winner-20260405-19-cuda-frontend-nct-custom-bwd --compile-strategy model`
+- `python scripts/hgdn.py h100-profile hybrid-eager --preset winner-20260405-19-cuda-frontend-nct-custom-bwd --run-prefix h100k14a`
+- `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-cuda-frontend-nct-custom-bwd --run-prefix h100k14a --offline`
+- `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-cuda-frontend-nct-custom-bwd --run-prefix h100k14b --offline`
+- `python scripts/hgdn.py h100-profile hybrid --preset winner-20260405-19-cuda-frontend-nct-custom-bwd --run-prefix h100k14a`
 
 ## 2026-04-06 — Compile-visible NCT frontend supersedes the standalone packed-conv sidecar locally (`rtx4070_phase1_cuda_frontendnct_fix1`)
 
