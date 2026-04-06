@@ -1,9 +1,129 @@
 # Profiling Log
 
-Last updated: 2026-04-06 13:10 EDT
+Last updated: 2026-04-06 12:51 EDT
 
 This file records profiler-driven checkpoints that should survive beyond the raw
 artifacts under `profiles/`.
+
+## 2026-04-06 — Compile-visible NCT frontend supersedes the standalone packed-conv sidecar locally (`rtx4070_phase1_cuda_frontendnct_fix1`)
+
+Bundle:
+
+- local candidate bundle:
+  - `profiles/rtx4070_phase1_cuda_frontendnct_fix1/`
+- direct comparison against the older local base:
+  - `profiles/rtx4070_phase1_cuda_frontendnct_fix1/compare_vs_rtx4070_cuda_base/comparison.md`
+- direct comparison against the earlier low-level CUDA packed-conv sidecar:
+  - `profiles/rtx4070_phase1_cuda_frontendnct_fix1/compare_vs_rtx4070_phase1_cuda_packedconv_fix1/comparison.md`
+
+Contract:
+
+- active H100 baseline:
+  - `winner-20260405-19`
+- candidate delta:
+  - `GDN_USE_CUDA_FRONTEND_NCT=1`
+- implementation idea:
+  - keep the promoted packed qkv projection
+  - keep the depthwise conv itself in the normal ATen conv path
+  - move the post-conv `SiLU + q/k/v split + q/k L2 norm` stage one boundary
+    earlier into a compile-visible `torch.library` op that consumes
+    `preact_nct`
+  - explicitly avoid the old k12 failure mode:
+    - no packed BTC `.contiguous()` right at the extension boundary
+    - no `_dynamo_disable(...)` eager-island wrapper around the new frontend op
+
+### Main finding
+
+This is the first k12-driven follow-up that actually matches the failure
+analysis from the H100 data and still looks positive after the full local
+phase-1 screen.
+
+Versus the older local base:
+
+- console step average:
+  - `3320.37 -> 2944.81 ms` (`-11.31%`)
+- `ProfilerStep*` self-device total:
+  - `6610.92 -> 5913.20 ms` (`-10.56%`)
+- peak allocated memory:
+  - `6184 -> 5984 MiB`
+
+Versus the earlier low-level CUDA packed-conv sidecar:
+
+- console step average:
+  - `3065.44 -> 2944.81 ms` (`-3.94%`)
+- `ProfilerStep*` self-device total:
+  - `6126.34 -> 5913.20 ms` (`-3.48%`)
+
+That is enough local evidence to promote this over the standalone packed-conv
+sidecar as the next H100 check.
+
+### What it got right
+
+The recurrence-facing contract stayed clean:
+
+- `conv_qkv q/k/v` stayed contiguous
+- `norm_qkv q/k/v` stayed contiguous
+- `recurrence_inputs q/k/v` stayed contiguous
+
+And the combined path did reduce real trainer-shell cost against the older
+baseline:
+
+- `aten::copy_`:
+  - `785.65 -> 591.96 ms`
+- `aten::mul`:
+  - `1012.30 -> 850.40 ms`
+- `gdn.recurrence`:
+  - `177.23 -> 172.20 ms`
+- `aten::convolution_backward`:
+  - `174.81 -> 169.83 ms`
+- `aten::_conv_depthwise2d`:
+  - `141.31 -> 138.00 ms`
+
+### Important nuance
+
+This did **not** simply dominate every bucket from the older CUDA packed-conv
+sidecar.
+
+Compared directly with `rtx4070_phase1_cuda_packedconv_fix1`:
+
+- `aten::copy_` got worse:
+  - `369.11 -> 591.96 ms`
+- but `aten::mul` got much better:
+  - `977.57 -> 850.40 ms`
+- and the end-to-end local trainer step still improved:
+  - `3065.44 -> 2944.81 ms`
+
+So the right read is not “this solved the front-end.” The right read is:
+
+- the compile-visible NCT boundary is a better combined direction than the
+  standalone exact-length packed-conv replacement
+- the win mechanism is now mixed enough that H100 should decide the next
+  promotion, not more laptop-only guesswork
+
+### Decision
+
+Keep `winner-20260405-19` active until H100 confirms or rejects this.
+
+Supersede `winner-20260405-19-cuda-packed-conv` with
+`winner-20260405-19-cuda-frontend-nct` as the next H100 sidecar.
+
+Keep the older packed-conv candidate in-tree as a building block. It is still a
+real kernel replacement and could matter again in a larger packed front-end
+pipeline.
+
+### H100 validation
+
+Run the same-day control pattern:
+
+- `python setup_hgdn_cuda.py build_ext --inplace`
+- `python scripts/hgdn_cuda_parity.py`
+- `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k13ctl_a --offline`
+- `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k13ctl_b --offline`
+- `python scripts/hgdn.py preflight --preset winner-20260405-19-cuda-frontend-nct --compile-strategy model`
+- `python scripts/hgdn.py h100-profile hybrid-eager --preset winner-20260405-19-cuda-frontend-nct --run-prefix h100k13a`
+- `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-cuda-frontend-nct --run-prefix h100k13a --offline`
+- `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-cuda-frontend-nct --run-prefix h100k13b --offline`
+- `python scripts/hgdn.py h100-profile hybrid --preset winner-20260405-19-cuda-frontend-nct --run-prefix h100k13a`
 
 ## 2026-04-06 — Exact-length CUDA packed-conv kernel is locally positive and H100-worthy (`rtx4070_phase1_cuda_packedconv_fix1`)
 

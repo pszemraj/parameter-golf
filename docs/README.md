@@ -1,6 +1,6 @@
 # HGDN Branch Status
 
-Last updated: 2026-04-06 13:10 EDT
+Last updated: 2026-04-06 12:51 EDT
 
 Branch: `exp/hgdn`
 
@@ -88,6 +88,7 @@ What has not been claimed:
 
 - `scripts/hgdn.py`: preferred structured launcher for HGDN helpers, with subcommands, named presets, and optional TOML env configs
 - `configs/hgdn/winner_20260405_19.toml`: reusable config for the active H100-confirmed HGDN kernel winner
+- `configs/hgdn/winner_20260405_19_cuda_frontend_nct.toml`: compile-visible NCT frontend sidecar candidate that keeps depthwise conv in ATen and moves post-conv `SiLU + split + q/k norm` one boundary earlier
 - `configs/hgdn/winner_20260405_19_cuda_packed_conv.toml`: exact-length CUDA packed-conv sidecar candidate that replaces the packed qkv causal depthwise conv family itself
 - `configs/hgdn/winner_20260405_19_cuda_split_norm.toml`: real-kernel H100 sidecar candidate that replaces only the post-conv packed split+q/k norm stage
 - `configs/hgdn/winner_20260405_19_single_contig.toml`: rejected Python-side single-contig front-end candidate kept in-tree for reference
@@ -140,6 +141,7 @@ Active timestamped presets:
 - `convcontig`
 - `packed-qkv`
 - `winner-20260405-19`
+- `winner-20260405-19-cuda-frontend-nct`
 - `winner-20260405-19-cuda-packed-conv`
 - `winner-20260405-19-single-contig`
 - `winner-20260405-11`
@@ -188,13 +190,51 @@ Kernel-work guardrail:
   - the Python-side `single-contig` attempt lost
   - the generated-path `split-copy` attempt also lost locally
   - the real CUDA post-conv split+q/k norm kernel also lost on compiled H100
-  - the first exact-length CUDA packed-conv replacement is now locally strong
-    enough to justify another H100 batch
+  - the first exact-length CUDA packed-conv replacement was locally strong
+  - the compile-visible NCT frontend follow-up now looks stronger locally than
+    that older packed-conv sidecar
   - the next front-end pass should therefore stay on real kernel replacement,
     not another front-end extension island layered above the compiled path or
     another layout-only rearrangement
 
 Latest screened front-end candidate:
+
+- `winner-20260405-19-cuda-frontend-nct`
+- equivalent to:
+  - `winner-20260405-19`
+  - `GDN_USE_CUDA_FRONTEND_NCT=1`
+- purpose:
+  - keep the packed qkv projection
+  - keep the depthwise conv itself in the normal ATen path
+  - move the post-conv `SiLU + q/k/v split + q/k L2 norm` stage one boundary
+    earlier into a compile-visible `torch.library` op over `preact_nct`
+  - avoid the old k12 failure mode:
+    - no packed BTC `.contiguous()` at the extension boundary
+    - no `_dynamo_disable(...)` eager-island wrapper around the new frontend op
+- status:
+  - implementation and tests are in-tree
+  - local phase-1 is directionally strong enough to justify H100
+  - compared against `profiles/rtx4070_cuda_base/`:
+    - console step average: `3320.37 -> 2944.81 ms` (`-11.31%`)
+    - `ProfilerStep*` self-device total: `6610.92 -> 5913.20 ms` (`-10.56%`)
+  - compared against `profiles/rtx4070_phase1_cuda_packedconv_fix1/`:
+    - console step average: `3065.44 -> 2944.81 ms` (`-3.94%`)
+    - `ProfilerStep*` self-device total: `6126.34 -> 5913.20 ms` (`-3.48%`)
+  - mechanism read:
+    - the recurrence-facing boundary stayed contiguous through `conv_qkv`,
+      `norm_qkv`, and `recurrence_inputs`
+    - trainer `aten::copy_` improved versus the older local base:
+      - `785.65 -> 591.96 ms`
+    - trainer `aten::mul` improved versus the older local base:
+      - `1012.30 -> 850.40 ms`
+    - versus `cuda-packed-conv`, `aten::copy_` reopened while `aten::mul`
+      improved enough for the full local step to still win
+  - decision:
+    - keep `winner-20260405-19` active until H100 confirms or rejects it
+    - this supersedes `winner-20260405-19-cuda-packed-conv` as the next H100
+      sidecar batch
+
+Older screened front-end candidate:
 
 - `winner-20260405-19-cuda-packed-conv`
 - equivalent to:
@@ -207,20 +247,14 @@ Latest screened front-end candidate:
   - preserve the recurrence-facing contiguous contract
 - status:
   - implementation and tests are in-tree
-  - local phase-1 is directionally strong enough to justify H100
+  - local phase-1 was directionally strong
   - compared against `profiles/rtx4070_cuda_base/`:
     - console step average: `3320.37 -> 3065.44 ms` (`-7.68%`)
     - `ProfilerStep*` self-device total: `6610.92 -> 6126.34 ms` (`-7.33%`)
-  - mechanism read:
-    - `_PackedQKVConvFunction` and `_PackedQKVConvFunctionBackward` are active
-    - trainer `aten::copy_`: `785.65 -> 369.11 ms`
-    - trainer `aten::mul`: `1012.30 -> 977.57 ms`
-    - trainer `gdn.recurrence`: `177.23 -> 169.22 ms`
   - decision:
-    - keep `winner-20260405-19` active until H100 confirms or rejects it
-    - this is the next H100 sidecar batch
-
-Older screened front-end candidate:
+    - keep it bookmarked as a real kernel building block
+    - the compile-visible NCT frontend now takes priority for the next H100
+      validation
 
 - `winner-20260405-19-cuda-split-norm`
 - equivalent to:
