@@ -180,20 +180,27 @@ Screened front-end candidate:
   - keep q/k normalization on the same Python-side `l2_norm` path
 - status:
   - implementation and tests are in-tree
-  - local phase-1 reject
-  - compared against `profiles/rtx4070_cuda_base/`, trainer eager self-device time moved:
-    - `25561.13 -> 26793.74 ms` (`+4.82%`)
-  - `aten::copy_` improved:
-    - `785.65 -> 727.70 ms`
-  - but the full trainer step still lost, mainly because:
-    - `aten::mul`: `1012.30 -> 1219.95 ms`
-  - do not promote this candidate to H100 unless its implementation changes materially
+  - local phase-1 reject on the RTX 4070 laptop
+  - optional H100 sidecar also failed to justify promotion
+  - same-day H100 compiled perf:
+    - controls: `882.37 ms`, `877.13 ms`
+    - candidate: `876.36 ms`, `878.32 ms`
+    - mean delta: `879.75 -> 877.34 ms` (`-0.27%`)
+  - profiler support was also unfavorable:
+    - `gdn.qkv_conv_output_contiguous_packed: 153.34 ms`
+    - `gdn.v_contiguous: 16.76 ms`
+    - `gdn.q_norm: 77.58 -> 82.71 ms`
+    - `gdn.k_norm: 77.74 -> 82.78 ms`
+  - keep `winner-20260405-19` active; do not promote this candidate
 
 Laptop-noise note:
 
 - this local machine is a laptop RTX 4070, not a dedicated bench box
 - treat small local deltas, roughly inside `+/-5%`, as screening only
 - promotion decisions for close calls should be made on H100, not on one laptop run
+- practical example:
+  - `winner-20260405-19-single-contig` was close enough locally to justify a belt-and-suspenders H100 sidecar
+  - that sidecar still came back too flat to promote
 
 Empirical contract note:
 

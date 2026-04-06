@@ -55,8 +55,22 @@ This file tracks follow-up work that is intentionally not enabled by default in 
       - `aten::mul`: `1012.30 -> 1219.95 ms`
       - `gdn.recurrence`: `177.23 -> 179.54 ms`
       - `aten::convolution_backward`: `174.81 -> 177.59 ms`
+    - optional H100 sidecar also failed to justify promotion:
+      - same-day controls:
+        - `882.37 ms`
+        - `877.13 ms`
+      - candidate:
+        - `876.36 ms`
+        - `878.32 ms`
+      - mean delta:
+        - `879.75 -> 877.34 ms` (`-0.27%`)
+      - eager profile also drifted the wrong way:
+        - `gdn.qkv_conv_output_contiguous_packed: 153.34 ms`
+        - `gdn.v_contiguous: 16.76 ms`
+        - `gdn.q_norm: 77.58 -> 82.71 ms`
+        - `gdn.k_norm: 77.74 -> 82.78 ms`
   - decision:
-    - do not spend H100 time on this variant
+    - H100 sidecar already run; no promotion
     - keep `winner-20260405-19` active
     - next front-end pass should target a lower-level packed output path, not another Python-side materialization reshuffle
 

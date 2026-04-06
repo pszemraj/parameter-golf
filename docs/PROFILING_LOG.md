@@ -1,9 +1,97 @@
 # Profiling Log
 
-Last updated: 2026-04-05 19:40 EDT
+Last updated: 2026-04-06 00:20 EDT
 
 This file records profiler-driven checkpoints that should survive beyond the raw
 artifacts under `profiles/`.
+
+## 2026-04-06 — H100 sidecar confirms single-contig is not promotable (`h100k11`)
+
+Bundle:
+
+- raw artifacts:
+  - `local-scratch/profiling-out-h100k11-hgdn.7z`
+- extracted review directory:
+  - `local-scratch/_inspect_h100k11/`
+- control reference:
+  - `local-scratch/_inspect_h100k10/`
+
+Contract:
+
+- active H100 baseline:
+  - `winner-20260405-19`
+- candidate delta:
+  - `GDN_PACKED_QKV_SINGLE_CONTIG=1`
+- purpose of the sidecar:
+  - local screening was done on a laptop RTX 4070 with non-dedicated GPU usage
+  - because that local result sat near the rough laptop noise band, run the full
+    same-day H100 control pattern before killing the idea outright
+- commands:
+  - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k11ctl_a --offline`
+  - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k11ctl_b --offline`
+  - `python scripts/hgdn.py preflight --preset winner-20260405-19-single-contig --compile-strategy model`
+  - `python scripts/hgdn.py h100-profile hybrid-eager --preset winner-20260405-19-single-contig --run-prefix h100k11a`
+  - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-single-contig --run-prefix h100k11a --offline`
+  - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-single-contig --run-prefix h100k11b --offline`
+  - `python scripts/hgdn.py h100-profile hybrid --preset winner-20260405-19-single-contig --run-prefix h100k11a`
+
+### Main finding
+
+The H100 sidecar confirms the local read: this variant is not promotable.
+
+Compiled perf:
+
+- same-day controls:
+  - `882.37 ms`
+  - `877.13 ms`
+- candidate:
+  - `876.36 ms`
+  - `878.32 ms`
+- mean delta:
+  - `879.75 -> 877.34 ms` (`-0.27%`)
+
+That is far too small to matter. It sits fully inside the same-day H100 control
+spread and does not justify replacing `winner-20260405-19`.
+
+### Why it is not a real win
+
+The saved profiles do not support a meaningful mechanism improvement.
+
+Eager profile vs the promoted `h100k10` winner:
+
+- `ProfilerStep*`: `6561.60 -> 6584.07 ms`
+- `gdn.qkv_conv_output_contiguous`:
+  - `147.16 ms`
+  - replaced by `gdn.qkv_conv_output_contiguous_packed: 153.34 ms`
+- `gdn.v_contiguous`:
+  - `0.00 -> 16.76 ms`
+- `gdn.q_norm`:
+  - `77.58 -> 82.71 ms`
+- `gdn.k_norm`:
+  - `77.74 -> 82.78 ms`
+- `aten::copy_`:
+  - `972.51 -> 995.69 ms`
+- `block.gdn`:
+  - `1365.27 -> 1396.78 ms`
+
+Compiled profile vs the promoted `h100k10` winner:
+
+- `ProfilerStep*`: `3453.97 -> 3524.79 ms`
+- `aten::copy_`: `57.72 -> 57.15 ms` (flat)
+- `aten::mul`: `53.98 -> 54.08 ms` (flat)
+- `aten::convolution_backward`: `287.23 -> 287.58 ms` (flat)
+- `aten::_conv_depthwise2d`: `201.08 -> 201.35 ms` (flat)
+
+So the sidecar result is not "slightly positive but noisy." It is "effectively
+flat on H100 perf, with profiles that do not show a cleaner front-end."
+
+### Decision
+
+Reject `winner-20260405-19-single-contig` after H100 confirmation.
+
+Keep `winner-20260405-19` as the active HGDN kernel preset. The next front-end
+attempt should target a lower-level packed output path change, not another
+Python-side materialization reshuffle.
 
 ## 2026-04-05 — Single packed post-conv materialization rejected locally (`rtx4070_phase1_singlecontig_fix1`)
 
@@ -81,11 +169,9 @@ way that made the true training step slower overall.
 
 ### Decision
 
-Reject `winner-20260405-19-single-contig` at the local gate.
-
-Do not spend H100 time on this variant unless its implementation changes
-materially. The next front-end attempt should be a lower-level packed output
-path change, not another Python-side reshuffle of when `.contiguous()` happens.
+This was enough to reject the variant locally. An optional H100 sidecar was run
+later because the screening box is a noisy laptop, and that H100 pass also
+confirmed no promotion.
 
 ## 2026-04-05 — Packed depthwise custom backward promoted to active H100 winner (`h100k10`)
 
