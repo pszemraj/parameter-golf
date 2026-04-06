@@ -472,6 +472,78 @@ class PackedCausalConv1d(nn.Module):
                     )
             return grad_packed, grad_weight
 
+    class _PackedDepthwisePreactNCTCustomBackward(torch.autograd.Function):
+        """Exact-length packed causal depthwise conv that returns pre-activation NCT."""
+
+        @staticmethod
+        def forward(
+            ctx: torch.autograd.function.FunctionCtx,
+            packed: Tensor,
+            weight: Tensor,
+        ) -> Tensor:
+            """Run one packed causal depthwise conv and return exact-length pre-activations.
+
+            :param torch.autograd.function.FunctionCtx ctx: Autograd context.
+            :param Tensor packed: Packed q/k/v tensor shaped ``(batch, seq, channels)``.
+            :param Tensor weight: Depthwise conv weights shaped ``(channels, 1, kernel)``.
+            :return Tensor: Packed pre-activation tensor shaped ``(batch, channels, seq)``.
+            """
+            kernel = weight.shape[-1]
+            groups = weight.shape[0]
+            with profile_range("gdn.qkv_conv_input_transpose"):
+                packed_t = packed.transpose(1, 2)
+            with profile_range("gdn.qkv_conv_left_pad"):
+                packed_pad = F.pad(packed_t, (kernel - 1, 0))
+            with profile_range("gdn.qkv_conv_depthwise"):
+                preact_nct = F.conv1d(packed_pad, weight, groups=groups)
+            ctx.save_for_backward(packed_pad, weight)
+            return preact_nct
+
+        @staticmethod
+        def backward(
+            ctx: torch.autograd.function.FunctionCtx,
+            grad_preact_nct: Tensor,
+        ) -> tuple[Tensor | None, Tensor | None]:
+            """Backprop through the exact-length packed pre-activation conv path.
+
+            :param torch.autograd.function.FunctionCtx ctx: Autograd context.
+            :param Tensor grad_preact_nct: Gradient for the packed pre-activation tensor.
+            :return tuple[Tensor | None, Tensor | None]: Gradients for packed input and conv weights.
+            """
+            packed_pad, weight = ctx.saved_tensors
+            grad_packed = None
+            grad_weight = None
+            groups = weight.shape[0]
+            kernel = weight.shape[-1]
+            grad_preact_nct = grad_preact_nct.contiguous()
+            if ctx.needs_input_grad[0]:
+                with profile_range("gdn.qkv_conv_bwd_input_grad"):
+                    grad_pad = nn_grad.conv1d_input(
+                        packed_pad.shape,
+                        weight,
+                        grad_preact_nct,
+                        stride=1,
+                        padding=0,
+                        dilation=1,
+                        groups=groups,
+                    )
+                with profile_range("gdn.qkv_conv_bwd_input_trim"):
+                    grad_packed = (
+                        grad_pad[..., kernel - 1 :].transpose(1, 2).contiguous()
+                    )
+            if ctx.needs_input_grad[1]:
+                with profile_range("gdn.qkv_conv_bwd_weight_grad"):
+                    grad_weight = nn_grad.conv1d_weight(
+                        packed_pad,
+                        weight.shape,
+                        grad_preact_nct,
+                        stride=1,
+                        padding=0,
+                        dilation=1,
+                        groups=groups,
+                    )
+            return grad_packed, grad_weight
+
     def _forward_packed_tensor(self, x: Tensor) -> Tensor:
         """Convolve one packed q/k/v tensor without splitting the result.
 
@@ -490,6 +562,24 @@ class PackedCausalConv1d(nn.Module):
             x = F.silu(x)
         with profile_range("gdn.qkv_conv_output_transpose"):
             x = x.transpose(1, 2)
+        return x
+
+    def forward_packed_preact_nct(self, x: Tensor) -> Tensor:
+        """Apply packed causal depthwise convolution and keep the exact-length NCT pre-activation.
+
+        :param Tensor x: Packed activations shaped `(batch, seq, q_dim + k_dim + v_dim)`.
+        :return Tensor: Packed pre-activation tensor shaped `(batch, q_dim + k_dim + v_dim, seq)`.
+        """
+        if self.use_custom_backward:
+            return self._PackedDepthwisePreactNCTCustomBackward.apply(
+                x, self.conv.weight
+            )
+        with profile_range("gdn.qkv_conv_input_transpose"):
+            x = x.transpose(1, 2)
+        with profile_range("gdn.qkv_conv_depthwise"):
+            x = self.conv(x)
+        with profile_range("gdn.qkv_conv_trim"):
+            x = x[..., : x.size(-1) - (self.conv.kernel_size[0] - 1)]
         return x
 
     def _forward_packed_impl(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor]:
@@ -762,10 +852,6 @@ class GatedDeltaNet(nn.Module):
             raise ValueError(
                 "use_cuda_frontend_nct requires use_packed_qkv_proj and use_packed_qkv_conv"
             )
-        if self.use_cuda_frontend_nct and self.use_packed_qkv_conv_custom_backward:
-            raise ValueError(
-                "use_cuda_frontend_nct is incompatible with use_packed_qkv_conv_custom_backward"
-            )
         if self.use_cuda_frontend_nct and self.use_cuda_packed_conv:
             raise ValueError(
                 "use_cuda_frontend_nct is incompatible with use_cuda_packed_conv"
@@ -968,15 +1054,8 @@ class GatedDeltaNet(nn.Module):
                 and self.qkv_conv is not None
                 and audit_call_index is None
             ):
-                with profile_range("gdn.qkv_conv_input_transpose"):
-                    qkv_nct = qkv.transpose(1, 2)
-                with profile_range("gdn.qkv_conv_depthwise"):
-                    preact_nct = self.qkv_conv.conv(qkv_nct)
-                with profile_range("gdn.qkv_conv_trim"):
-                    preact_nct = preact_nct[
-                        ...,
-                        : preact_nct.size(-1) - (self.qkv_conv.conv.kernel_size[0] - 1),
-                    ]
+                with profile_range("gdn.qkv_frontend_nct_preact"):
+                    preact_nct = self.qkv_conv.forward_packed_preact_nct(qkv)
                 with profile_range("gdn.qkv_frontend_nct_cuda"):
                     q, k, v = frontend_preact_silu_split_l2norm_nct(
                         preact_nct,

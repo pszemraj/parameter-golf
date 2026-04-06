@@ -858,6 +858,39 @@ def test_gdn_cuda_frontend_nct_cpu_fallback_matches_packed_path():
     print("  ✓ CUDA frontend NCT CPU fallback matches packed path")
 
 
+def test_gdn_cuda_frontend_nct_custom_backward_cpu_fallback_matches_custombwd_path():
+    """CPU fallback for the NCT frontend should compose with the packed custom backward path."""
+    torch.manual_seed(42)
+    kwargs = dict(
+        d_model=64,
+        n_heads=4,
+        head_k_dim=8,
+        expand_v=1.0,
+        allow_neg_eigval=True,
+        conv_size=4,
+        use_fla=False,
+        use_packed_qkv_conv=True,
+        use_packed_qkv_proj=True,
+        conv_output_contiguous=True,
+        use_packed_qkv_conv_custom_backward=True,
+    )
+    custombwd = GatedDeltaNet(**kwargs)
+    frontend_nct = GatedDeltaNet(**kwargs, use_cuda_frontend_nct=True)
+    frontend_nct.load_state_dict(custombwd.state_dict(), strict=True)
+
+    x_ref = torch.randn(2, 32, 64, requires_grad=True)
+    x_frontend = x_ref.detach().clone().requires_grad_(True)
+    y_ref = custombwd(x_ref)
+    y_frontend = frontend_nct(x_frontend)
+    torch.testing.assert_close(y_frontend, y_ref, atol=1e-5, rtol=1e-5)
+
+    grad = torch.randn_like(y_ref)
+    y_ref.backward(grad, retain_graph=True)
+    y_frontend.backward(grad)
+    torch.testing.assert_close(x_frontend.grad, x_ref.grad, atol=3e-4, rtol=5e-3)
+    print("  ✓ CUDA frontend NCT composes with packed custom backward")
+
+
 def test_gdn_cuda_packed_conv_cpu_fallback_matches_packed_path():
     """CPU fallback for CUDA packed conv should preserve packed-path outputs and gradients."""
     torch.manual_seed(42)
@@ -955,23 +988,19 @@ def test_gdn_cuda_frontend_nct_validation():
         )
     except ValueError:
         pass
-    try:
-        GatedDeltaNet(
-            d_model=64,
-            n_heads=4,
-            head_k_dim=8,
-            expand_v=1.0,
-            use_packed_qkv_conv=True,
-            use_packed_qkv_proj=True,
-            conv_output_contiguous=True,
-            use_packed_qkv_conv_custom_backward=True,
-            use_cuda_frontend_nct=True,
-        )
-        raise AssertionError(
-            "Expected CUDA frontend NCT to reject packed qkv custom backward"
-        )
-    except ValueError:
-        pass
+    layer = GatedDeltaNet(
+        d_model=64,
+        n_heads=4,
+        head_k_dim=8,
+        expand_v=1.0,
+        use_packed_qkv_conv=True,
+        use_packed_qkv_proj=True,
+        conv_output_contiguous=True,
+        use_packed_qkv_conv_custom_backward=True,
+        use_cuda_frontend_nct=True,
+    )
+    assert layer.use_packed_qkv_conv_custom_backward
+    assert layer.use_cuda_frontend_nct
     try:
         GatedDeltaNet(
             d_model=64,
