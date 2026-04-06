@@ -47,6 +47,18 @@ This file tracks follow-up work that is intentionally not enabled by default in 
       compiled HGDN path
     - target lower-level ATen, Triton, CUDA, or other generated-path changes
       instead
+  - use `scripts/hgdn_kernel_scoreboard.py` to make family decisions explicit:
+    - meaningful win:
+      - `max(5 ms, 0.5% of control_step_ms, 3 * control_noise_ms)`
+    - flat band:
+      - `max(2.5 ms, 0.25% of control_step_ms, 2 * control_noise_ms)`
+    - derived integration signals:
+      - `compiled_copy_tax = aten::copy_ + direct_copy_kernel_cuda`
+      - `compile_specific_penalty = compiled_hotpath_delta - eager_hotpath_delta`
+    - family stop rule:
+      - `SATURATED` if the control compiled upper bound is already below the
+        meaningful-win threshold
+      - stop after repeated `FLAT` or repeated `INTEGRATION_BOTTLENECK` results
 - Latest screened candidate:
   - `winner-20260405-19-cuda-frontend-nct-custom-bwd`
   - equivalent to:

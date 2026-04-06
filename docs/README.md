@@ -99,6 +99,7 @@ What has not been claimed:
 - `configs/hgdn/winner_20260405_11_cuda_fused.toml`: experimental fused-CUDA variant of that winner
 - `scripts/screen_hgdn_arch_sizes.py`: CPU-only artifact-proxy screen for resized HGDN architecture candidates
 - `scripts/compare_hgdn_fixed2k.py`: structured W&B comparator for completed HGDN fixed-step H100 runs
+- `scripts/hgdn_kernel_scoreboard.py`: family-level H100 kernel gatekeeper that scores same-day controls and candidates against explicit `meaningful_win`, `flat_band`, copy-tax, and compile-penalty rules
 - `configs/hgdn/winner_20260405_11_retune.toml`: first-pass retune family around the active timestamped HGDN kernel winner
 - `configs/hgdn/retune_*.toml`: named runnable configs for the first resized-HGDN shortlist
 - `model.py`: hybrid HGDN architecture and presets
@@ -188,6 +189,16 @@ Kernel-work guardrail:
     HGDN path
   - prefer lower-level ATen, Triton, CUDA, or other generated-path changes for
     the next tranche
+  - use the family scoreboard before declaring a kernel family exhausted:
+    - meaningful win:
+      - `max(5 ms, 0.5% of control_step_ms, 3 * control_noise_ms)`
+    - flat band:
+      - `max(2.5 ms, 0.25% of control_step_ms, 2 * control_noise_ms)`
+    - derived signals:
+      - `compiled_copy_tax = aten::copy_ + direct_copy_kernel_cuda`
+      - `compile_specific_penalty = compiled_hotpath_delta - eager_hotpath_delta`
+    - stop a family when it is `SATURATED`, after repeated `FLAT`, or after
+      repeated `INTEGRATION_BOTTLENECK` results
 - updated practical read:
   - the Python-side `single-contig` attempt lost
   - the generated-path `split-copy` attempt also lost locally
