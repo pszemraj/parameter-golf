@@ -16,6 +16,7 @@ HGDN_TRANSFER_BUCKETS = (
     "aten::copy_",
     "aten::mul",
     "gdn.qkv_conv_packed",
+    "gdn.qkv_frontend_nct_cuda",
     "gdn.q_conv",
     "gdn.k_conv",
     "gdn.v_conv",

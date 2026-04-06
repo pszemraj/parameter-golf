@@ -23,6 +23,17 @@ def _norm_accum_dtype(x: Tensor) -> torch.dtype:
     return torch.float32 if x.dtype in _LOW_PRECISION_DTYPES else x.dtype
 
 
+def _silu_backward_from_preact(preact: Tensor) -> Tensor:
+    """Return the exact SiLU derivative evaluated at the pre-activation.
+
+    :param Tensor preact: Input pre-activation tensor.
+    :return Tensor: SiLU derivative with the same dtype as ``preact``.
+    """
+    preact_f = preact.float()
+    sigma = torch.sigmoid(preact_f)
+    return (sigma * (1.0 + preact_f * (1.0 - sigma))).to(dtype=preact.dtype)
+
+
 def packed_qkv_frontend_reference(
     qkv: Tensor,
     weight: Tensor,
@@ -175,6 +186,139 @@ def packed_qkv_split_l2norm_reference(
     ).to(dtype=packed.dtype)
     v = v.view(batch, seq, n_heads, head_v_dim).to(dtype=packed.dtype)
     return q.contiguous(), k.contiguous(), v.contiguous()
+
+
+def preact_silu_split_l2norm_nct_reference(
+    preact_nct: Tensor,
+    *,
+    n_heads: int,
+    head_k_dim: int,
+    head_v_dim: int,
+    eps: float = 1e-6,
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+    """Reference NCT preact frontend op.
+
+    This matches the proposed compile-visible frontend boundary:
+
+    - input: pre-activation tensor in conv-native ``(batch, channels, seq)``
+    - work: SiLU, q/k/v split, q/k L2 norm
+    - output: q/k/v in recurrence layout plus cached inverse norms
+
+    :param Tensor preact_nct: Packed pre-activations shaped ``(batch, channels, seq)``.
+    :param int n_heads: Number of HGDN heads.
+    :param int head_k_dim: Per-head q/k width.
+    :param int head_v_dim: Per-head value width.
+    :param float eps: Numerical stability epsilon.
+    :raises ValueError: If the pre-activation tensor shape is unsupported.
+    :return tuple[Tensor, Tensor, Tensor, Tensor, Tensor]: Normalized q/k, reshaped v, and fp32 inverse norms.
+    """
+    if preact_nct.ndim != 3:
+        raise ValueError(f"Expected preact_nct.ndim == 3, got {preact_nct.ndim}")
+
+    batch, channels, seq = preact_nct.shape
+    q_dim = n_heads * head_k_dim
+    k_dim = n_heads * head_k_dim
+    v_dim = n_heads * head_v_dim
+    expected_channels = q_dim + k_dim + v_dim
+    if channels != expected_channels:
+        raise ValueError(
+            f"NCT preact channel mismatch: got {channels}, expected {expected_channels}"
+        )
+
+    activated_btc = F.silu(preact_nct).transpose(1, 2).contiguous()
+    q_pre, k_pre, v = activated_btc.split((q_dim, k_dim, v_dim), dim=-1)
+    q_pre = q_pre.view(batch, seq, n_heads, head_k_dim)
+    k_pre = k_pre.view(batch, seq, n_heads, head_k_dim)
+    v = v.view(batch, seq, n_heads, head_v_dim)
+
+    accum_dtype = _norm_accum_dtype(q_pre)
+    q_pre_accum = q_pre.to(dtype=accum_dtype)
+    k_pre_accum = k_pre.to(dtype=accum_dtype)
+    inv_q = torch.rsqrt(q_pre_accum.square().sum(dim=-1) + eps).float()
+    inv_k = torch.rsqrt(k_pre_accum.square().sum(dim=-1) + eps).float()
+    q = (q_pre_accum * inv_q.unsqueeze(-1)).to(dtype=preact_nct.dtype)
+    k = (k_pre_accum * inv_k.unsqueeze(-1)).to(dtype=preact_nct.dtype)
+    return (
+        q.contiguous(),
+        k.contiguous(),
+        v.to(dtype=preact_nct.dtype).contiguous(),
+        inv_q.contiguous(),
+        inv_k.contiguous(),
+    )
+
+
+def preact_silu_split_l2norm_nct_backward_reference(
+    grad_q: Tensor,
+    grad_k: Tensor,
+    grad_v: Tensor,
+    preact_nct: Tensor,
+    q_norm: Tensor,
+    k_norm: Tensor,
+    inv_q: Tensor,
+    inv_k: Tensor,
+) -> Tensor:
+    """Reference backward for the NCT preact frontend op.
+
+    :param Tensor grad_q: Query gradients shaped ``(batch, seq, heads, head_k_dim)``.
+    :param Tensor grad_k: Key gradients shaped ``(batch, seq, heads, head_k_dim)``.
+    :param Tensor grad_v: Value gradients shaped ``(batch, seq, heads, head_v_dim)``.
+    :param Tensor preact_nct: Saved pre-activation tensor shaped ``(batch, channels, seq)``.
+    :param Tensor q_norm: Normalized q output from the forward pass.
+    :param Tensor k_norm: Normalized k output from the forward pass.
+    :param Tensor inv_q: Saved inverse q norms shaped ``(batch, seq, heads)``.
+    :param Tensor inv_k: Saved inverse k norms shaped ``(batch, seq, heads)``.
+    :return Tensor: Gradient for ``preact_nct`` with the same shape as the input.
+    """
+    batch, channels, seq = preact_nct.shape
+    _, _, n_heads, head_k_dim = grad_q.shape
+    head_v_dim = grad_v.shape[-1]
+    q_dim = n_heads * head_k_dim
+    k_dim = n_heads * head_k_dim
+    v_dim = n_heads * head_v_dim
+    if channels != q_dim + k_dim + v_dim:
+        raise ValueError(
+            f"NCT preact channel mismatch: got {channels}, expected {q_dim + k_dim + v_dim}"
+        )
+
+    accum_dtype = _norm_accum_dtype(preact_nct)
+    grad_q_accum = grad_q.to(dtype=accum_dtype)
+    grad_k_accum = grad_k.to(dtype=accum_dtype)
+    grad_v_accum = grad_v.to(dtype=accum_dtype)
+    q_norm_accum = q_norm.to(dtype=accum_dtype)
+    k_norm_accum = k_norm.to(dtype=accum_dtype)
+    inv_q_accum = inv_q.to(dtype=accum_dtype).unsqueeze(-1)
+    inv_k_accum = inv_k.to(dtype=accum_dtype).unsqueeze(-1)
+
+    q_dot = (grad_q_accum * q_norm_accum).sum(dim=-1, keepdim=True)
+    k_dot = (grad_k_accum * k_norm_accum).sum(dim=-1, keepdim=True)
+    grad_q_pre = (grad_q_accum - q_norm_accum * q_dot) * inv_q_accum
+    grad_k_pre = (grad_k_accum - k_norm_accum * k_dot) * inv_k_accum
+
+    preact_btc = preact_nct.transpose(1, 2).contiguous()
+    q_preact, k_preact, v_preact = preact_btc.split((q_dim, k_dim, v_dim), dim=-1)
+    q_preact = q_preact.view(batch, seq, n_heads, head_k_dim)
+    k_preact = k_preact.view(batch, seq, n_heads, head_k_dim)
+    v_preact = v_preact.view(batch, seq, n_heads, head_v_dim)
+
+    grad_q_preact = grad_q_pre * _silu_backward_from_preact(q_preact).to(
+        dtype=accum_dtype
+    )
+    grad_k_preact = grad_k_pre * _silu_backward_from_preact(k_preact).to(
+        dtype=accum_dtype
+    )
+    grad_v_preact = grad_v_accum * _silu_backward_from_preact(v_preact).to(
+        dtype=accum_dtype
+    )
+
+    grad_preact_btc = torch.cat(
+        (
+            grad_q_preact.reshape(batch, seq, q_dim),
+            grad_k_preact.reshape(batch, seq, k_dim),
+            grad_v_preact.reshape(batch, seq, v_dim),
+        ),
+        dim=-1,
+    )
+    return grad_preact_btc.transpose(1, 2).contiguous().to(dtype=preact_nct.dtype)
 
 
 def rmsnorm_silu_gate_reference(

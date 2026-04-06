@@ -240,6 +240,174 @@ __global__ void build_grad_preact_kernel(
 }
 
 template <typename scalar_t>
+__global__ void preact_silu_split_l2norm_nct_forward_kernel(
+    const scalar_t* __restrict__ preact_nct,
+    scalar_t* __restrict__ q_out,
+    scalar_t* __restrict__ k_out,
+    scalar_t* __restrict__ v_out,
+    float* __restrict__ inv_q,
+    float* __restrict__ inv_k,
+    int64_t BT,
+    int64_t H,
+    int64_t Dk,
+    int64_t Dv,
+    int64_t T,
+    int64_t C,
+    float eps) {
+  const int64_t head_idx = blockIdx.x;
+  const int64_t bt = head_idx / H;
+  const int64_t h = head_idx % H;
+  if (bt >= BT) {
+    return;
+  }
+
+  const int64_t b = bt / T;
+  const int64_t t = bt % T;
+  const int64_t q_dim = H * Dk;
+  const int64_t k_dim = H * Dk;
+  const int64_t q_channel_base = h * Dk;
+  const int64_t k_channel_base = q_dim + h * Dk;
+  const int64_t v_channel_base = q_dim + k_dim + h * Dv;
+  const int64_t out_q_base = ((b * T + t) * H + h) * Dk;
+  const int64_t out_k_base = ((b * T + t) * H + h) * Dk;
+  const int64_t out_v_base = ((b * T + t) * H + h) * Dv;
+
+  extern __shared__ float shmem[];
+  float* sh_q = shmem;
+  float* sh_k = shmem + blockDim.x;
+
+  float q_sum = 0.0f;
+  float k_sum = 0.0f;
+  for (int64_t d = threadIdx.x; d < Dk; d += blockDim.x) {
+    const int64_t q_idx = ((b * C + q_channel_base + d) * T + t);
+    const int64_t k_idx = ((b * C + k_channel_base + d) * T + t);
+    const float qv = silu_from_preact(preact_nct[q_idx]);
+    const float kv = silu_from_preact(preact_nct[k_idx]);
+    q_sum += qv * qv;
+    k_sum += kv * kv;
+  }
+  sh_q[threadIdx.x] = q_sum;
+  sh_k[threadIdx.x] = k_sum;
+  __syncthreads();
+
+  for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+    if (threadIdx.x < stride) {
+      sh_q[threadIdx.x] += sh_q[threadIdx.x + stride];
+      sh_k[threadIdx.x] += sh_k[threadIdx.x + stride];
+    }
+    __syncthreads();
+  }
+
+  const float q_inv = rsqrtf(sh_q[0] + eps);
+  const float k_inv = rsqrtf(sh_k[0] + eps);
+  if (threadIdx.x == 0) {
+    inv_q[((b * T + t) * H) + h] = q_inv;
+    inv_k[((b * T + t) * H) + h] = k_inv;
+  }
+
+  for (int64_t d = threadIdx.x; d < Dk; d += blockDim.x) {
+    const int64_t q_idx = ((b * C + q_channel_base + d) * T + t);
+    const int64_t k_idx = ((b * C + k_channel_base + d) * T + t);
+    q_out[out_q_base + d] =
+        from_float<scalar_t>(silu_from_preact(preact_nct[q_idx]) * q_inv);
+    k_out[out_k_base + d] =
+        from_float<scalar_t>(silu_from_preact(preact_nct[k_idx]) * k_inv);
+  }
+
+  for (int64_t d = threadIdx.x; d < Dv; d += blockDim.x) {
+    const int64_t v_idx = ((b * C + v_channel_base + d) * T + t);
+    v_out[out_v_base + d] = from_float<scalar_t>(silu_from_preact(preact_nct[v_idx]));
+  }
+}
+
+template <typename scalar_t>
+__global__ void preact_silu_split_l2norm_nct_backward_kernel(
+    const scalar_t* __restrict__ grad_q,
+    const scalar_t* __restrict__ grad_k,
+    const scalar_t* __restrict__ grad_v,
+    const scalar_t* __restrict__ preact_nct,
+    const scalar_t* __restrict__ q_norm,
+    const scalar_t* __restrict__ k_norm,
+    const float* __restrict__ inv_q,
+    const float* __restrict__ inv_k,
+    scalar_t* __restrict__ grad_preact_nct,
+    int64_t BT,
+    int64_t H,
+    int64_t Dk,
+    int64_t Dv,
+    int64_t T,
+    int64_t C) {
+  const int64_t head_idx = blockIdx.x;
+  const int64_t bt = head_idx / H;
+  const int64_t h = head_idx % H;
+  if (bt >= BT) {
+    return;
+  }
+
+  const int64_t b = bt / T;
+  const int64_t t = bt % T;
+  const int64_t q_dim = H * Dk;
+  const int64_t k_dim = H * Dk;
+  const int64_t q_channel_base = h * Dk;
+  const int64_t k_channel_base = q_dim + h * Dk;
+  const int64_t v_channel_base = q_dim + k_dim + h * Dv;
+  const int64_t out_q_base = ((b * T + t) * H + h) * Dk;
+  const int64_t out_k_base = ((b * T + t) * H + h) * Dk;
+  const int64_t out_v_base = ((b * T + t) * H + h) * Dv;
+
+  extern __shared__ float shmem[];
+  float* sh_q = shmem;
+  float* sh_k = shmem + blockDim.x;
+
+  float dot_q = 0.0f;
+  float dot_k = 0.0f;
+  for (int64_t d = threadIdx.x; d < Dk; d += blockDim.x) {
+    dot_q += to_float(grad_q[out_q_base + d]) * to_float(q_norm[out_q_base + d]);
+    dot_k += to_float(grad_k[out_k_base + d]) * to_float(k_norm[out_k_base + d]);
+  }
+  sh_q[threadIdx.x] = dot_q;
+  sh_k[threadIdx.x] = dot_k;
+  __syncthreads();
+
+  for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+    if (threadIdx.x < stride) {
+      sh_q[threadIdx.x] += sh_q[threadIdx.x + stride];
+      sh_k[threadIdx.x] += sh_k[threadIdx.x + stride];
+    }
+    __syncthreads();
+  }
+
+  const float q_inv = inv_q[((b * T + t) * H) + h];
+  const float k_inv = inv_k[((b * T + t) * H) + h];
+  const float q_dot = sh_q[0];
+  const float k_dot = sh_k[0];
+
+  for (int64_t d = threadIdx.x; d < Dk; d += blockDim.x) {
+    const int64_t q_idx = ((b * C + q_channel_base + d) * T + t);
+    const int64_t k_idx = ((b * C + k_channel_base + d) * T + t);
+
+    const float qn = to_float(q_norm[out_q_base + d]);
+    const float kn = to_float(k_norm[out_k_base + d]);
+    const float gq = to_float(grad_q[out_q_base + d]);
+    const float gk = to_float(grad_k[out_k_base + d]);
+    const float grad_q_pre = (gq - qn * q_dot) * q_inv;
+    const float grad_k_pre = (gk - kn * k_dot) * k_inv;
+
+    grad_preact_nct[q_idx] = from_float<scalar_t>(
+        grad_q_pre * silu_backward_from_preact(preact_nct[q_idx]));
+    grad_preact_nct[k_idx] = from_float<scalar_t>(
+        grad_k_pre * silu_backward_from_preact(preact_nct[k_idx]));
+  }
+
+  for (int64_t d = threadIdx.x; d < Dv; d += blockDim.x) {
+    const int64_t v_idx = ((b * C + v_channel_base + d) * T + t);
+    grad_preact_nct[v_idx] = from_float<scalar_t>(
+        to_float(grad_v[out_v_base + d]) *
+        silu_backward_from_preact(preact_nct[v_idx]));
+  }
+}
+
+template <typename scalar_t>
 __global__ void split_l2norm_from_packed_kernel(
     const scalar_t* __restrict__ packed,
     scalar_t* __restrict__ q_out,
@@ -748,6 +916,61 @@ std::vector<torch::Tensor> packed_qkv_split_l2norm_forward_cuda(
   return {q, k, v, inv_q, inv_k};
 }
 
+std::vector<torch::Tensor> preact_silu_split_l2norm_nct_forward_cuda(
+    torch::Tensor preact_nct,
+    int64_t n_heads,
+    int64_t head_k_dim,
+    int64_t head_v_dim,
+    double eps) {
+  c10::cuda::CUDAGuard device_guard(preact_nct.device());
+
+  const auto B = preact_nct.size(0);
+  const auto C = preact_nct.size(1);
+  const auto T = preact_nct.size(2);
+  const int64_t q_dim = n_heads * head_k_dim;
+  const int64_t k_dim = n_heads * head_k_dim;
+  const int64_t v_dim = n_heads * head_v_dim;
+  TORCH_CHECK(
+      C == q_dim + k_dim + v_dim,
+      "NCT preact channel mismatch: got ",
+      C,
+      " expected ",
+      q_dim + k_dim + v_dim);
+
+  auto q = torch::empty({B, T, n_heads, head_k_dim}, preact_nct.options());
+  auto k = torch::empty({B, T, n_heads, head_k_dim}, preact_nct.options());
+  auto v = torch::empty({B, T, n_heads, head_v_dim}, preact_nct.options());
+  auto inv_opts = preact_nct.options().dtype(torch::kFloat32);
+  auto inv_q = torch::empty({B, T, n_heads}, inv_opts);
+  auto inv_k = torch::empty({B, T, n_heads}, inv_opts);
+  const auto stream = at::cuda::getCurrentCUDAStream();
+
+  AT_DISPATCH_FLOATING_TYPES_AND2(
+      at::ScalarType::Half,
+      at::ScalarType::BFloat16,
+      preact_nct.scalar_type(),
+      "preact_silu_split_l2norm_nct_forward_cuda",
+      [&] {
+        preact_silu_split_l2norm_nct_forward_kernel<scalar_t>
+            <<<B * T * n_heads, 128, sizeof(float) * 128 * 2, stream>>>(
+                preact_nct.data_ptr<scalar_t>(),
+                q.data_ptr<scalar_t>(),
+                k.data_ptr<scalar_t>(),
+                v.data_ptr<scalar_t>(),
+                inv_q.data_ptr<float>(),
+                inv_k.data_ptr<float>(),
+                B * T,
+                n_heads,
+                head_k_dim,
+                head_v_dim,
+                T,
+                C,
+                static_cast<float>(eps));
+      });
+  AT_CUDA_CHECK(cudaGetLastError());
+  return {q, k, v, inv_q, inv_k};
+}
+
 torch::Tensor packed_qkv_split_l2norm_backward_cuda(
     torch::Tensor grad_q,
     torch::Tensor grad_k,
@@ -790,4 +1013,53 @@ torch::Tensor packed_qkv_split_l2norm_backward_cuda(
       });
   AT_CUDA_CHECK(cudaGetLastError());
   return grad_packed;
+}
+
+torch::Tensor preact_silu_split_l2norm_nct_backward_cuda(
+    torch::Tensor grad_q,
+    torch::Tensor grad_k,
+    torch::Tensor grad_v,
+    torch::Tensor preact_nct,
+    torch::Tensor q_norm,
+    torch::Tensor k_norm,
+    torch::Tensor inv_q,
+    torch::Tensor inv_k) {
+  c10::cuda::CUDAGuard device_guard(grad_q.device());
+
+  const auto B = preact_nct.size(0);
+  const auto C = preact_nct.size(1);
+  const auto T = preact_nct.size(2);
+  const auto H = grad_q.size(2);
+  const auto Dk = grad_q.size(3);
+  const auto Dv = grad_v.size(3);
+
+  auto grad_preact_nct = torch::empty_like(preact_nct);
+  const auto stream = at::cuda::getCurrentCUDAStream();
+
+  AT_DISPATCH_FLOATING_TYPES_AND2(
+      at::ScalarType::Half,
+      at::ScalarType::BFloat16,
+      grad_q.scalar_type(),
+      "preact_silu_split_l2norm_nct_backward_cuda",
+      [&] {
+        preact_silu_split_l2norm_nct_backward_kernel<scalar_t>
+            <<<B * T * H, 128, sizeof(float) * 128 * 2, stream>>>(
+                grad_q.data_ptr<scalar_t>(),
+                grad_k.data_ptr<scalar_t>(),
+                grad_v.data_ptr<scalar_t>(),
+                preact_nct.data_ptr<scalar_t>(),
+                q_norm.data_ptr<scalar_t>(),
+                k_norm.data_ptr<scalar_t>(),
+                inv_q.data_ptr<float>(),
+                inv_k.data_ptr<float>(),
+                grad_preact_nct.data_ptr<scalar_t>(),
+                B * T,
+                H,
+                Dk,
+                Dv,
+                T,
+                C);
+      });
+  AT_CUDA_CHECK(cudaGetLastError());
+  return grad_preact_nct;
 }

@@ -10,6 +10,8 @@ from hgdn_cuda import (
     packed_qkv_conv_reference,
     packed_qkv_frontend_reference,
     packed_qkv_split_l2norm_reference,
+    preact_silu_split_l2norm_nct_backward_reference,
+    preact_silu_split_l2norm_nct_reference,
     rmsnorm_silu_gate_reference,
 )
 
@@ -707,6 +709,59 @@ def test_packed_qkv_split_l2norm_reference_matches_eager_ops():
     print("  ✓ packed split+l2norm reference matches eager ops")
 
 
+def test_preact_silu_split_l2norm_nct_reference_matches_eager_ops():
+    """Reference NCT frontend op should match eager SiLU+split+q/k normalization."""
+    torch.manual_seed(42)
+    preact = torch.randn(2, 96, 32, requires_grad=True)
+    preact_ref = preact.detach().clone().requires_grad_(True)
+    q_ref, k_ref, v_ref, inv_q, inv_k = preact_silu_split_l2norm_nct_reference(
+        preact_ref,
+        n_heads=4,
+        head_k_dim=8,
+        head_v_dim=8,
+    )
+
+    packed = F.silu(preact).transpose(1, 2).contiguous()
+    q_eager, k_eager, v_eager = packed.split((32, 32, 32), dim=-1)
+    q_eager = q_eager.view(2, 32, 4, 8)
+    k_eager = k_eager.view(2, 32, 4, 8)
+    v_eager = v_eager.view(2, 32, 4, 8)
+    q_norm = l2_norm(q_eager)
+    k_norm = l2_norm(k_eager)
+
+    torch.testing.assert_close(q_ref, q_norm, atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(k_ref, k_norm, atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(v_ref, v_eager, atol=1e-6, rtol=1e-6)
+    assert inv_q.shape == (2, 32, 4)
+    assert inv_k.shape == (2, 32, 4)
+
+    grad_q = torch.randn_like(q_ref)
+    grad_k = torch.randn_like(k_ref)
+    grad_v = torch.randn_like(v_ref)
+    grad_ref = preact_silu_split_l2norm_nct_backward_reference(
+        grad_q,
+        grad_k,
+        grad_v,
+        preact_ref.detach(),
+        q_ref.detach(),
+        k_ref.detach(),
+        inv_q.detach(),
+        inv_k.detach(),
+    )
+
+    preact_eager = preact.detach().clone().requires_grad_(True)
+    packed = F.silu(preact_eager).transpose(1, 2).contiguous()
+    q_eager, k_eager, v_eager = packed.split((32, 32, 32), dim=-1)
+    q_eager = l2_norm(q_eager.view(2, 32, 4, 8))
+    k_eager = l2_norm(k_eager.view(2, 32, 4, 8))
+    v_eager = v_eager.view(2, 32, 4, 8)
+    (q_eager * grad_q).sum().backward(retain_graph=True)
+    (k_eager * grad_k).sum().backward(retain_graph=True)
+    (v_eager * grad_v).sum().backward()
+    torch.testing.assert_close(preact_eager.grad, grad_ref, atol=1e-5, rtol=1e-5)
+    print("  ✓ NCT preact frontend reference matches eager ops")
+
+
 def test_packed_qkv_conv_reference_matches_eager_ops():
     """Reference packed causal depthwise conv should match eager packed conv ops."""
     torch.manual_seed(42)
@@ -769,6 +824,38 @@ def test_gdn_cuda_split_norm_cpu_fallback_matches_packed_path():
     y_split.backward(grad)
     torch.testing.assert_close(x_split.grad, x_eager.grad, atol=1e-5, rtol=1e-5)
     print("  ✓ CUDA split+l2norm CPU fallback matches packed path")
+
+
+def test_gdn_cuda_frontend_nct_cpu_fallback_matches_packed_path():
+    """CPU fallback for the NCT frontend op should preserve packed-path outputs and gradients."""
+    torch.manual_seed(42)
+    kwargs = dict(
+        d_model=64,
+        n_heads=4,
+        head_k_dim=8,
+        expand_v=1.0,
+        allow_neg_eigval=True,
+        conv_size=4,
+        use_fla=False,
+        use_packed_qkv_conv=True,
+        use_packed_qkv_proj=True,
+        conv_output_contiguous=True,
+    )
+    eager = GatedDeltaNet(**kwargs)
+    frontend_nct = GatedDeltaNet(**kwargs, use_cuda_frontend_nct=True)
+    frontend_nct.load_state_dict(eager.state_dict(), strict=True)
+
+    x_eager = torch.randn(2, 32, 64, requires_grad=True)
+    x_frontend = x_eager.detach().clone().requires_grad_(True)
+    y_eager = eager(x_eager)
+    y_frontend = frontend_nct(x_frontend)
+    torch.testing.assert_close(y_frontend, y_eager, atol=1e-5, rtol=1e-5)
+
+    grad = torch.randn_like(y_eager)
+    y_eager.backward(grad, retain_graph=True)
+    y_frontend.backward(grad)
+    torch.testing.assert_close(x_frontend.grad, x_eager.grad, atol=3e-4, rtol=5e-3)
+    print("  ✓ CUDA frontend NCT CPU fallback matches packed path")
 
 
 def test_gdn_cuda_packed_conv_cpu_fallback_matches_packed_path():
@@ -851,6 +938,56 @@ def test_gdn_cuda_packed_conv_validation():
     except ValueError:
         pass
     print("  ✓ CUDA packed conv validates requirements")
+
+
+def test_gdn_cuda_frontend_nct_validation():
+    """NCT frontend op should only run on the packed non-fused front-end path."""
+    try:
+        GatedDeltaNet(
+            d_model=64,
+            n_heads=4,
+            head_k_dim=8,
+            expand_v=1.0,
+            use_cuda_frontend_nct=True,
+        )
+        raise AssertionError(
+            "Expected CUDA frontend NCT to require packed qkv proj+conv"
+        )
+    except ValueError:
+        pass
+    try:
+        GatedDeltaNet(
+            d_model=64,
+            n_heads=4,
+            head_k_dim=8,
+            expand_v=1.0,
+            use_packed_qkv_conv=True,
+            use_packed_qkv_proj=True,
+            conv_output_contiguous=True,
+            use_packed_qkv_conv_custom_backward=True,
+            use_cuda_frontend_nct=True,
+        )
+        raise AssertionError(
+            "Expected CUDA frontend NCT to reject packed qkv custom backward"
+        )
+    except ValueError:
+        pass
+    try:
+        GatedDeltaNet(
+            d_model=64,
+            n_heads=4,
+            head_k_dim=8,
+            expand_v=1.0,
+            use_packed_qkv_conv=True,
+            use_packed_qkv_proj=True,
+            conv_output_contiguous=True,
+            use_cuda_frontend_nct=True,
+            use_cuda_split_norm=True,
+        )
+        raise AssertionError("Expected CUDA frontend NCT to reject CUDA split+l2norm")
+    except ValueError:
+        pass
+    print("  ✓ CUDA frontend NCT validates requirements")
 
 
 def test_gdn_cuda_split_norm_validation():
@@ -1432,6 +1569,10 @@ if __name__ == "__main__":
             test_packed_qkv_split_l2norm_reference_matches_eager_ops,
         ),
         (
+            "NCT preact frontend reference parity",
+            test_preact_silu_split_l2norm_nct_reference_matches_eager_ops,
+        ),
+        (
             "Packed conv reference parity",
             test_packed_qkv_conv_reference_matches_eager_ops,
         ),
@@ -1456,8 +1597,16 @@ if __name__ == "__main__":
             test_gdn_cuda_split_norm_cpu_fallback_matches_packed_path,
         ),
         (
+            "CUDA frontend NCT CPU fallback parity",
+            test_gdn_cuda_frontend_nct_cpu_fallback_matches_packed_path,
+        ),
+        (
             "CUDA split+l2norm validation",
             test_gdn_cuda_split_norm_validation,
+        ),
+        (
+            "CUDA frontend NCT validation",
+            test_gdn_cuda_frontend_nct_validation,
         ),
         (
             "CUDA packed conv CPU fallback parity",

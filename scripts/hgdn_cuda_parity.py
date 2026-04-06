@@ -19,6 +19,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from hgdn_cuda import (  # noqa: E402
     extension_status,
+    frontend_preact_silu_split_l2norm_nct,
     fused_packed_qkv_conv,
     fused_packed_qkv_frontend,
     fused_packed_qkv_split_l2norm,
@@ -26,6 +27,8 @@ from hgdn_cuda import (  # noqa: E402
     packed_qkv_conv_reference,
     packed_qkv_frontend_reference,
     packed_qkv_split_l2norm_reference,
+    preact_silu_split_l2norm_nct_backward_reference,
+    preact_silu_split_l2norm_nct_reference,
     rmsnorm_silu_gate_reference,
 )
 
@@ -297,6 +300,67 @@ def check_split_norm(dtype: torch.dtype) -> None:
     )
 
 
+def check_frontend_nct(dtype: torch.dtype) -> None:
+    """Check compile-visible NCT frontend forward and backward parity.
+
+    :param torch.dtype dtype: CUDA dtype under test.
+    """
+    bsz, seq, n_heads, head_k_dim, head_v_dim = 2, 32, 4, 8, 8
+    channels = n_heads * (2 * head_k_dim + head_v_dim)
+    atol, rtol = tolerances(dtype)
+
+    torch.manual_seed(2028)
+    preact_ref = torch.randn(
+        bsz, channels, seq, device="cuda", dtype=dtype, requires_grad=True
+    )
+    preact_ext = preact_ref.detach().clone().requires_grad_(True)
+
+    q_ref, k_ref, v_ref, inv_q_ref, inv_k_ref = preact_silu_split_l2norm_nct_reference(
+        preact_ref,
+        n_heads=n_heads,
+        head_k_dim=head_k_dim,
+        head_v_dim=head_v_dim,
+    )
+    q_ext, k_ext, v_ext = frontend_preact_silu_split_l2norm_nct(
+        preact_ext,
+        n_heads=n_heads,
+        head_k_dim=head_k_dim,
+        head_v_dim=head_v_dim,
+    )
+
+    torch.testing.assert_close(q_ext.float(), q_ref.float(), atol=atol, rtol=rtol)
+    torch.testing.assert_close(k_ext.float(), k_ref.float(), atol=atol, rtol=rtol)
+    torch.testing.assert_close(v_ext.float(), v_ref.float(), atol=atol, rtol=rtol)
+
+    grad_q = torch.randn_like(q_ref)
+    grad_k = torch.randn_like(k_ref)
+    grad_v = torch.randn_like(v_ref)
+    grad_ref = preact_silu_split_l2norm_nct_backward_reference(
+        grad_q,
+        grad_k,
+        grad_v,
+        preact_ref.detach(),
+        q_ref.detach(),
+        k_ref.detach(),
+        inv_q_ref.detach(),
+        inv_k_ref.detach(),
+    )
+    (q_ext * grad_q).sum().backward(retain_graph=True)
+    (k_ext * grad_k).sum().backward(retain_graph=True)
+    (v_ext * grad_v).sum().backward()
+    grad_ext = preact_ext.grad.detach().clone()
+
+    torch.testing.assert_close(grad_ext.float(), grad_ref.float(), atol=atol, rtol=rtol)
+    print(
+        "frontend_nct_parity:"
+        f" dtype={dtype}"
+        f" q={max_abs_diff(q_ext.float(), q_ref.float()):.6f}"
+        f" k={max_abs_diff(k_ext.float(), k_ref.float()):.6f}"
+        f" v={max_abs_diff(v_ext.float(), v_ref.float()):.6f}"
+        f" grad_preact={max_abs_diff(grad_ext.float(), grad_ref.float()):.6f}"
+    )
+
+
 def main() -> None:
     """Run the CUDA parity suite."""
     if not torch.cuda.is_available():
@@ -314,6 +378,7 @@ def main() -> None:
     dtype = parse_dtype()
     check_packed_conv(dtype)
     check_frontend(dtype)
+    check_frontend_nct(dtype)
     check_split_norm(dtype)
     check_output(dtype)
     print("HGDN CUDA parity passed")

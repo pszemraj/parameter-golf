@@ -16,6 +16,8 @@ from .reference import (
     packed_qkv_conv_reference,
     packed_qkv_frontend_reference,
     packed_qkv_split_l2norm_reference,
+    preact_silu_split_l2norm_nct_backward_reference,
+    preact_silu_split_l2norm_nct_reference,
     rmsnorm_silu_gate_reference,
 )
 
@@ -103,6 +105,296 @@ def _dynamo_disable(fn: Callable[..., Any]) -> Callable[..., Any]:
     if disable is None:
         return fn
     return disable(fn)
+
+
+_FRONTEND_V2_LIB = torch.library.Library("hgdn_cuda_v2", "DEF")
+_FRONTEND_V2_LIB.define(
+    "preact_silu_split_l2norm_nct(Tensor preact_nct, int n_heads, int head_k_dim, int head_v_dim, float eps) "
+    "-> (Tensor q, Tensor k, Tensor v, Tensor inv_q, Tensor inv_k)"
+)
+_FRONTEND_V2_LIB.define(
+    "preact_silu_split_l2norm_nct_backward("
+    "Tensor grad_q, Tensor grad_k, Tensor grad_v, "
+    "Tensor preact_nct, Tensor q, Tensor k, Tensor inv_q, Tensor inv_k"
+    ") -> Tensor"
+)
+
+
+@torch.library.impl("hgdn_cuda_v2::preact_silu_split_l2norm_nct", "CPU")
+def _preact_silu_split_l2norm_nct_cpu(
+    preact_nct: Tensor,
+    n_heads: int,
+    head_k_dim: int,
+    head_v_dim: int,
+    eps: float,
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+    """CPU/reference implementation for the compile-visible NCT frontend op.
+
+    :param Tensor preact_nct: Packed pre-activation tensor in ``(batch, channels, seq)`` layout.
+    :param int n_heads: Number of HGDN heads.
+    :param int head_k_dim: Per-head q/k width.
+    :param int head_v_dim: Per-head value width.
+    :param float eps: L2-normalization epsilon.
+    :return tuple[Tensor, Tensor, Tensor, Tensor, Tensor]: Normalized q/k, reshaped v, and cached inverse norms.
+    """
+    return preact_silu_split_l2norm_nct_reference(
+        preact_nct,
+        n_heads=int(n_heads),
+        head_k_dim=int(head_k_dim),
+        head_v_dim=int(head_v_dim),
+        eps=float(eps),
+    )
+
+
+@torch.library.impl("hgdn_cuda_v2::preact_silu_split_l2norm_nct_backward", "CPU")
+def _preact_silu_split_l2norm_nct_backward_cpu(
+    grad_q: Tensor,
+    grad_k: Tensor,
+    grad_v: Tensor,
+    preact_nct: Tensor,
+    q: Tensor,
+    k: Tensor,
+    inv_q: Tensor,
+    inv_k: Tensor,
+) -> Tensor:
+    """CPU/reference implementation for the NCT frontend backward op.
+
+    :param Tensor grad_q: Query gradients.
+    :param Tensor grad_k: Key gradients.
+    :param Tensor grad_v: Value gradients.
+    :param Tensor preact_nct: Saved packed pre-activation tensor.
+    :param Tensor q: Saved normalized q output.
+    :param Tensor k: Saved normalized k output.
+    :param Tensor inv_q: Saved inverse q norms.
+    :param Tensor inv_k: Saved inverse k norms.
+    :return Tensor: Gradient for ``preact_nct``.
+    """
+    return preact_silu_split_l2norm_nct_backward_reference(
+        grad_q,
+        grad_k,
+        grad_v,
+        preact_nct,
+        q,
+        k,
+        inv_q,
+        inv_k,
+    )
+
+
+@torch.library.impl("hgdn_cuda_v2::preact_silu_split_l2norm_nct", "CUDA")
+def _preact_silu_split_l2norm_nct_cuda(
+    preact_nct: Tensor,
+    n_heads: int,
+    head_k_dim: int,
+    head_v_dim: int,
+    eps: float,
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+    """CUDA implementation for the compile-visible NCT frontend op.
+
+    :param Tensor preact_nct: Packed pre-activation tensor in ``(batch, channels, seq)`` layout.
+    :param int n_heads: Number of HGDN heads.
+    :param int head_k_dim: Per-head q/k width.
+    :param int head_v_dim: Per-head value width.
+    :param float eps: L2-normalization epsilon.
+    :return tuple[Tensor, Tensor, Tensor, Tensor, Tensor]: Normalized q/k, reshaped v, and cached inverse norms.
+    """
+    ext = _load_extension()
+    if ext is None:
+        _warn_once(
+            "hgdn_cuda_frontend_nct_fallback",
+            "GDN CUDA NCT frontend path requested but the extension is unavailable; "
+            "using the PyTorch reference path instead.",
+        )
+        return preact_silu_split_l2norm_nct_reference(
+            preact_nct,
+            n_heads=int(n_heads),
+            head_k_dim=int(head_k_dim),
+            head_v_dim=int(head_v_dim),
+            eps=float(eps),
+        )
+    return ext.preact_silu_split_l2norm_nct_forward(
+        preact_nct.contiguous(),
+        int(n_heads),
+        int(head_k_dim),
+        int(head_v_dim),
+        float(eps),
+    )
+
+
+@torch.library.impl("hgdn_cuda_v2::preact_silu_split_l2norm_nct_backward", "CUDA")
+def _preact_silu_split_l2norm_nct_backward_cuda(
+    grad_q: Tensor,
+    grad_k: Tensor,
+    grad_v: Tensor,
+    preact_nct: Tensor,
+    q: Tensor,
+    k: Tensor,
+    inv_q: Tensor,
+    inv_k: Tensor,
+) -> Tensor:
+    """CUDA implementation for the NCT frontend backward op.
+
+    :param Tensor grad_q: Query gradients.
+    :param Tensor grad_k: Key gradients.
+    :param Tensor grad_v: Value gradients.
+    :param Tensor preact_nct: Saved packed pre-activation tensor.
+    :param Tensor q: Saved normalized q output.
+    :param Tensor k: Saved normalized k output.
+    :param Tensor inv_q: Saved inverse q norms.
+    :param Tensor inv_k: Saved inverse k norms.
+    :return Tensor: Gradient for ``preact_nct``.
+    """
+    ext = _load_extension()
+    if ext is None:
+        _warn_once(
+            "hgdn_cuda_frontend_nct_bwd_fallback",
+            "GDN CUDA NCT frontend backward requested but the extension is unavailable; "
+            "using the PyTorch reference path instead.",
+        )
+        return preact_silu_split_l2norm_nct_backward_reference(
+            grad_q,
+            grad_k,
+            grad_v,
+            preact_nct,
+            q,
+            k,
+            inv_q,
+            inv_k,
+        )
+    return ext.preact_silu_split_l2norm_nct_backward(
+        grad_q.contiguous(),
+        grad_k.contiguous(),
+        grad_v.contiguous(),
+        preact_nct.contiguous(),
+        q.contiguous(),
+        k.contiguous(),
+        inv_q.contiguous(),
+        inv_k.contiguous(),
+    )
+
+
+@torch.library.register_fake("hgdn_cuda_v2::preact_silu_split_l2norm_nct")
+def _preact_silu_split_l2norm_nct_fake(
+    preact_nct: Tensor,
+    n_heads: int,
+    head_k_dim: int,
+    head_v_dim: int,
+    eps: float,
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+    """Meta kernel for the compile-visible NCT frontend op.
+
+    :param Tensor preact_nct: Packed pre-activation tensor in ``(batch, channels, seq)`` layout.
+    :param int n_heads: Number of HGDN heads.
+    :param int head_k_dim: Per-head q/k width.
+    :param int head_v_dim: Per-head value width.
+    :param float eps: L2-normalization epsilon.
+    :return tuple[Tensor, Tensor, Tensor, Tensor, Tensor]: Meta tensors matching the real op outputs.
+    """
+    if preact_nct.ndim != 3:
+        raise ValueError(f"Expected preact_nct.ndim == 3, got {preact_nct.ndim}")
+    batch, channels, seq = preact_nct.shape
+    q_dim = int(n_heads) * int(head_k_dim)
+    k_dim = int(n_heads) * int(head_k_dim)
+    v_dim = int(n_heads) * int(head_v_dim)
+    expected_channels = q_dim + k_dim + v_dim
+    if channels != expected_channels:
+        raise ValueError(
+            f"Channel mismatch: got {channels}, expected {expected_channels}"
+        )
+    q = preact_nct.new_empty((batch, seq, int(n_heads), int(head_k_dim)))
+    k = preact_nct.new_empty((batch, seq, int(n_heads), int(head_k_dim)))
+    v = preact_nct.new_empty((batch, seq, int(n_heads), int(head_v_dim)))
+    inv_q = preact_nct.new_empty((batch, seq, int(n_heads)), dtype=torch.float32)
+    inv_k = preact_nct.new_empty((batch, seq, int(n_heads)), dtype=torch.float32)
+    return q, k, v, inv_q, inv_k
+
+
+@torch.library.register_fake("hgdn_cuda_v2::preact_silu_split_l2norm_nct_backward")
+def _preact_silu_split_l2norm_nct_backward_fake(
+    grad_q: Tensor,
+    grad_k: Tensor,
+    grad_v: Tensor,
+    preact_nct: Tensor,
+    q: Tensor,
+    k: Tensor,
+    inv_q: Tensor,
+    inv_k: Tensor,
+) -> Tensor:
+    """Meta kernel for the NCT frontend backward op.
+
+    :param Tensor grad_q: Query gradients.
+    :param Tensor grad_k: Key gradients.
+    :param Tensor grad_v: Value gradients.
+    :param Tensor preact_nct: Saved packed pre-activation tensor.
+    :param Tensor q: Saved normalized q output.
+    :param Tensor k: Saved normalized k output.
+    :param Tensor inv_q: Saved inverse q norms.
+    :param Tensor inv_k: Saved inverse k norms.
+    :return Tensor: Meta tensor matching the ``preact_nct`` gradient shape.
+    """
+    return preact_nct.new_empty(preact_nct.shape)
+
+
+def _setup_preact_silu_split_l2norm_nct_context(
+    ctx: torch.autograd.function.FunctionCtx,
+    inputs: tuple[Tensor, int, int, int, float],
+    output: tuple[Tensor, Tensor, Tensor, Tensor, Tensor],
+) -> None:
+    """Save tensors needed by the registered NCT frontend backward formula.
+
+    :param torch.autograd.function.FunctionCtx ctx: Autograd context.
+    :param tuple[Tensor, int, int, int, float] inputs: Forward inputs.
+    :param tuple[Tensor, Tensor, Tensor, Tensor, Tensor] output: Forward outputs.
+    :return None: Saves tensors onto ``ctx``.
+    """
+    preact_nct, _n_heads, _head_k_dim, _head_v_dim, _eps = inputs
+    q, k, _v, inv_q, inv_k = output
+    ctx.save_for_backward(preact_nct, q, k, inv_q, inv_k)
+
+
+def _preact_silu_split_l2norm_nct_backward_formula(
+    ctx: torch.autograd.function.FunctionCtx,
+    grad_q: Tensor | None,
+    grad_k: Tensor | None,
+    grad_v: Tensor | None,
+    _grad_inv_q: Tensor | None,
+    _grad_inv_k: Tensor | None,
+) -> tuple[Tensor | None, None, None, None, None]:
+    """Backward formula for the registered NCT frontend op.
+
+    :param torch.autograd.function.FunctionCtx ctx: Autograd context.
+    :param Tensor | None grad_q: Query-output gradient.
+    :param Tensor | None grad_k: Key-output gradient.
+    :param Tensor | None grad_v: Value-output gradient.
+    :param Tensor | None _grad_inv_q: Ignored inverse-q gradient placeholder.
+    :param Tensor | None _grad_inv_k: Ignored inverse-k gradient placeholder.
+    :return tuple[Tensor | None, None, None, None, None]: Gradient for ``preact_nct`` plus ``None`` for non-tensor args.
+    """
+    preact_nct, q, k, inv_q, inv_k = ctx.saved_tensors
+    grad_q = torch.zeros_like(q) if grad_q is None else grad_q
+    grad_k = torch.zeros_like(k) if grad_k is None else grad_k
+    if grad_v is None:
+        batch, seq, heads = inv_q.shape
+        head_v_dim = preact_nct.shape[1] // heads - 2 * q.shape[-1]
+        grad_v = preact_nct.new_zeros((batch, seq, heads, head_v_dim))
+    grad_preact = torch.ops.hgdn_cuda_v2.preact_silu_split_l2norm_nct_backward(
+        grad_q,
+        grad_k,
+        grad_v,
+        preact_nct,
+        q,
+        k,
+        inv_q,
+        inv_k,
+    )
+    return grad_preact, None, None, None, None
+
+
+torch.library.register_autograd(
+    "hgdn_cuda_v2::preact_silu_split_l2norm_nct",
+    _preact_silu_split_l2norm_nct_backward_formula,
+    setup_context=_setup_preact_silu_split_l2norm_nct_context,
+)
 
 
 class _PackedQKVFrontendFunction(torch.autograd.Function):
@@ -522,3 +814,34 @@ def fused_packed_qkv_split_l2norm(
         head_v_dim=head_v_dim,
         eps=eps,
     )
+
+
+def frontend_preact_silu_split_l2norm_nct(
+    preact_nct: Tensor,
+    *,
+    n_heads: int,
+    head_k_dim: int,
+    head_v_dim: int,
+    eps: float = 1e-6,
+) -> tuple[Tensor, Tensor, Tensor]:
+    """Run the compile-visible NCT preact frontend op.
+
+    This op consumes the conv-native packed pre-activation tensor in
+    ``(batch, channels, seq)`` layout, applies SiLU, splits q/k/v, and returns
+    recurrence-ready q/k/v with q/k L2-normalized.
+
+    :param Tensor preact_nct: Packed pre-activation tensor shaped ``(batch, channels, seq)``.
+    :param int n_heads: Number of HGDN heads.
+    :param int head_k_dim: Per-head q/k width.
+    :param int head_v_dim: Per-head value width.
+    :param float eps: L2-normalization epsilon.
+    :return tuple[Tensor, Tensor, Tensor]: Normalized q/k and reshaped v.
+    """
+    q, k, v, _inv_q, _inv_k = torch.ops.hgdn_cuda_v2.preact_silu_split_l2norm_nct(
+        preact_nct,
+        int(n_heads),
+        int(head_k_dim),
+        int(head_v_dim),
+        float(eps),
+    )
+    return q, k, v
