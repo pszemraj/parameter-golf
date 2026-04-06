@@ -90,6 +90,42 @@ def packed_qkv_frontend_reference(
     return q.contiguous(), k.contiguous(), v.contiguous()
 
 
+def packed_qkv_conv_reference(
+    qkv: Tensor,
+    weight: Tensor,
+) -> Tensor:
+    """Reference exact-length packed causal depthwise conv plus SiLU.
+
+    This matches the promoted packed HGDN front-end at the point immediately
+    before q/k/v splitting and q/k normalization.
+
+    :param Tensor qkv: Packed q/k/v projections shaped ``(batch, seq, channels)``.
+    :param Tensor weight: Depthwise conv weights shaped ``(channels, kernel)`` or
+        ``(channels, 1, kernel)``.
+    :raises ValueError: If the packed tensor or conv weight shape is unsupported.
+    :return Tensor: Packed post-conv activations shaped ``(batch, seq, channels)``.
+    """
+    if qkv.ndim != 3:
+        raise ValueError(f"Expected qkv.ndim == 3, got {qkv.ndim}")
+    if weight.ndim == 3:
+        weight = weight.view(weight.shape[0], weight.shape[-1])
+    if weight.ndim != 2:
+        raise ValueError(f"Expected weight.ndim in {{2, 3}}, got {weight.ndim}")
+    if qkv.shape[-1] != weight.shape[0]:
+        raise ValueError(
+            f"Packed conv channel mismatch: qkv={qkv.shape[-1]} weight={weight.shape[0]}"
+        )
+
+    seq = qkv.shape[1]
+    packed = F.conv1d(
+        qkv.transpose(1, 2),
+        weight[:, None, :],
+        padding=weight.shape[-1] - 1,
+        groups=qkv.shape[-1],
+    )[..., :seq]
+    return F.silu(packed).transpose(1, 2).contiguous()
+
+
 def packed_qkv_split_l2norm_reference(
     packed: Tensor,
     *,

@@ -13,6 +13,7 @@ import torch
 from torch import Tensor
 
 from .reference import (
+    packed_qkv_conv_reference,
     packed_qkv_frontend_reference,
     packed_qkv_split_l2norm_reference,
     rmsnorm_silu_gate_reference,
@@ -180,6 +181,57 @@ class _PackedQKVFrontendFunction(torch.autograd.Function):
         return grad_input, grad_weight, None, None, None, None
 
 
+class _PackedQKVConvFunction(torch.autograd.Function):
+    """CUDA autograd wrapper for exact-length packed causal depthwise conv."""
+
+    @staticmethod
+    def forward(
+        ctx: torch.autograd.function.FunctionCtx,
+        qkv: Tensor,
+        weight: Tensor,
+    ) -> Tensor:
+        """Run the packed causal depthwise conv forward pass.
+
+        :param torch.autograd.function.FunctionCtx ctx: Autograd context.
+        :param Tensor qkv: Packed q/k/v activations.
+        :param Tensor weight: Packed depthwise conv weights.
+        :raises RuntimeError: If the HGDN CUDA extension is unavailable.
+        :return Tensor: Packed post-conv activations.
+        """
+        ext = _load_extension()
+        if ext is None:
+            raise RuntimeError("HGDN CUDA extension is not available")
+        qkv_c = qkv.contiguous()
+        weight_c = weight.contiguous()
+        packed_out, preact = ext.packed_qkv_conv_forward(qkv_c, weight_c)
+        ctx.save_for_backward(qkv_c, weight_c, preact)
+        return packed_out
+
+    @staticmethod
+    def backward(
+        ctx: torch.autograd.function.FunctionCtx,
+        grad_packed_out: Tensor,
+    ) -> tuple[Tensor | None, Tensor | None]:
+        """Run the packed causal depthwise conv backward pass.
+
+        :param torch.autograd.function.FunctionCtx ctx: Autograd context.
+        :param Tensor grad_packed_out: Packed output gradients.
+        :raises RuntimeError: If the HGDN CUDA extension is unavailable.
+        :return tuple[Tensor | None, Tensor | None]: Input and weight gradients.
+        """
+        ext = _load_extension()
+        if ext is None:
+            raise RuntimeError("HGDN CUDA extension is not available")
+        qkv, weight, preact = ctx.saved_tensors
+        grad_input, grad_weight = ext.packed_qkv_conv_backward(
+            grad_packed_out.contiguous(),
+            qkv,
+            weight,
+            preact,
+        )
+        return grad_input, grad_weight
+
+
 class _RMSNormSiluGateFunction(torch.autograd.Function):
     """CUDA autograd wrapper for fused RMSNorm * SiLU(gate)."""
 
@@ -322,6 +374,32 @@ def extension_status() -> dict[str, object]:
         "loaded": extension_loaded(),
         "allow_jit_build": bool(int(os.environ.get("GDN_CUDA_ALLOW_JIT_BUILD", "0"))),
     }
+
+
+@_dynamo_disable
+def fused_packed_qkv_conv(
+    qkv: Tensor,
+    weight: Tensor,
+    *,
+    enabled: bool = True,
+) -> Tensor:
+    """Run packed causal depthwise conv through CUDA or the reference path.
+
+    :param Tensor qkv: Packed q/k/v projections shaped ``(batch, seq, channels)``.
+    :param Tensor weight: Depthwise conv weights shaped ``(channels, kernel)``.
+    :param bool enabled: Whether the caller wants the CUDA path when available.
+    :return Tensor: Packed post-conv activations.
+    """
+    use_cuda_ext = enabled and qkv.is_cuda and weight.is_cuda and extension_loaded()
+    if use_cuda_ext:
+        return _PackedQKVConvFunction.apply(qkv, weight)
+    if enabled and qkv.is_cuda and weight.is_cuda:
+        _warn_once(
+            "hgdn_cuda_conv_fallback",
+            "GDN CUDA packed-conv path requested but the extension is unavailable; "
+            "using the PyTorch reference path instead.",
+        )
+    return packed_qkv_conv_reference(qkv, weight)
 
 
 @_dynamo_disable

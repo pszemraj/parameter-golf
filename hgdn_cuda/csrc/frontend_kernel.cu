@@ -65,6 +65,30 @@ __global__ void causal_dwconv_preact_forward_kernel(
 }
 
 template <typename scalar_t>
+__global__ void silu_from_preact_kernel(
+    const scalar_t* __restrict__ preact,
+    scalar_t* __restrict__ packed_out,
+    int64_t total) {
+  for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < total;
+       idx += static_cast<int64_t>(blockDim.x) * gridDim.x) {
+    packed_out[idx] = from_float<scalar_t>(silu_from_preact(preact[idx]));
+  }
+}
+
+template <typename scalar_t>
+__global__ void silu_grad_from_preact_kernel(
+    const scalar_t* __restrict__ grad_out,
+    const scalar_t* __restrict__ preact,
+    scalar_t* __restrict__ grad_preact,
+    int64_t total) {
+  for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < total;
+       idx += static_cast<int64_t>(blockDim.x) * gridDim.x) {
+    grad_preact[idx] = from_float<scalar_t>(
+        to_float(grad_out[idx]) * silu_backward_from_preact(preact[idx]));
+  }
+}
+
+template <typename scalar_t>
 __global__ void split_norm_from_preact_kernel(
     const scalar_t* __restrict__ preact,
     scalar_t* __restrict__ q_out,
@@ -485,6 +509,55 @@ std::vector<torch::Tensor> packed_qkv_frontend_forward_cuda(
   return {q, k, v, preact, inv_q, inv_k};
 }
 
+std::vector<torch::Tensor> packed_qkv_conv_forward_cuda(
+    torch::Tensor qkv,
+    torch::Tensor weight) {
+  c10::cuda::CUDAGuard device_guard(qkv.device());
+  const auto B = qkv.size(0);
+  const auto T = qkv.size(1);
+  const auto C = qkv.size(2);
+  const auto K = weight.size(1);
+  TORCH_CHECK(
+      C == weight.size(0),
+      "Packed conv channel mismatch: got ",
+      C,
+      " expected ",
+      weight.size(0));
+
+  auto preact = torch::empty_like(qkv);
+  auto packed_out = torch::empty_like(qkv);
+
+  constexpr int threads = 256;
+  const int64_t total = B * T * C;
+  const int blocks = static_cast<int>((total + threads - 1) / threads);
+  const int launch_blocks = std::min(blocks, 65535);
+  const auto stream = at::cuda::getCurrentCUDAStream();
+
+  AT_DISPATCH_FLOATING_TYPES_AND2(
+      at::ScalarType::Half,
+      at::ScalarType::BFloat16,
+      qkv.scalar_type(),
+      "packed_qkv_conv_forward_cuda",
+      [&] {
+        causal_dwconv_preact_forward_kernel<scalar_t>
+            <<<launch_blocks, threads, 0, stream>>>(
+                qkv.data_ptr<scalar_t>(),
+                weight.data_ptr<scalar_t>(),
+                preact.data_ptr<scalar_t>(),
+                B,
+                T,
+                C,
+                K);
+        silu_from_preact_kernel<scalar_t>
+            <<<launch_blocks, threads, 0, stream>>>(
+                preact.data_ptr<scalar_t>(),
+                packed_out.data_ptr<scalar_t>(),
+                total);
+      });
+  AT_CUDA_CHECK(cudaGetLastError());
+  return {packed_out, preact};
+}
+
 std::vector<torch::Tensor> packed_qkv_frontend_backward_cuda(
     torch::Tensor grad_q,
     torch::Tensor grad_k,
@@ -540,6 +613,65 @@ std::vector<torch::Tensor> packed_qkv_frontend_backward_cuda(
                 Dk,
                 Dv,
                 C);
+        causal_dwconv_input_backward_kernel<scalar_t>
+            <<<launch_blocks, threads, 0, stream>>>(
+                grad_preact.data_ptr<scalar_t>(),
+                weight.data_ptr<scalar_t>(),
+                grad_input.data_ptr<scalar_t>(),
+                B,
+                T,
+                C,
+                K);
+        causal_dwconv_weight_backward_kernel<scalar_t>
+            <<<weight_launch_blocks, threads, 0, stream>>>(
+                grad_preact.data_ptr<scalar_t>(),
+                qkv.data_ptr<scalar_t>(),
+                grad_weight.data_ptr<scalar_t>(),
+                B,
+                T,
+                C,
+                K);
+      });
+  AT_CUDA_CHECK(cudaGetLastError());
+  return {grad_input, grad_weight};
+}
+
+std::vector<torch::Tensor> packed_qkv_conv_backward_cuda(
+    torch::Tensor grad_packed_out,
+    torch::Tensor qkv,
+    torch::Tensor weight,
+    torch::Tensor preact) {
+  c10::cuda::CUDAGuard device_guard(qkv.device());
+  const auto B = qkv.size(0);
+  const auto T = qkv.size(1);
+  const auto C = qkv.size(2);
+  const auto K = weight.size(1);
+
+  auto grad_preact = torch::empty_like(preact);
+  auto grad_input = torch::empty_like(qkv);
+  auto grad_weight = torch::empty_like(weight);
+
+  constexpr int threads = 256;
+  const int64_t total = B * T * C;
+  const int blocks = static_cast<int>((total + threads - 1) / threads);
+  const int launch_blocks = std::min(blocks, 65535);
+  const int64_t weight_total = C * K;
+  const int weight_blocks = static_cast<int>((weight_total + threads - 1) / threads);
+  const int weight_launch_blocks = std::min(weight_blocks, 65535);
+  const auto stream = at::cuda::getCurrentCUDAStream();
+
+  AT_DISPATCH_FLOATING_TYPES_AND2(
+      at::ScalarType::Half,
+      at::ScalarType::BFloat16,
+      qkv.scalar_type(),
+      "packed_qkv_conv_backward_cuda",
+      [&] {
+        silu_grad_from_preact_kernel<scalar_t>
+            <<<launch_blocks, threads, 0, stream>>>(
+                grad_packed_out.data_ptr<scalar_t>(),
+                preact.data_ptr<scalar_t>(),
+                grad_preact.data_ptr<scalar_t>(),
+                total);
         causal_dwconv_input_backward_kernel<scalar_t>
             <<<launch_blocks, threads, 0, stream>>>(
                 grad_preact.data_ptr<scalar_t>(),

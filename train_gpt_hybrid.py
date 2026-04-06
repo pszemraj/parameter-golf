@@ -175,6 +175,9 @@ class Hyperparameters:
     gdn_control_proj_fp32 = bool(int(os.environ.get("GDN_CONTROL_PROJ_FP32", "1")))
     gdn_gates_fp32 = bool(int(os.environ.get("GDN_GATES_FP32", "1")))
     gdn_output_norm_fp32 = bool(int(os.environ.get("GDN_OUTPUT_NORM_FP32", "1")))
+    gdn_use_cuda_packed_conv = bool(
+        int(os.environ.get("GDN_USE_CUDA_PACKED_CONV", "0"))
+    )
     gdn_use_cuda_fused_frontend = bool(
         int(os.environ.get("GDN_USE_CUDA_FUSED_FRONTEND", "0"))
     )
@@ -1022,6 +1025,7 @@ def main() -> None:
         f"control_proj_fp32={int(args.gdn_control_proj_fp32)} "
         f"gates_fp32={int(args.gdn_gates_fp32)} "
         f"output_norm_fp32={int(args.gdn_output_norm_fp32)} "
+        f"cuda_packed_conv={int(args.gdn_use_cuda_packed_conv)} "
         f"cuda_fused_frontend={int(args.gdn_use_cuda_fused_frontend)} "
         f"cuda_fused_output={int(args.gdn_use_cuda_fused_output)} "
         f"cuda_split_norm={int(args.gdn_use_cuda_split_norm)}",
@@ -1113,6 +1117,7 @@ def main() -> None:
             gdn_v_conv_output_contiguous=args.gdn_v_conv_output_contiguous,
             gdn_gates_fp32=args.gdn_gates_fp32,
             gdn_output_norm_fp32=args.gdn_output_norm_fp32,
+            gdn_use_cuda_packed_conv=args.gdn_use_cuda_packed_conv,
             gdn_use_cuda_fused_frontend=args.gdn_use_cuda_fused_frontend,
             gdn_use_cuda_fused_output=args.gdn_use_cuda_fused_output,
             gdn_use_cuda_split_norm=args.gdn_use_cuda_split_norm,
@@ -1196,6 +1201,7 @@ def main() -> None:
                 "gdn_control_proj_fp32": args.gdn_control_proj_fp32,
                 "gdn_gates_fp32": args.gdn_gates_fp32,
                 "gdn_output_norm_fp32": args.gdn_output_norm_fp32,
+                "gdn_use_cuda_packed_conv": args.gdn_use_cuda_packed_conv,
                 "gdn_use_cuda_fused_frontend": args.gdn_use_cuda_fused_frontend,
                 "gdn_use_cuda_fused_output": args.gdn_use_cuda_fused_output,
                 "gdn_use_cuda_split_norm": args.gdn_use_cuda_split_norm,

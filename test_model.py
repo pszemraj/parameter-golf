@@ -7,6 +7,7 @@ import torch
 import torch.nn.functional as F
 
 from hgdn_cuda import (
+    packed_qkv_conv_reference,
     packed_qkv_frontend_reference,
     packed_qkv_split_l2norm_reference,
     rmsnorm_silu_gate_reference,
@@ -17,6 +18,7 @@ from model import (
     CausalConv1d,
     GatedDeltaNet,
     HybridGPT,
+    PackedCausalConv1d,
     gdn_recurrent_naive,
     l2_norm,
     rms_norm,
@@ -705,6 +707,37 @@ def test_packed_qkv_split_l2norm_reference_matches_eager_ops():
     print("  ✓ packed split+l2norm reference matches eager ops")
 
 
+def test_packed_qkv_conv_reference_matches_eager_ops():
+    """Reference packed causal depthwise conv should match eager packed conv ops."""
+    torch.manual_seed(42)
+    layer = PackedCausalConv1d((32, 32, 32), kernel_size=4, output_contiguous=True)
+    qkv_ref = torch.randn(2, 32, 96, requires_grad=True)
+    weight_ref = layer.conv.weight.view(layer.conv.weight.shape[0], -1).detach().clone()
+    weight_ref.requires_grad_(True)
+
+    packed_ref = packed_qkv_conv_reference(qkv_ref, weight_ref)
+    layer.conv.weight.data.copy_(weight_ref.view_as(layer.conv.weight).detach())
+    qkv_eager = qkv_ref.detach().clone().requires_grad_(True)
+    packed_eager = layer.forward_packed_tensor(qkv_eager)
+    torch.testing.assert_close(packed_ref, packed_eager, atol=1e-6, rtol=1e-6)
+
+    grad = torch.randn_like(packed_ref)
+    packed_ref.backward(grad, retain_graph=True)
+    grad_qkv_ref = qkv_ref.grad.detach().clone()
+    grad_weight_ref = weight_ref.grad.detach().clone()
+
+    layer.zero_grad(set_to_none=True)
+    packed_eager.backward(grad)
+    torch.testing.assert_close(qkv_eager.grad, grad_qkv_ref, atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(
+        layer.conv.weight.grad.view_as(weight_ref),
+        grad_weight_ref,
+        atol=1e-5,
+        rtol=1e-5,
+    )
+    print("  ✓ packed conv reference matches eager ops")
+
+
 def test_gdn_cuda_split_norm_cpu_fallback_matches_packed_path():
     """CPU fallback for CUDA split+l2norm should preserve packed-path outputs and gradients."""
     torch.manual_seed(42)
@@ -736,6 +769,88 @@ def test_gdn_cuda_split_norm_cpu_fallback_matches_packed_path():
     y_split.backward(grad)
     torch.testing.assert_close(x_split.grad, x_eager.grad, atol=1e-5, rtol=1e-5)
     print("  ✓ CUDA split+l2norm CPU fallback matches packed path")
+
+
+def test_gdn_cuda_packed_conv_cpu_fallback_matches_packed_path():
+    """CPU fallback for CUDA packed conv should preserve packed-path outputs and gradients."""
+    torch.manual_seed(42)
+    kwargs = dict(
+        d_model=64,
+        n_heads=4,
+        head_k_dim=8,
+        expand_v=1.0,
+        allow_neg_eigval=True,
+        conv_size=4,
+        use_fla=False,
+        use_packed_qkv_conv=True,
+        use_packed_qkv_proj=True,
+        conv_output_contiguous=True,
+    )
+    eager = GatedDeltaNet(**kwargs)
+    packed_conv = GatedDeltaNet(**kwargs, use_cuda_packed_conv=True)
+    packed_conv.load_state_dict(eager.state_dict(), strict=True)
+
+    x_eager = torch.randn(2, 32, 64, requires_grad=True)
+    x_conv = x_eager.detach().clone().requires_grad_(True)
+    y_eager = eager(x_eager)
+    y_conv = packed_conv(x_conv)
+    torch.testing.assert_close(y_conv, y_eager, atol=1e-5, rtol=1e-5)
+
+    grad = torch.randn_like(y_eager)
+    y_eager.backward(grad, retain_graph=True)
+    y_conv.backward(grad)
+    torch.testing.assert_close(x_conv.grad, x_eager.grad, atol=1e-5, rtol=1e-5)
+    print("  ✓ CUDA packed conv CPU fallback matches packed path")
+
+
+def test_gdn_cuda_packed_conv_validation():
+    """CUDA packed conv should only run on the packed non-fused front-end path."""
+    try:
+        GatedDeltaNet(
+            d_model=64,
+            n_heads=4,
+            head_k_dim=8,
+            expand_v=1.0,
+            use_cuda_packed_conv=True,
+        )
+        raise AssertionError(
+            "Expected CUDA packed conv to require packed qkv proj+conv"
+        )
+    except ValueError:
+        pass
+    try:
+        GatedDeltaNet(
+            d_model=64,
+            n_heads=4,
+            head_k_dim=8,
+            expand_v=1.0,
+            use_packed_qkv_conv=True,
+            use_packed_qkv_proj=True,
+            conv_output_contiguous=True,
+            use_packed_qkv_conv_custom_backward=True,
+            use_cuda_packed_conv=True,
+        )
+        raise AssertionError(
+            "Expected CUDA packed conv to reject packed qkv custom backward"
+        )
+    except ValueError:
+        pass
+    try:
+        GatedDeltaNet(
+            d_model=64,
+            n_heads=4,
+            head_k_dim=8,
+            expand_v=1.0,
+            use_packed_qkv_conv=True,
+            use_packed_qkv_proj=True,
+            conv_output_contiguous=True,
+            use_cuda_packed_conv=True,
+            use_cuda_split_norm=True,
+        )
+        raise AssertionError("Expected CUDA packed conv to reject CUDA split+l2norm")
+    except ValueError:
+        pass
+    print("  ✓ CUDA packed conv validates requirements")
 
 
 def test_gdn_cuda_split_norm_validation():
@@ -1317,6 +1432,10 @@ if __name__ == "__main__":
             test_packed_qkv_split_l2norm_reference_matches_eager_ops,
         ),
         (
+            "Packed conv reference parity",
+            test_packed_qkv_conv_reference_matches_eager_ops,
+        ),
+        (
             "Packed qkv frontend reference parity",
             test_packed_qkv_frontend_reference_matches_eager_ops,
         ),
@@ -1339,6 +1458,14 @@ if __name__ == "__main__":
         (
             "CUDA split+l2norm validation",
             test_gdn_cuda_split_norm_validation,
+        ),
+        (
+            "CUDA packed conv CPU fallback parity",
+            test_gdn_cuda_packed_conv_cpu_fallback_matches_packed_path,
+        ),
+        (
+            "CUDA packed conv validation",
+            test_gdn_cuda_packed_conv_validation,
         ),
         ("Hybrid fwd/bwd", test_hybrid_fwd_bwd),
         ("Norm styles", test_norm_styles),

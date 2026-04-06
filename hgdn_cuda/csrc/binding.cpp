@@ -26,6 +26,16 @@ std::vector<torch::Tensor> packed_qkv_frontend_backward_cuda(
     torch::Tensor inv_q,
     torch::Tensor inv_k);
 
+std::vector<torch::Tensor> packed_qkv_conv_forward_cuda(
+    torch::Tensor qkv,
+    torch::Tensor weight);
+
+std::vector<torch::Tensor> packed_qkv_conv_backward_cuda(
+    torch::Tensor grad_packed_out,
+    torch::Tensor qkv,
+    torch::Tensor weight,
+    torch::Tensor preact);
+
 std::vector<torch::Tensor> packed_qkv_split_l2norm_forward_cuda(
     torch::Tensor packed,
     int64_t n_heads,
@@ -74,6 +84,18 @@ std::vector<torch::Tensor> packed_qkv_frontend_forward(
       qkv, weight, n_heads, head_k_dim, head_v_dim, eps);
 }
 
+std::vector<torch::Tensor> packed_qkv_conv_forward(
+    torch::Tensor qkv,
+    torch::Tensor weight) {
+  CHECK_CUDA(qkv);
+  CHECK_CUDA(weight);
+  CHECK_CONTIGUOUS(qkv);
+  CHECK_CONTIGUOUS(weight);
+  CHECK_DIM(qkv, 3);
+  CHECK_DIM(weight, 2);
+  return packed_qkv_conv_forward_cuda(qkv, weight);
+}
+
 std::vector<torch::Tensor> packed_qkv_frontend_backward(
     torch::Tensor grad_q,
     torch::Tensor grad_k,
@@ -118,6 +140,26 @@ std::vector<torch::Tensor> packed_qkv_frontend_backward(
       k_norm,
       inv_q,
       inv_k);
+}
+
+std::vector<torch::Tensor> packed_qkv_conv_backward(
+    torch::Tensor grad_packed_out,
+    torch::Tensor qkv,
+    torch::Tensor weight,
+    torch::Tensor preact) {
+  CHECK_CUDA(grad_packed_out);
+  CHECK_CUDA(qkv);
+  CHECK_CUDA(weight);
+  CHECK_CUDA(preact);
+  CHECK_CONTIGUOUS(grad_packed_out);
+  CHECK_CONTIGUOUS(qkv);
+  CHECK_CONTIGUOUS(weight);
+  CHECK_CONTIGUOUS(preact);
+  CHECK_DIM(grad_packed_out, 3);
+  CHECK_DIM(qkv, 3);
+  CHECK_DIM(weight, 2);
+  CHECK_DIM(preact, 3);
+  return packed_qkv_conv_backward_cuda(grad_packed_out, qkv, weight, preact);
 }
 
 std::vector<torch::Tensor> rmsnorm_silu_gate_forward(
@@ -198,6 +240,14 @@ torch::Tensor packed_qkv_split_l2norm_backward(
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def(
+      "packed_qkv_conv_forward",
+      &packed_qkv_conv_forward,
+      "HGDN packed qkv conv forward (CUDA)");
+  m.def(
+      "packed_qkv_conv_backward",
+      &packed_qkv_conv_backward,
+      "HGDN packed qkv conv backward (CUDA)");
   m.def(
       "packed_qkv_frontend_forward",
       &packed_qkv_frontend_forward,
