@@ -113,6 +113,7 @@ def run_gdn_eager() -> PreflightResult:
                 "GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD"
             ),
             use_packed_qkv_single_contig=env_flag("GDN_PACKED_QKV_SINGLE_CONTIG"),
+            use_packed_qkv_split_copy=env_flag("GDN_PACKED_QKV_SPLIT_COPY"),
         )
     )
     x = torch.randn(
@@ -177,6 +178,7 @@ def run_hybrid_case(*, compiled: bool) -> PreflightResult:
                 "GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD"
             ),
             gdn_use_packed_qkv_single_contig=env_flag("GDN_PACKED_QKV_SINGLE_CONTIG"),
+            gdn_use_packed_qkv_split_copy=env_flag("GDN_PACKED_QKV_SPLIT_COPY"),
             gdn_ratio=1,
             mlp_mult=2.0,
             norm_style="pre",

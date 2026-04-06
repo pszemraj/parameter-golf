@@ -528,6 +528,142 @@ def test_gdn_packed_qkv_single_contig_validation():
     print("  ✓ packed qkv single-contig validates requirements")
 
 
+def test_gdn_packed_qkv_split_copy_matches_default_path():
+    """Generated split-copy should preserve packed qkv outputs, grads, and contiguity."""
+    if not hasattr(torch.ops.aten, "split_with_sizes_copy"):
+        print(
+            "  - skipping packed qkv split-copy parity (aten.split_with_sizes_copy unavailable)"
+        )
+        return
+    torch.manual_seed(42)
+    kwargs = dict(
+        d_model=64,
+        n_heads=4,
+        head_k_dim=8,
+        expand_v=1.0,
+        use_fla=False,
+        use_packed_qkv_conv=True,
+        use_packed_qkv_proj=True,
+        use_packed_qkv_conv_custom_backward=True,
+        conv_output_contiguous=True,
+    )
+    eager = GatedDeltaNet(**kwargs)
+    split_copy = GatedDeltaNet(**kwargs, use_packed_qkv_split_copy=True)
+    split_copy.load_state_dict(eager.state_dict())
+
+    x_eager = torch.randn(2, 32, 64, requires_grad=True)
+    x_split = x_eager.detach().clone().requires_grad_(True)
+    grad = torch.randn_like(x_eager)
+
+    out_eager = eager(x_eager)
+    out_split = split_copy(x_split)
+    torch.testing.assert_close(out_split, out_eager, atol=1e-6, rtol=1e-6)
+
+    out_eager.backward(grad, retain_graph=True)
+    out_split.backward(grad)
+    torch.testing.assert_close(x_split.grad, x_eager.grad, atol=1e-5, rtol=1e-5)
+
+    eager_grads = dict(eager.named_parameters())
+    split_grads = dict(split_copy.named_parameters())
+    for name in [
+        "w_qkv.linear.weight",
+        "qkv_conv.conv.weight",
+        "w_a.weight",
+        "w_out.weight",
+    ]:
+        torch.testing.assert_close(
+            split_grads[name].grad,
+            eager_grads[name].grad,
+            atol=1e-5,
+            rtol=1e-5,
+        )
+    split_bf16 = _make_bf16_gdn(
+        use_packed_qkv_conv=True,
+        use_packed_qkv_proj=True,
+        use_packed_qkv_conv_custom_backward=True,
+        use_packed_qkv_split_copy=True,
+        conv_output_contiguous=True,
+    )
+    q, k, v, _, _ = split_bf16._project_recurrence_inputs(
+        torch.randn(2, 16, 64, dtype=torch.bfloat16)
+    )
+    assert q.is_contiguous()
+    assert k.is_contiguous()
+    assert v.is_contiguous()
+    print("  ✓ packed qkv split-copy matches default path")
+
+
+def test_gdn_packed_qkv_split_copy_validation():
+    """Generated split-copy should only run on the non-fused packed path."""
+    if not hasattr(torch.ops.aten, "split_with_sizes_copy"):
+        print(
+            "  - skipping packed qkv split-copy validation (aten.split_with_sizes_copy unavailable)"
+        )
+        return
+    try:
+        GatedDeltaNet(
+            d_model=64,
+            n_heads=4,
+            head_k_dim=8,
+            expand_v=1.0,
+            use_packed_qkv_split_copy=True,
+        )
+        raise AssertionError(
+            "Expected packed qkv split-copy to require packed qkv conv"
+        )
+    except ValueError:
+        pass
+    try:
+        GatedDeltaNet(
+            d_model=64,
+            n_heads=4,
+            head_k_dim=8,
+            expand_v=1.0,
+            use_packed_qkv_conv=True,
+            use_packed_qkv_split_copy=True,
+        )
+        raise AssertionError(
+            "Expected packed qkv split-copy to require packed qkv output_contiguous"
+        )
+    except ValueError:
+        pass
+    try:
+        GatedDeltaNet(
+            d_model=64,
+            n_heads=4,
+            head_k_dim=8,
+            expand_v=1.0,
+            use_packed_qkv_conv=True,
+            use_packed_qkv_proj=True,
+            conv_output_contiguous=True,
+            use_packed_qkv_split_copy=True,
+            use_cuda_fused_frontend=True,
+        )
+        raise AssertionError(
+            "Expected packed qkv split-copy to reject the CUDA fused frontend"
+        )
+    except ValueError:
+        pass
+    try:
+        GatedDeltaNet(
+            d_model=64,
+            n_heads=4,
+            head_k_dim=8,
+            expand_v=1.0,
+            use_packed_qkv_conv=True,
+            use_packed_qkv_proj=True,
+            conv_output_contiguous=True,
+            use_packed_qkv_single_contig=True,
+            use_packed_qkv_split_copy=True,
+        )
+        raise AssertionError(
+            "Expected packed qkv split-copy to reject packed qkv single-contig"
+        )
+    except ValueError:
+        pass
+    print("  ✓ packed qkv split-copy validates requirements")
+
+
 def test_packed_qkv_frontend_reference_matches_eager_ops():
     """Reference packed front-end should match the eager packed conv + q/k norm path."""
     torch.manual_seed(42)
@@ -1041,6 +1177,14 @@ if __name__ == "__main__":
         (
             "Packed qkv single-contig validation",
             test_gdn_packed_qkv_single_contig_validation,
+        ),
+        (
+            "Packed qkv split-copy parity",
+            test_gdn_packed_qkv_split_copy_matches_default_path,
+        ),
+        (
+            "Packed qkv split-copy validation",
+            test_gdn_packed_qkv_split_copy_validation,
         ),
         (
             "Packed qkv frontend reference parity",
