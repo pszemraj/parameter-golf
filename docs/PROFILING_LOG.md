@@ -1,9 +1,86 @@
 # Profiling Log
 
-Last updated: 2026-04-06 00:20 EDT
+Last updated: 2026-04-06 01:05 EDT
 
 This file records profiler-driven checkpoints that should survive beyond the raw
 artifacts under `profiles/`.
+
+## 2026-04-06 — ATen split-copy packed output path rejected locally (`rtx4070_phase1_splitcopy_fix1`)
+
+Bundle:
+
+- local candidate bundle:
+  - `profiles/rtx4070_phase1_splitcopy_fix1/`
+- direct comparison against the active local winner:
+  - `profiles/rtx4070_phase1_splitcopy_fix1/compare_vs_rtx4070_cuda_base/comparison.md`
+
+Contract:
+
+- active baseline:
+  - `winner-20260405-19`
+- candidate delta:
+  - `GDN_PACKED_QKV_SPLIT_COPY=1`
+- implementation idea:
+  - keep the promoted packed qkv front-end and custom backward
+  - replace the packed split-plus-three-contiguous path with
+    `aten.split_with_sizes_copy`
+  - keep recurrence math unchanged
+  - keep the packed recurrence-facing q/k/v contract contiguous
+
+### Main finding
+
+This was the right direction conceptually, but it still lost clearly on the
+true trainer-eager bundle and should stop locally.
+
+Local phase-1 result versus `rtx4070_cuda_base`:
+
+- console step average:
+  - `3320.37 -> 3752.76 ms` (`+13.02%`)
+- `ProfilerStep*` self-device total:
+  - `6610.92 -> 7546.44 ms` (`+14.15%`)
+- peak allocated memory:
+  - `6184 -> 6184 MiB`
+
+### What it got right
+
+Unlike the rejected single-contig path, this one preserved the packed conv
+boundary cleanly:
+
+- `conv_qkv q/k/v` stayed contiguous
+- `norm_qkv` stayed contiguous
+- `recurrence_inputs` stayed contiguous
+
+And it did replace the old output materialization path with a real generated
+op:
+
+- `gdn.qkv_conv_split_copy`: `2.27 ms` in `hybrid_fwd_bwd`
+
+### Why it still lost
+
+The trainer view got worse in the same places that keep killing these
+front-end layout experiments:
+
+- `aten::mul`:
+  - `1012.30 -> 1276.17 ms`
+- `aten::copy_`:
+  - `785.65 -> 798.02 ms`
+- `gdn.recurrence`:
+  - `177.23 -> 191.34 ms`
+- `aten::convolution_backward`:
+  - `174.81 -> 206.86 ms`
+- `aten::_conv_depthwise2d`:
+  - `141.31 -> 159.04 ms`
+
+So this is not another “maybe laptop noise” case. The generated-path split-copy
+experiment still made the real training step materially worse.
+
+### Decision
+
+Reject `winner-20260405-19-split-copy` locally.
+
+Do not spend H100 time on it. The next low-level pass should go below this
+ATen-only output-path change and target a genuinely lower-level packed output
+path, not another layout-only variation.
 
 ## 2026-04-06 — H100 sidecar confirms single-contig is not promotable (`h100k11`)
 

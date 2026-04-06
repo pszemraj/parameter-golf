@@ -1,6 +1,6 @@
 # HGDN Branch Status
 
-Last updated: 2026-04-05 12:10 EDT
+Last updated: 2026-04-06 01:05 EDT
 
 Branch: `exp/hgdn`
 
@@ -88,7 +88,8 @@ What has not been claimed:
 
 - `scripts/hgdn.py`: preferred structured launcher for HGDN helpers, with subcommands, named presets, and optional TOML env configs
 - `configs/hgdn/winner_20260405_19.toml`: reusable config for the active H100-confirmed HGDN kernel winner
-- `configs/hgdn/winner_20260405_19_single_contig.toml`: prepared next-step front-end candidate that replaces three post-conv q/k/v contiguous materializations with one packed contiguous materialization
+- `configs/hgdn/winner_20260405_19_single_contig.toml`: rejected Python-side single-contig front-end candidate kept in-tree for reference
+- `configs/hgdn/winner_20260405_19_split_copy.toml`: rejected generated-path split-copy front-end candidate kept in-tree for reference
 - `configs/hgdn/winner_20260405_11.toml`: reusable config for the active timestamped HGDN kernel winner
 - `configs/hgdn/winner_20260405_11_custombwd.toml`: reusable config for the packed depthwise custom-backward candidate layered on that winner
 - `configs/hgdn/winner_20260405_11_cuda_fused.toml`: experimental fused-CUDA variant of that winner
@@ -180,8 +181,36 @@ Kernel-work guardrail:
     HGDN path
   - prefer lower-level ATen, Triton, CUDA, or other generated-path changes for
     the next tranche
+- updated practical read:
+  - the Python-side `single-contig` attempt lost
+  - the generated-path `split-copy` attempt also lost locally
+  - the next front-end pass should therefore go below these layout-level
+    rearrangements and target a lower-level packed output path directly
 
-Screened front-end candidate:
+Latest screened front-end candidate:
+
+- `winner-20260405-19-split-copy`
+- equivalent to:
+  - `winner-20260405-19`
+  - `GDN_PACKED_QKV_SPLIT_COPY=1`
+- purpose:
+  - replace the packed split-plus-three-contiguous path with
+    `aten.split_with_sizes_copy`
+  - keep the packed recurrence-facing q/k/v contract contiguous
+  - keep recurrence math unchanged
+- status:
+  - implementation and tests are in-tree
+  - local phase-1 reject
+  - compared against `profiles/rtx4070_cuda_base/`:
+    - console step average: `3320.37 -> 3752.76 ms` (`+13.02%`)
+    - `ProfilerStep*` self-device total: `6610.92 -> 7546.44 ms` (`+14.15%`)
+  - boundary audit stayed clean, but trainer buckets still got worse:
+    - `aten::mul`: `1012.30 -> 1276.17 ms`
+    - `aten::copy_`: `785.65 -> 798.02 ms`
+    - `gdn.recurrence`: `177.23 -> 191.34 ms`
+  - do not promote this candidate to H100
+
+Older screened front-end candidate:
 
 - `winner-20260405-19-single-contig`
 - equivalent to:
@@ -195,15 +224,6 @@ Screened front-end candidate:
   - implementation and tests are in-tree
   - local phase-1 reject on the RTX 4070 laptop
   - optional H100 sidecar also failed to justify promotion
-  - same-day H100 compiled perf:
-    - controls: `882.37 ms`, `877.13 ms`
-    - candidate: `876.36 ms`, `878.32 ms`
-    - mean delta: `879.75 -> 877.34 ms` (`-0.27%`)
-  - profiler support was also unfavorable:
-    - `gdn.qkv_conv_output_contiguous_packed: 153.34 ms`
-    - `gdn.v_contiguous: 16.76 ms`
-    - `gdn.q_norm: 77.58 -> 82.71 ms`
-    - `gdn.k_norm: 77.74 -> 82.78 ms`
   - keep `winner-20260405-19` active; do not promote this candidate
 
 Laptop-noise note:

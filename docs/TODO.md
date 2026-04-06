@@ -48,6 +48,33 @@ This file tracks follow-up work that is intentionally not enabled by default in 
     - target lower-level ATen, Triton, CUDA, or other generated-path changes
       instead
 - Latest screened candidate:
+  - `winner-20260405-19-split-copy`
+  - equivalent to:
+    - `winner-20260405-19`
+    - `GDN_PACKED_QKV_SPLIT_COPY=1`
+  - purpose:
+    - replace the packed split-plus-three-contiguous path with
+      `aten.split_with_sizes_copy`
+    - keep the packed recurrence-facing q/k/v contract contiguous
+    - keep recurrence math unchanged
+  - result:
+    - local reject against `profiles/rtx4070_cuda_base/`
+    - console step average:
+      - `3320.37 -> 3752.76 ms` (`+13.02%`)
+    - `ProfilerStep*` self-device total:
+      - `6610.92 -> 7546.44 ms` (`+14.15%`)
+    - boundary audit stayed clean, but trainer buckets still got worse:
+      - `aten::mul`: `1012.30 -> 1276.17 ms`
+      - `aten::copy_`: `785.65 -> 798.02 ms`
+      - `gdn.recurrence`: `177.23 -> 191.34 ms`
+      - `aten::convolution_backward`: `174.81 -> 206.86 ms`
+      - `aten::_conv_depthwise2d`: `141.31 -> 159.04 ms`
+  - decision:
+    - do not spend H100 time on this variant
+    - keep `winner-20260405-19` active
+    - next front-end pass should go below this ATen-only output-path change
+      and target a genuinely lower-level packed output path
+- Older screened candidate:
   - `winner-20260405-19-single-contig`
   - equivalent to:
     - `winner-20260405-19`
