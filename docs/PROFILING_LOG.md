@@ -1,9 +1,124 @@
 # Profiling Log
 
-Last updated: 2026-04-06 11:20 EDT
+Last updated: 2026-04-06 13:10 EDT
 
 This file records profiler-driven checkpoints that should survive beyond the raw
 artifacts under `profiles/`.
+
+## 2026-04-06 — Exact-length CUDA packed-conv kernel is locally positive and H100-worthy (`rtx4070_phase1_cuda_packedconv_fix1`)
+
+Bundle:
+
+- local candidate bundle:
+  - `profiles/rtx4070_phase1_cuda_packedconv_fix1/`
+- direct comparison against the active local winner:
+  - `profiles/rtx4070_phase1_cuda_packedconv_fix1/compare_vs_rtx4070_cuda_base/comparison.md`
+
+Contract:
+
+- active baseline:
+  - `winner-20260405-19`
+- candidate delta:
+  - `GDN_USE_CUDA_PACKED_CONV=1`
+- implementation idea:
+  - keep the promoted packed qkv projection and the exact same recurrence math
+  - replace the packed qkv causal depthwise conv itself with a narrow exact-length
+    CUDA op and custom backward
+  - keep split, q/k norm, and recurrence-facing layout inside the normal PyTorch
+    path
+  - do not stack on top of the promoted custom-backward path; this is a direct
+    replacement candidate
+
+### Main finding
+
+This is the first post-`winner-20260405-19` candidate that looks both genuinely
+low-level and locally strong enough to justify another H100 batch.
+
+Local phase-1 result versus `rtx4070_cuda_base`:
+
+- console step average:
+  - `3320.37 -> 3065.44 ms` (`-7.68%`)
+- `ProfilerStep*` self-device total:
+  - `6610.92 -> 6126.34 ms` (`-7.33%`)
+- peak allocated memory:
+  - `6184 -> 6184 MiB`
+
+That is now outside the rough “treat it as laptop noise” band and the mechanism
+is cleaner than the failed split/norm and layout-only attempts.
+
+### What it got right
+
+The new depthwise kernel family is actually active:
+
+- `_PackedQKVConvFunction`
+- `_PackedQKVConvFunctionBackward`
+- `causal_dwconv_preact_forward_kernel`
+- `causal_dwconv_input_backward_kernel`
+- `causal_dwconv_weight_backward_kernel`
+
+The recurrence-facing contract also stayed clean:
+
+- `conv_qkv q/k/v` stayed contiguous
+- `norm_qkv q/k/v` stayed contiguous
+- `recurrence_inputs q/k/v` stayed contiguous
+
+And the trainer view improved in the right buckets:
+
+- `aten::copy_`:
+  - `785.65 -> 369.11 ms`
+- `aten::mul`:
+  - `1012.30 -> 977.57 ms`
+- `gdn.recurrence`:
+  - `177.23 -> 169.22 ms`
+- `gdn.q_norm`:
+  - `48.81 -> 46.86 ms`
+- `gdn.k_norm`:
+  - `49.14 -> 46.87 ms`
+
+### Important nuance
+
+This did not make the depthwise family itself disappear. It changed how the
+front-end shows up:
+
+- old active path:
+  - `aten::convolution_backward`
+  - `aten::_conv_depthwise2d`
+- new candidate:
+  - `_PackedQKVConvFunctionBackward`
+  - `causal_dwconv_weight_backward_kernel`
+  - `gdn.qkv_conv_cuda`
+
+That is acceptable for now because the real trainer step still moved in the
+right direction. The question is no longer “does the kernel appear in the
+trace?” It does. The question is whether H100 agrees with the local win.
+
+### Decision
+
+Keep `winner-20260405-19` active until H100 confirms or rejects this.
+
+Promote `winner-20260405-19-cuda-packed-conv` to the next H100 sidecar.
+
+### H100 validation
+
+Run the same-day control pattern:
+
+- `python setup_hgdn_cuda.py build_ext --inplace`
+- `python scripts/hgdn_cuda_parity.py`
+- `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k13ctl_a --offline`
+- `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k13ctl_b --offline`
+- `python scripts/hgdn.py preflight --preset winner-20260405-19-cuda-packed-conv --compile-strategy model`
+- `python scripts/hgdn.py h100-profile hybrid-eager --preset winner-20260405-19-cuda-packed-conv --run-prefix h100k13a`
+- `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-cuda-packed-conv --run-prefix h100k13a --offline`
+- `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-cuda-packed-conv --run-prefix h100k13b --offline`
+- `python scripts/hgdn.py h100-profile hybrid --preset winner-20260405-19-cuda-packed-conv --run-prefix h100k13a`
+
+### Composition note
+
+Even if the standalone packed-conv candidate later loses on H100, keep it
+bookmarked as a real building block. Unlike the Python/layout reshuffles, this
+one replaces a real front-end kernel family and preserves the recurrence
+boundary contract cleanly, so it is the kind of piece that could matter in a
+larger packed front-end pipeline.
 
 ## 2026-04-06 — H100 rejects CUDA split+l2norm sidecar (`h100k12`)
 

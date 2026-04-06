@@ -48,6 +48,41 @@ This file tracks follow-up work that is intentionally not enabled by default in 
     - target lower-level ATen, Triton, CUDA, or other generated-path changes
       instead
 - Latest screened candidate:
+  - `winner-20260405-19-cuda-packed-conv`
+  - equivalent to:
+    - `winner-20260405-19`
+    - `GDN_USE_CUDA_PACKED_CONV=1`
+  - purpose:
+    - replace the packed qkv causal depthwise conv itself with a narrow
+      exact-length CUDA op and custom backward
+    - keep split, q/k norm, and recurrence math in the normal PyTorch path
+    - preserve the recurrence-facing contiguous contract
+  - local result:
+    - directionally strong against `profiles/rtx4070_cuda_base/`
+    - console step average:
+      - `3320.37 -> 3065.44 ms` (`-7.68%`)
+    - `ProfilerStep*` self-device total:
+      - `6610.92 -> 6126.34 ms` (`-7.33%`)
+    - boundary audit stayed clean through `conv_qkv`, `norm_qkv`, and
+      `recurrence_inputs`
+    - trainer buckets moved in the right direction:
+      - `aten::copy_`: `785.65 -> 369.11 ms`
+      - `aten::mul`: `1012.30 -> 977.57 ms`
+      - `gdn.recurrence`: `177.23 -> 169.22 ms`
+  - current decision:
+    - keep `winner-20260405-19` active until H100 confirmation
+    - this is H100-worthy and should be the next sidecar batch
+  - H100 batch:
+    - `python setup_hgdn_cuda.py build_ext --inplace`
+    - `python scripts/hgdn_cuda_parity.py`
+    - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k13ctl_a --offline`
+    - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k13ctl_b --offline`
+    - `python scripts/hgdn.py preflight --preset winner-20260405-19-cuda-packed-conv --compile-strategy model`
+    - `python scripts/hgdn.py h100-profile hybrid-eager --preset winner-20260405-19-cuda-packed-conv --run-prefix h100k13a`
+    - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-cuda-packed-conv --run-prefix h100k13a --offline`
+    - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-cuda-packed-conv --run-prefix h100k13b --offline`
+    - `python scripts/hgdn.py h100-profile hybrid --preset winner-20260405-19-cuda-packed-conv --run-prefix h100k13a`
+- Older screened candidate:
   - `winner-20260405-19-cuda-split-norm`
   - equivalent to:
     - `winner-20260405-19`
