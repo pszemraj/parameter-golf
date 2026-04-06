@@ -58,29 +58,36 @@ This file tracks follow-up work that is intentionally not enabled by default in 
       stage with a narrow CUDA op
     - keep recurrence math unchanged and preserve the recurrence-facing
       contract
-  - result:
-    - local directionally positive against `profiles/rtx4070_cuda_base/`
+  - local result:
+    - directionally positive against `profiles/rtx4070_cuda_base/`
     - console step average:
       - `3320.37 -> 3192.68 ms` (`-3.85%`)
     - `ProfilerStep*` self-device total:
       - `6610.92 -> 6384.67 ms` (`-3.42%`)
     - peak allocated memory:
       - `6184 -> 5984 MiB`
-    - the new kernel is actually live in the trace:
-      - `_PackedQKVSplitL2NormFunction`
-      - `gdn.qkv_split_norm_cuda`
-    - it materially reduced trainer copy traffic:
-      - `aten::copy_`: `785.65 -> 604.06 ms`
-    - but the win is not yet clean enough to promote from the laptop:
-      - `aten::mul`: `1012.30 -> 1116.85 ms`
-      - `gdn.recurrence`: `177.23 -> 182.32 ms`
-      - `aten::convolution_backward`: `174.81 -> 182.88 ms`
+  - H100 result:
+    - hard reject with same-day controls
+    - controls:
+      - `879.46 ms`
+      - `878.20 ms`
+    - candidate:
+      - `959.13 ms`
+      - `961.33 ms`
+    - mean delta:
+      - `878.83 -> 960.23 ms` (`+9.26%`)
+    - compiled profile failure mode:
+      - `aten::copy_`: `57.72 -> 210.65 ms`
+      - `_PackedQKVSplitL2NormFunction: 145.83 ms`
+      - `_PackedQKVSplitL2NormFunctionBackward: 194.82 ms`
+      - while the real depthwise conv buckets barely moved
   - decision:
     - keep `winner-20260405-19` active
-    - send this candidate to H100 with same-day controls
-    - if H100 rejects it, keep it bookmarked as a composable ingredient for a
-      larger packed front-end kernel pipeline rather than treating it as a dead
-      end
+    - reject this standalone sidecar on H100
+    - keep it bookmarked only as a possible ingredient for a larger packed
+      front-end kernel pipeline
+    - next kernel tranche should target the depthwise-conv family directly,
+      not another extension island layered on top of the compiled front-end
 - Older screened candidate:
   - `winner-20260405-19-split-copy`
   - equivalent to:

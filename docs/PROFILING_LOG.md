@@ -1,9 +1,96 @@
 # Profiling Log
 
-Last updated: 2026-04-06 00:58 EDT
+Last updated: 2026-04-06 11:20 EDT
 
 This file records profiler-driven checkpoints that should survive beyond the raw
 artifacts under `profiles/`.
+
+## 2026-04-06 — H100 rejects CUDA split+l2norm sidecar (`h100k12`)
+
+Bundle:
+
+- raw artifacts:
+  - `local-scratch/profiling-out-h100k12-hgdn.7z`
+- extracted review directory:
+  - `local-scratch/_inspect_h100k12/`
+- control reference:
+  - `winner-20260405-19`
+
+Contract:
+
+- active H100 baseline:
+  - `winner-20260405-19`
+- candidate delta:
+  - `GDN_USE_CUDA_SPLIT_NORM=1`
+- purpose of the sidecar:
+  - keep the promoted packed qkv front-end and custom depthwise backward
+  - replace only the post-conv `split + q/k l2 norm + v materialization`
+    stage with a narrow CUDA op
+  - leave recurrence math unchanged
+
+### Main finding
+
+This candidate is a hard compiled-H100 reject and should not stay on the active
+path.
+
+Same-day compiled perf:
+
+- controls:
+  - `879.46 ms`
+  - `878.20 ms`
+- candidate:
+  - `959.13 ms`
+  - `961.33 ms`
+- mean delta:
+  - `878.83 -> 960.23 ms` (`+9.26%`)
+
+The eager profile moved in the tempting direction, but compiled is what decides
+this branch, and compiled lost badly.
+
+### Why it lost
+
+The compiled profile says the extension path reintroduced front-end boundary
+cost instead of removing enough real work:
+
+- `aten::copy_`:
+  - `57.72 -> 210.65 ms`
+- new forward island:
+  - `_PackedQKVSplitL2NormFunction: 145.83 ms`
+- new backward island:
+  - `_PackedQKVSplitL2NormFunctionBackward: 194.82 ms`
+- the true depthwise conv family barely moved:
+  - `aten::convolution_backward: 287.23 -> 287.41 ms`
+  - `aten::_conv_depthwise2d: 201.08 -> 201.23 ms`
+  - `aten::mul: 53.98 -> 54.06 ms`
+
+So the H100 trace is saying the same thing the earlier extension failures said
+in a different form: adding another eager CUDA island on top of the compiled
+front-end is not enough. It has to replace a much larger native bucket or stay
+out of the way.
+
+### Decision
+
+Reject `winner-20260405-19-cuda-split-norm` on H100.
+
+Keep `winner-20260405-19` as the active HGDN kernel baseline.
+
+### Next direction
+
+The next real kernel pass should be narrower and lower in the stack:
+
+- keep split/norm inside the compiled PyTorch path
+- target the exact-length packed causal depthwise conv forward/backward itself
+- specifically attack the surviving compiled buckets:
+  - `aten::convolution_backward`
+  - `aten::_conv_depthwise2d`
+  - `conv_depthwise2d_grad_weight_kernel`
+
+This preserves the lesson from the last few runs:
+
+- Python-side layout reshuffles are done
+- extension-side split/norm islands are also done
+- the next win has to come from replacing a large native depthwise-conv bucket
+  directly
 
 ## 2026-04-06 — CUDA post-conv split+l2norm kernel is locally positive and H100-worthy (`rtx4070_phase1_cuda_splitnorm_fix1`)
 

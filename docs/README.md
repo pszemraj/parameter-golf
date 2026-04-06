@@ -185,10 +185,10 @@ Kernel-work guardrail:
 - updated practical read:
   - the Python-side `single-contig` attempt lost
   - the generated-path `split-copy` attempt also lost locally
-  - the next credible candidate is a real CUDA post-conv split+q/k norm kernel,
-    not another layout-only rearrangement
-  - the next front-end pass should therefore go below these layout-level
-    rearrangements and target a lower-level packed output path directly
+  - the real CUDA post-conv split+q/k norm kernel also lost on compiled H100
+  - the next front-end pass should therefore target the exact-length packed
+    depthwise-conv family itself, not another front-end extension island or
+    layout-only rearrangement
 
 Latest screened front-end candidate:
 
@@ -203,20 +203,23 @@ Latest screened front-end candidate:
   - keep recurrence math unchanged and preserve the recurrence-facing contract
 - status:
   - implementation and tests are in-tree
-  - local phase-1 is directionally positive but still inside the rough laptop
+  - local phase-1 was directionally positive but still inside the rough laptop
     noise band
-  - compared against `profiles/rtx4070_cuda_base/`:
-    - console step average: `3320.37 -> 3192.68 ms` (`-3.85%`)
-    - `ProfilerStep*` self-device total: `6610.92 -> 6384.67 ms` (`-3.42%`)
-    - peak allocated memory: `6184 -> 5984 MiB`
-  - trainer buckets moved in a plausible mixed pattern:
-    - `aten::copy_`: `785.65 -> 604.06 ms`
-    - `aten::mul`: `1012.30 -> 1116.85 ms`
-    - `gdn.recurrence`: `177.23 -> 182.32 ms`
+  - H100 sidecar rejected it on compiled perf
+  - compared against same-day H100 controls:
+    - controls: `879.46 ms`, `878.20 ms`
+    - candidate: `959.13 ms`, `961.33 ms`
+    - mean delta: `878.83 -> 960.23 ms` (`+9.26%`)
+  - compiled H100 profile failure mode:
+    - `aten::copy_`: `57.72 -> 210.65 ms`
+    - `_PackedQKVSplitL2NormFunction: 145.83 ms`
+    - `_PackedQKVSplitL2NormFunctionBackward: 194.82 ms`
+    - the real depthwise-conv buckets barely moved
   - decision:
     - keep `winner-20260405-19` active
-    - do not promote from the laptop alone
-    - send this candidate to H100 as the next sidecar
+    - reject this standalone sidecar on H100
+    - keep it only as a possible ingredient for a larger packed front-end
+      kernel pipeline
 
 Older screened front-end candidate:
 
@@ -263,9 +266,10 @@ Laptop-noise note:
 - practical example:
   - `winner-20260405-19-single-contig` was close enough locally to justify a belt-and-suspenders H100 sidecar
   - that sidecar still came back too flat to promote
-  - `winner-20260405-19-cuda-split-norm` is close enough locally, and real
-    enough architecturally, that it should also be decided on H100 rather than
-    by the laptop alone
+  - `winner-20260405-19-cuda-split-norm` was close enough locally to justify
+    H100 validation
+  - H100 then killed it cleanly, which is why close calls should still be
+    decided there rather than on the laptop
 
 Empirical contract note:
 
