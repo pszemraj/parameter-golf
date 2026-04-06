@@ -168,6 +168,19 @@ Current best H100-confirmed HGDN kernel preset:
   - promoted delta:
     - `904.46 -> 853.21 ms` (`-5.67%`)
 
+Kernel-work guardrail:
+
+- the last few results make the practical point clear:
+  - the remaining wins are not going to come from rearranging Python-side views
+    or `.contiguous()` calls
+  - the H100 profiles are telling us to go after the actual generated/kernel
+    path
+- practical rule:
+  - treat Python-side layout reshuffles as suspect by default on the compiled
+    HGDN path
+  - prefer lower-level ATen, Triton, CUDA, or other generated-path changes for
+    the next tranche
+
 Screened front-end candidate:
 
 - `winner-20260405-19-single-contig`

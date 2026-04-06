@@ -36,6 +36,17 @@ This file tracks follow-up work that is intentionally not enabled by default in 
   1. use `winner-20260405-19` as the active non-extension HGDN baseline
   2. continue profiler-driven kernel work from this promoted baseline, not from `winner-20260405-11`
   3. do not spend more H100 time on `winner-20260405-11-cuda-output-only` unless its implementation changes materially
+- Kernel-work guardrail:
+  - the last few results make the practical point clear
+  - the remaining wins are not going to come from rearranging Python-side views
+    or `.contiguous()` calls
+  - the H100 profiles are telling us to go after the actual generated/kernel
+    path
+  - practical consequence:
+    - stop treating Python-side layout reshuffles as primary kernel work on the
+      compiled HGDN path
+    - target lower-level ATen, Triton, CUDA, or other generated-path changes
+      instead
 - Latest screened candidate:
   - `winner-20260405-19-single-contig`
   - equivalent to:
