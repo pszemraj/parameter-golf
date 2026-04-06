@@ -168,7 +168,7 @@ Current best H100-confirmed HGDN kernel preset:
   - promoted delta:
     - `904.46 -> 853.21 ms` (`-5.67%`)
 
-Prepared next front-end screening candidate:
+Screened front-end candidate:
 
 - `winner-20260405-19-single-contig`
 - equivalent to:
@@ -180,8 +180,14 @@ Prepared next front-end screening candidate:
   - keep q/k normalization on the same Python-side `l2_norm` path
 - status:
   - implementation and tests are in-tree
-  - not screened yet
-  - next gate is local hotpath, then local phase-1, then H100 only if the local signal is strong enough
+  - local phase-1 reject
+  - compared against `profiles/rtx4070_cuda_base/`, trainer eager self-device time moved:
+    - `25561.13 -> 26793.74 ms` (`+4.82%`)
+  - `aten::copy_` improved:
+    - `785.65 -> 727.70 ms`
+  - but the full trainer step still lost, mainly because:
+    - `aten::mul`: `1012.30 -> 1219.95 ms`
+  - do not promote this candidate to H100 unless its implementation changes materially
 
 Laptop-noise note:
 

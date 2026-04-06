@@ -5,6 +5,88 @@ Last updated: 2026-04-05 19:40 EDT
 This file records profiler-driven checkpoints that should survive beyond the raw
 artifacts under `profiles/`.
 
+## 2026-04-05 — Single packed post-conv materialization rejected locally (`rtx4070_phase1_singlecontig_fix1`)
+
+Bundle:
+
+- local candidate bundle:
+  - `profiles/rtx4070_phase1_singlecontig_fix1/`
+- direct comparison against the active local winner:
+  - `profiles/rtx4070_phase1_singlecontig_fix1/compare_vs_rtx4070_cuda_base/comparison.md`
+
+Contract:
+
+- active baseline:
+  - `winner-20260405-19`
+- candidate delta:
+  - `GDN_PACKED_QKV_SINGLE_CONTIG=1`
+- implementation idea:
+  - keep the promoted packed qkv front-end and custom backward
+  - replace three post-conv `q/k/v` contiguous materializations with one packed
+    contiguous materialization before split
+  - keep the Python-side `l2_norm` path unchanged
+
+### Main finding
+
+This candidate did the intended mechanical thing, but it still lost on the
+true trainer-eager phase-1 bundle and should not go to H100.
+
+Local phase-1 result versus `rtx4070_cuda_base`:
+
+- trainer eager self-device total:
+  - `25561.13 -> 26793.74 ms` (`+4.82%`)
+- console step average:
+  - `3320.37 -> 3392.40 ms` (`+2.17%`)
+- peak allocated memory:
+  - `6184 -> 6280 MiB`
+
+### What improved
+
+- `aten::copy_`:
+  - `785.65 -> 727.70 ms`
+- `aten::_conv_depthwise2d`:
+  - `141.31 -> 135.20 ms`
+- `gdn.q_norm`:
+  - `48.81 -> 48.21 ms`
+- `gdn.k_norm`:
+  - `49.14 -> 48.85 ms`
+
+The boundary audit also confirmed that the recurrence-facing contract stayed
+clean:
+
+- `norm_qkv` remained contiguous bf16
+- `recurrence_inputs` remained contiguous bf16
+
+### Why it still lost
+
+The candidate moved the post-conv contiguity point later, so `conv_qkv` itself
+became non-contiguous:
+
+- baseline `conv_qkv q/k/v`:
+  - contiguous with stride `(786432, 384, 1)`
+- candidate `conv_qkv q/k/v`:
+  - non-contiguous views with stride `(2359296, 1152, 1)`
+
+That saved copy time, but the full trainer step paid more elsewhere:
+
+- `aten::mul`:
+  - `1012.30 -> 1219.95 ms`
+- `gdn.recurrence`:
+  - `177.23 -> 179.54 ms`
+- `aten::convolution_backward`:
+  - `174.81 -> 177.59 ms`
+
+So this was not a free clone-tax removal. It shifted the front-end contract in a
+way that made the true training step slower overall.
+
+### Decision
+
+Reject `winner-20260405-19-single-contig` at the local gate.
+
+Do not spend H100 time on this variant unless its implementation changes
+materially. The next front-end attempt should be a lower-level packed output
+path change, not another Python-side reshuffle of when `.contiguous()` happens.
+
 ## 2026-04-05 — Packed depthwise custom backward promoted to active H100 winner (`h100k10`)
 
 Bundle:
