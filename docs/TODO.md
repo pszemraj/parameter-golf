@@ -48,6 +48,40 @@ This file tracks follow-up work that is intentionally not enabled by default in 
     - target lower-level ATen, Triton, CUDA, or other generated-path changes
       instead
 - Latest screened candidate:
+  - `winner-20260405-19-cuda-split-norm`
+  - equivalent to:
+    - `winner-20260405-19`
+    - `GDN_USE_CUDA_SPLIT_NORM=1`
+  - purpose:
+    - keep the promoted packed qkv front-end and custom depthwise backward
+    - replace only the post-conv `split + q/k l2 norm + v materialization`
+      stage with a narrow CUDA op
+    - keep recurrence math unchanged and preserve the recurrence-facing
+      contract
+  - result:
+    - local directionally positive against `profiles/rtx4070_cuda_base/`
+    - console step average:
+      - `3320.37 -> 3192.68 ms` (`-3.85%`)
+    - `ProfilerStep*` self-device total:
+      - `6610.92 -> 6384.67 ms` (`-3.42%`)
+    - peak allocated memory:
+      - `6184 -> 5984 MiB`
+    - the new kernel is actually live in the trace:
+      - `_PackedQKVSplitL2NormFunction`
+      - `gdn.qkv_split_norm_cuda`
+    - it materially reduced trainer copy traffic:
+      - `aten::copy_`: `785.65 -> 604.06 ms`
+    - but the win is not yet clean enough to promote from the laptop:
+      - `aten::mul`: `1012.30 -> 1116.85 ms`
+      - `gdn.recurrence`: `177.23 -> 182.32 ms`
+      - `aten::convolution_backward`: `174.81 -> 182.88 ms`
+  - decision:
+    - keep `winner-20260405-19` active
+    - send this candidate to H100 with same-day controls
+    - if H100 rejects it, keep it bookmarked as a composable ingredient for a
+      larger packed front-end kernel pipeline rather than treating it as a dead
+      end
+- Older screened candidate:
   - `winner-20260405-19-split-copy`
   - equivalent to:
     - `winner-20260405-19`

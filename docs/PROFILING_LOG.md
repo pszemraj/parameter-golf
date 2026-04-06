@@ -1,9 +1,106 @@
 # Profiling Log
 
-Last updated: 2026-04-06 01:05 EDT
+Last updated: 2026-04-06 00:58 EDT
 
 This file records profiler-driven checkpoints that should survive beyond the raw
 artifacts under `profiles/`.
+
+## 2026-04-06 — CUDA post-conv split+l2norm kernel is locally positive and H100-worthy (`rtx4070_phase1_cuda_splitnorm_fix1`)
+
+Bundle:
+
+- local candidate bundle:
+  - `profiles/rtx4070_phase1_cuda_splitnorm_fix1/`
+- direct comparison against the active local winner:
+  - `profiles/rtx4070_phase1_cuda_splitnorm_fix1/compare_vs_rtx4070_cuda_base/comparison.md`
+
+Contract:
+
+- active baseline:
+  - `winner-20260405-19`
+- candidate delta:
+  - `GDN_USE_CUDA_SPLIT_NORM=1`
+- implementation idea:
+  - keep the promoted packed qkv front-end and custom depthwise backward
+  - leave recurrence math unchanged
+  - replace only the post-conv `split + q/k l2 norm + v materialization` stage
+    with a narrow CUDA op and custom backward
+  - do not revive the rejected fused frontend conv backward
+
+### Main finding
+
+This is the first front-end follow-up since the promotion that is both a real
+kernel and locally directionally positive.
+
+Local phase-1 result versus `rtx4070_cuda_base`:
+
+- console step average:
+  - `3320.37 -> 3192.68 ms` (`-3.85%`)
+- `ProfilerStep*` self-device total:
+  - `6610.92 -> 6384.67 ms` (`-3.42%`)
+- peak allocated memory:
+  - `6184 -> 5984 MiB`
+
+Because this branch is screened on a laptop RTX 4070, that is still inside the
+rough local noise band. But unlike the recent layout-only attempts, the
+mechanism is plausible enough to justify H100 validation.
+
+### What it got right
+
+The new kernel is actually active in the trace:
+
+- `_PackedQKVSplitL2NormFunction`
+- `gdn.qkv_split_norm_cuda`
+
+It also preserved the recurrence-facing contract cleanly:
+
+- `conv_qkv q/k/v` stayed contiguous
+- `norm_qkv` stayed contiguous
+- `recurrence_inputs` stayed contiguous
+
+And it materially reduced trainer copy traffic:
+
+- trainer `aten::copy_`:
+  - `785.65 -> 604.06 ms`
+
+### What is still unresolved
+
+The new kernel did not produce a clean win everywhere:
+
+- trainer `aten::mul`:
+  - `1012.30 -> 1116.85 ms`
+- trainer `gdn.recurrence`:
+  - `177.23 -> 182.32 ms`
+- trainer `aten::convolution_backward`:
+  - `174.81 -> 182.88 ms`
+
+So this should not be promoted from the laptop alone.
+
+### Decision
+
+Keep `winner-20260405-19` active.
+
+Promote `winner-20260405-19-cuda-split-norm` to the next H100 sidecar.
+
+### H100 validation
+
+Run the same-day control pattern:
+
+- `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k12ctl_a --offline`
+- `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k12ctl_b --offline`
+- `python scripts/hgdn.py preflight --preset winner-20260405-19-cuda-split-norm --compile-strategy model`
+- `python scripts/hgdn.py h100-profile hybrid-eager --preset winner-20260405-19-cuda-split-norm --run-prefix h100k12a`
+- `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-cuda-split-norm --run-prefix h100k12a --offline`
+- `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-cuda-split-norm --run-prefix h100k12b --offline`
+- `python scripts/hgdn.py h100-profile hybrid --preset winner-20260405-19-cuda-split-norm --run-prefix h100k12a`
+
+### Composition note
+
+Even if this candidate later loses standalone on H100, keep it in mind as a
+real composable ingredient. It attacks the post-conv split/norm stage directly,
+preserves the recurrence boundary contract, and materially reduces trainer copy
+traffic. That makes it a plausible building block for a larger packed front-end
+kernel pipeline, unlike the rejected Python-side reshuffles.
 
 ## 2026-04-06 — ATen split-copy packed output path rejected locally (`rtx4070_phase1_splitcopy_fix1`)
 

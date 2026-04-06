@@ -88,6 +88,7 @@ What has not been claimed:
 
 - `scripts/hgdn.py`: preferred structured launcher for HGDN helpers, with subcommands, named presets, and optional TOML env configs
 - `configs/hgdn/winner_20260405_19.toml`: reusable config for the active H100-confirmed HGDN kernel winner
+- `configs/hgdn/winner_20260405_19_cuda_split_norm.toml`: real-kernel H100 sidecar candidate that replaces only the post-conv packed split+q/k norm stage
 - `configs/hgdn/winner_20260405_19_single_contig.toml`: rejected Python-side single-contig front-end candidate kept in-tree for reference
 - `configs/hgdn/winner_20260405_19_split_copy.toml`: rejected generated-path split-copy front-end candidate kept in-tree for reference
 - `configs/hgdn/winner_20260405_11.toml`: reusable config for the active timestamped HGDN kernel winner
@@ -184,10 +185,40 @@ Kernel-work guardrail:
 - updated practical read:
   - the Python-side `single-contig` attempt lost
   - the generated-path `split-copy` attempt also lost locally
+  - the next credible candidate is a real CUDA post-conv split+q/k norm kernel,
+    not another layout-only rearrangement
   - the next front-end pass should therefore go below these layout-level
     rearrangements and target a lower-level packed output path directly
 
 Latest screened front-end candidate:
+
+- `winner-20260405-19-cuda-split-norm`
+- equivalent to:
+  - `winner-20260405-19`
+  - `GDN_USE_CUDA_SPLIT_NORM=1`
+- purpose:
+  - keep the promoted packed qkv front-end and custom depthwise backward
+  - replace only the post-conv `split + q/k l2 norm + v materialization` stage
+    with a narrow CUDA op
+  - keep recurrence math unchanged and preserve the recurrence-facing contract
+- status:
+  - implementation and tests are in-tree
+  - local phase-1 is directionally positive but still inside the rough laptop
+    noise band
+  - compared against `profiles/rtx4070_cuda_base/`:
+    - console step average: `3320.37 -> 3192.68 ms` (`-3.85%`)
+    - `ProfilerStep*` self-device total: `6610.92 -> 6384.67 ms` (`-3.42%`)
+    - peak allocated memory: `6184 -> 5984 MiB`
+  - trainer buckets moved in a plausible mixed pattern:
+    - `aten::copy_`: `785.65 -> 604.06 ms`
+    - `aten::mul`: `1012.30 -> 1116.85 ms`
+    - `gdn.recurrence`: `177.23 -> 182.32 ms`
+  - decision:
+    - keep `winner-20260405-19` active
+    - do not promote from the laptop alone
+    - send this candidate to H100 as the next sidecar
+
+Older screened front-end candidate:
 
 - `winner-20260405-19-split-copy`
 - equivalent to:
@@ -209,8 +240,6 @@ Latest screened front-end candidate:
     - `aten::copy_`: `785.65 -> 798.02 ms`
     - `gdn.recurrence`: `177.23 -> 191.34 ms`
   - do not promote this candidate to H100
-
-Older screened front-end candidate:
 
 - `winner-20260405-19-single-contig`
 - equivalent to:
@@ -234,6 +263,9 @@ Laptop-noise note:
 - practical example:
   - `winner-20260405-19-single-contig` was close enough locally to justify a belt-and-suspenders H100 sidecar
   - that sidecar still came back too flat to promote
+  - `winner-20260405-19-cuda-split-norm` is close enough locally, and real
+    enough architecturally, that it should also be decided on H100 rather than
+    by the laptop alone
 
 Empirical contract note:
 
