@@ -1,9 +1,166 @@
 # Profiling Log
 
-Last updated: 2026-04-06 22:50 EDT
+Last updated: 2026-04-07 01:35 EDT
 
 This file records profiler-driven checkpoints that should survive beyond the raw
 artifacts under `profiles/`.
+
+## 2026-04-07 — Full-custom CUDA packed-conv backward is the wrong ownership on H100 (`h100k15`)
+
+Bundle:
+
+- H100 bundle:
+  - `local-scratch/profiling-out-h100k15-hgdn.7z`
+
+Contract:
+
+- active H100 baseline:
+  - `winner-20260405-19`
+- candidate delta:
+  - `GDN_USE_CUDA_PACKED_CONV=1`
+- family read:
+  - exact-length CUDA packed qkv depthwise conv
+  - custom forward
+  - custom input backward
+  - custom weight backward
+
+### Main finding
+
+Reject the full-custom `winner-20260405-19-cuda-packed-conv` family on H100.
+
+Same-day H100 compiled perf:
+
+- controls:
+  - `848.75 ms`
+  - `848.76 ms`
+- candidate:
+  - `1796.70 ms`
+  - `1793.67 ms`
+- mean delta:
+  - `848.75 -> 1795.19 ms` (`+111.51%`)
+
+### What went wrong
+
+This was not another frontend split/norm failure. The packed-conv direction is
+still the right target stage, but the current backward ownership is wrong.
+
+The important compiled-profile read is:
+
+- `_PackedQKVConvFunctionBackward`:
+  - `4161.58 ms`
+- `causal_dwconv_weight_backward_kernel`:
+  - `3973.02 ms`
+- `causal_dwconv_preact_forward_kernel`:
+  - `138.52 ms`
+- `causal_dwconv_input_backward_kernel`:
+  - `133.55 ms`
+
+So the failure is concentrated in the custom weight-backward path, not the
+forward kernel itself.
+
+### Scoreboard read
+
+The scoreboard classifies this run as `INTEGRATION_BOTTLENECK`, but the
+practical diagnosis is more specific:
+
+- compile-specific penalty:
+  - `+751.28 ms`
+- compiled copy tax:
+  - `-46.51 ms`
+- compiled external-kernel self time:
+  - `8591.02 ms`
+
+Copy tax actually improved a bit. The family still lost badly because the
+custom backward kernels dominated the compiled step.
+
+### Decision
+
+Kill the full-custom packed-conv backward ownership.
+
+Do **not** go back up to standalone frontend fusion ideas.
+
+Reset the packed-conv family with different backward ownership:
+
+- keep the exact-length CUDA packed-conv forward
+- keep the narrow fused preact generation
+- switch backward to ATen/cuDNN conv grads
+
+That becomes the next live sidecar family.
+
+## 2026-04-07 — Exact-length CUDA packed-conv forward plus ATen backward is locally positive (`rtx4070_phase1_cuda_packedconvaten_fix1`)
+
+Bundle:
+
+- fresh same-day local baseline:
+  - `profiles/rtx4070_phase1_winner20260405_19_r5/`
+- fresh same-day local candidate:
+  - `profiles/rtx4070_phase1_cuda_packedconvaten_fix1/`
+- direct comparison:
+  - `profiles/rtx4070_phase1_cuda_packedconvaten_fix1/compare_vs_rtx4070_phase1_winner20260405_19_r5/comparison.md`
+
+Contract:
+
+- active H100 baseline:
+  - `winner-20260405-19`
+- candidate delta:
+  - `GDN_USE_CUDA_PACKED_CONV_ATEN_BACKWARD=1`
+- family read:
+  - exact-length CUDA packed qkv depthwise conv forward
+  - SiLU backward in packed layout
+  - ATen/cuDNN `conv1d_input` and `conv1d_weight` for backward
+  - same recurrence-facing contiguous contract as the promoted winner
+
+### Main finding
+
+This ownership change screens positive locally and is the correct next H100
+sidecar.
+
+Same-day local phase-1 result:
+
+- trainer `ProfilerStep*`:
+  - `6979.99 -> 4128.87 ms` (`-40.85%`)
+- trainer `aten::copy_`:
+  - `740.89 -> 415.25 ms`
+- trainer `aten::mul`:
+  - `1256.18 -> 756.61 ms`
+- trainer `gdn.recurrence`:
+  - `182.11 -> 109.95 ms`
+- trainer `aten::convolution_backward`:
+  - `182.77 -> 111.10 ms`
+
+### What it got right
+
+The recurrence-facing boundary stayed clean:
+
+- `conv_qkv q/k/v` stayed contiguous
+- `norm_qkv q/k/v` stayed contiguous
+- `recurrence_inputs q/k/v` stayed contiguous
+
+And the hotpath improvements line up with the ownership change:
+
+- the old depthwise ATen forward bucket disappears from the trainer view
+- the old full-custom weight-backward ownership is gone
+- the new path keeps the forward-side copy savings without reopening the
+  frontend-NCT integration problem
+
+### Decision
+
+Keep `winner-20260405-19` active until H100 confirms or rejects this.
+
+Promote `winner-20260405-19-cuda-packed-conv-aten-bwd` to the next H100
+sidecar batch.
+
+### H100 validation
+
+- `python setup_hgdn_cuda.py build_ext --inplace`
+- `python scripts/hgdn_cuda_parity.py`
+- `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k16ctl_a --offline`
+- `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k16ctl_b --offline`
+- `python scripts/hgdn.py preflight --preset winner-20260405-19-cuda-packed-conv-aten-bwd --compile-strategy model`
+- `python scripts/hgdn.py h100-profile hybrid-eager --preset winner-20260405-19-cuda-packed-conv-aten-bwd --run-prefix h100k16a`
+- `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-cuda-packed-conv-aten-bwd --run-prefix h100k16a --offline`
+- `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-cuda-packed-conv-aten-bwd --run-prefix h100k16b --offline`
+- `python scripts/hgdn.py h100-profile hybrid --preset winner-20260405-19-cuda-packed-conv-aten-bwd --run-prefix h100k16a`
 
 ## 2026-04-06 — Composed custom-backward + compile-visible NCT frontend is an H100 integration bottleneck (`h100k14`)
 

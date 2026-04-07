@@ -60,6 +60,73 @@ This file tracks follow-up work that is intentionally not enabled by default in 
         meaningful-win threshold
       - stop after repeated `FLAT` or repeated `INTEGRATION_BOTTLENECK` results
 - Latest screened candidate:
+  - `winner-20260405-19-cuda-packed-conv-aten-bwd`
+  - equivalent to:
+    - `winner-20260405-19`
+    - `GDN_USE_CUDA_PACKED_CONV_ATEN_BACKWARD=1`
+  - purpose:
+    - keep the exact-length CUDA packed qkv depthwise conv forward
+    - hand conv backward ownership back to ATen/cuDNN
+    - preserve the promoted recurrence-facing contiguous contract
+  - local result:
+    - same-day local baseline:
+      - `profiles/rtx4070_phase1_winner20260405_19_r5/`
+    - candidate:
+      - `profiles/rtx4070_phase1_cuda_packedconvaten_fix1/`
+    - direct comparison:
+      - `profiles/rtx4070_phase1_cuda_packedconvaten_fix1/compare_vs_rtx4070_phase1_winner20260405_19_r5/comparison.md`
+    - trainer `ProfilerStep*`:
+      - `6979.99 -> 4128.87 ms` (`-40.85%`)
+    - trainer buckets moved in the right direction:
+      - `aten::copy_`: `740.89 -> 415.25 ms`
+      - `aten::mul`: `1256.18 -> 756.61 ms`
+      - `gdn.recurrence`: `182.11 -> 109.95 ms`
+      - `aten::convolution_backward`: `182.77 -> 111.10 ms`
+    - boundary audit stayed clean through `conv_qkv`, `norm_qkv`, and
+      `recurrence_inputs`
+  - current decision:
+    - this is now the next H100 sidecar family
+    - keep `winner-20260405-19` active until H100 confirms or rejects it
+    - H100 batch:
+      - `python setup_hgdn_cuda.py build_ext --inplace`
+      - `python scripts/hgdn_cuda_parity.py`
+      - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k16ctl_a --offline`
+      - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k16ctl_b --offline`
+      - `python scripts/hgdn.py preflight --preset winner-20260405-19-cuda-packed-conv-aten-bwd --compile-strategy model`
+      - `python scripts/hgdn.py h100-profile hybrid-eager --preset winner-20260405-19-cuda-packed-conv-aten-bwd --run-prefix h100k16a`
+      - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-cuda-packed-conv-aten-bwd --run-prefix h100k16a --offline`
+      - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-cuda-packed-conv-aten-bwd --run-prefix h100k16b --offline`
+      - `python scripts/hgdn.py h100-profile hybrid --preset winner-20260405-19-cuda-packed-conv-aten-bwd --run-prefix h100k16a`
+- Older screened candidate:
+  - `winner-20260405-19-cuda-packed-conv`
+  - equivalent to:
+    - `winner-20260405-19`
+    - `GDN_USE_CUDA_PACKED_CONV=1`
+  - H100 result:
+    - reject
+    - same-day controls:
+      - `848.75 ms`
+      - `848.76 ms`
+    - candidate:
+      - `1796.70 ms`
+      - `1793.67 ms`
+    - mean delta:
+      - `848.75 -> 1795.19 ms` (`+111.51%`)
+    - scoreboard status:
+      - `INTEGRATION_BOTTLENECK`
+  - mechanism read:
+    - copy tax did not reopen:
+      - `compiled_copy_tax = -46.51 ms`
+    - compiled external-kernel self time exploded:
+      - `8591.02 ms`
+    - dominant compiled rows:
+      - `_PackedQKVConvFunctionBackward`: `4161.58 ms`
+      - `causal_dwconv_weight_backward_kernel`: `3973.02 ms`
+  - current decision:
+    - reject the full-custom backward ownership on H100
+    - keep the forward kernel as a building block
+    - stay in the packed-conv stage, but reset backward ownership to ATen
+- Older screened candidate:
   - `winner-20260405-19-cuda-frontend-nct-custom-bwd`
   - equivalent to:
     - `winner-20260405-19`
@@ -114,50 +181,6 @@ This file tracks follow-up work that is intentionally not enabled by default in 
   - decision:
     - reject this standalone sidecar on H100
     - keep only the compile-visible NCT frontend idea as a building block
-- Older screened candidate:
-  - `winner-20260405-19-cuda-packed-conv`
-  - equivalent to:
-    - `winner-20260405-19`
-    - `GDN_USE_CUDA_PACKED_CONV=1`
-  - purpose:
-    - replace the packed qkv causal depthwise conv itself with a narrow
-      exact-length CUDA op and custom backward
-    - keep split, q/k norm, and recurrence math in the normal PyTorch path
-    - preserve the recurrence-facing contiguous contract
-  - local result:
-    - original screen against `profiles/rtx4070_cuda_base/` was directionally
-      strong
-    - refreshed same-day sequential rerun on current HEAD still agrees
-    - baseline:
-      - `profiles/rtx4070_phase1_winner20260405_19_r4/`
-    - candidate:
-      - `profiles/rtx4070_phase1_cuda_packedconv_fix2/`
-    - direct comparison:
-      - `profiles/rtx4070_phase1_cuda_packedconv_fix2/compare_vs_rtx4070_phase1_winner20260405_19_r4/comparison.md`
-    - console step average:
-      - `3285.35 -> 3092.15 ms` (`-5.88%`)
-    - trainer `ProfilerStep*`:
-      - `5543.80 -> 5119.98 ms` (`-7.64%`)
-    - boundary audit stayed clean through `conv_qkv`, `norm_qkv`, and
-      `recurrence_inputs`
-    - trainer buckets moved in the right direction:
-      - `aten::copy_`: `586.65 -> 308.23 ms`
-      - `aten::mul`: `995.28 -> 813.31 ms`
-      - `block.gdn`: `993.14 -> 800.58 ms`
-      - `gdn.recurrence`: `143.78 -> 142.33 ms`
-  - current decision:
-    - this is now the next H100 sidecar family
-    - keep `winner-20260405-19` active until H100 confirms or rejects it
-    - H100 batch:
-      - `python setup_hgdn_cuda.py build_ext --inplace`
-      - `python scripts/hgdn_cuda_parity.py`
-      - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k15ctl_a --offline`
-      - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k15ctl_b --offline`
-      - `python scripts/hgdn.py preflight --preset winner-20260405-19-cuda-packed-conv --compile-strategy model`
-      - `python scripts/hgdn.py h100-profile hybrid-eager --preset winner-20260405-19-cuda-packed-conv --run-prefix h100k15a`
-      - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-cuda-packed-conv --run-prefix h100k15a --offline`
-      - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-cuda-packed-conv --run-prefix h100k15b --offline`
-      - `python scripts/hgdn.py h100-profile hybrid --preset winner-20260405-19-cuda-packed-conv --run-prefix h100k15a`
 - Older screened candidate:
   - `winner-20260405-19-cuda-split-norm`
   - equivalent to:

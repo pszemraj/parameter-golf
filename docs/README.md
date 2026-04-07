@@ -88,6 +88,7 @@ What has not been claimed:
 
 - `scripts/hgdn.py`: preferred structured launcher for HGDN helpers, with subcommands, named presets, and optional TOML env configs
 - `configs/hgdn/winner_20260405_19.toml`: reusable config for the active H100-confirmed HGDN kernel winner
+- `configs/hgdn/winner_20260405_19_cuda_packed_conv_atenbwd.toml`: next packed-conv sidecar candidate that keeps the exact-length CUDA packed-conv forward but hands backward back to ATen/cuDNN
 - `configs/hgdn/winner_20260405_19_cuda_frontend_nct_custombwd.toml`: composed sidecar candidate that keeps the promoted exact-length packed custom-backward conv path and layers the compile-visible NCT frontend op above `preact_nct`
 - `configs/hgdn/winner_20260405_19_cuda_frontend_nct.toml`: compile-visible NCT frontend sidecar candidate that keeps depthwise conv in ATen and moves post-conv `SiLU + split + q/k norm` one boundary earlier
 - `configs/hgdn/winner_20260405_19_cuda_packed_conv.toml`: exact-length CUDA packed-conv sidecar candidate that replaces the packed qkv causal depthwise conv family itself
@@ -143,6 +144,7 @@ Active timestamped presets:
 - `convcontig`
 - `packed-qkv`
 - `winner-20260405-19`
+- `winner-20260405-19-cuda-packed-conv-aten-bwd`
 - `winner-20260405-19-cuda-frontend-nct-custom-bwd`
 - `winner-20260405-19-cuda-frontend-nct`
 - `winner-20260405-19-cuda-packed-conv`
@@ -204,6 +206,8 @@ Kernel-work guardrail:
   - the generated-path `split-copy` attempt also lost locally
   - the real CUDA post-conv split+q/k norm kernel also lost on compiled H100
   - the first exact-length CUDA packed-conv replacement was locally strong
+  - the first full-custom packed-conv H100 run then failed hard because the
+    custom weight-backward kernel dominated the compiled step
   - the standalone compile-visible NCT frontend follow-up lost badly on H100
     because it reopened copy tax and dropped the promoted custom-backward win
   - the composed `k10 + k13` follow-up also lost on H100:
@@ -216,7 +220,8 @@ Kernel-work guardrail:
       bottleneck at this abstraction level
     - do not spend more H100 time on that family unless the boundary changes
       materially
-    - the next live family should move back down to the packed-conv stage
+    - the next live family should stay at the packed-conv stage, but with
+      different backward ownership
 
 Latest screened front-end candidate:
 
@@ -259,32 +264,61 @@ Latest screened front-end candidate:
 
 Next live low-level sidecar:
 
-- `winner-20260405-19-cuda-packed-conv`
+- `winner-20260405-19-cuda-packed-conv-aten-bwd`
 - equivalent to:
   - `winner-20260405-19`
-  - `GDN_USE_CUDA_PACKED_CONV=1`
+  - `GDN_USE_CUDA_PACKED_CONV_ATEN_BACKWARD=1`
 - refreshed same-day local phase-1 result on current HEAD:
   - baseline:
-    - `profiles/rtx4070_phase1_winner20260405_19_r4/`
+    - `profiles/rtx4070_phase1_winner20260405_19_r5/`
   - candidate:
-    - `profiles/rtx4070_phase1_cuda_packedconv_fix2/`
+    - `profiles/rtx4070_phase1_cuda_packedconvaten_fix1/`
   - direct comparison:
-    - `profiles/rtx4070_phase1_cuda_packedconv_fix2/compare_vs_rtx4070_phase1_winner20260405_19_r4/comparison.md`
-  - console step average:
-    - `3285.35 -> 3092.15 ms` (`-5.88%`)
+    - `profiles/rtx4070_phase1_cuda_packedconvaten_fix1/compare_vs_rtx4070_phase1_winner20260405_19_r5/comparison.md`
   - trainer `ProfilerStep*`:
-    - `5543.80 -> 5119.98 ms` (`-7.64%`)
+    - `6979.99 -> 4128.87 ms` (`-40.85%`)
   - trainer `aten::copy_`:
-    - `586.65 -> 308.23 ms`
+    - `740.89 -> 415.25 ms`
   - trainer `aten::mul`:
-    - `995.28 -> 813.31 ms`
-  - trainer `block.gdn`:
-    - `993.14 -> 800.58 ms`
+    - `1256.18 -> 756.61 ms`
+  - trainer `gdn.recurrence`:
+    - `182.11 -> 109.95 ms`
   - recurrence-facing boundary stayed contiguous through `conv_qkv`,
     `norm_qkv`, and `recurrence_inputs`
 - decision:
   - this is now the next H100 sidecar family
   - if H100 agrees, it becomes the next promoted kernel winner
+
+Older screened packed-conv candidate:
+
+- `winner-20260405-19-cuda-packed-conv`
+- equivalent to:
+  - `winner-20260405-19`
+  - `GDN_USE_CUDA_PACKED_CONV=1`
+- purpose:
+  - replace the packed qkv causal depthwise conv itself with a narrow
+    exact-length CUDA op and a full custom backward
+- H100 result:
+  - reject
+  - same-day controls:
+    - `848.75 ms`
+    - `848.76 ms`
+  - candidate:
+    - `1796.70 ms`
+    - `1793.67 ms`
+  - mean delta:
+    - `848.75 -> 1795.19 ms` (`+111.51%`)
+- failure mode:
+  - the custom weight-backward kernel dominated the compiled step
+  - compiled profile top rows:
+    - `_PackedQKVConvFunctionBackward: 4161.58 ms`
+    - `causal_dwconv_weight_backward_kernel: 3973.02 ms`
+    - `causal_dwconv_preact_forward_kernel: 138.52 ms`
+    - `causal_dwconv_input_backward_kernel: 133.55 ms`
+- decision:
+  - reject this full-custom backward ownership on H100
+  - keep the forward kernel as the useful ingredient
+  - move the next live family to ATen/cuDNN backward ownership instead
 
 Older screened front-end candidate:
 
@@ -315,28 +349,6 @@ Older screened front-end candidate:
   - reject this standalone sidecar on H100
   - keep only the compile-visible NCT frontend idea as a building block inside
     the stronger combined candidate
-
-Older screened front-end candidate:
-
-- `winner-20260405-19-cuda-packed-conv`
-- equivalent to:
-  - `winner-20260405-19`
-  - `GDN_USE_CUDA_PACKED_CONV=1`
-- purpose:
-  - replace the packed qkv causal depthwise conv itself with a narrow
-    exact-length CUDA op and custom backward
-  - keep split, q/k norm, and recurrence math in the normal PyTorch path
-  - preserve the recurrence-facing contiguous contract
-- status:
-  - implementation and tests are in-tree
-  - local phase-1 was directionally strong
-  - compared against `profiles/rtx4070_cuda_base/`:
-    - console step average: `3320.37 -> 3065.44 ms` (`-7.68%`)
-    - `ProfilerStep*` self-device total: `6610.92 -> 6126.34 ms` (`-7.33%`)
-  - decision:
-    - keep it bookmarked as a real kernel building block
-    - the compile-visible NCT frontend now takes priority for the next H100
-      validation
 
 - `winner-20260405-19-cuda-split-norm`
 - equivalent to:
