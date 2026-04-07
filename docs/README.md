@@ -1,6 +1,6 @@
 # HGDN Branch Status
 
-Last updated: 2026-04-06 18:02 EDT
+Last updated: 2026-04-06 22:50 EDT
 
 Branch: `exp/hgdn`
 
@@ -99,7 +99,7 @@ What has not been claimed:
 - `configs/hgdn/winner_20260405_11_cuda_fused.toml`: experimental fused-CUDA variant of that winner
 - `scripts/screen_hgdn_arch_sizes.py`: CPU-only artifact-proxy screen for resized HGDN architecture candidates
 - `scripts/compare_hgdn_fixed2k.py`: structured W&B comparator for completed HGDN fixed-step H100 runs
-- `scripts/hgdn_kernel_scoreboard.py`: family-level H100 kernel gatekeeper that scores same-day controls and candidates against explicit `meaningful_win`, `flat_band`, copy-tax, and compile-penalty rules
+- `scripts/hgdn_kernel_scoreboard.py`: family-level H100 kernel gatekeeper that scores same-day controls and candidates against explicit `meaningful_win`, `flat_band`, copy-tax, and compile-penalty rules; accepts extracted trees and direct `.7z` bundles via `py7zr` or a system `7z` fallback
 - `configs/hgdn/winner_20260405_11_retune.toml`: first-pass retune family around the active timestamped HGDN kernel winner
 - `configs/hgdn/retune_*.toml`: named runnable configs for the first resized-HGDN shortlist
 - `model.py`: hybrid HGDN architecture and presets
@@ -206,12 +206,17 @@ Kernel-work guardrail:
   - the first exact-length CUDA packed-conv replacement was locally strong
   - the standalone compile-visible NCT frontend follow-up lost badly on H100
     because it reopened copy tax and dropped the promoted custom-backward win
-  - the composed `k10 + k13` path, which keeps the promoted custom-backward
-    conv path and layers the compile-visible NCT frontend above `preact_nct`,
-    now looks strongest locally
-  - the next front-end pass should therefore stay on real kernel replacement,
-    not another front-end extension island layered above the compiled path or
-    another layout-only rearrangement
+  - the composed `k10 + k13` follow-up also lost on H100:
+    - eager improved
+    - compiled copy tax stayed flat
+    - compiled `ProfilerStep*`, `CompiledFxGraph`, and `DDP.forward` got much
+      worse
+  - practical conclusion:
+    - the current compile-visible NCT frontend family is an integration
+      bottleneck at this abstraction level
+    - do not spend more H100 time on that family unless the boundary changes
+      materially
+    - the next live family should move back down to the packed-conv stage
 
 Latest screened front-end candidate:
 
@@ -220,35 +225,66 @@ Latest screened front-end candidate:
   - `winner-20260405-19`
   - `GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=1`
   - `GDN_USE_CUDA_FRONTEND_NCT=1`
-- purpose:
-  - keep the promoted exact-length packed depthwise custom-backward path from
-    `winner-20260405-19`
-  - expose `preact_nct` to a compile-visible frontend op that performs
-    `SiLU + q/k/v split + q/k L2 norm`
-  - preserve the ATen conv gradient path that won on H100 while fixing the bad
-    standalone k13 boundary choice
-- status:
-  - implementation and tests are in-tree
-  - same-day local phase-1 rerun is directionally strong enough to justify H100
-  - compared against `profiles/rtx4070_phase1_winner20260405_19_r3/`:
-    - console step average: `3479.42 -> 3042.16 ms` (`-12.57%`)
-    - trainer `aten::copy_`: `469.96 -> 236.48 ms`
-    - trainer `aten::mul`: `794.53 -> 511.73 ms`
-    - trainer `gdn.recurrence`: `115.13 -> 103.36 ms`
-    - trainer `aten::convolution_backward`: `116.08 -> 104.93 ms`
-    - trainer `aten::_conv_depthwise2d`: `88.44 -> 80.11 ms`
+- H100 result:
+  - reject
+  - same-day controls:
+    - `878.10 ms`
+    - `882.01 ms`
+  - candidate:
+    - `996.66 ms`
+    - `996.98 ms`
+  - mean delta:
+    - `880.06 -> 996.82 ms` (`+13.27%`)
+  - scoreboard status:
+    - `INTEGRATION_BOTTLENECK`
   - mechanism read:
-    - the recurrence-facing boundary stayed contiguous through `conv_qkv`,
-      `norm_qkv`, and `recurrence_inputs`
-    - the new frontend op is visible in the trace:
-      - `gdn.qkv_frontend_nct_cuda`
-    - the standalone `q_norm` bucket disappears from the trainer view because
-      that work is now inside the custom op, but the trainer shell cost also
-      drops materially
-  - decision:
-    - keep `winner-20260405-19` active until H100 confirms or rejects it
-    - this supersedes both `winner-20260405-19-cuda-frontend-nct` and
-      `winner-20260405-19-cuda-packed-conv` as the next H100 sidecar batch
+    - eager `ProfilerStep*` improved:
+      - `-577.25 ms`
+    - compiled `ProfilerStep*` worsened:
+      - `+554.10 ms`
+    - compile-specific penalty:
+      - `+1131.36 ms`
+    - compiled copy tax stayed flat:
+      - `-0.54 ms`
+    - compiled external-kernel self time reopened:
+      - `726.23 ms`
+    - `CompiledFxGraph` delta:
+      - `+542.31 ms`
+    - `DDP.forward` delta:
+      - `+183.48 ms`
+- decision:
+  - keep `winner-20260405-19` active
+  - park the current standalone NCT-frontend family until the compile boundary
+    changes materially
+
+Next live low-level sidecar:
+
+- `winner-20260405-19-cuda-packed-conv`
+- equivalent to:
+  - `winner-20260405-19`
+  - `GDN_USE_CUDA_PACKED_CONV=1`
+- refreshed same-day local phase-1 result on current HEAD:
+  - baseline:
+    - `profiles/rtx4070_phase1_winner20260405_19_r4/`
+  - candidate:
+    - `profiles/rtx4070_phase1_cuda_packedconv_fix2/`
+  - direct comparison:
+    - `profiles/rtx4070_phase1_cuda_packedconv_fix2/compare_vs_rtx4070_phase1_winner20260405_19_r4/comparison.md`
+  - console step average:
+    - `3285.35 -> 3092.15 ms` (`-5.88%`)
+  - trainer `ProfilerStep*`:
+    - `5543.80 -> 5119.98 ms` (`-7.64%`)
+  - trainer `aten::copy_`:
+    - `586.65 -> 308.23 ms`
+  - trainer `aten::mul`:
+    - `995.28 -> 813.31 ms`
+  - trainer `block.gdn`:
+    - `993.14 -> 800.58 ms`
+  - recurrence-facing boundary stayed contiguous through `conv_qkv`,
+    `norm_qkv`, and `recurrence_inputs`
+- decision:
+  - this is now the next H100 sidecar family
+  - if H100 agrees, it becomes the next promoted kernel winner
 
 Older screened front-end candidate:
 

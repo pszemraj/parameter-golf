@@ -65,39 +65,33 @@ This file tracks follow-up work that is intentionally not enabled by default in 
     - `winner-20260405-19`
     - `GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=1`
     - `GDN_USE_CUDA_FRONTEND_NCT=1`
-  - purpose:
-    - compose the promoted exact-length packed custom-backward conv path with
-      the compile-visible NCT frontend op
-    - expose `preact_nct` directly to the frontend op so `SiLU + split + q/k
-      norm` stay compile-visible without giving back the k10 conv-backward win
-  - local result:
-    - same-day sequential local phase-1 rerun is clearly positive against the
-      active winner
-    - versus `profiles/rtx4070_phase1_winner20260405_19_r3/`:
-      - console step average:
-        - `3479.42 -> 3042.16 ms` (`-12.57%`)
-    - boundary audit stayed clean through `conv_qkv`, `norm_qkv`, and
-      `recurrence_inputs`
-    - trainer buckets moved in the right direction:
-      - `aten::copy_`: `469.96 -> 236.48 ms`
-      - `aten::mul`: `794.53 -> 511.73 ms`
-      - `gdn.recurrence`: `115.13 -> 103.36 ms`
-      - `aten::convolution_backward`: `116.08 -> 104.93 ms`
-      - `aten::_conv_depthwise2d`: `88.44 -> 80.11 ms`
+  - H100 result:
+    - reject
+    - same-day controls:
+      - `878.10 ms`
+      - `882.01 ms`
+    - candidate:
+      - `996.66 ms`
+      - `996.98 ms`
+    - mean delta:
+      - `880.06 -> 996.82 ms` (`+13.27%`)
+    - scoreboard status:
+      - `INTEGRATION_BOTTLENECK`
+  - mechanism read:
+    - eager `ProfilerStep*` improved:
+      - `-577.25 ms`
+    - compiled `ProfilerStep*` worsened:
+      - `+554.10 ms`
+    - compile-specific penalty:
+      - `+1131.36 ms`
+    - compiled copy tax stayed flat:
+      - `-0.54 ms`
+    - compiled external-kernel self time reopened:
+      - `726.23 ms`
   - current decision:
-    - keep `winner-20260405-19` active until H100 confirmation
-    - this supersedes both the standalone `cuda-frontend-nct` H100 reject and
-      the older `cuda-packed-conv` local sidecar as the next H100 batch
-  - H100 batch:
-    - `python setup_hgdn_cuda.py build_ext --inplace`
-    - `python scripts/hgdn_cuda_parity.py`
-    - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k14ctl_a --offline`
-    - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k14ctl_b --offline`
-    - `python scripts/hgdn.py preflight --preset winner-20260405-19-cuda-frontend-nct-custom-bwd --compile-strategy model`
-    - `python scripts/hgdn.py h100-profile hybrid-eager --preset winner-20260405-19-cuda-frontend-nct-custom-bwd --run-prefix h100k14a`
-    - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-cuda-frontend-nct-custom-bwd --run-prefix h100k14a --offline`
-    - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-cuda-frontend-nct-custom-bwd --run-prefix h100k14b --offline`
-    - `python scripts/hgdn.py h100-profile hybrid --preset winner-20260405-19-cuda-frontend-nct-custom-bwd --run-prefix h100k14a`
+    - keep `winner-20260405-19` active
+    - park the current NCT-frontend family until the compile boundary changes
+      materially
 - Older screened candidate:
   - `winner-20260405-19-cuda-frontend-nct`
   - equivalent to:
@@ -131,21 +125,39 @@ This file tracks follow-up work that is intentionally not enabled by default in 
     - keep split, q/k norm, and recurrence math in the normal PyTorch path
     - preserve the recurrence-facing contiguous contract
   - local result:
-    - directionally strong against `profiles/rtx4070_cuda_base/`
+    - original screen against `profiles/rtx4070_cuda_base/` was directionally
+      strong
+    - refreshed same-day sequential rerun on current HEAD still agrees
+    - baseline:
+      - `profiles/rtx4070_phase1_winner20260405_19_r4/`
+    - candidate:
+      - `profiles/rtx4070_phase1_cuda_packedconv_fix2/`
+    - direct comparison:
+      - `profiles/rtx4070_phase1_cuda_packedconv_fix2/compare_vs_rtx4070_phase1_winner20260405_19_r4/comparison.md`
     - console step average:
-      - `3320.37 -> 3065.44 ms` (`-7.68%`)
-    - `ProfilerStep*` self-device total:
-      - `6610.92 -> 6126.34 ms` (`-7.33%`)
+      - `3285.35 -> 3092.15 ms` (`-5.88%`)
+    - trainer `ProfilerStep*`:
+      - `5543.80 -> 5119.98 ms` (`-7.64%`)
     - boundary audit stayed clean through `conv_qkv`, `norm_qkv`, and
       `recurrence_inputs`
     - trainer buckets moved in the right direction:
-      - `aten::copy_`: `785.65 -> 369.11 ms`
-      - `aten::mul`: `1012.30 -> 977.57 ms`
-      - `gdn.recurrence`: `177.23 -> 169.22 ms`
+      - `aten::copy_`: `586.65 -> 308.23 ms`
+      - `aten::mul`: `995.28 -> 813.31 ms`
+      - `block.gdn`: `993.14 -> 800.58 ms`
+      - `gdn.recurrence`: `143.78 -> 142.33 ms`
   - current decision:
-    - keep `winner-20260405-19` active until H100 confirmation of the stronger
-      composed NCT sidecar
-    - keep this in-tree as a building block
+    - this is now the next H100 sidecar family
+    - keep `winner-20260405-19` active until H100 confirms or rejects it
+    - H100 batch:
+      - `python setup_hgdn_cuda.py build_ext --inplace`
+      - `python scripts/hgdn_cuda_parity.py`
+      - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k15ctl_a --offline`
+      - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k15ctl_b --offline`
+      - `python scripts/hgdn.py preflight --preset winner-20260405-19-cuda-packed-conv --compile-strategy model`
+      - `python scripts/hgdn.py h100-profile hybrid-eager --preset winner-20260405-19-cuda-packed-conv --run-prefix h100k15a`
+      - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-cuda-packed-conv --run-prefix h100k15a --offline`
+      - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-cuda-packed-conv --run-prefix h100k15b --offline`
+      - `python scripts/hgdn.py h100-profile hybrid --preset winner-20260405-19-cuda-packed-conv --run-prefix h100k15a`
 - Older screened candidate:
   - `winner-20260405-19-cuda-split-norm`
   - equivalent to:
