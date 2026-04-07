@@ -150,6 +150,13 @@ HGDN_PRESETS: dict[str, dict[str, str]] = {
         "GDN_CONTROL_PROJ_FP32": "0",
         "GDN_USE_CUDA_PACKED_CONV_ATEN_BACKWARD": "1",
     },
+    "winner-20260405-19-cuda-packed-conv-aten-weight-bwd": {
+        "GDN_CONV_OUTPUT_CONTIGUOUS": "1",
+        "GDN_USE_PACKED_QKV_CONV": "1",
+        "GDN_USE_PACKED_QKV_PROJ": "1",
+        "GDN_CONTROL_PROJ_FP32": "0",
+        "GDN_USE_CUDA_PACKED_CONV_ATEN_WEIGHT_BACKWARD": "1",
+    },
 }
 
 COMMON_ENV_ARGS: tuple[tuple[str, str], ...] = (
@@ -322,6 +329,11 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
         "--cuda-packed-conv-aten-backward",
         action="store_true",
         help="Set GDN_USE_CUDA_PACKED_CONV_ATEN_BACKWARD=1.",
+    )
+    parser.add_argument(
+        "--cuda-packed-conv-aten-weight-backward",
+        action="store_true",
+        help="Set GDN_USE_CUDA_PACKED_CONV_ATEN_WEIGHT_BACKWARD=1.",
     )
     parser.add_argument(
         "--cuda-fused-frontend",
@@ -559,6 +571,8 @@ def build_env(args: argparse.Namespace) -> dict[str, str]:
         env["GDN_USE_CUDA_PACKED_CONV"] = "1"
     if args.cuda_packed_conv_aten_backward:
         env["GDN_USE_CUDA_PACKED_CONV_ATEN_BACKWARD"] = "1"
+    if args.cuda_packed_conv_aten_weight_backward:
+        env["GDN_USE_CUDA_PACKED_CONV_ATEN_WEIGHT_BACKWARD"] = "1"
     if args.cuda_split_norm:
         env["GDN_USE_CUDA_SPLIT_NORM"] = "1"
 

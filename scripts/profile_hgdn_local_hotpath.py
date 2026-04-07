@@ -203,6 +203,9 @@ def build_hybrid_model() -> HybridGPT:
             gdn_use_cuda_packed_conv_aten_backward=env_flag(
                 "GDN_USE_CUDA_PACKED_CONV_ATEN_BACKWARD"
             ),
+            gdn_use_cuda_packed_conv_aten_weight_backward=env_flag(
+                "GDN_USE_CUDA_PACKED_CONV_ATEN_WEIGHT_BACKWARD"
+            ),
             gdn_use_cuda_split_norm=env_flag("GDN_USE_CUDA_SPLIT_NORM"),
             gdn_use_packed_qkv_conv_custom_backward=env_flag(
                 "GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD"
@@ -390,6 +393,9 @@ def profile_gdn(
             use_cuda_packed_conv=env_flag("GDN_USE_CUDA_PACKED_CONV"),
             use_cuda_packed_conv_aten_backward=env_flag(
                 "GDN_USE_CUDA_PACKED_CONV_ATEN_BACKWARD"
+            ),
+            use_cuda_packed_conv_aten_weight_backward=env_flag(
+                "GDN_USE_CUDA_PACKED_CONV_ATEN_WEIGHT_BACKWARD"
             ),
             use_cuda_split_norm=env_flag("GDN_USE_CUDA_SPLIT_NORM"),
             use_packed_qkv_conv_custom_backward=env_flag(

@@ -577,7 +577,7 @@ __global__ void causal_dwconv_input_backward_kernel(
 }
 
 template <typename scalar_t>
-__global__ void causal_dwconv_weight_backward_kernel(
+__global__ void causal_dwconv_weight_backward_kernel_generic(
     const scalar_t* __restrict__ grad_preact,
     const scalar_t* __restrict__ qkv,
     scalar_t* __restrict__ grad_weight,
@@ -585,23 +585,100 @@ __global__ void causal_dwconv_weight_backward_kernel(
     int64_t T,
     int64_t C,
     int64_t K) {
+  __shared__ float shmem[256];
   const int64_t total = C * K;
-  for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < total;
-       idx += static_cast<int64_t>(blockDim.x) * gridDim.x) {
-    const int64_t c = idx / K;
-    const int64_t k = idx % K;
-    float acc = 0.0f;
-    for (int64_t b = 0; b < B; ++b) {
-      for (int64_t t = 0; t < T; ++t) {
-        const int64_t tau = t - (K - 1) + k;
-        if (tau >= 0 && tau < T) {
-          const int64_t g_idx = ((b * T + t) * C + c);
-          const int64_t x_idx = ((b * T + tau) * C + c);
-          acc += to_float(grad_preact[g_idx]) * to_float(qkv[x_idx]);
-        }
-      }
+  const int64_t idx =
+      blockIdx.x + static_cast<int64_t>(gridDim.x) * blockIdx.y;
+  if (idx >= total) {
+    return;
+  }
+
+  const int64_t c = idx / K;
+  const int64_t k = idx % K;
+  const int64_t BT = B * T;
+  float acc = 0.0f;
+  for (int64_t bt = threadIdx.x; bt < BT; bt += blockDim.x) {
+    const int64_t b = bt / T;
+    const int64_t t = bt - b * T;
+    const int64_t tau = t - (K - 1) + k;
+    if (tau >= 0 && tau < T) {
+      const int64_t g_idx = ((b * T + t) * C + c);
+      const int64_t x_idx = ((b * T + tau) * C + c);
+      acc += to_float(grad_preact[g_idx]) * to_float(qkv[x_idx]);
     }
-    grad_weight[idx] = from_float<scalar_t>(acc);
+  }
+
+  shmem[threadIdx.x] = acc;
+  __syncthreads();
+  for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+    if (threadIdx.x < stride) {
+      shmem[threadIdx.x] += shmem[threadIdx.x + stride];
+    }
+    __syncthreads();
+  }
+  if (threadIdx.x == 0) {
+    grad_weight[idx] = from_float<scalar_t>(shmem[0]);
+  }
+}
+
+template <typename scalar_t>
+__global__ void causal_dwconv_weight_backward_kernel_k4(
+    const scalar_t* __restrict__ grad_preact,
+    const scalar_t* __restrict__ qkv,
+    scalar_t* __restrict__ grad_weight,
+    int64_t B,
+    int64_t T,
+    int64_t C) {
+  __shared__ float sh0[256];
+  __shared__ float sh1[256];
+  __shared__ float sh2[256];
+  __shared__ float sh3[256];
+  const int64_t c = blockIdx.x + static_cast<int64_t>(gridDim.x) * blockIdx.y;
+  if (c >= C) {
+    return;
+  }
+
+  const int64_t BT = B * T;
+  float acc0 = 0.0f;
+  float acc1 = 0.0f;
+  float acc2 = 0.0f;
+  float acc3 = 0.0f;
+  for (int64_t bt = threadIdx.x; bt < BT; bt += blockDim.x) {
+    const int64_t b = bt / T;
+    const int64_t t = bt - b * T;
+    const int64_t row = (b * T + t) * C + c;
+    const float grad = to_float(grad_preact[row]);
+    if (t >= 3) {
+      acc0 += grad * to_float(qkv[row - static_cast<int64_t>(3) * C]);
+    }
+    if (t >= 2) {
+      acc1 += grad * to_float(qkv[row - static_cast<int64_t>(2) * C]);
+    }
+    if (t >= 1) {
+      acc2 += grad * to_float(qkv[row - C]);
+    }
+    acc3 += grad * to_float(qkv[row]);
+  }
+
+  sh0[threadIdx.x] = acc0;
+  sh1[threadIdx.x] = acc1;
+  sh2[threadIdx.x] = acc2;
+  sh3[threadIdx.x] = acc3;
+  __syncthreads();
+  for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+    if (threadIdx.x < stride) {
+      sh0[threadIdx.x] += sh0[threadIdx.x + stride];
+      sh1[threadIdx.x] += sh1[threadIdx.x + stride];
+      sh2[threadIdx.x] += sh2[threadIdx.x + stride];
+      sh3[threadIdx.x] += sh3[threadIdx.x + stride];
+    }
+    __syncthreads();
+  }
+  if (threadIdx.x == 0) {
+    grad_weight[c * 4 + 0] = from_float<scalar_t>(sh0[0]);
+    grad_weight[c * 4 + 1] = from_float<scalar_t>(sh1[0]);
+    grad_weight[c * 4 + 2] = from_float<scalar_t>(sh2[0]);
+    grad_weight[c * 4 + 3] = from_float<scalar_t>(sh3[0]);
   }
 }
 
@@ -755,8 +832,17 @@ std::vector<torch::Tensor> packed_qkv_frontend_backward_cuda(
   const int blocks = static_cast<int>((total + threads - 1) / threads);
   const int launch_blocks = std::min(blocks, 65535);
   const int64_t weight_total = C * K;
-  const int weight_blocks = static_cast<int>((weight_total + threads - 1) / threads);
-  const int weight_launch_blocks = std::min(weight_blocks, 65535);
+  const unsigned int weight_grid_x =
+      static_cast<unsigned int>(std::min<int64_t>(weight_total, 65535));
+  const unsigned int weight_grid_y = static_cast<unsigned int>(
+      (weight_total + static_cast<int64_t>(weight_grid_x) - 1) / weight_grid_x);
+  const dim3 weight_grid(weight_grid_x, weight_grid_y, 1);
+  const unsigned int weight_channel_grid_x =
+      static_cast<unsigned int>(std::min<int64_t>(C, 65535));
+  const unsigned int weight_channel_grid_y = static_cast<unsigned int>(
+      (C + static_cast<int64_t>(weight_channel_grid_x) - 1) /
+      weight_channel_grid_x);
+  const dim3 weight_channel_grid(weight_channel_grid_x, weight_channel_grid_y, 1);
   const auto stream = at::cuda::getCurrentCUDAStream();
 
   AT_DISPATCH_FLOATING_TYPES_AND2(
@@ -790,15 +876,26 @@ std::vector<torch::Tensor> packed_qkv_frontend_backward_cuda(
                 T,
                 C,
                 K);
-        causal_dwconv_weight_backward_kernel<scalar_t>
-            <<<weight_launch_blocks, threads, 0, stream>>>(
-                grad_preact.data_ptr<scalar_t>(),
-                qkv.data_ptr<scalar_t>(),
-                grad_weight.data_ptr<scalar_t>(),
-                B,
-                T,
-                C,
-                K);
+        if (K == 4) {
+          causal_dwconv_weight_backward_kernel_k4<scalar_t>
+              <<<weight_channel_grid, threads, 0, stream>>>(
+                  grad_preact.data_ptr<scalar_t>(),
+                  qkv.data_ptr<scalar_t>(),
+                  grad_weight.data_ptr<scalar_t>(),
+                  B,
+                  T,
+                  C);
+        } else {
+          causal_dwconv_weight_backward_kernel_generic<scalar_t>
+              <<<weight_grid, threads, 0, stream>>>(
+                  grad_preact.data_ptr<scalar_t>(),
+                  qkv.data_ptr<scalar_t>(),
+                  grad_weight.data_ptr<scalar_t>(),
+                  B,
+                  T,
+                  C,
+                  K);
+        }
       });
   AT_CUDA_CHECK(cudaGetLastError());
   return {grad_input, grad_weight};
@@ -824,8 +921,17 @@ std::vector<torch::Tensor> packed_qkv_conv_backward_cuda(
   const int blocks = static_cast<int>((total + threads - 1) / threads);
   const int launch_blocks = std::min(blocks, 65535);
   const int64_t weight_total = C * K;
-  const int weight_blocks = static_cast<int>((weight_total + threads - 1) / threads);
-  const int weight_launch_blocks = std::min(weight_blocks, 65535);
+  const unsigned int weight_grid_x =
+      static_cast<unsigned int>(std::min<int64_t>(weight_total, 65535));
+  const unsigned int weight_grid_y = static_cast<unsigned int>(
+      (weight_total + static_cast<int64_t>(weight_grid_x) - 1) / weight_grid_x);
+  const dim3 weight_grid(weight_grid_x, weight_grid_y, 1);
+  const unsigned int weight_channel_grid_x =
+      static_cast<unsigned int>(std::min<int64_t>(C, 65535));
+  const unsigned int weight_channel_grid_y = static_cast<unsigned int>(
+      (C + static_cast<int64_t>(weight_channel_grid_x) - 1) /
+      weight_channel_grid_x);
+  const dim3 weight_channel_grid(weight_channel_grid_x, weight_channel_grid_y, 1);
   const auto stream = at::cuda::getCurrentCUDAStream();
 
   AT_DISPATCH_FLOATING_TYPES_AND2(
@@ -849,18 +955,74 @@ std::vector<torch::Tensor> packed_qkv_conv_backward_cuda(
                 T,
                 C,
                 K);
-        causal_dwconv_weight_backward_kernel<scalar_t>
-            <<<weight_launch_blocks, threads, 0, stream>>>(
+        if (K == 4) {
+          causal_dwconv_weight_backward_kernel_k4<scalar_t>
+              <<<weight_channel_grid, threads, 0, stream>>>(
+                  grad_preact.data_ptr<scalar_t>(),
+                  qkv.data_ptr<scalar_t>(),
+                  grad_weight.data_ptr<scalar_t>(),
+                  B,
+                  T,
+                  C);
+        } else {
+          causal_dwconv_weight_backward_kernel_generic<scalar_t>
+              <<<weight_grid, threads, 0, stream>>>(
+                  grad_preact.data_ptr<scalar_t>(),
+                  qkv.data_ptr<scalar_t>(),
+                  grad_weight.data_ptr<scalar_t>(),
+                  B,
+                  T,
+                  C,
+                  K);
+        }
+      });
+  AT_CUDA_CHECK(cudaGetLastError());
+  return {grad_input, grad_weight};
+}
+
+std::vector<torch::Tensor> packed_qkv_conv_input_backward_cuda(
+    torch::Tensor grad_packed_out,
+    torch::Tensor weight,
+    torch::Tensor preact) {
+  c10::cuda::CUDAGuard device_guard(grad_packed_out.device());
+  const auto B = grad_packed_out.size(0);
+  const auto T = grad_packed_out.size(1);
+  const auto C = grad_packed_out.size(2);
+  const auto K = weight.size(1);
+
+  auto grad_preact = torch::empty_like(preact);
+  auto grad_input = torch::empty_like(grad_packed_out);
+
+  constexpr int threads = 256;
+  const int64_t total = B * T * C;
+  const int blocks = static_cast<int>((total + threads - 1) / threads);
+  const int launch_blocks = std::min(blocks, 65535);
+  const auto stream = at::cuda::getCurrentCUDAStream();
+
+  AT_DISPATCH_FLOATING_TYPES_AND2(
+      at::ScalarType::Half,
+      at::ScalarType::BFloat16,
+      grad_packed_out.scalar_type(),
+      "packed_qkv_conv_input_backward_cuda",
+      [&] {
+        silu_grad_from_preact_kernel<scalar_t>
+            <<<launch_blocks, threads, 0, stream>>>(
+                grad_packed_out.data_ptr<scalar_t>(),
+                preact.data_ptr<scalar_t>(),
                 grad_preact.data_ptr<scalar_t>(),
-                qkv.data_ptr<scalar_t>(),
-                grad_weight.data_ptr<scalar_t>(),
+                total);
+        causal_dwconv_input_backward_kernel<scalar_t>
+            <<<launch_blocks, threads, 0, stream>>>(
+                grad_preact.data_ptr<scalar_t>(),
+                weight.data_ptr<scalar_t>(),
+                grad_input.data_ptr<scalar_t>(),
                 B,
                 T,
                 C,
                 K);
       });
   AT_CUDA_CHECK(cudaGetLastError());
-  return {grad_input, grad_weight};
+  return {grad_preact, grad_input};
 }
 
 std::vector<torch::Tensor> packed_qkv_split_l2norm_forward_cuda(

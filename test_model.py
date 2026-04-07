@@ -955,6 +955,40 @@ def test_gdn_cuda_packed_conv_aten_bwd_cpu_fallback_matches_packed_path():
     print("  ✓ CUDA packed conv ATen-backward CPU fallback matches packed path")
 
 
+def test_gdn_cuda_packed_conv_aten_weight_bwd_cpu_fallback_matches_packed_path():
+    """CPU fallback for CUDA packed-conv ATen-weight-backward should preserve the packed path."""
+    torch.manual_seed(42)
+    kwargs = dict(
+        d_model=64,
+        n_heads=4,
+        head_k_dim=8,
+        expand_v=1.0,
+        allow_neg_eigval=True,
+        conv_size=4,
+        use_fla=False,
+        use_packed_qkv_conv=True,
+        use_packed_qkv_proj=True,
+        conv_output_contiguous=True,
+    )
+    eager = GatedDeltaNet(**kwargs)
+    packed_conv = GatedDeltaNet(
+        **kwargs, use_cuda_packed_conv_aten_weight_backward=True
+    )
+    packed_conv.load_state_dict(eager.state_dict(), strict=True)
+
+    x_eager = torch.randn(2, 32, 64, requires_grad=True)
+    x_conv = x_eager.detach().clone().requires_grad_(True)
+    y_eager = eager(x_eager)
+    y_conv = packed_conv(x_conv)
+    torch.testing.assert_close(y_conv, y_eager, atol=1e-5, rtol=1e-5)
+
+    grad = torch.randn_like(y_eager)
+    y_eager.backward(grad, retain_graph=True)
+    y_conv.backward(grad)
+    torch.testing.assert_close(x_conv.grad, x_eager.grad, atol=1e-5, rtol=1e-5)
+    print("  ✓ CUDA packed conv ATen-weight-backward CPU fallback matches packed path")
+
+
 def test_gdn_cuda_packed_conv_validation():
     """CUDA packed conv should only run on the packed non-fused front-end path."""
     try:
@@ -967,6 +1001,40 @@ def test_gdn_cuda_packed_conv_validation():
         )
         raise AssertionError(
             "Expected CUDA packed conv to require packed qkv proj+conv"
+        )
+    except ValueError:
+        pass
+    try:
+        GatedDeltaNet(
+            d_model=64,
+            n_heads=4,
+            head_k_dim=8,
+            expand_v=1.0,
+            use_packed_qkv_conv=True,
+            use_packed_qkv_proj=True,
+            conv_output_contiguous=True,
+            use_cuda_packed_conv_aten_weight_backward=True,
+            use_cuda_packed_conv_aten_backward=True,
+        )
+        raise AssertionError(
+            "Expected CUDA packed conv ATen-weight-backward to reject ATen-backward"
+        )
+    except ValueError:
+        pass
+    try:
+        GatedDeltaNet(
+            d_model=64,
+            n_heads=4,
+            head_k_dim=8,
+            expand_v=1.0,
+            use_packed_qkv_conv=True,
+            use_packed_qkv_proj=True,
+            conv_output_contiguous=True,
+            use_packed_qkv_conv_custom_backward=True,
+            use_cuda_packed_conv_aten_weight_backward=True,
+        )
+        raise AssertionError(
+            "Expected CUDA packed conv ATen-weight-backward to reject packed qkv custom backward"
         )
     except ValueError:
         pass
@@ -1710,6 +1778,10 @@ if __name__ == "__main__":
         (
             "CUDA packed conv ATen-backward CPU fallback parity",
             test_gdn_cuda_packed_conv_aten_bwd_cpu_fallback_matches_packed_path,
+        ),
+        (
+            "CUDA packed conv ATen-weight-backward CPU fallback parity",
+            test_gdn_cuda_packed_conv_aten_weight_bwd_cpu_fallback_matches_packed_path,
         ),
         (
             "CUDA packed conv validation",

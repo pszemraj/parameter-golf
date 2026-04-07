@@ -112,6 +112,9 @@ def run_gdn_eager() -> PreflightResult:
             use_cuda_packed_conv_aten_backward=env_flag(
                 "GDN_USE_CUDA_PACKED_CONV_ATEN_BACKWARD"
             ),
+            use_cuda_packed_conv_aten_weight_backward=env_flag(
+                "GDN_USE_CUDA_PACKED_CONV_ATEN_WEIGHT_BACKWARD"
+            ),
             use_cuda_fused_frontend=env_flag("GDN_USE_CUDA_FUSED_FRONTEND"),
             use_cuda_fused_output=env_flag("GDN_USE_CUDA_FUSED_OUTPUT"),
             use_cuda_split_norm=env_flag("GDN_USE_CUDA_SPLIT_NORM"),
@@ -182,6 +185,9 @@ def run_hybrid_case(*, compiled: bool) -> PreflightResult:
             gdn_use_cuda_packed_conv=env_flag("GDN_USE_CUDA_PACKED_CONV"),
             gdn_use_cuda_packed_conv_aten_backward=env_flag(
                 "GDN_USE_CUDA_PACKED_CONV_ATEN_BACKWARD"
+            ),
+            gdn_use_cuda_packed_conv_aten_weight_backward=env_flag(
+                "GDN_USE_CUDA_PACKED_CONV_ATEN_WEIGHT_BACKWARD"
             ),
             gdn_use_cuda_fused_frontend=env_flag("GDN_USE_CUDA_FUSED_FRONTEND"),
             gdn_use_cuda_fused_output=env_flag("GDN_USE_CUDA_FUSED_OUTPUT"),

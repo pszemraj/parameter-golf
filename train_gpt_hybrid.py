@@ -184,6 +184,9 @@ class Hyperparameters:
     gdn_use_cuda_packed_conv_aten_backward = bool(
         int(os.environ.get("GDN_USE_CUDA_PACKED_CONV_ATEN_BACKWARD", "0"))
     )
+    gdn_use_cuda_packed_conv_aten_weight_backward = bool(
+        int(os.environ.get("GDN_USE_CUDA_PACKED_CONV_ATEN_WEIGHT_BACKWARD", "0"))
+    )
     gdn_use_cuda_fused_frontend = bool(
         int(os.environ.get("GDN_USE_CUDA_FUSED_FRONTEND", "0"))
     )
@@ -1034,6 +1037,7 @@ def main() -> None:
         f"cuda_frontend_nct={int(args.gdn_use_cuda_frontend_nct)} "
         f"cuda_packed_conv={int(args.gdn_use_cuda_packed_conv)} "
         f"cuda_packed_conv_aten_bwd={int(args.gdn_use_cuda_packed_conv_aten_backward)} "
+        f"cuda_packed_conv_aten_weight_bwd={int(args.gdn_use_cuda_packed_conv_aten_weight_backward)} "
         f"cuda_fused_frontend={int(args.gdn_use_cuda_fused_frontend)} "
         f"cuda_fused_output={int(args.gdn_use_cuda_fused_output)} "
         f"cuda_split_norm={int(args.gdn_use_cuda_split_norm)}",
@@ -1128,6 +1132,7 @@ def main() -> None:
             gdn_use_cuda_frontend_nct=args.gdn_use_cuda_frontend_nct,
             gdn_use_cuda_packed_conv=args.gdn_use_cuda_packed_conv,
             gdn_use_cuda_packed_conv_aten_backward=args.gdn_use_cuda_packed_conv_aten_backward,
+            gdn_use_cuda_packed_conv_aten_weight_backward=args.gdn_use_cuda_packed_conv_aten_weight_backward,
             gdn_use_cuda_fused_frontend=args.gdn_use_cuda_fused_frontend,
             gdn_use_cuda_fused_output=args.gdn_use_cuda_fused_output,
             gdn_use_cuda_split_norm=args.gdn_use_cuda_split_norm,
@@ -1214,6 +1219,7 @@ def main() -> None:
                 "gdn_use_cuda_frontend_nct": args.gdn_use_cuda_frontend_nct,
                 "gdn_use_cuda_packed_conv": args.gdn_use_cuda_packed_conv,
                 "gdn_use_cuda_packed_conv_aten_backward": args.gdn_use_cuda_packed_conv_aten_backward,
+                "gdn_use_cuda_packed_conv_aten_weight_backward": args.gdn_use_cuda_packed_conv_aten_weight_backward,
                 "gdn_use_cuda_fused_frontend": args.gdn_use_cuda_fused_frontend,
                 "gdn_use_cuda_fused_output": args.gdn_use_cuda_fused_output,
                 "gdn_use_cuda_split_norm": args.gdn_use_cuda_split_norm,

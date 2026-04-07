@@ -22,6 +22,7 @@ from hgdn_cuda import (  # noqa: E402
     frontend_preact_silu_split_l2norm_nct,
     fused_packed_qkv_conv,
     fused_packed_qkv_conv_aten_backward,
+    fused_packed_qkv_conv_aten_weight_backward,
     fused_packed_qkv_frontend,
     fused_packed_qkv_split_l2norm,
     fused_rmsnorm_silu_gate,
@@ -248,6 +249,60 @@ def check_packed_conv_aten_backward(dtype: torch.dtype) -> None:
     )
 
 
+def check_packed_conv_aten_weight_backward(dtype: torch.dtype) -> None:
+    """Check CUDA packed-conv forward/input-grad with ATen weight-grad parity.
+
+    :param torch.dtype dtype: CUDA dtype under test.
+    """
+    bsz, seq, n_heads, head_k_dim, head_v_dim = 2, 32, 4, 8, 8
+    channels = n_heads * (2 * head_k_dim + head_v_dim)
+    kernel = 4
+    atol, rtol = tolerances(dtype)
+
+    torch.manual_seed(2029)
+    qkv_ref = torch.randn(
+        bsz, seq, channels, device="cuda", dtype=dtype, requires_grad=True
+    )
+    weight_ref = torch.randn(
+        channels, kernel, device="cuda", dtype=dtype, requires_grad=True
+    )
+    qkv_ext = qkv_ref.detach().clone().requires_grad_(True)
+    weight_ext = weight_ref.detach().clone().requires_grad_(True)
+
+    packed_ref = packed_qkv_conv_reference(qkv_ref, weight_ref)
+    packed_ext = fused_packed_qkv_conv_aten_weight_backward(
+        qkv_ext, weight_ext, enabled=True
+    )
+
+    torch.testing.assert_close(
+        packed_ext.float(), packed_ref.float(), atol=atol, rtol=rtol
+    )
+
+    grad = torch.randn_like(packed_ref)
+    (packed_ref * grad).sum().backward()
+    grad_qkv_ref = qkv_ref.grad.detach().clone()
+    grad_weight_ref = weight_ref.grad.detach().clone()
+
+    (packed_ext * grad).sum().backward()
+    grad_qkv_ext = qkv_ext.grad.detach().clone()
+    grad_weight_ext = weight_ext.grad.detach().clone()
+
+    torch.testing.assert_close(
+        grad_qkv_ext.float(), grad_qkv_ref.float(), atol=atol, rtol=rtol
+    )
+    torch.testing.assert_close(
+        grad_weight_ext.float(), grad_weight_ref.float(), atol=atol, rtol=rtol
+    )
+
+    print(
+        "packed_conv_aten_weight_bwd_parity:"
+        f" dtype={dtype}"
+        f" out={max_abs_diff(packed_ext.float(), packed_ref.float()):.6f}"
+        f" grad_qkv={max_abs_diff(grad_qkv_ext.float(), grad_qkv_ref.float()):.6f}"
+        f" grad_weight={max_abs_diff(grad_weight_ext.float(), grad_weight_ref.float()):.6f}"
+    )
+
+
 def check_output(dtype: torch.dtype) -> None:
     """Check fused output RMSNorm*SiLU(gate) forward and backward parity.
 
@@ -431,6 +486,7 @@ def main() -> None:
     dtype = parse_dtype()
     check_packed_conv(dtype)
     check_packed_conv_aten_backward(dtype)
+    check_packed_conv_aten_weight_backward(dtype)
     check_frontend(dtype)
     check_frontend_nct(dtype)
     check_split_norm(dtype)

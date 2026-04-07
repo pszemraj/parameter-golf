@@ -627,6 +627,85 @@ class _PackedQKVConvAtenBackwardFunction(torch.autograd.Function):
         return grad_input, grad_weight
 
 
+class _PackedQKVConvAtenWeightBackwardFunction(torch.autograd.Function):
+    """CUDA forward/input-grad wrapper with ATen/cuDNN weight grad."""
+
+    @staticmethod
+    def forward(
+        ctx: torch.autograd.function.FunctionCtx,
+        qkv: Tensor,
+        weight: Tensor,
+    ) -> Tensor:
+        """Run exact-length packed causal depthwise conv forward through CUDA.
+
+        :param torch.autograd.function.FunctionCtx ctx: Autograd context.
+        :param Tensor qkv: Packed q/k/v activations.
+        :param Tensor weight: Packed depthwise conv weights shaped ``(channels, kernel)``.
+        :raises RuntimeError: If the HGDN CUDA extension is unavailable.
+        :return Tensor: Packed post-conv activations.
+        """
+        ext = _load_extension()
+        if ext is None:
+            raise RuntimeError("HGDN CUDA extension is not available")
+        qkv_c = qkv.contiguous()
+        weight_c = weight.contiguous()
+        packed_out, preact = ext.packed_qkv_conv_forward(qkv_c, weight_c)
+        ctx.save_for_backward(qkv_c, weight_c, preact)
+        return packed_out
+
+    @staticmethod
+    def backward(
+        ctx: torch.autograd.function.FunctionCtx,
+        grad_packed_out: Tensor,
+    ) -> tuple[Tensor | None, Tensor | None]:
+        """Backprop with CUDA input-grad and ATen/cuDNN weight grad.
+
+        :param torch.autograd.function.FunctionCtx ctx: Autograd context.
+        :param Tensor grad_packed_out: Packed output gradients.
+        :raises RuntimeError: If the HGDN CUDA extension is unavailable.
+        :return tuple[Tensor | None, Tensor | None]: Input and weight gradients.
+        """
+        ext = _load_extension()
+        if ext is None:
+            raise RuntimeError("HGDN CUDA extension is not available")
+        qkv, weight, preact = ctx.saved_tensors
+        grad_input = None
+        grad_weight = None
+        groups = weight.shape[0]
+        kernel = weight.shape[-1]
+        weight_3d = weight.unsqueeze(1)
+
+        with torch.autograd.profiler.record_function(
+            "gdn.qkv_conv_cuda_aten_weight_bwd_cuda_input"
+        ):
+            grad_preact, grad_input = ext.packed_qkv_conv_input_backward(
+                grad_packed_out.contiguous(),
+                weight,
+                preact,
+            )
+        if ctx.needs_input_grad[1]:
+            with torch.autograd.profiler.record_function(
+                "gdn.qkv_conv_cuda_aten_weight_bwd_left_pad"
+            ):
+                qkv_t = qkv.transpose(1, 2)
+                qkv_pad = F.pad(qkv_t, (kernel - 1, 0))
+                grad_preact_t = grad_preact.transpose(1, 2).contiguous()
+            with torch.autograd.profiler.record_function(
+                "gdn.qkv_conv_cuda_aten_weight_bwd_weight_grad"
+            ):
+                grad_weight_3d = nn_grad.conv1d_weight(
+                    qkv_pad,
+                    weight_3d.shape,
+                    grad_preact_t,
+                    stride=1,
+                    padding=0,
+                    dilation=1,
+                    groups=groups,
+                )
+            grad_weight = grad_weight_3d.squeeze(1).contiguous()
+        return grad_input, grad_weight
+
+
 class _RMSNormSiluGateFunction(torch.autograd.Function):
     """CUDA autograd wrapper for fused RMSNorm * SiLU(gate)."""
 
@@ -819,6 +898,32 @@ def fused_packed_qkv_conv_aten_backward(
             "hgdn_cuda_conv_aten_backward_fallback",
             "GDN CUDA packed-conv ATen-backward path requested but the extension is "
             "unavailable; using the PyTorch reference path instead.",
+        )
+    return packed_qkv_conv_reference(qkv, weight)
+
+
+@_dynamo_disable
+def fused_packed_qkv_conv_aten_weight_backward(
+    qkv: Tensor,
+    weight: Tensor,
+    *,
+    enabled: bool = True,
+) -> Tensor:
+    """Run CUDA packed-conv forward/input-grad while keeping weight grad on ATen.
+
+    :param Tensor qkv: Packed q/k/v projections shaped ``(batch, seq, channels)``.
+    :param Tensor weight: Depthwise conv weights shaped ``(channels, kernel)``.
+    :param bool enabled: Whether the caller wants the CUDA path when available.
+    :return Tensor: Packed post-conv activations.
+    """
+    use_cuda_ext = enabled and qkv.is_cuda and weight.is_cuda and extension_loaded()
+    if use_cuda_ext:
+        return _PackedQKVConvAtenWeightBackwardFunction.apply(qkv, weight)
+    if enabled and qkv.is_cuda and weight.is_cuda:
+        _warn_once(
+            "hgdn_cuda_conv_aten_weight_backward_fallback",
+            "GDN CUDA packed-conv ATen-weight-backward path requested but the "
+            "extension is unavailable; using the PyTorch reference path instead.",
         )
     return packed_qkv_conv_reference(qkv, weight)
 
