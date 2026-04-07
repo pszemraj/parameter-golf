@@ -354,6 +354,16 @@ Ranked optimization checklist:
 6. Consider attention-side alternatives only later.
    - Why: the attention stack is already using PyTorch flash SDPA, not a naive slow path.
    - Flex attention or external `flash-attn` should only be tested if HGDN-side kernels stop being the dominant issue.
+   - Reminder for later:
+     - once the HGDN kernel family is genuinely converged, full-attention work is a plausible next frontier
+     - likely candidates are:
+       - direct Hopper-oriented attention kernels
+       - FlexAttention
+       - explicit FA3-style paths if they beat PyTorch SDPA on the target image
+     - do not start that work yet; it is intentionally deferred until HGDN-side kernels stop dominating the hybrid gap
+     - important current-scope note:
+       - this HGDN branch uses PyTorch `scaled_dot_product_attention`, not direct `flash_attn` / FA3 calls
+       - so merely having FA2/FA3 installed in the environment should not change the current HGDN profiling path by itself
 
 Suggested immediate sequence:
 
