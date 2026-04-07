@@ -24,6 +24,7 @@ from torch.nn import grad as nn_grad
 
 from hgdn_cuda import (
     fused_packed_qkv_conv,
+    fused_packed_qkv_conv_aten_backward,
     fused_packed_qkv_frontend,
     fused_packed_qkv_split_l2norm,
     fused_rmsnorm_silu_gate,
@@ -711,6 +712,7 @@ class GatedDeltaNet(nn.Module):
         output_norm_fp32: bool = True,
         use_cuda_frontend_nct: bool = False,
         use_cuda_packed_conv: bool = False,
+        use_cuda_packed_conv_aten_backward: bool = False,
         use_cuda_fused_frontend: bool = False,
         use_cuda_fused_output: bool = False,
         use_cuda_split_norm: bool = False,
@@ -740,6 +742,7 @@ class GatedDeltaNet(nn.Module):
         :param bool output_norm_fp32: Whether to keep the post-recurrence RMSNorm in fp32 before casting back to the activation dtype, defaults to True.
         :param bool use_cuda_frontend_nct: Whether to route the packed post-conv preactivation through a compile-visible NCT frontend op, defaults to False.
         :param bool use_cuda_packed_conv: Whether to route the packed post-projection causal depthwise conv through the optional CUDA extension, defaults to False.
+        :param bool use_cuda_packed_conv_aten_backward: Whether to route the packed post-projection causal depthwise conv through the optional CUDA extension for forward only while keeping backward on ATen/cuDNN, defaults to False.
         :param bool use_cuda_fused_frontend: Whether to route the packed qkv post-projection conv+q/k norm front-end through the optional CUDA extension, defaults to False.
         :param bool use_cuda_fused_output: Whether to route the output RMSNorm*SiLU(gate) path through the optional CUDA extension, defaults to False.
         :param bool use_cuda_split_norm: Whether to route packed post-conv q/k split+L2 normalization through the optional CUDA extension, defaults to False.
@@ -759,6 +762,7 @@ class GatedDeltaNet(nn.Module):
         self.output_norm_fp32 = output_norm_fp32
         self.use_cuda_frontend_nct = use_cuda_frontend_nct
         self.use_cuda_packed_conv = use_cuda_packed_conv
+        self.use_cuda_packed_conv_aten_backward = use_cuda_packed_conv_aten_backward
         self.use_cuda_fused_frontend = use_cuda_fused_frontend
         self.use_cuda_fused_output = use_cuda_fused_output
         self.use_cuda_split_norm = use_cuda_split_norm
@@ -856,6 +860,10 @@ class GatedDeltaNet(nn.Module):
             raise ValueError(
                 "use_cuda_frontend_nct is incompatible with use_cuda_packed_conv"
             )
+        if self.use_cuda_frontend_nct and self.use_cuda_packed_conv_aten_backward:
+            raise ValueError(
+                "use_cuda_frontend_nct is incompatible with use_cuda_packed_conv_aten_backward"
+            )
         if self.use_cuda_frontend_nct and self.use_cuda_fused_frontend:
             raise ValueError(
                 "use_cuda_frontend_nct is incompatible with use_cuda_fused_frontend"
@@ -897,6 +905,42 @@ class GatedDeltaNet(nn.Module):
         if self.use_cuda_packed_conv and self.use_packed_qkv_split_copy:
             raise ValueError(
                 "use_cuda_packed_conv is incompatible with use_packed_qkv_split_copy"
+            )
+        if self.use_cuda_packed_conv_aten_backward and not (
+            self.use_packed_qkv_proj and self.use_packed_qkv_conv
+        ):
+            raise ValueError(
+                "use_cuda_packed_conv_aten_backward requires use_packed_qkv_proj and use_packed_qkv_conv"
+            )
+        if self.use_cuda_packed_conv_aten_backward and self.use_cuda_packed_conv:
+            raise ValueError(
+                "use_cuda_packed_conv_aten_backward is incompatible with use_cuda_packed_conv"
+            )
+        if (
+            self.use_cuda_packed_conv_aten_backward
+            and self.use_packed_qkv_conv_custom_backward
+        ):
+            raise ValueError(
+                "use_cuda_packed_conv_aten_backward is incompatible with use_packed_qkv_conv_custom_backward"
+            )
+        if self.use_cuda_packed_conv_aten_backward and self.use_cuda_fused_frontend:
+            raise ValueError(
+                "use_cuda_packed_conv_aten_backward is incompatible with use_cuda_fused_frontend"
+            )
+        if self.use_cuda_packed_conv_aten_backward and self.use_cuda_split_norm:
+            raise ValueError(
+                "use_cuda_packed_conv_aten_backward is incompatible with use_cuda_split_norm"
+            )
+        if (
+            self.use_cuda_packed_conv_aten_backward
+            and self.use_packed_qkv_single_contig
+        ):
+            raise ValueError(
+                "use_cuda_packed_conv_aten_backward is incompatible with use_packed_qkv_single_contig"
+            )
+        if self.use_cuda_packed_conv_aten_backward and self.use_packed_qkv_split_copy:
+            raise ValueError(
+                "use_cuda_packed_conv_aten_backward is incompatible with use_packed_qkv_split_copy"
             )
         if self.use_cuda_split_norm and not (
             self.use_packed_qkv_proj and self.use_packed_qkv_conv
@@ -1065,6 +1109,29 @@ class GatedDeltaNet(nn.Module):
                         eps=1e-6,
                     )
             elif (
+                self.use_cuda_packed_conv_aten_backward
+                and qkv is not None
+                and self.qkv_conv is not None
+                and audit_call_index is None
+            ):
+                weight = self.qkv_conv.conv.weight.view(
+                    self.qkv_conv.conv.weight.shape[0], -1
+                )
+                with profile_range("gdn.qkv_conv_cuda_aten_bwd"):
+                    packed = fused_packed_qkv_conv_aten_backward(
+                        qkv,
+                        weight,
+                        enabled=True,
+                    )
+                with profile_range("gdn.qkv_conv_split"):
+                    q_dim, k_dim, v_dim = self.qkv_conv.dims
+                    q, k, v = packed.split((q_dim, k_dim, v_dim), dim=-1)
+                if self.qkv_conv.output_contiguous:
+                    with profile_range("gdn.qkv_conv_output_contiguous"):
+                        q = q.contiguous()
+                        k = k.contiguous()
+                        v = v.contiguous()
+            elif (
                 self.use_cuda_packed_conv
                 and qkv is not None
                 and self.qkv_conv is not None
@@ -1147,7 +1214,9 @@ class GatedDeltaNet(nn.Module):
                     v=v,
                 )
 
-        if self.use_cuda_packed_conv and audit_call_index is None:
+        if (
+            self.use_cuda_packed_conv or self.use_cuda_packed_conv_aten_backward
+        ) and audit_call_index is None:
             audit_gdn_boundary(
                 "conv_qkv",
                 audit_call_index,
@@ -1480,6 +1549,7 @@ class GDNBlock(nn.Module):
         output_norm_fp32: bool = True,
         use_cuda_frontend_nct: bool = False,
         use_cuda_packed_conv: bool = False,
+        use_cuda_packed_conv_aten_backward: bool = False,
         use_cuda_fused_frontend: bool = False,
         use_cuda_fused_output: bool = False,
         use_cuda_split_norm: bool = False,
@@ -1513,6 +1583,7 @@ class GDNBlock(nn.Module):
         :param bool output_norm_fp32: Whether to keep the post-recurrence RMSNorm in fp32 before casting back to the activation dtype, defaults to True.
         :param bool use_cuda_frontend_nct: Whether to route the packed post-conv preactivation through a compile-visible NCT frontend op, defaults to False.
         :param bool use_cuda_packed_conv: Whether to route the packed post-projection causal depthwise conv through the optional CUDA extension, defaults to False.
+        :param bool use_cuda_packed_conv_aten_backward: Whether to route the packed post-projection causal depthwise conv through the optional CUDA extension for forward only while keeping backward on ATen/cuDNN, defaults to False.
         :param bool use_cuda_fused_frontend: Whether to route the packed qkv post-projection conv+q/k norm front-end through the optional CUDA extension, defaults to False.
         :param bool use_cuda_fused_output: Whether to route the output RMSNorm*SiLU(gate) path through the optional CUDA extension, defaults to False.
         :param bool use_cuda_split_norm: Whether to route packed post-conv q/k split+L2 normalization through the optional CUDA extension, defaults to False.
@@ -1550,6 +1621,7 @@ class GDNBlock(nn.Module):
             output_norm_fp32=output_norm_fp32,
             use_cuda_frontend_nct=use_cuda_frontend_nct,
             use_cuda_packed_conv=use_cuda_packed_conv,
+            use_cuda_packed_conv_aten_backward=use_cuda_packed_conv_aten_backward,
             use_cuda_fused_frontend=use_cuda_fused_frontend,
             use_cuda_fused_output=use_cuda_fused_output,
             use_cuda_split_norm=use_cuda_split_norm,
@@ -1708,6 +1780,7 @@ class HybridGPT(nn.Module):
         gdn_output_norm_fp32: bool = True,
         gdn_use_cuda_frontend_nct: bool = False,
         gdn_use_cuda_packed_conv: bool = False,
+        gdn_use_cuda_packed_conv_aten_backward: bool = False,
         gdn_use_cuda_fused_frontend: bool = False,
         gdn_use_cuda_fused_output: bool = False,
         gdn_use_cuda_split_norm: bool = False,
@@ -1751,6 +1824,7 @@ class HybridGPT(nn.Module):
         :param bool gdn_output_norm_fp32: Whether to keep the post-recurrence RMSNorm in fp32 before casting back to the activation dtype, defaults to True.
         :param bool gdn_use_cuda_frontend_nct: Whether to route the packed post-conv preactivation through a compile-visible NCT frontend op, defaults to False.
         :param bool gdn_use_cuda_packed_conv: Whether to route the packed post-projection causal depthwise conv through the optional CUDA extension, defaults to False.
+        :param bool gdn_use_cuda_packed_conv_aten_backward: Whether to route the packed post-projection causal depthwise conv through the optional CUDA extension for forward only while keeping backward on ATen/cuDNN, defaults to False.
         :param bool gdn_use_cuda_fused_frontend: Whether to route packed qkv post-projection conv+q/k norm front-ends through the optional CUDA extension, defaults to False.
         :param bool gdn_use_cuda_fused_output: Whether to route the GDN output RMSNorm*SiLU(gate) path through the optional CUDA extension, defaults to False.
         :param bool gdn_use_cuda_split_norm: Whether to route packed post-conv q/k split+L2 normalization through the optional CUDA extension, defaults to False.
@@ -1822,6 +1896,7 @@ class HybridGPT(nn.Module):
                         gdn_output_norm_fp32,
                         gdn_use_cuda_frontend_nct,
                         gdn_use_cuda_packed_conv,
+                        gdn_use_cuda_packed_conv_aten_backward,
                         gdn_use_cuda_fused_frontend,
                         gdn_use_cuda_fused_output,
                         gdn_use_cuda_split_norm,
