@@ -19,6 +19,7 @@ import json
 import re
 import shutil
 import statistics
+import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -104,17 +105,25 @@ def extract_input(src: Path, dst_root: Path) -> Path:
         shutil.copytree(src, dst)
         return dst
     if src.suffix == ".7z":
-        try:
-            import py7zr  # type: ignore
-        except Exception as exc:  # pragma: no cover - optional dependency
-            raise RuntimeError(
-                "py7zr is required to read .7z archives. Install it with "
-                "`python -m pip install py7zr`."
-            ) from exc
         dst = dst_root / src.stem
         dst.mkdir(parents=True, exist_ok=True)
-        with py7zr.SevenZipFile(src, "r") as archive:
-            archive.extractall(dst)
+        try:
+            import py7zr  # type: ignore
+        except Exception:
+            seven_zip = shutil.which("7z")
+            if seven_zip is None:  # pragma: no cover - env-specific fallback
+                raise RuntimeError(
+                    "Need either `py7zr` or a `7z` binary to read .7z archives."
+                )
+            subprocess.run(
+                [seven_zip, "x", "-y", str(src), f"-o{dst}"],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.STDOUT,
+            )
+        else:
+            with py7zr.SevenZipFile(src, "r") as archive:
+                archive.extractall(dst)
         return dst
     raise ValueError(f"Unsupported input: {src}")
 
