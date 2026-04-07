@@ -1,9 +1,167 @@
 # Profiling Log
 
-Last updated: 2026-04-07 01:35 EDT
+Last updated: 2026-04-07 14:20 EDT
 
 This file records profiler-driven checkpoints that should survive beyond the raw
 artifacts under `profiles/`.
+
+## 2026-04-07 — CUDA packed-conv forward plus ATen backward is an H100 integration bottleneck (`h100k16`)
+
+Bundle:
+
+- H100 bundle:
+  - `local-scratch/profiling-out-h100k16-hgdn.7z`
+
+Contract:
+
+- active H100 baseline:
+  - `winner-20260405-19`
+- candidate delta:
+  - `GDN_USE_CUDA_PACKED_CONV_ATEN_BACKWARD=1`
+- family read:
+  - exact-length CUDA packed qkv depthwise conv forward
+  - ATen/cuDNN conv backward
+  - same recurrence-facing contiguous contract as the promoted winner
+
+### Main finding
+
+Reject `winner-20260405-19-cuda-packed-conv-aten-bwd` on H100.
+
+Same-day H100 compiled perf:
+
+- controls:
+  - `880.50 ms`
+  - `883.49 ms`
+- candidate:
+  - `994.59 ms`
+  - `993.22 ms`
+- mean delta:
+  - `881.99 -> 993.91 ms` (`+12.69%`)
+
+### What went wrong
+
+This did not fail because ATen depthwise conv backward itself was slow. It
+failed because the packed-conv shell around that ownership reopened too much
+compiled glue.
+
+Important compiled-profile rows:
+
+- `aten::copy_`:
+  - `491.69 ms`
+- `direct_copy_kernel_cuda`:
+  - `478.43 ms`
+- `gdn.qkv_conv_cuda_aten_bwd_left_pad`:
+  - `297.25 ms`
+- `gdn.qkv_conv_cuda_aten_bwd_input_grad`:
+  - `201.69 ms`
+- `gdn.qkv_conv_cuda_aten_bwd_silu`:
+  - `193.26 ms`
+- `aten::convolution_backward` stayed roughly flat relative to the winner
+
+### Scoreboard read
+
+This family is an `INTEGRATION_BOTTLENECK`.
+
+- compile-specific penalty:
+  - `+622.26 ms`
+- compiled copy tax:
+  - `+868.54 ms`
+- eager improved a bit
+- compiled step got materially worse
+
+### Decision
+
+Reject the ATen-backward ownership on H100.
+
+Do not send the ATen-weight split to H100 from the first local screen alone.
+
+Stay inside the packed-conv family, but change the kernel implementation
+itself:
+
+- keep the exact-length CUDA packed-conv stage
+- keep full custom backward ownership as a family
+- specifically rewrite the custom weight-backward kernel before reevaluating
+
+## 2026-04-07 — Rewritten full-custom packed-conv weight backward is locally positive again (`rtx5090_phase1_cuda_packedconv_wgradv3_fix2`)
+
+Bundle:
+
+- fresh same-day local baseline:
+  - `profiles/rtx5090_phase1_winner20260405_19_r8/`
+- fresh same-day local candidate:
+  - `profiles/rtx5090_phase1_cuda_packedconv_wgradv3_fix2/`
+- direct comparison:
+  - `profiles/rtx5090_phase1_cuda_packedconv_wgradv3_fix2/compare_vs_rtx5090_phase1_winner20260405_19_r8/comparison.md`
+
+Contract:
+
+- active H100 baseline:
+  - `winner-20260405-19`
+- candidate delta:
+  - `GDN_USE_CUDA_PACKED_CONV=1`
+- family read:
+  - same exact-length CUDA packed qkv depthwise conv family as `h100k15`
+  - same custom backward ownership
+  - materially different weight-backward kernel implementation:
+    - one block owns one channel
+    - accumulates all four taps together
+    - reuses the `grad_preact` stream across taps instead of rereading it once
+      per `(channel, tap)` block
+
+### Main finding
+
+The packed-conv family is alive after the weight-backward rewrite and is again
+worth a target-hardware sidecar.
+
+Same-day local phase-1 result:
+
+- console step average:
+  - `3085.62 -> 2874.43 ms` (`-6.84%`)
+- trainer `ProfilerStep*`:
+  - `6154.71 -> 5707.37 ms` (`-7.27%`)
+- trainer `DistributedDataParallel.forward`:
+  - `1792.51 -> 1627.82 ms`
+- trainer `aten::copy_`:
+  - `646.49 -> 364.96 ms`
+- trainer `aten::mul`:
+  - `1165.79 -> 969.75 ms`
+- trainer `gdn.qkv_conv_output_contiguous`:
+  - `76.26 -> 40.70 ms`
+
+### What changed
+
+The earlier full-custom family lost because the weight-backward kernel
+dominated the compiled step. The rewritten kernel now cuts that row sharply in
+the local hotpath:
+
+- bare-GDN hotpath `causal_dwconv_weight_backward_kernel`:
+  - `1.65 -> 0.50 ms`
+- hybrid hotpath `block.gdn` is now effectively back to parity
+- recurrence-facing boundary stayed contiguous through `conv_qkv`,
+  `norm_qkv`, and `recurrence_inputs`
+
+The candidate still adds custom conv rows in the trainer view, but those no
+longer outweigh the saved copy and multiply tax on the same local contract.
+
+### Decision
+
+Reopen `winner-20260405-19-cuda-packed-conv` as the next H100 sidecar family,
+but only because the weight-backward kernel changed materially.
+
+Keep `winner-20260405-19` active until H100 confirms or rejects this rewritten
+full-custom packed-conv path.
+
+### H100 validation
+
+- `python setup_hgdn_cuda.py build_ext --inplace`
+- `python scripts/hgdn_cuda_parity.py`
+- `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k17ctl_a --offline`
+- `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k17ctl_b --offline`
+- `python scripts/hgdn.py preflight --preset winner-20260405-19-cuda-packed-conv --compile-strategy model --offline`
+- `python scripts/hgdn.py h100-profile hybrid-eager --preset winner-20260405-19-cuda-packed-conv --run-prefix h100k17a --offline`
+- `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-cuda-packed-conv --run-prefix h100k17a --offline`
+- `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-cuda-packed-conv --run-prefix h100k17b --offline`
+- `python scripts/hgdn.py h100-profile hybrid --preset winner-20260405-19-cuda-packed-conv --run-prefix h100k17a --offline`
 
 ## 2026-04-07 — Full-custom CUDA packed-conv backward is the wrong ownership on H100 (`h100k15`)
 

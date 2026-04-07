@@ -60,49 +60,95 @@ This file tracks follow-up work that is intentionally not enabled by default in 
         meaningful-win threshold
       - stop after repeated `FLAT` or repeated `INTEGRATION_BOTTLENECK` results
 - Latest screened candidate:
-  - `winner-20260405-19-cuda-packed-conv-aten-bwd`
+  - `winner-20260405-19-cuda-packed-conv`
   - equivalent to:
     - `winner-20260405-19`
-    - `GDN_USE_CUDA_PACKED_CONV_ATEN_BACKWARD=1`
+    - `GDN_USE_CUDA_PACKED_CONV=1`
   - purpose:
-    - keep the exact-length CUDA packed qkv depthwise conv forward
-    - hand conv backward ownership back to ATen/cuDNN
-    - preserve the promoted recurrence-facing contiguous contract
+    - keep the exact-length CUDA packed qkv depthwise conv family
+    - keep full custom backward ownership
+    - use the rewritten weight-backward kernel that accumulates all four taps
+      per channel block instead of rereading the grad stream once per
+      `(channel, tap)` block
   - local result:
     - same-day local baseline:
-      - `profiles/rtx4070_phase1_winner20260405_19_r5/`
+      - `profiles/rtx5090_phase1_winner20260405_19_r8/`
     - candidate:
-      - `profiles/rtx4070_phase1_cuda_packedconvaten_fix1/`
+      - `profiles/rtx5090_phase1_cuda_packedconv_wgradv3_fix2/`
     - direct comparison:
-      - `profiles/rtx4070_phase1_cuda_packedconvaten_fix1/compare_vs_rtx4070_phase1_winner20260405_19_r5/comparison.md`
+      - `profiles/rtx5090_phase1_cuda_packedconv_wgradv3_fix2/compare_vs_rtx5090_phase1_winner20260405_19_r8/comparison.md`
+    - console step average:
+      - `3085.62 -> 2874.43 ms` (`-6.84%`)
     - trainer `ProfilerStep*`:
-      - `6979.99 -> 4128.87 ms` (`-40.85%`)
+      - `6154.71 -> 5707.37 ms` (`-7.27%`)
     - trainer buckets moved in the right direction:
-      - `aten::copy_`: `740.89 -> 415.25 ms`
-      - `aten::mul`: `1256.18 -> 756.61 ms`
-      - `gdn.recurrence`: `182.11 -> 109.95 ms`
-      - `aten::convolution_backward`: `182.77 -> 111.10 ms`
+      - `DistributedDataParallel.forward`: `1792.51 -> 1627.82 ms`
+      - `aten::copy_`: `646.49 -> 364.96 ms`
+      - `aten::mul`: `1165.79 -> 969.75 ms`
+      - `gdn.qkv_conv_output_contiguous`: `76.26 -> 40.70 ms`
     - boundary audit stayed clean through `conv_qkv`, `norm_qkv`, and
       `recurrence_inputs`
   - current decision:
+    - this family is live again only because the weight-backward kernel changed
+      materially after the original `h100k15` failure
     - this is now the next H100 sidecar family
     - keep `winner-20260405-19` active until H100 confirms or rejects it
     - H100 batch:
       - `python setup_hgdn_cuda.py build_ext --inplace`
       - `python scripts/hgdn_cuda_parity.py`
-      - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k16ctl_a --offline`
-      - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k16ctl_b --offline`
-      - `python scripts/hgdn.py preflight --preset winner-20260405-19-cuda-packed-conv-aten-bwd --compile-strategy model`
-      - `python scripts/hgdn.py h100-profile hybrid-eager --preset winner-20260405-19-cuda-packed-conv-aten-bwd --run-prefix h100k16a`
-      - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-cuda-packed-conv-aten-bwd --run-prefix h100k16a --offline`
-      - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-cuda-packed-conv-aten-bwd --run-prefix h100k16b --offline`
-      - `python scripts/hgdn.py h100-profile hybrid --preset winner-20260405-19-cuda-packed-conv-aten-bwd --run-prefix h100k16a`
+      - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k17ctl_a --offline`
+      - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k17ctl_b --offline`
+      - `python scripts/hgdn.py preflight --preset winner-20260405-19-cuda-packed-conv --compile-strategy model --offline`
+      - `python scripts/hgdn.py h100-profile hybrid-eager --preset winner-20260405-19-cuda-packed-conv --run-prefix h100k17a --offline`
+      - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-cuda-packed-conv --run-prefix h100k17a --offline`
+      - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-cuda-packed-conv --run-prefix h100k17b --offline`
+      - `python scripts/hgdn.py h100-profile hybrid --preset winner-20260405-19-cuda-packed-conv --run-prefix h100k17a --offline`
+- Older screened candidate:
+  - `winner-20260405-19-cuda-packed-conv-aten-bwd`
+  - equivalent to:
+    - `winner-20260405-19`
+    - `GDN_USE_CUDA_PACKED_CONV_ATEN_BACKWARD=1`
+  - H100 result:
+    - reject
+    - same-day controls:
+      - `880.50 ms`
+      - `883.49 ms`
+    - candidate:
+      - `994.59 ms`
+      - `993.22 ms`
+    - mean delta:
+      - `881.99 -> 993.91 ms` (`+12.69%`)
+    - scoreboard status:
+      - `INTEGRATION_BOTTLENECK`
+  - mechanism read:
+    - copy tax reopened badly:
+      - `compiled_copy_tax = +868.54 ms`
+    - compiled shell rows dominated:
+      - `aten::copy_ = 491.69 ms`
+      - `direct_copy_kernel_cuda = 478.43 ms`
+      - `gdn.qkv_conv_cuda_aten_bwd_left_pad = 297.25 ms`
+      - `gdn.qkv_conv_cuda_aten_bwd_input_grad = 201.69 ms`
+  - current decision:
+    - reject this ATen-backward ownership on H100
+    - do not spend more H100 time on this ownership split
+- Older screened candidate:
+  - `winner-20260405-19-cuda-packed-conv-aten-weight-bwd`
+  - equivalent to:
+    - `winner-20260405-19`
+    - `GDN_USE_CUDA_PACKED_CONV_ATEN_WEIGHT_BACKWARD=1`
+  - local result:
+    - reject
+    - direct hotpath result:
+      - `gdn_fwd_bwd`: `199.41 -> 249.66 ms`
+      - `hybrid_fwd_bwd`: `351.10 -> 362.01 ms`
+  - current decision:
+    - keep this only as a discarded ownership waypoint
 - Older screened candidate:
   - `winner-20260405-19-cuda-packed-conv`
   - equivalent to:
     - `winner-20260405-19`
     - `GDN_USE_CUDA_PACKED_CONV=1`
-  - H100 result:
+  - first H100 result:
     - reject
     - same-day controls:
       - `848.75 ms`
@@ -115,17 +161,14 @@ This file tracks follow-up work that is intentionally not enabled by default in 
     - scoreboard status:
       - `INTEGRATION_BOTTLENECK`
   - mechanism read:
-    - copy tax did not reopen:
-      - `compiled_copy_tax = -46.51 ms`
-    - compiled external-kernel self time exploded:
-      - `8591.02 ms`
+    - the old custom weight-backward kernel dominated the compiled step
     - dominant compiled rows:
       - `_PackedQKVConvFunctionBackward`: `4161.58 ms`
       - `causal_dwconv_weight_backward_kernel`: `3973.02 ms`
   - current decision:
-    - reject the full-custom backward ownership on H100
-    - keep the forward kernel as a building block
-    - stay in the packed-conv stage, but reset backward ownership to ATen
+    - reject the original implementation
+    - keep the family alive only because the weight-backward kernel changed
+      materially
 - Older screened candidate:
   - `winner-20260405-19-cuda-frontend-nct-custom-bwd`
   - equivalent to:

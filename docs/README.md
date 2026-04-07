@@ -1,6 +1,6 @@
 # HGDN Branch Status
 
-Last updated: 2026-04-06 22:50 EDT
+Last updated: 2026-04-07 14:20 EDT
 
 Branch: `exp/hgdn`
 
@@ -88,7 +88,8 @@ What has not been claimed:
 
 - `scripts/hgdn.py`: preferred structured launcher for HGDN helpers, with subcommands, named presets, and optional TOML env configs
 - `configs/hgdn/winner_20260405_19.toml`: reusable config for the active H100-confirmed HGDN kernel winner
-- `configs/hgdn/winner_20260405_19_cuda_packed_conv_atenbwd.toml`: next packed-conv sidecar candidate that keeps the exact-length CUDA packed-conv forward but hands backward back to ATen/cuDNN
+- `configs/hgdn/winner_20260405_19_cuda_packed_conv_atenbwd.toml`: rejected H100 sidecar that keeps the exact-length CUDA packed-conv forward but hands backward back to ATen/cuDNN
+- `configs/hgdn/winner_20260405_19_cuda_packed_conv_aten_weightbwd.toml`: local-only ownership split that keeps custom forward and input-grad but hands only weight-grad back to ATen
 - `configs/hgdn/winner_20260405_19_cuda_frontend_nct_custombwd.toml`: composed sidecar candidate that keeps the promoted exact-length packed custom-backward conv path and layers the compile-visible NCT frontend op above `preact_nct`
 - `configs/hgdn/winner_20260405_19_cuda_frontend_nct.toml`: compile-visible NCT frontend sidecar candidate that keeps depthwise conv in ATen and moves post-conv `SiLU + split + q/k norm` one boundary earlier
 - `configs/hgdn/winner_20260405_19_cuda_packed_conv.toml`: exact-length CUDA packed-conv sidecar candidate that replaces the packed qkv causal depthwise conv family itself
@@ -145,6 +146,7 @@ Active timestamped presets:
 - `packed-qkv`
 - `winner-20260405-19`
 - `winner-20260405-19-cuda-packed-conv-aten-bwd`
+- `winner-20260405-19-cuda-packed-conv-aten-weight-bwd`
 - `winner-20260405-19-cuda-frontend-nct-custom-bwd`
 - `winner-20260405-19-cuda-frontend-nct`
 - `winner-20260405-19-cuda-packed-conv`
@@ -208,6 +210,12 @@ Kernel-work guardrail:
   - the first exact-length CUDA packed-conv replacement was locally strong
   - the first full-custom packed-conv H100 run then failed hard because the
     custom weight-backward kernel dominated the compiled step
+  - the ATen-backward packed-conv follow-up also failed on H100:
+    - `aten::convolution_backward` itself stayed fine
+    - the packed-conv shell reopened copy and left-pad glue badly
+  - the ATen-weight split did not win the clean local screen
+  - the full-custom packed-conv family only became live again after a material
+    rewrite of the custom weight-backward kernel
   - the standalone compile-visible NCT frontend follow-up lost badly on H100
     because it reopened copy tax and dropped the promoted custom-backward win
   - the composed `k10 + k13` follow-up also lost on H100:
@@ -264,30 +272,88 @@ Latest screened front-end candidate:
 
 Next live low-level sidecar:
 
-- `winner-20260405-19-cuda-packed-conv-aten-bwd`
+- `winner-20260405-19-cuda-packed-conv`
 - equivalent to:
   - `winner-20260405-19`
-  - `GDN_USE_CUDA_PACKED_CONV_ATEN_BACKWARD=1`
-- refreshed same-day local phase-1 result on current HEAD:
+  - `GDN_USE_CUDA_PACKED_CONV=1`
+- refreshed same-day local phase-1 result after the weight-backward rewrite:
   - baseline:
-    - `profiles/rtx4070_phase1_winner20260405_19_r5/`
+    - `profiles/rtx5090_phase1_winner20260405_19_r8/`
   - candidate:
-    - `profiles/rtx4070_phase1_cuda_packedconvaten_fix1/`
+    - `profiles/rtx5090_phase1_cuda_packedconv_wgradv3_fix2/`
   - direct comparison:
-    - `profiles/rtx4070_phase1_cuda_packedconvaten_fix1/compare_vs_rtx4070_phase1_winner20260405_19_r5/comparison.md`
+    - `profiles/rtx5090_phase1_cuda_packedconv_wgradv3_fix2/compare_vs_rtx5090_phase1_winner20260405_19_r8/comparison.md`
+  - console step average:
+    - `3085.62 -> 2874.43 ms` (`-6.84%`)
   - trainer `ProfilerStep*`:
-    - `6979.99 -> 4128.87 ms` (`-40.85%`)
+    - `6154.71 -> 5707.37 ms` (`-7.27%`)
+  - trainer `DistributedDataParallel.forward`:
+    - `1792.51 -> 1627.82 ms`
   - trainer `aten::copy_`:
-    - `740.89 -> 415.25 ms`
+    - `646.49 -> 364.96 ms`
   - trainer `aten::mul`:
-    - `1256.18 -> 756.61 ms`
+    - `1165.79 -> 969.75 ms`
   - trainer `gdn.recurrence`:
-    - `182.11 -> 109.95 ms`
+    - `164.28 -> 165.59 ms`
+  - trainer `gdn.qkv_conv_output_contiguous`:
+    - `76.26 -> 40.70 ms`
   - recurrence-facing boundary stayed contiguous through `conv_qkv`,
     `norm_qkv`, and `recurrence_inputs`
 - decision:
   - this is now the next H100 sidecar family
   - if H100 agrees, it becomes the next promoted kernel winner
+  - the family was only reopened because the custom weight-backward kernel
+    changed materially, not because the earlier `h100k15` failure was ignored
+
+Older screened packed-conv candidate:
+
+- `winner-20260405-19-cuda-packed-conv-aten-bwd`
+- equivalent to:
+  - `winner-20260405-19`
+  - `GDN_USE_CUDA_PACKED_CONV_ATEN_BACKWARD=1`
+- purpose:
+  - keep the exact-length CUDA packed-conv forward
+  - hand all conv backward ownership back to ATen/cuDNN
+- H100 result:
+  - reject
+  - same-day controls:
+    - `880.50 ms`
+    - `883.49 ms`
+  - candidate:
+    - `994.59 ms`
+    - `993.22 ms`
+  - mean delta:
+    - `881.99 -> 993.91 ms` (`+12.69%`)
+- failure mode:
+  - `aten::convolution_backward` itself was not the problem
+  - the packed-conv shell reopened copy and left-pad glue badly
+  - compiled profile top rows:
+    - `aten::copy_: 491.69 ms`
+    - `direct_copy_kernel_cuda: 478.43 ms`
+    - `gdn.qkv_conv_cuda_aten_bwd_left_pad: 297.25 ms`
+    - `gdn.qkv_conv_cuda_aten_bwd_input_grad: 201.69 ms`
+- decision:
+  - reject this ATen-backward ownership on H100
+  - do not keep iterating shell variants at this ownership split
+
+Older screened packed-conv candidate:
+
+- `winner-20260405-19-cuda-packed-conv-aten-weight-bwd`
+- equivalent to:
+  - `winner-20260405-19`
+  - `GDN_USE_CUDA_PACKED_CONV_ATEN_WEIGHT_BACKWARD=1`
+- purpose:
+  - keep custom forward and custom input-grad
+  - hand only weight-grad back to ATen
+- local result:
+  - clean direct hotpath reject
+  - `gdn_fwd_bwd` total self CUDA:
+    - `199.41 -> 249.66 ms`
+  - `hybrid_fwd_bwd` total self CUDA:
+    - `351.10 -> 362.01 ms`
+- decision:
+  - keep this split only as a discarded ownership waypoint
+  - do not spend H100 time on it
 
 Older screened packed-conv candidate:
 
@@ -298,7 +364,7 @@ Older screened packed-conv candidate:
 - purpose:
   - replace the packed qkv causal depthwise conv itself with a narrow
     exact-length CUDA op and a full custom backward
-- H100 result:
+- first H100 result:
   - reject
   - same-day controls:
     - `848.75 ms`
@@ -308,17 +374,17 @@ Older screened packed-conv candidate:
     - `1793.67 ms`
   - mean delta:
     - `848.75 -> 1795.19 ms` (`+111.51%`)
-- failure mode:
-  - the custom weight-backward kernel dominated the compiled step
+- first failure mode:
+  - the old custom weight-backward kernel dominated the compiled step
   - compiled profile top rows:
     - `_PackedQKVConvFunctionBackward: 4161.58 ms`
     - `causal_dwconv_weight_backward_kernel: 3973.02 ms`
     - `causal_dwconv_preact_forward_kernel: 138.52 ms`
     - `causal_dwconv_input_backward_kernel: 133.55 ms`
-- decision:
-  - reject this full-custom backward ownership on H100
-  - keep the forward kernel as the useful ingredient
-  - move the next live family to ATen/cuDNN backward ownership instead
+- current decision:
+  - the original implementation is rejected
+  - the family is only reopened because the weight-backward kernel changed
+    materially and now screens positive locally
 
 Older screened front-end candidate:
 
