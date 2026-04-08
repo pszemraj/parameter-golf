@@ -1,6 +1,6 @@
 # Redundancy Audit
 
-Last updated: 2026-04-04 18:15 EDT
+Last updated: 2026-04-08 01:40 EDT
 
 This document is the interim cleanup checkpoint before returning to HGDN kernel work. The goal is to identify code and test paths that do not justify their independent existence.
 
@@ -14,6 +14,15 @@ The codebase does not look bloated because of large amounts of obviously unreach
 - the test suite has a few table-driven opportunities that are still written as hand-expanded individual tests
 
 The cleanest immediate cleanup target is the profiler/report toolchain. The riskiest consolidation target is the baseline-vs-hybrid trainer utility layer, because those copies now differ in validation strictness and artifact semantics.
+
+## Progress
+
+- `scripts/hgdn_cuda_preflight.py` and `scripts/profile_hgdn_local_hotpath.py`
+  now share the same CUDA module-preparation helper instead of carrying their
+  own copies of the mixed-precision and conv-freeze logic.
+- `scripts/hgdn_cuda_parity.py` now uses one parameterized packed-conv parity
+  helper for the three backward-ownership variants instead of repeating the same
+  test body three times.
 
 ## Findings
 

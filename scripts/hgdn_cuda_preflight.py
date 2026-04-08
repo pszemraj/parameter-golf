@@ -21,6 +21,7 @@ if str(REPO_ROOT) not in sys.path:
 from hgdn_cuda import extension_status  # noqa: E402
 from local_env import env_flag  # noqa: E402
 from model import GatedDeltaNet, HybridGPT  # noqa: E402
+from scripts.hgdn_script_utils import prepare_cuda_module  # noqa: E402
 from train_gpt_hybrid import (  # noqa: E402
     prepare_hybrid_compile,
     restore_low_dim_params_to_fp32,
@@ -49,28 +50,12 @@ def prepare_module(module: torch.nn.Module) -> torch.nn.Module:
     :param torch.nn.Module module: Module to prepare in place.
     :return torch.nn.Module: Prepared module.
     """
-    module = module.cuda().bfloat16()
-    restore_low_dim_params_to_fp32(
-        module, gdn_control_proj_fp32=env_flag("GDN_CONTROL_PROJ_FP32", True)
+    return prepare_cuda_module(
+        module,
+        restore_low_dim_params_to_fp32=restore_low_dim_params_to_fp32,
+        freeze_conv_weights=env_flag("GDN_FREEZE_CONV_WEIGHTS"),
+        gdn_control_proj_fp32=env_flag("GDN_CONTROL_PROJ_FP32", True),
     )
-    maybe_freeze_gdn_conv_weights(module)
-    return module
-
-
-def maybe_freeze_gdn_conv_weights(module: torch.nn.Module) -> None:
-    """Optionally freeze wrapped GDN depthwise-conv weights for attribution screens.
-
-    :param torch.nn.Module module: Module tree to mutate in place.
-    """
-    if not env_flag("GDN_FREEZE_CONV_WEIGHTS"):
-        return
-    for submodule in module.modules():
-        conv = getattr(submodule, "conv", None)
-        if isinstance(conv, torch.nn.Conv1d) and submodule.__class__.__name__ in {
-            "CausalConv1d",
-            "PackedCausalConv1d",
-        }:
-            conv.weight.requires_grad_(False)
 
 
 def run_gdn_eager() -> PreflightResult:
