@@ -4,6 +4,61 @@ This file tracks follow-up work that is intentionally not enabled by default in 
 
 ## Active next steps
 
+### Strategic path if the current front-end seam stalls
+
+- Main objective:
+  - beat or match the attention-only baseline on final wall-clock outcome, not
+    defend any one HGDN kernel family
+- Current evidence says the architecture is still worth pushing:
+  - on the fixed-step 1xH100 quality check, the hybrid reached:
+    - `eval/bpb = 2.3587`
+    - `final roundtrip = 2.3719`
+  - the matched attention-only baseline reached:
+    - `eval/bpb = 2.5457`
+    - `final roundtrip = 2.5950`
+  - that is a real learning-per-step advantage even though the current HGDN
+    systems winner is still materially slower on H100
+- Practical implication:
+  - if the current split-norm seam dies, the branch still has several live ways
+    to improve the overall HGDN-vs-GPT result
+  - the next tranche should then stop trying to rescue this exact front-end
+    boundary and move to the higher-payoff levers below
+- Priority order after the current seam:
+  1. compute-optimal HGDN resize on H100
+     - best immediate candidates already prepared:
+       - `configs/hgdn/retune_trim_layers_14.toml`
+       - `configs/hgdn/retune_trim_width_320.toml`
+       - `configs/hgdn/retune_balanced_14l_mlp3.toml`
+     - rationale:
+       - the hybrid already learns faster per step on H100
+       - a slightly smaller or better-balanced HGDN may keep most of that
+         quality edge while buying back enough throughput to win on wall clock
+  2. norm placement screen
+     - compare `pre`, `post`, and `keel`
+     - rationale:
+       - this is a real learning-dynamics lever, not just a systems trick
+       - it can improve optimization depth utilization even if raw step time is
+         unchanged
+  3. remaining non-seam HGDN systems hotspots
+     - gate/output projection work
+     - residual shell and compiled `add + mul + unsqueeze` glue
+     - recurrence-adjacent work only if the compiled profile says recurrence is
+       back to dominating
+     - rationale:
+       - these targets matter even if the current post-conv split/norm seam is
+         closed
+  4. finalist-only compile/backend work
+     - compile-mode shootout
+     - Nsight-guided kernel pass
+     - possible Hopper-only backend experiments such as cuLA, but only if the
+       profiles say the recurrence backend is the main remaining loss
+- Stop rule:
+  - do not stop because the branch has reached some arbitrary `kXX`
+  - stop a seam when the scoreboard says it is flat, saturated, or still an
+    integration bottleneck after one genuinely narrower follow-up
+  - then move to the next higher-value HGDN lever rather than relitigating the
+    same boundary
+
 ### Immediate kernel gate
 
 - Status: promoted.

@@ -1120,6 +1120,44 @@ If continuing this branch, the current best path is:
 8. Keep the current winner as the H100 systems baseline, but do another HGDN kernel/profiling tranche before treating model-size selection as the main branch priority.
 9. Use the 16 MB cap as a hard upper bound, not a hard fill target. Finalists should bracket the boundary rather than assuming that exact saturation is automatically optimal.
 
+### What Still Matters If The Current Kernel Seam Dies
+
+The branch should not treat one failed front-end seam as evidence that the full
+HGDN path is exhausted.
+
+The important current read is:
+
+- the hybrid still learns materially faster per step on H100 than the
+  attention-only baseline
+- the main unresolved question is how much of that quality edge can be kept
+  while buying back wall-clock throughput
+
+That means the next serious HGDN levers, in order, are:
+
+1. Compute-optimal resize on H100.
+   - The hybrid quality edge is large enough that a slightly smaller HGDN may
+     still beat the attention-only baseline overall.
+   - The existing retune shortlist is the first place to spend that budget once
+     the current narrow kernel seam stops paying.
+2. Norm placement.
+   - `pre` vs `post` vs `keel` is a learning-dynamics question, not just a
+     style preference.
+   - If it improves depth utilization or optimization stability, it can matter
+     more than another small kernel win.
+3. Remaining non-seam systems hotspots.
+   - Gate/output projection work, residual-shell glue, and recurrence-adjacent
+     costs are still live targets if profiles say they dominate.
+4. Finalist-only compile/backend work.
+   - More aggressive compile modes, Nsight-guided passes, or Hopper-specific
+     backend experiments only make sense after the architecture and main seams
+     are narrowed.
+
+So the right stop rule is not “quit after N rejects.” It is:
+
+- close the current seam when it stops producing falsifiable kernel decisions
+- then move to the next HGDN lever that has a clearer path to improving the
+  overall hybrid-vs-baseline result
+
 ## Likely Next Work
 
 - Continue HGDN-native hotspot work on top of the current winner, especially the packed qkv front-end and remaining norm/gate/layout glue.
