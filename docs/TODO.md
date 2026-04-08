@@ -107,22 +107,63 @@ This file tracks follow-up work that is intentionally not enabled by default in 
       - `causal_dwconv_weight_backward_kernel_k4`: `190.19 ms`
     - boundary audit stayed clean through `conv_qkv`, `norm_qkv`, and
       `recurrence_inputs`
+  - H100 result:
+    - reject
+    - same-day controls:
+      - `849.98 ms`
+      - `850.04 ms`
+    - candidate:
+      - `929.75 ms`
+      - `928.82 ms`
+      - `931.50 ms`
+    - mean delta:
+      - `850.01 -> 930.02 ms` (`+9.41%`)
+    - scoreboard status:
+      - `INTEGRATION_BOTTLENECK`
+  - mechanism read:
+    - eager got much better, but compiled got worse
+    - compiled copy tax improved:
+      - `compiled_copy_tax = -46.61 ms`
+    - compiled shell rows dominated:
+      - `DistributedDataParallel.forward = 1147.61 ms`
+      - `_PackedQKVFrontendFunctionBackward = 756.54 ms`
+      - `## Call CompiledFxGraph ... = 694.59 ms`
+      - `aten::mm = 616.68 ms`
+      - `build_grad_preact_kernel = 224.03 ms`
   - current decision:
-    - the `h100k17` packed-conv rewrite showed the custom weight-backward
-      problem is no longer the dominant failure
-    - the remaining live target is the post-conv frontend shell
-    - this frontend-only fused preset is now the next H100 sidecar family
-    - keep `winner-20260405-19` active until H100 confirms or rejects it
-    - H100 batch:
-      - `python setup_hgdn_cuda.py build_ext --inplace`
-      - `python scripts/hgdn_cuda_parity.py`
-      - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k18ctl_a --offline`
-      - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k18ctl_b --offline`
-      - `python scripts/hgdn.py preflight --preset winner-20260405-19-cuda-fused-frontend --compile-strategy model --offline`
-      - `python scripts/hgdn.py h100-profile hybrid-eager --preset winner-20260405-19-cuda-fused-frontend --run-prefix h100k18a --offline`
-      - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-cuda-fused-frontend --run-prefix h100k18a --offline`
-      - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-cuda-fused-frontend --run-prefix h100k18b --offline`
-      - `python scripts/hgdn.py h100-profile hybrid --preset winner-20260405-19-cuda-fused-frontend --run-prefix h100k18a --offline`
+    - reject the old fused-frontend custom-op boundary on H100
+    - keep `winner-20260405-19` active
+    - do not send this exact family back to H100 without a material boundary
+      change
+- Next screened candidate:
+  - `winner-20260405-19-cuda-fused-frontend-lib`
+  - equivalent to:
+    - `winner-20260405-19`
+    - `GDN_USE_CUDA_FUSED_FRONTEND_LIB=1`
+  - purpose:
+    - keep the same packed post-conv frontend math that helped in eager
+    - replace the old `_PackedQKVFrontendFunction` autograd island with a
+      compile-visible `torch.library` op and registered backward
+    - test the boundary change directly instead of re-running the same fused
+      frontend family
+  - local validation:
+    - `python scripts/hgdn.py preflight --preset winner-20260405-19-cuda-fused-frontend-lib --compile-strategy model --offline`
+      passed
+    - `python scripts/hgdn_cuda_parity.py` passed
+    - `python test_model.py` passed with new coverage for this family
+  - next H100 batch:
+    - `python setup_hgdn_cuda.py build_ext --inplace`
+    - `python scripts/hgdn_cuda_parity.py`
+    - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k19ctl_a --offline`
+    - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k19ctl_b --offline`
+    - `python scripts/hgdn.py h100-profile hybrid-eager --preset winner-20260405-19 --run-prefix h100k19ctl --offline`
+    - `python scripts/hgdn.py h100-profile hybrid --preset winner-20260405-19 --run-prefix h100k19ctl --offline`
+    - `python scripts/hgdn.py preflight --preset winner-20260405-19-cuda-fused-frontend-lib --compile-strategy model --offline`
+    - `python scripts/hgdn.py h100-profile hybrid-eager --preset winner-20260405-19-cuda-fused-frontend-lib --run-prefix h100k19a --offline`
+    - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-cuda-fused-frontend-lib --run-prefix h100k19a --offline`
+    - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-cuda-fused-frontend-lib --run-prefix h100k19b --offline`
+    - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-cuda-fused-frontend-lib --run-prefix h100k19c --offline`
+    - `python scripts/hgdn.py h100-profile hybrid --preset winner-20260405-19-cuda-fused-frontend-lib --run-prefix h100k19a --offline`
 - Older screened candidate:
   - `winner-20260405-19-cuda-packed-conv-aten-bwd`
   - equivalent to:

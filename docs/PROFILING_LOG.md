@@ -1,9 +1,113 @@
 # Profiling Log
 
-Last updated: 2026-04-07 23:35 EDT
+Last updated: 2026-04-08 00:31 EDT
 
 This file records profiler-driven checkpoints that should survive beyond the raw
 artifacts under `profiles/`.
+
+## 2026-04-08 — Old fused frontend is another H100 integration bottleneck (`h100k18`)
+
+Bundle:
+
+- H100 bundle:
+  - `local-scratch/profiling-out-h100k18-hgdn.7z`
+
+Contract:
+
+- active H100 baseline:
+  - `winner-20260405-19`
+- candidate delta:
+  - `GDN_USE_CUDA_FUSED_FRONTEND=1`
+- family read:
+  - packed qkv projection plus packed qkv depthwise conv remain unchanged
+  - old `_PackedQKVFrontendFunction` custom-op boundary owns post-conv `SiLU`,
+    split, q/k normalization, and its custom backward shell
+
+### Main finding
+
+Reject `winner-20260405-19-cuda-fused-frontend` on H100.
+
+Same-day H100 compiled perf:
+
+- controls:
+  - `849.98 ms`
+  - `850.04 ms`
+- candidate:
+  - `929.75 ms`
+  - `928.82 ms`
+  - `931.50 ms`
+- mean delta:
+  - `850.01 -> 930.02 ms` (`+9.41%`)
+
+### What went wrong
+
+This is another eager-positive, compiled-negative boundary miss.
+
+The candidate removed copy overhead, but the old custom-op shell still lost
+badly once compiled:
+
+- `DistributedDataParallel.forward`:
+  - `1147.61 ms`
+- `_PackedQKVFrontendFunctionBackward`:
+  - `756.54 ms`
+- `## Call CompiledFxGraph ...`:
+  - `694.59 ms`
+- `aten::mm`:
+  - `616.68 ms`
+- `build_grad_preact_kernel`:
+  - `224.03 ms`
+- `split_norm_from_preact_kernel`:
+  - `153.18 ms`
+
+Copy tax was not the problem this time:
+
+- `aten::copy_`:
+  - `34.38 ms`
+- `direct_copy_kernel_cuda`:
+  - `20.67 ms`
+
+### Scoreboard read
+
+This family is an `INTEGRATION_BOTTLENECK`.
+
+- compile-specific penalty:
+  - `+1387.41 ms`
+- compiled copy tax:
+  - `-46.61 ms`
+- eager `ProfilerStep*` improved:
+  - `-1077.61 ms`
+- compiled `ProfilerStep*` still worsened:
+  - `+309.80 ms`
+
+### Decision
+
+Reject the old fused-frontend family at the current custom-op boundary.
+
+Do not discard the frontend math. `k18` says the old fused frontend op is still
+helpful in eager and still removes copy tax. The problem is the boundary, not
+the fused post-conv math itself.
+
+The next targeted family should keep the packed frontend math but move it to a
+compile-visible `torch.library` boundary:
+
+- keep `winner-20260405-19` active
+- park `winner-20260405-19-cuda-fused-frontend`
+- test `winner-20260405-19-cuda-fused-frontend-lib` next
+
+### H100 validation
+
+- `python setup_hgdn_cuda.py build_ext --inplace`
+- `python scripts/hgdn_cuda_parity.py`
+- `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k19ctl_a --offline`
+- `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k19ctl_b --offline`
+- `python scripts/hgdn.py h100-profile hybrid-eager --preset winner-20260405-19 --run-prefix h100k19ctl --offline`
+- `python scripts/hgdn.py h100-profile hybrid --preset winner-20260405-19 --run-prefix h100k19ctl --offline`
+- `python scripts/hgdn.py preflight --preset winner-20260405-19-cuda-fused-frontend-lib --compile-strategy model --offline`
+- `python scripts/hgdn.py h100-profile hybrid-eager --preset winner-20260405-19-cuda-fused-frontend-lib --run-prefix h100k19a --offline`
+- `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-cuda-fused-frontend-lib --run-prefix h100k19a --offline`
+- `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-cuda-fused-frontend-lib --run-prefix h100k19b --offline`
+- `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-cuda-fused-frontend-lib --run-prefix h100k19c --offline`
+- `python scripts/hgdn.py h100-profile hybrid --preset winner-20260405-19-cuda-fused-frontend-lib --run-prefix h100k19a --offline`
 
 ## 2026-04-07 — Rewritten full-custom packed-conv is still an H100 integration bottleneck (`h100k17`)
 
