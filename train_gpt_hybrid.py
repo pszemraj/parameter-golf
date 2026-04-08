@@ -197,6 +197,9 @@ class Hyperparameters:
         int(os.environ.get("GDN_USE_CUDA_FUSED_OUTPUT", "0"))
     )
     gdn_use_cuda_split_norm = bool(int(os.environ.get("GDN_USE_CUDA_SPLIT_NORM", "0")))
+    gdn_use_cuda_split_norm_lib = bool(
+        int(os.environ.get("GDN_USE_CUDA_SPLIT_NORM_LIB", "0"))
+    )
     gdn_use_packed_qkv_conv_custom_backward = bool(
         int(os.environ.get("GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD", "0"))
     )
@@ -1044,7 +1047,8 @@ def main() -> None:
         f"cuda_fused_frontend={int(args.gdn_use_cuda_fused_frontend)} "
         f"cuda_fused_frontend_lib={int(args.gdn_use_cuda_fused_frontend_lib)} "
         f"cuda_fused_output={int(args.gdn_use_cuda_fused_output)} "
-        f"cuda_split_norm={int(args.gdn_use_cuda_split_norm)}",
+        f"cuda_split_norm={int(args.gdn_use_cuda_split_norm)} "
+        f"cuda_split_norm_lib={int(args.gdn_use_cuda_split_norm_lib)}",
         console=False,
     )
     if args.profile:
@@ -1141,6 +1145,7 @@ def main() -> None:
             gdn_use_cuda_fused_frontend_lib=args.gdn_use_cuda_fused_frontend_lib,
             gdn_use_cuda_fused_output=args.gdn_use_cuda_fused_output,
             gdn_use_cuda_split_norm=args.gdn_use_cuda_split_norm,
+            gdn_use_cuda_split_norm_lib=args.gdn_use_cuda_split_norm_lib,
             gdn_use_packed_qkv_conv_custom_backward=args.gdn_use_packed_qkv_conv_custom_backward,
             gdn_use_packed_qkv_single_contig=args.gdn_use_packed_qkv_single_contig,
             gdn_use_packed_qkv_split_copy=args.gdn_use_packed_qkv_split_copy,
@@ -1229,6 +1234,7 @@ def main() -> None:
                 "gdn_use_cuda_fused_frontend_lib": args.gdn_use_cuda_fused_frontend_lib,
                 "gdn_use_cuda_fused_output": args.gdn_use_cuda_fused_output,
                 "gdn_use_cuda_split_norm": args.gdn_use_cuda_split_norm,
+                "gdn_use_cuda_split_norm_lib": args.gdn_use_cuda_split_norm_lib,
                 "gdn_use_packed_qkv_conv_custom_backward": args.gdn_use_packed_qkv_conv_custom_backward,
                 "gdn_use_packed_qkv_single_contig": args.gdn_use_packed_qkv_single_contig,
                 "gdn_use_packed_qkv_split_copy": args.gdn_use_packed_qkv_split_copy,

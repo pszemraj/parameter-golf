@@ -306,6 +306,47 @@ def packed_qkv_frontend_backward_reference(
     return grad_input.contiguous(), grad_weight.contiguous()
 
 
+def packed_qkv_split_l2norm_backward_reference(
+    grad_q: Tensor,
+    grad_k: Tensor,
+    grad_v: Tensor,
+    packed: Tensor,
+    *,
+    n_heads: int,
+    head_k_dim: int,
+    head_v_dim: int,
+    eps: float = 1e-6,
+) -> Tensor:
+    """Reference backward for the packed split plus q/k L2-normalization op.
+
+    :param Tensor grad_q: Query gradients shaped ``(batch, seq, heads, head_k_dim)``.
+    :param Tensor grad_k: Key gradients shaped ``(batch, seq, heads, head_k_dim)``.
+    :param Tensor grad_v: Value gradients shaped ``(batch, seq, heads, head_v_dim)``.
+    :param Tensor packed: Saved packed post-conv activations.
+    :param int n_heads: Number of HGDN heads.
+    :param int head_k_dim: Per-head q/k width.
+    :param int head_v_dim: Per-head value width.
+    :param float eps: Numerical stability epsilon.
+    :return Tensor: Gradient for ``packed``.
+    """
+    with torch.enable_grad():
+        packed_ref = packed.detach().requires_grad_(True)
+        q, k, v = packed_qkv_split_l2norm_reference(
+            packed_ref,
+            n_heads=n_heads,
+            head_k_dim=head_k_dim,
+            head_v_dim=head_v_dim,
+            eps=eps,
+        )
+        (grad_packed,) = torch.autograd.grad(
+            outputs=(q, k, v),
+            inputs=(packed_ref,),
+            grad_outputs=(grad_q, grad_k, grad_v),
+            allow_unused=False,
+        )
+    return grad_packed.contiguous()
+
+
 def preact_silu_split_l2norm_nct_reference(
     preact_nct: Tensor,
     *,

@@ -19,6 +19,7 @@ from .reference import (
     packed_qkv_frontend_reference_with_ctx,
     packed_qkv_conv_reference,
     packed_qkv_frontend_reference,
+    packed_qkv_split_l2norm_backward_reference,
     packed_qkv_split_l2norm_reference,
     preact_silu_split_l2norm_nct_backward_reference,
     preact_silu_split_l2norm_nct_reference,
@@ -135,6 +136,20 @@ _FRONTEND_V3_LIB.define(
     "Tensor qkv, Tensor weight, Tensor preact, Tensor q, Tensor k, Tensor inv_q, Tensor inv_k, "
     "int n_heads, int head_k_dim, int head_v_dim, float eps"
     ") -> (Tensor grad_qkv, Tensor grad_weight)"
+)
+
+_FRONTEND_V4_LIB = torch.library.Library("hgdn_cuda_v4", "DEF")
+_FRONTEND_V4_LIB.define(
+    "packed_qkv_split_l2norm("
+    "Tensor packed, int n_heads, int head_k_dim, int head_v_dim, float eps"
+    ") -> (Tensor q, Tensor k, Tensor v, Tensor inv_q, Tensor inv_k)"
+)
+_FRONTEND_V4_LIB.define(
+    "packed_qkv_split_l2norm_backward("
+    "Tensor grad_q, Tensor grad_k, Tensor grad_v, "
+    "Tensor packed, Tensor q, Tensor k, Tensor inv_q, Tensor inv_k, "
+    "int n_heads, int head_k_dim, int head_v_dim, float eps"
+    ") -> Tensor"
 )
 
 
@@ -479,6 +494,189 @@ def _packed_qkv_frontend_backward_cuda(
     )
 
 
+@torch.library.impl("hgdn_cuda_v4::packed_qkv_split_l2norm", "CPU")
+def _packed_qkv_split_l2norm_lib_cpu(
+    packed: Tensor,
+    n_heads: int,
+    head_k_dim: int,
+    head_v_dim: int,
+    eps: float,
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+    """CPU/reference implementation for the compile-visible split-norm op.
+
+    :param Tensor packed: Packed post-conv activations in ``(batch, seq, channels)`` layout.
+    :param int n_heads: Number of HGDN heads.
+    :param int head_k_dim: Per-head q/k width.
+    :param int head_v_dim: Per-head value width.
+    :param float eps: L2-normalization epsilon.
+    :return tuple[Tensor, Tensor, Tensor, Tensor, Tensor]: Normalized q/k, reshaped v, and inverse norms.
+    """
+    batch, seq, _channels = packed.shape
+    q, k, v = packed_qkv_split_l2norm_reference(
+        packed,
+        n_heads=int(n_heads),
+        head_k_dim=int(head_k_dim),
+        head_v_dim=int(head_v_dim),
+        eps=float(eps),
+    )
+    inv_dtype = packed.new_empty((), dtype=torch.float32).dtype
+    q_pre, k_pre, _v_pre = packed.split(
+        (
+            int(n_heads) * int(head_k_dim),
+            int(n_heads) * int(head_k_dim),
+            int(n_heads) * int(head_v_dim),
+        ),
+        dim=-1,
+    )
+    q_pre = q_pre.view(batch, seq, int(n_heads), int(head_k_dim)).to(dtype=inv_dtype)
+    k_pre = k_pre.view(batch, seq, int(n_heads), int(head_k_dim)).to(dtype=inv_dtype)
+    inv_q = torch.rsqrt(q_pre.square().sum(dim=-1) + float(eps)).float()
+    inv_k = torch.rsqrt(k_pre.square().sum(dim=-1) + float(eps)).float()
+    return q, k, v, inv_q.contiguous(), inv_k.contiguous()
+
+
+@torch.library.impl("hgdn_cuda_v4::packed_qkv_split_l2norm", "CUDA")
+def _packed_qkv_split_l2norm_lib_cuda(
+    packed: Tensor,
+    n_heads: int,
+    head_k_dim: int,
+    head_v_dim: int,
+    eps: float,
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+    """CUDA implementation for the compile-visible split-norm op.
+
+    :param Tensor packed: Packed post-conv activations in ``(batch, seq, channels)`` layout.
+    :param int n_heads: Number of HGDN heads.
+    :param int head_k_dim: Per-head q/k width.
+    :param int head_v_dim: Per-head value width.
+    :param float eps: L2-normalization epsilon.
+    :return tuple[Tensor, Tensor, Tensor, Tensor, Tensor]: Normalized q/k, reshaped v, and inverse norms.
+    """
+    ext = _load_extension()
+    if ext is None:
+        _warn_once(
+            "hgdn_cuda_split_norm_lib_fallback",
+            "GDN compile-visible split-norm path requested but the extension is unavailable; "
+            "using the PyTorch reference path instead.",
+        )
+        return _packed_qkv_split_l2norm_lib_cpu(
+            packed,
+            int(n_heads),
+            int(head_k_dim),
+            int(head_v_dim),
+            float(eps),
+        )
+    return ext.packed_qkv_split_l2norm_forward(
+        packed.contiguous(),
+        int(n_heads),
+        int(head_k_dim),
+        int(head_v_dim),
+        float(eps),
+    )
+
+
+@torch.library.impl("hgdn_cuda_v4::packed_qkv_split_l2norm_backward", "CPU")
+def _packed_qkv_split_l2norm_lib_backward_cpu(
+    grad_q: Tensor,
+    grad_k: Tensor,
+    grad_v: Tensor,
+    packed: Tensor,
+    _q: Tensor,
+    _k: Tensor,
+    _inv_q: Tensor,
+    _inv_k: Tensor,
+    n_heads: int,
+    head_k_dim: int,
+    head_v_dim: int,
+    eps: float,
+) -> Tensor:
+    """CPU/reference implementation for the compile-visible split-norm backward op.
+
+    :param Tensor grad_q: Query gradients.
+    :param Tensor grad_k: Key gradients.
+    :param Tensor grad_v: Value gradients.
+    :param Tensor packed: Saved packed post-conv activations.
+    :param Tensor _q: Ignored saved q placeholder.
+    :param Tensor _k: Ignored saved k placeholder.
+    :param Tensor _inv_q: Ignored saved inverse-q placeholder.
+    :param Tensor _inv_k: Ignored saved inverse-k placeholder.
+    :param int n_heads: Number of HGDN heads.
+    :param int head_k_dim: Per-head q/k width.
+    :param int head_v_dim: Per-head value width.
+    :param float eps: L2-normalization epsilon.
+    :return Tensor: Gradient for ``packed``.
+    """
+    return packed_qkv_split_l2norm_backward_reference(
+        grad_q,
+        grad_k,
+        grad_v,
+        packed,
+        n_heads=int(n_heads),
+        head_k_dim=int(head_k_dim),
+        head_v_dim=int(head_v_dim),
+        eps=float(eps),
+    )
+
+
+@torch.library.impl("hgdn_cuda_v4::packed_qkv_split_l2norm_backward", "CUDA")
+def _packed_qkv_split_l2norm_lib_backward_cuda(
+    grad_q: Tensor,
+    grad_k: Tensor,
+    grad_v: Tensor,
+    packed: Tensor,
+    q: Tensor,
+    k: Tensor,
+    inv_q: Tensor,
+    inv_k: Tensor,
+    n_heads: int,
+    head_k_dim: int,
+    head_v_dim: int,
+    eps: float,
+) -> Tensor:
+    """CUDA implementation for the compile-visible split-norm backward op.
+
+    :param Tensor grad_q: Query gradients.
+    :param Tensor grad_k: Key gradients.
+    :param Tensor grad_v: Value gradients.
+    :param Tensor packed: Saved packed post-conv activations.
+    :param Tensor q: Saved normalized q output.
+    :param Tensor k: Saved normalized k output.
+    :param Tensor inv_q: Saved inverse q norms.
+    :param Tensor inv_k: Saved inverse k norms.
+    :param int n_heads: Number of HGDN heads.
+    :param int head_k_dim: Per-head q/k width.
+    :param int head_v_dim: Per-head value width.
+    :param float eps: Unused epsilon placeholder for API symmetry.
+    :return Tensor: Gradient for ``packed``.
+    """
+    ext = _load_extension()
+    if ext is None:
+        _warn_once(
+            "hgdn_cuda_split_norm_lib_bwd_fallback",
+            "GDN compile-visible split-norm backward requested but the extension is unavailable; "
+            "using the PyTorch reference path instead.",
+        )
+        return packed_qkv_split_l2norm_backward_reference(
+            grad_q,
+            grad_k,
+            grad_v,
+            packed,
+            n_heads=int(n_heads),
+            head_k_dim=int(head_k_dim),
+            head_v_dim=int(head_v_dim),
+            eps=float(eps),
+        )
+    return ext.packed_qkv_split_l2norm_backward(
+        grad_q.contiguous(),
+        grad_k.contiguous(),
+        grad_v.contiguous(),
+        q.contiguous(),
+        k.contiguous(),
+        inv_q.contiguous(),
+        inv_k.contiguous(),
+    )
+
+
 @torch.library.register_fake("hgdn_cuda_v2::preact_silu_split_l2norm_nct")
 def _preact_silu_split_l2norm_nct_fake(
     preact_nct: Tensor,
@@ -611,6 +809,69 @@ def _packed_qkv_frontend_backward_fake(
     return qkv.new_empty(qkv.shape), weight.new_empty(weight.shape)
 
 
+@torch.library.register_fake("hgdn_cuda_v4::packed_qkv_split_l2norm")
+def _packed_qkv_split_l2norm_lib_fake(
+    packed: Tensor,
+    n_heads: int,
+    head_k_dim: int,
+    head_v_dim: int,
+    _eps: float,
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+    """Meta kernel for the compile-visible packed split-norm op.
+
+    :param Tensor packed: Packed post-conv activations.
+    :param int n_heads: Number of HGDN heads.
+    :param int head_k_dim: Per-head q/k width.
+    :param int head_v_dim: Per-head value width.
+    :param float _eps: Ignored epsilon placeholder.
+    :return tuple[Tensor, Tensor, Tensor, Tensor, Tensor]: Meta tensors matching the real outputs.
+    """
+    if packed.ndim != 3:
+        raise ValueError(f"Expected packed.ndim == 3, got {packed.ndim}")
+    batch, seq, _channels = packed.shape
+    q = packed.new_empty((batch, seq, int(n_heads), int(head_k_dim)))
+    k = packed.new_empty((batch, seq, int(n_heads), int(head_k_dim)))
+    v = packed.new_empty((batch, seq, int(n_heads), int(head_v_dim)))
+    inv_q = packed.new_empty((batch, seq, int(n_heads)), dtype=torch.float32)
+    inv_k = packed.new_empty((batch, seq, int(n_heads)), dtype=torch.float32)
+    return q, k, v, inv_q, inv_k
+
+
+@torch.library.register_fake("hgdn_cuda_v4::packed_qkv_split_l2norm_backward")
+def _packed_qkv_split_l2norm_lib_backward_fake(
+    grad_q: Tensor,
+    grad_k: Tensor,
+    grad_v: Tensor,
+    packed: Tensor,
+    _q: Tensor,
+    _k: Tensor,
+    _inv_q: Tensor,
+    _inv_k: Tensor,
+    _n_heads: int,
+    _head_k_dim: int,
+    _head_v_dim: int,
+    _eps: float,
+) -> Tensor:
+    """Meta kernel for the compile-visible packed split-norm backward op.
+
+    :param Tensor grad_q: Query gradients.
+    :param Tensor grad_k: Key gradients.
+    :param Tensor grad_v: Value gradients.
+    :param Tensor packed: Saved packed activations.
+    :param Tensor _q: Ignored saved q placeholder.
+    :param Tensor _k: Ignored saved k placeholder.
+    :param Tensor _inv_q: Ignored saved inverse-q placeholder.
+    :param Tensor _inv_k: Ignored saved inverse-k placeholder.
+    :param int _n_heads: Ignored head-count placeholder.
+    :param int _head_k_dim: Ignored q/k width placeholder.
+    :param int _head_v_dim: Ignored value width placeholder.
+    :param float _eps: Ignored epsilon placeholder.
+    :return Tensor: Meta tensor matching the packed-input gradient.
+    """
+    del grad_q, grad_k, grad_v
+    return packed.new_empty(packed.shape)
+
+
 def _setup_preact_silu_split_l2norm_nct_context(
     ctx: torch.autograd.function.FunctionCtx,
     inputs: tuple[Tensor, int, int, int, float],
@@ -643,6 +904,27 @@ def _setup_packed_qkv_frontend_context(
     qkv, weight, n_heads, head_k_dim, head_v_dim, eps = inputs
     q, k, _v, preact, inv_q, inv_k = output
     ctx.save_for_backward(qkv, weight, preact, q, k, inv_q, inv_k)
+    ctx.n_heads = int(n_heads)
+    ctx.head_k_dim = int(head_k_dim)
+    ctx.head_v_dim = int(head_v_dim)
+    ctx.eps = float(eps)
+
+
+def _setup_packed_qkv_split_l2norm_context(
+    ctx: torch.autograd.function.FunctionCtx,
+    inputs: tuple[Tensor, int, int, int, float],
+    output: tuple[Tensor, Tensor, Tensor, Tensor, Tensor],
+) -> None:
+    """Save tensors needed by the compile-visible split-norm backward formula.
+
+    :param torch.autograd.function.FunctionCtx ctx: Autograd context.
+    :param tuple[Tensor, int, int, int, float] inputs: Forward inputs.
+    :param tuple[Tensor, Tensor, Tensor, Tensor, Tensor] output: Forward outputs.
+    :return None: Saves tensors and metadata onto ``ctx``.
+    """
+    packed, n_heads, head_k_dim, head_v_dim, eps = inputs
+    q, k, _v, inv_q, inv_k = output
+    ctx.save_for_backward(packed, q, k, inv_q, inv_k)
     ctx.n_heads = int(n_heads)
     ctx.head_k_dim = int(head_k_dim)
     ctx.head_v_dim = int(head_v_dim)
@@ -732,6 +1014,47 @@ def _packed_qkv_frontend_backward_formula(
     return grad_qkv, grad_weight, None, None, None, None
 
 
+def _packed_qkv_split_l2norm_backward_formula(
+    ctx: torch.autograd.function.FunctionCtx,
+    grad_q: Tensor | None,
+    grad_k: Tensor | None,
+    grad_v: Tensor | None,
+    _grad_inv_q: Tensor | None,
+    _grad_inv_k: Tensor | None,
+) -> tuple[Tensor | None, None, None, None, None]:
+    """Backward formula for the compile-visible packed split-norm op.
+
+    :param torch.autograd.function.FunctionCtx ctx: Autograd context.
+    :param Tensor | None grad_q: Query-output gradient.
+    :param Tensor | None grad_k: Key-output gradient.
+    :param Tensor | None grad_v: Value-output gradient.
+    :param Tensor | None _grad_inv_q: Ignored inverse-q-gradient placeholder.
+    :param Tensor | None _grad_inv_k: Ignored inverse-k-gradient placeholder.
+    :return tuple[Tensor | None, None, None, None, None]: Gradient for ``packed`` plus ``None`` for non-tensor args.
+    """
+    packed, q, k, inv_q, inv_k = ctx.saved_tensors
+    grad_q = torch.zeros_like(q) if grad_q is None else grad_q
+    grad_k = torch.zeros_like(k) if grad_k is None else grad_k
+    if grad_v is None:
+        batch, seq, heads = inv_q.shape
+        grad_v = packed.new_zeros((batch, seq, heads, ctx.head_v_dim))
+    grad_packed = torch.ops.hgdn_cuda_v4.packed_qkv_split_l2norm_backward(
+        grad_q,
+        grad_k,
+        grad_v,
+        packed,
+        q,
+        k,
+        inv_q,
+        inv_k,
+        int(ctx.n_heads),
+        int(ctx.head_k_dim),
+        int(ctx.head_v_dim),
+        float(ctx.eps),
+    )
+    return grad_packed, None, None, None, None
+
+
 torch.library.register_autograd(
     "hgdn_cuda_v2::preact_silu_split_l2norm_nct",
     _preact_silu_split_l2norm_nct_backward_formula,
@@ -742,6 +1065,12 @@ torch.library.register_autograd(
     "hgdn_cuda_v3::packed_qkv_frontend",
     _packed_qkv_frontend_backward_formula,
     setup_context=_setup_packed_qkv_frontend_context,
+)
+
+torch.library.register_autograd(
+    "hgdn_cuda_v4::packed_qkv_split_l2norm",
+    _packed_qkv_split_l2norm_backward_formula,
+    setup_context=_setup_packed_qkv_split_l2norm_context,
 )
 
 
@@ -1394,6 +1723,33 @@ def fused_packed_qkv_split_l2norm(
         head_v_dim=head_v_dim,
         eps=eps,
     )
+
+
+def packed_qkv_split_l2norm_compile_visible(
+    packed: Tensor,
+    *,
+    n_heads: int,
+    head_k_dim: int,
+    head_v_dim: int,
+    eps: float = 1e-6,
+) -> tuple[Tensor, Tensor, Tensor]:
+    """Run packed split plus q/k norm through a compile-visible `torch.library` op.
+
+    :param Tensor packed: Packed post-conv activations shaped ``(batch, seq, channels)``.
+    :param int n_heads: Number of HGDN heads.
+    :param int head_k_dim: Per-head q/k width.
+    :param int head_v_dim: Per-head value width.
+    :param float eps: L2-normalization epsilon.
+    :return tuple[Tensor, Tensor, Tensor]: Normalized q/k and reshaped v.
+    """
+    q, k, v, _inv_q, _inv_k = torch.ops.hgdn_cuda_v4.packed_qkv_split_l2norm(
+        packed,
+        int(n_heads),
+        int(head_k_dim),
+        int(head_v_dim),
+        float(eps),
+    )
+    return q, k, v
 
 
 def frontend_preact_silu_split_l2norm_nct(

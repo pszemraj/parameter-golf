@@ -824,6 +824,17 @@ def test_gdn_cuda_split_norm_cpu_fallback_matches_packed_path() -> None:
     )
 
 
+def test_gdn_cuda_split_norm_lib_cpu_fallback_matches_custombwd_path() -> None:
+    """CPU fallback for compile-visible split+l2norm should compose with packed custom backward."""
+    _assert_gdn_cpu_fallback_matches_reference(
+        base_kwargs=_make_standard_packed_kwargs(
+            use_packed_qkv_conv_custom_backward=True
+        ),
+        candidate_overrides=dict(use_cuda_split_norm_lib=True),
+        success_message="  ✓ CUDA split+l2norm lib composes with packed custom backward",
+    )
+
+
 def test_gdn_cuda_frontend_nct_cpu_fallback_matches_packed_path() -> None:
     """CPU fallback for the NCT frontend op should preserve packed-path outputs and gradients."""
     _assert_gdn_cpu_fallback_matches_reference(
@@ -1004,9 +1015,70 @@ def test_gdn_cuda_split_norm_validation() -> None:
                 use_packed_qkv_split_copy=True,
             ),
         ),
+        (
+            "Expected CUDA split+l2norm to reject split+l2norm lib",
+            dict(
+                use_packed_qkv_conv=True,
+                use_packed_qkv_proj=True,
+                conv_output_contiguous=True,
+                use_cuda_split_norm=True,
+                use_cuda_split_norm_lib=True,
+            ),
+        ),
     ]:
         _assert_gdn_init_rejected(message, **kwargs)
     print("  ✓ CUDA split+l2norm validates requirements")
+
+
+def test_gdn_cuda_split_norm_lib_validation() -> None:
+    """Compile-visible CUDA split+l2norm should stay on the packed custom-backward path."""
+    for message, kwargs in [
+        (
+            "Expected CUDA split+l2norm lib to require packed qkv proj+conv",
+            dict(use_cuda_split_norm_lib=True),
+        ),
+        (
+            "Expected CUDA split+l2norm lib to reject CUDA split+l2norm",
+            dict(
+                use_packed_qkv_conv=True,
+                use_packed_qkv_proj=True,
+                conv_output_contiguous=True,
+                use_cuda_split_norm=True,
+                use_cuda_split_norm_lib=True,
+            ),
+        ),
+        (
+            "Expected CUDA split+l2norm lib to reject the CUDA fused frontend lib",
+            dict(
+                use_packed_qkv_conv=True,
+                use_packed_qkv_proj=True,
+                conv_output_contiguous=True,
+                use_cuda_split_norm_lib=True,
+                use_cuda_fused_frontend_lib=True,
+            ),
+        ),
+        (
+            "Expected CUDA split+l2norm lib to reject split-copy materialization",
+            dict(
+                use_packed_qkv_conv=True,
+                use_packed_qkv_proj=True,
+                conv_output_contiguous=True,
+                use_cuda_split_norm_lib=True,
+                use_packed_qkv_split_copy=True,
+            ),
+        ),
+    ]:
+        _assert_gdn_init_rejected(message, **kwargs)
+    layer = _make_small_gdn(
+        use_packed_qkv_conv=True,
+        use_packed_qkv_proj=True,
+        conv_output_contiguous=True,
+        use_packed_qkv_conv_custom_backward=True,
+        use_cuda_split_norm_lib=True,
+    )
+    assert layer.use_packed_qkv_conv_custom_backward
+    assert layer.use_cuda_split_norm_lib
+    print("  ✓ CUDA split+l2norm lib validates requirements")
 
 
 def test_packed_qkv_frontend_reference_matches_eager_ops():
