@@ -143,6 +143,13 @@ HGDN_PRESETS: dict[str, dict[str, str]] = {
         "GDN_CONTROL_PROJ_FP32": "0",
         "GDN_USE_CUDA_FUSED_FRONTEND": "1",
     },
+    "winner-20260405-19-cuda-fused-frontend-lib": {
+        "GDN_CONV_OUTPUT_CONTIGUOUS": "1",
+        "GDN_USE_PACKED_QKV_CONV": "1",
+        "GDN_USE_PACKED_QKV_PROJ": "1",
+        "GDN_CONTROL_PROJ_FP32": "0",
+        "GDN_USE_CUDA_FUSED_FRONTEND_LIB": "1",
+    },
     "winner-20260405-19-cuda-packed-conv": {
         "GDN_CONV_OUTPUT_CONTIGUOUS": "1",
         "GDN_USE_PACKED_QKV_CONV": "1",
@@ -346,6 +353,11 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
         "--cuda-fused-frontend",
         action="store_true",
         help="Set GDN_USE_CUDA_FUSED_FRONTEND=1.",
+    )
+    parser.add_argument(
+        "--cuda-fused-frontend-lib",
+        action="store_true",
+        help="Set GDN_USE_CUDA_FUSED_FRONTEND_LIB=1.",
     )
     parser.add_argument(
         "--cuda-fused-output",
@@ -564,6 +576,8 @@ def build_env(args: argparse.Namespace) -> dict[str, str]:
         env["GDN_USE_CUDA_FRONTEND_NCT"] = "1"
     if args.cuda_fused_frontend:
         env["GDN_USE_CUDA_FUSED_FRONTEND"] = "1"
+    if args.cuda_fused_frontend_lib:
+        env["GDN_USE_CUDA_FUSED_FRONTEND_LIB"] = "1"
     if args.cuda_fused_output:
         env["GDN_USE_CUDA_FUSED_OUTPUT"] = "1"
     if args.cuda_jit_build:

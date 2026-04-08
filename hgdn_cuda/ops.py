@@ -15,6 +15,8 @@ from torch.nn import functional as F
 from torch.nn import grad as nn_grad
 
 from .reference import (
+    packed_qkv_frontend_backward_reference,
+    packed_qkv_frontend_reference_with_ctx,
     packed_qkv_conv_reference,
     packed_qkv_frontend_reference,
     packed_qkv_split_l2norm_reference,
@@ -119,6 +121,20 @@ _FRONTEND_V2_LIB.define(
     "Tensor grad_q, Tensor grad_k, Tensor grad_v, "
     "Tensor preact_nct, Tensor q, Tensor k, Tensor inv_q, Tensor inv_k"
     ") -> Tensor"
+)
+
+_FRONTEND_V3_LIB = torch.library.Library("hgdn_cuda_v3", "DEF")
+_FRONTEND_V3_LIB.define(
+    "packed_qkv_frontend("
+    "Tensor qkv, Tensor weight, int n_heads, int head_k_dim, int head_v_dim, float eps"
+    ") -> (Tensor q, Tensor k, Tensor v, Tensor preact, Tensor inv_q, Tensor inv_k)"
+)
+_FRONTEND_V3_LIB.define(
+    "packed_qkv_frontend_backward("
+    "Tensor grad_q, Tensor grad_k, Tensor grad_v, "
+    "Tensor qkv, Tensor weight, Tensor preact, Tensor q, Tensor k, Tensor inv_q, Tensor inv_k, "
+    "int n_heads, int head_k_dim, int head_v_dim, float eps"
+    ") -> (Tensor grad_qkv, Tensor grad_weight)"
 )
 
 
@@ -275,6 +291,194 @@ def _preact_silu_split_l2norm_nct_backward_cuda(
     )
 
 
+@torch.library.impl("hgdn_cuda_v3::packed_qkv_frontend", "CPU")
+def _packed_qkv_frontend_cpu(
+    qkv: Tensor,
+    weight: Tensor,
+    n_heads: int,
+    head_k_dim: int,
+    head_v_dim: int,
+    eps: float,
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+    """CPU/reference implementation for the compile-visible packed frontend op.
+
+    :param Tensor qkv: Packed q/k/v projections in ``(batch, seq, channels)`` layout.
+    :param Tensor weight: Packed depthwise conv weights.
+    :param int n_heads: Number of HGDN heads.
+    :param int head_k_dim: Per-head q/k width.
+    :param int head_v_dim: Per-head value width.
+    :param float eps: L2-normalization epsilon.
+    :return tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]: Normalized q/k, reshaped v, packed preactivation, and inverse norms.
+    """
+    return packed_qkv_frontend_reference_with_ctx(
+        qkv,
+        weight,
+        n_heads=int(n_heads),
+        head_k_dim=int(head_k_dim),
+        head_v_dim=int(head_v_dim),
+        eps=float(eps),
+    )
+
+
+@torch.library.impl("hgdn_cuda_v3::packed_qkv_frontend", "CUDA")
+def _packed_qkv_frontend_cuda(
+    qkv: Tensor,
+    weight: Tensor,
+    n_heads: int,
+    head_k_dim: int,
+    head_v_dim: int,
+    eps: float,
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+    """CUDA implementation for the compile-visible packed frontend op.
+
+    :param Tensor qkv: Packed q/k/v projections in ``(batch, seq, channels)`` layout.
+    :param Tensor weight: Packed depthwise conv weights.
+    :param int n_heads: Number of HGDN heads.
+    :param int head_k_dim: Per-head q/k width.
+    :param int head_v_dim: Per-head value width.
+    :param float eps: L2-normalization epsilon.
+    :return tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]: Normalized q/k, reshaped v, packed preactivation, and inverse norms.
+    """
+    ext = _load_extension()
+    if ext is None:
+        _warn_once(
+            "hgdn_cuda_frontend_v3_fallback",
+            "GDN compile-visible packed frontend path requested but the extension is unavailable; "
+            "using the PyTorch reference path instead.",
+        )
+        return packed_qkv_frontend_reference_with_ctx(
+            qkv,
+            weight,
+            n_heads=int(n_heads),
+            head_k_dim=int(head_k_dim),
+            head_v_dim=int(head_v_dim),
+            eps=float(eps),
+        )
+    return ext.packed_qkv_frontend_forward(
+        qkv.contiguous(),
+        weight.contiguous(),
+        int(n_heads),
+        int(head_k_dim),
+        int(head_v_dim),
+        float(eps),
+    )
+
+
+@torch.library.impl("hgdn_cuda_v3::packed_qkv_frontend_backward", "CPU")
+def _packed_qkv_frontend_backward_cpu(
+    grad_q: Tensor,
+    grad_k: Tensor,
+    grad_v: Tensor,
+    qkv: Tensor,
+    weight: Tensor,
+    _preact: Tensor,
+    _q: Tensor,
+    _k: Tensor,
+    _inv_q: Tensor,
+    _inv_k: Tensor,
+    n_heads: int,
+    head_k_dim: int,
+    head_v_dim: int,
+    eps: float,
+) -> tuple[Tensor, Tensor]:
+    """CPU/reference implementation for the packed frontend backward op.
+
+    :param Tensor grad_q: Query gradients.
+    :param Tensor grad_k: Key gradients.
+    :param Tensor grad_v: Value gradients.
+    :param Tensor qkv: Saved packed q/k/v projections.
+    :param Tensor weight: Saved depthwise conv weights.
+    :param Tensor _preact: Ignored saved preactivation placeholder.
+    :param Tensor _q: Ignored saved q placeholder.
+    :param Tensor _k: Ignored saved k placeholder.
+    :param Tensor _inv_q: Ignored saved inverse-q placeholder.
+    :param Tensor _inv_k: Ignored saved inverse-k placeholder.
+    :param int n_heads: Number of HGDN heads.
+    :param int head_k_dim: Per-head q/k width.
+    :param int head_v_dim: Per-head value width.
+    :param float eps: L2-normalization epsilon.
+    :return tuple[Tensor, Tensor]: Gradients for ``qkv`` and ``weight``.
+    """
+    return packed_qkv_frontend_backward_reference(
+        grad_q,
+        grad_k,
+        grad_v,
+        qkv,
+        weight,
+        n_heads=int(n_heads),
+        head_k_dim=int(head_k_dim),
+        head_v_dim=int(head_v_dim),
+        eps=float(eps),
+    )
+
+
+@torch.library.impl("hgdn_cuda_v3::packed_qkv_frontend_backward", "CUDA")
+def _packed_qkv_frontend_backward_cuda(
+    grad_q: Tensor,
+    grad_k: Tensor,
+    grad_v: Tensor,
+    qkv: Tensor,
+    weight: Tensor,
+    preact: Tensor,
+    q: Tensor,
+    k: Tensor,
+    inv_q: Tensor,
+    inv_k: Tensor,
+    n_heads: int,
+    head_k_dim: int,
+    head_v_dim: int,
+    eps: float,
+) -> tuple[Tensor, Tensor]:
+    """CUDA implementation for the packed frontend backward op.
+
+    :param Tensor grad_q: Query gradients.
+    :param Tensor grad_k: Key gradients.
+    :param Tensor grad_v: Value gradients.
+    :param Tensor qkv: Saved packed q/k/v projections.
+    :param Tensor weight: Saved depthwise conv weights.
+    :param Tensor preact: Saved packed preactivation tensor.
+    :param Tensor q: Saved normalized q output.
+    :param Tensor k: Saved normalized k output.
+    :param Tensor inv_q: Saved inverse q norms.
+    :param Tensor inv_k: Saved inverse k norms.
+    :param int n_heads: Number of HGDN heads.
+    :param int head_k_dim: Per-head q/k width.
+    :param int head_v_dim: Per-head value width.
+    :param float eps: Unused epsilon placeholder for API symmetry.
+    :return tuple[Tensor, Tensor]: Gradients for ``qkv`` and ``weight``.
+    """
+    ext = _load_extension()
+    if ext is None:
+        _warn_once(
+            "hgdn_cuda_frontend_v3_bwd_fallback",
+            "GDN compile-visible packed frontend backward requested but the extension is unavailable; "
+            "using the PyTorch reference path instead.",
+        )
+        return packed_qkv_frontend_backward_reference(
+            grad_q,
+            grad_k,
+            grad_v,
+            qkv,
+            weight,
+            n_heads=int(n_heads),
+            head_k_dim=int(head_k_dim),
+            head_v_dim=int(head_v_dim),
+            eps=float(eps),
+        )
+    return ext.packed_qkv_frontend_backward(
+        grad_q.contiguous(),
+        grad_k.contiguous(),
+        grad_v.contiguous(),
+        qkv.contiguous(),
+        weight.contiguous(),
+        preact.contiguous(),
+        q.contiguous(),
+        k.contiguous(),
+        inv_q.contiguous(),
+        inv_k.contiguous(),
+    )
+
+
 @torch.library.register_fake("hgdn_cuda_v2::preact_silu_split_l2norm_nct")
 def _preact_silu_split_l2norm_nct_fake(
     preact_nct: Tensor,
@@ -337,6 +541,76 @@ def _preact_silu_split_l2norm_nct_backward_fake(
     return preact_nct.new_empty(preact_nct.shape)
 
 
+@torch.library.register_fake("hgdn_cuda_v3::packed_qkv_frontend")
+def _packed_qkv_frontend_fake(
+    qkv: Tensor,
+    weight: Tensor,
+    n_heads: int,
+    head_k_dim: int,
+    head_v_dim: int,
+    _eps: float,
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+    """Meta kernel for the compile-visible packed frontend op.
+
+    :param Tensor qkv: Packed q/k/v projections.
+    :param Tensor weight: Packed depthwise conv weights.
+    :param int n_heads: Number of HGDN heads.
+    :param int head_k_dim: Per-head q/k width.
+    :param int head_v_dim: Per-head value width.
+    :param float _eps: Ignored epsilon placeholder.
+    :return tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]: Meta tensors matching the packed frontend outputs.
+    """
+    if qkv.ndim != 3:
+        raise ValueError(f"Expected qkv.ndim == 3, got {qkv.ndim}")
+    batch, seq, _channels = qkv.shape
+    q = qkv.new_empty((batch, seq, int(n_heads), int(head_k_dim)))
+    k = qkv.new_empty((batch, seq, int(n_heads), int(head_k_dim)))
+    v = qkv.new_empty((batch, seq, int(n_heads), int(head_v_dim)))
+    preact = qkv.new_empty(qkv.shape)
+    inv_q = qkv.new_empty((batch, seq, int(n_heads)), dtype=torch.float32)
+    inv_k = qkv.new_empty((batch, seq, int(n_heads)), dtype=torch.float32)
+    return q, k, v, preact, inv_q, inv_k
+
+
+@torch.library.register_fake("hgdn_cuda_v3::packed_qkv_frontend_backward")
+def _packed_qkv_frontend_backward_fake(
+    grad_q: Tensor,
+    grad_k: Tensor,
+    grad_v: Tensor,
+    qkv: Tensor,
+    weight: Tensor,
+    _preact: Tensor,
+    _q: Tensor,
+    _k: Tensor,
+    _inv_q: Tensor,
+    _inv_k: Tensor,
+    _n_heads: int,
+    _head_k_dim: int,
+    _head_v_dim: int,
+    _eps: float,
+) -> tuple[Tensor, Tensor]:
+    """Meta kernel for the packed frontend backward op.
+
+    :param Tensor grad_q: Query gradients.
+    :param Tensor grad_k: Key gradients.
+    :param Tensor grad_v: Value gradients.
+    :param Tensor qkv: Saved packed q/k/v projections.
+    :param Tensor weight: Saved depthwise conv weights.
+    :param Tensor _preact: Ignored saved preactivation placeholder.
+    :param Tensor _q: Ignored saved q placeholder.
+    :param Tensor _k: Ignored saved k placeholder.
+    :param Tensor _inv_q: Ignored saved inverse-q placeholder.
+    :param Tensor _inv_k: Ignored saved inverse-k placeholder.
+    :param int _n_heads: Ignored head-count placeholder.
+    :param int _head_k_dim: Ignored q/k width placeholder.
+    :param int _head_v_dim: Ignored value width placeholder.
+    :param float _eps: Ignored epsilon placeholder.
+    :return tuple[Tensor, Tensor]: Meta tensors matching the input and weight gradients.
+    """
+    del grad_q, grad_k, grad_v
+    return qkv.new_empty(qkv.shape), weight.new_empty(weight.shape)
+
+
 def _setup_preact_silu_split_l2norm_nct_context(
     ctx: torch.autograd.function.FunctionCtx,
     inputs: tuple[Tensor, int, int, int, float],
@@ -352,6 +626,27 @@ def _setup_preact_silu_split_l2norm_nct_context(
     preact_nct, _n_heads, _head_k_dim, _head_v_dim, _eps = inputs
     q, k, _v, inv_q, inv_k = output
     ctx.save_for_backward(preact_nct, q, k, inv_q, inv_k)
+
+
+def _setup_packed_qkv_frontend_context(
+    ctx: torch.autograd.function.FunctionCtx,
+    inputs: tuple[Tensor, Tensor, int, int, int, float],
+    output: tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor],
+) -> None:
+    """Save tensors needed by the packed frontend backward formula.
+
+    :param torch.autograd.function.FunctionCtx ctx: Autograd context.
+    :param tuple[Tensor, Tensor, int, int, int, float] inputs: Forward inputs.
+    :param tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor] output: Forward outputs.
+    :return None: Saves tensors and metadata onto ``ctx``.
+    """
+    qkv, weight, n_heads, head_k_dim, head_v_dim, eps = inputs
+    q, k, _v, preact, inv_q, inv_k = output
+    ctx.save_for_backward(qkv, weight, preact, q, k, inv_q, inv_k)
+    ctx.n_heads = int(n_heads)
+    ctx.head_k_dim = int(head_k_dim)
+    ctx.head_v_dim = int(head_v_dim)
+    ctx.eps = float(eps)
 
 
 def _preact_silu_split_l2norm_nct_backward_formula(
@@ -392,10 +687,61 @@ def _preact_silu_split_l2norm_nct_backward_formula(
     return grad_preact, None, None, None, None
 
 
+def _packed_qkv_frontend_backward_formula(
+    ctx: torch.autograd.function.FunctionCtx,
+    grad_q: Tensor | None,
+    grad_k: Tensor | None,
+    grad_v: Tensor | None,
+    _grad_preact: Tensor | None,
+    _grad_inv_q: Tensor | None,
+    _grad_inv_k: Tensor | None,
+) -> tuple[Tensor | None, Tensor | None, None, None, None, None]:
+    """Backward formula for the compile-visible packed frontend op.
+
+    :param torch.autograd.function.FunctionCtx ctx: Autograd context.
+    :param Tensor | None grad_q: Query-output gradient.
+    :param Tensor | None grad_k: Key-output gradient.
+    :param Tensor | None grad_v: Value-output gradient.
+    :param Tensor | None _grad_preact: Ignored preactivation-gradient placeholder.
+    :param Tensor | None _grad_inv_q: Ignored inverse-q-gradient placeholder.
+    :param Tensor | None _grad_inv_k: Ignored inverse-k-gradient placeholder.
+    :return tuple[Tensor | None, Tensor | None, None, None, None, None]: Gradients for ``qkv`` and ``weight`` plus ``None`` for non-tensor args.
+    """
+    qkv, weight, preact, q, k, inv_q, inv_k = ctx.saved_tensors
+    grad_q = torch.zeros_like(q) if grad_q is None else grad_q
+    grad_k = torch.zeros_like(k) if grad_k is None else grad_k
+    if grad_v is None:
+        batch, seq, heads = inv_q.shape
+        grad_v = qkv.new_zeros((batch, seq, heads, ctx.head_v_dim))
+    grad_qkv, grad_weight = torch.ops.hgdn_cuda_v3.packed_qkv_frontend_backward(
+        grad_q,
+        grad_k,
+        grad_v,
+        qkv,
+        weight,
+        preact,
+        q,
+        k,
+        inv_q,
+        inv_k,
+        int(ctx.n_heads),
+        int(ctx.head_k_dim),
+        int(ctx.head_v_dim),
+        float(ctx.eps),
+    )
+    return grad_qkv, grad_weight, None, None, None, None
+
+
 torch.library.register_autograd(
     "hgdn_cuda_v2::preact_silu_split_l2norm_nct",
     _preact_silu_split_l2norm_nct_backward_formula,
     setup_context=_setup_preact_silu_split_l2norm_nct_context,
+)
+
+torch.library.register_autograd(
+    "hgdn_cuda_v3::packed_qkv_frontend",
+    _packed_qkv_frontend_backward_formula,
+    setup_context=_setup_packed_qkv_frontend_context,
 )
 
 
@@ -1073,6 +1419,36 @@ def frontend_preact_silu_split_l2norm_nct(
     """
     q, k, v, _inv_q, _inv_k = torch.ops.hgdn_cuda_v2.preact_silu_split_l2norm_nct(
         preact_nct,
+        int(n_heads),
+        int(head_k_dim),
+        int(head_v_dim),
+        float(eps),
+    )
+    return q, k, v
+
+
+def packed_qkv_frontend_compile_visible(
+    qkv: Tensor,
+    weight: Tensor,
+    *,
+    n_heads: int,
+    head_k_dim: int,
+    head_v_dim: int,
+    eps: float = 1e-6,
+) -> tuple[Tensor, Tensor, Tensor]:
+    """Run the packed fused frontend through a compile-visible `torch.library` op.
+
+    :param Tensor qkv: Packed q/k/v projections shaped ``(batch, seq, channels)``.
+    :param Tensor weight: Packed depthwise conv weights shaped ``(channels, kernel)``.
+    :param int n_heads: Number of HGDN heads.
+    :param int head_k_dim: Per-head q/k width.
+    :param int head_v_dim: Per-head value width.
+    :param float eps: L2-normalization epsilon.
+    :return tuple[Tensor, Tensor, Tensor]: Normalized q/k and reshaped v.
+    """
+    q, k, v, _preact, _inv_q, _inv_k = torch.ops.hgdn_cuda_v3.packed_qkv_frontend(
+        qkv,
+        weight,
         int(n_heads),
         int(head_k_dim),
         int(head_v_dim),

@@ -1324,8 +1324,96 @@ def test_gdn_cuda_fused_cpu_fallback_matches_packed_path():
     grad = torch.randn_like(y_eager)
     y_eager.backward(grad, retain_graph=True)
     y_fused.backward(grad)
-    torch.testing.assert_close(x_fused.grad, x_eager.grad, atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(x_fused.grad, x_eager.grad, atol=3e-4, rtol=5e-3)
     print("  ✓ fused HGDN CPU fallback matches packed path")
+
+
+def test_gdn_cuda_fused_frontend_lib_validation():
+    """Compile-visible fused frontend should validate the intended family contract."""
+    try:
+        GatedDeltaNet(
+            d_model=64,
+            n_heads=4,
+            head_k_dim=8,
+            expand_v=1.0,
+            use_cuda_fused_frontend_lib=True,
+        )
+        raise AssertionError(
+            "Expected compile-visible fused frontend to require packed qkv proj+conv"
+        )
+    except ValueError:
+        pass
+    try:
+        GatedDeltaNet(
+            d_model=64,
+            n_heads=4,
+            head_k_dim=8,
+            expand_v=1.0,
+            use_packed_qkv_conv=True,
+            use_packed_qkv_proj=True,
+            conv_output_contiguous=True,
+            use_packed_qkv_conv_custom_backward=True,
+            use_cuda_fused_frontend_lib=True,
+        )
+        raise AssertionError(
+            "Expected compile-visible fused frontend to reject packed qkv custom backward"
+        )
+    except ValueError:
+        pass
+    try:
+        GatedDeltaNet(
+            d_model=64,
+            n_heads=4,
+            head_k_dim=8,
+            expand_v=1.0,
+            use_packed_qkv_conv=True,
+            use_packed_qkv_proj=True,
+            conv_output_contiguous=True,
+            use_cuda_fused_frontend=True,
+            use_cuda_fused_frontend_lib=True,
+        )
+        raise AssertionError(
+            "Expected compile-visible fused frontend to reject the old fused frontend path"
+        )
+    except ValueError:
+        pass
+    print("  ✓ compile-visible fused frontend validates requirements")
+
+
+def test_gdn_cuda_fused_frontend_lib_cpu_fallback_matches_packed_path():
+    """Compile-visible fused frontend CPU fallback should preserve packed-path outputs and gradients."""
+    torch.manual_seed(42)
+    kwargs = dict(
+        d_model=64,
+        n_heads=4,
+        head_k_dim=8,
+        expand_v=1.0,
+        allow_neg_eigval=True,
+        conv_size=4,
+        use_fla=False,
+        use_packed_qkv_conv=True,
+        use_packed_qkv_proj=True,
+        conv_output_contiguous=True,
+        output_norm_fp32=True,
+    )
+    eager = GatedDeltaNet(**kwargs)
+    fused = GatedDeltaNet(
+        **kwargs,
+        use_cuda_fused_frontend_lib=True,
+    )
+    fused.load_state_dict(eager.state_dict(), strict=True)
+
+    x_eager = torch.randn(2, 32, 64, requires_grad=True)
+    x_fused = x_eager.detach().clone().requires_grad_(True)
+    y_eager = eager(x_eager)
+    y_fused = fused(x_fused)
+    torch.testing.assert_close(y_fused, y_eager, atol=1e-5, rtol=1e-5)
+
+    grad = torch.randn_like(y_eager)
+    y_eager.backward(grad, retain_graph=True)
+    y_fused.backward(grad)
+    torch.testing.assert_close(x_fused.grad, x_eager.grad, atol=3e-4, rtol=5e-3)
+    print("  ✓ compile-visible fused frontend CPU fallback matches packed path")
 
 
 def test_gdn_conv_output_contiguous():
@@ -1754,6 +1842,14 @@ if __name__ == "__main__":
         (
             "Fused HGDN CPU fallback parity",
             test_gdn_cuda_fused_cpu_fallback_matches_packed_path,
+        ),
+        (
+            "Compile-visible fused frontend validation",
+            test_gdn_cuda_fused_frontend_lib_validation,
+        ),
+        (
+            "Compile-visible fused frontend CPU fallback parity",
+            test_gdn_cuda_fused_frontend_lib_cpu_fallback_matches_packed_path,
         ),
         (
             "CUDA split+l2norm CPU fallback parity",

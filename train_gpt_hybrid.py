@@ -190,6 +190,9 @@ class Hyperparameters:
     gdn_use_cuda_fused_frontend = bool(
         int(os.environ.get("GDN_USE_CUDA_FUSED_FRONTEND", "0"))
     )
+    gdn_use_cuda_fused_frontend_lib = bool(
+        int(os.environ.get("GDN_USE_CUDA_FUSED_FRONTEND_LIB", "0"))
+    )
     gdn_use_cuda_fused_output = bool(
         int(os.environ.get("GDN_USE_CUDA_FUSED_OUTPUT", "0"))
     )
@@ -1039,6 +1042,7 @@ def main() -> None:
         f"cuda_packed_conv_aten_bwd={int(args.gdn_use_cuda_packed_conv_aten_backward)} "
         f"cuda_packed_conv_aten_weight_bwd={int(args.gdn_use_cuda_packed_conv_aten_weight_backward)} "
         f"cuda_fused_frontend={int(args.gdn_use_cuda_fused_frontend)} "
+        f"cuda_fused_frontend_lib={int(args.gdn_use_cuda_fused_frontend_lib)} "
         f"cuda_fused_output={int(args.gdn_use_cuda_fused_output)} "
         f"cuda_split_norm={int(args.gdn_use_cuda_split_norm)}",
         console=False,
@@ -1134,6 +1138,7 @@ def main() -> None:
             gdn_use_cuda_packed_conv_aten_backward=args.gdn_use_cuda_packed_conv_aten_backward,
             gdn_use_cuda_packed_conv_aten_weight_backward=args.gdn_use_cuda_packed_conv_aten_weight_backward,
             gdn_use_cuda_fused_frontend=args.gdn_use_cuda_fused_frontend,
+            gdn_use_cuda_fused_frontend_lib=args.gdn_use_cuda_fused_frontend_lib,
             gdn_use_cuda_fused_output=args.gdn_use_cuda_fused_output,
             gdn_use_cuda_split_norm=args.gdn_use_cuda_split_norm,
             gdn_use_packed_qkv_conv_custom_backward=args.gdn_use_packed_qkv_conv_custom_backward,
@@ -1221,6 +1226,7 @@ def main() -> None:
                 "gdn_use_cuda_packed_conv_aten_backward": args.gdn_use_cuda_packed_conv_aten_backward,
                 "gdn_use_cuda_packed_conv_aten_weight_backward": args.gdn_use_cuda_packed_conv_aten_weight_backward,
                 "gdn_use_cuda_fused_frontend": args.gdn_use_cuda_fused_frontend,
+                "gdn_use_cuda_fused_frontend_lib": args.gdn_use_cuda_fused_frontend_lib,
                 "gdn_use_cuda_fused_output": args.gdn_use_cuda_fused_output,
                 "gdn_use_cuda_split_norm": args.gdn_use_cuda_split_norm,
                 "gdn_use_packed_qkv_conv_custom_backward": args.gdn_use_packed_qkv_conv_custom_backward,

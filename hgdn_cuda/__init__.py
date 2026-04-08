@@ -8,8 +8,9 @@ from .ops import (
     fused_packed_qkv_conv_aten_weight_backward,
     fused_packed_qkv_frontend,
     fused_packed_qkv_split_l2norm,
-    frontend_preact_silu_split_l2norm_nct,
     fused_rmsnorm_silu_gate,
+    frontend_preact_silu_split_l2norm_nct,
+    packed_qkv_frontend_compile_visible,
 )
 from .reference import (
     packed_qkv_conv_reference,
@@ -28,8 +29,9 @@ __all__ = [
     "fused_packed_qkv_conv_aten_weight_backward",
     "fused_packed_qkv_frontend",
     "fused_packed_qkv_split_l2norm",
-    "frontend_preact_silu_split_l2norm_nct",
     "fused_rmsnorm_silu_gate",
+    "frontend_preact_silu_split_l2norm_nct",
+    "packed_qkv_frontend_compile_visible",
     "packed_qkv_conv_reference",
     "packed_qkv_frontend_reference",
     "packed_qkv_split_l2norm_reference",

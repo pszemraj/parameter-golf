@@ -188,6 +188,124 @@ def packed_qkv_split_l2norm_reference(
     return q.contiguous(), k.contiguous(), v.contiguous()
 
 
+def packed_qkv_frontend_reference_with_ctx(
+    qkv: Tensor,
+    weight: Tensor,
+    *,
+    n_heads: int,
+    head_k_dim: int,
+    head_v_dim: int,
+    eps: float = 1e-6,
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+    """Reference packed frontend with saved tensors for custom autograd formulas.
+
+    :param Tensor qkv: Packed q/k/v projections shaped ``(batch, seq, channels)``.
+    :param Tensor weight: Depthwise conv weights shaped ``(channels, kernel)``.
+    :param int n_heads: Number of HGDN heads.
+    :param int head_k_dim: Per-head q/k width.
+    :param int head_v_dim: Per-head value width.
+    :param float eps: Numerical stability epsilon.
+    :return tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]: Normalized q/k, reshaped v, packed preactivation, and fp32 inverse norms.
+    """
+    if qkv.ndim != 3:
+        raise ValueError(f"Expected qkv.ndim == 3, got {qkv.ndim}")
+    if weight.ndim == 3:
+        weight = weight.view(weight.shape[0], weight.shape[-1])
+    if weight.ndim != 2:
+        raise ValueError(f"Expected weight.ndim in {{2, 3}}, got {weight.ndim}")
+    if qkv.shape[-1] != weight.shape[0]:
+        raise ValueError(
+            f"Packed conv channel mismatch: qkv={qkv.shape[-1]} weight={weight.shape[0]}"
+        )
+
+    batch, seq, channels = qkv.shape
+    q_dim = n_heads * head_k_dim
+    k_dim = n_heads * head_k_dim
+    v_dim = n_heads * head_v_dim
+    expected_channels = q_dim + k_dim + v_dim
+    if channels != expected_channels:
+        raise ValueError(
+            f"Packed frontend channel mismatch: got {channels}, expected {expected_channels}"
+        )
+
+    preact = (
+        F.conv1d(
+            qkv.transpose(1, 2),
+            weight[:, None, :],
+            padding=weight.shape[-1] - 1,
+            groups=qkv.shape[-1],
+        )[..., :seq]
+        .transpose(1, 2)
+        .contiguous()
+    )
+    activated = F.silu(preact)
+    q_pre, k_pre, v = activated.split((q_dim, k_dim, v_dim), dim=-1)
+    q_pre = q_pre.view(batch, seq, n_heads, head_k_dim)
+    k_pre = k_pre.view(batch, seq, n_heads, head_k_dim)
+    v = v.view(batch, seq, n_heads, head_v_dim)
+
+    accum_dtype = _norm_accum_dtype(q_pre)
+    q_pre_accum = q_pre.to(dtype=accum_dtype)
+    k_pre_accum = k_pre.to(dtype=accum_dtype)
+    inv_q = torch.rsqrt(q_pre_accum.square().sum(dim=-1) + eps).float()
+    inv_k = torch.rsqrt(k_pre_accum.square().sum(dim=-1) + eps).float()
+    q = (q_pre_accum * inv_q.unsqueeze(-1)).to(dtype=qkv.dtype)
+    k = (k_pre_accum * inv_k.unsqueeze(-1)).to(dtype=qkv.dtype)
+    return (
+        q.contiguous(),
+        k.contiguous(),
+        v.to(dtype=qkv.dtype).contiguous(),
+        preact,
+        inv_q.contiguous(),
+        inv_k.contiguous(),
+    )
+
+
+def packed_qkv_frontend_backward_reference(
+    grad_q: Tensor,
+    grad_k: Tensor,
+    grad_v: Tensor,
+    qkv: Tensor,
+    weight: Tensor,
+    *,
+    n_heads: int,
+    head_k_dim: int,
+    head_v_dim: int,
+    eps: float = 1e-6,
+) -> tuple[Tensor, Tensor]:
+    """Reference backward for the packed frontend op.
+
+    :param Tensor grad_q: Query gradients shaped ``(batch, seq, heads, head_k_dim)``.
+    :param Tensor grad_k: Key gradients shaped ``(batch, seq, heads, head_k_dim)``.
+    :param Tensor grad_v: Value gradients shaped ``(batch, seq, heads, head_v_dim)``.
+    :param Tensor qkv: Saved packed q/k/v projections.
+    :param Tensor weight: Saved depthwise conv weights.
+    :param int n_heads: Number of HGDN heads.
+    :param int head_k_dim: Per-head q/k width.
+    :param int head_v_dim: Per-head value width.
+    :param float eps: Numerical stability epsilon.
+    :return tuple[Tensor, Tensor]: Gradients for ``qkv`` and ``weight``.
+    """
+    with torch.enable_grad():
+        qkv_ref = qkv.detach().requires_grad_(True)
+        weight_ref = weight.detach().requires_grad_(True)
+        q, k, v, _preact, _inv_q, _inv_k = packed_qkv_frontend_reference_with_ctx(
+            qkv_ref,
+            weight_ref,
+            n_heads=n_heads,
+            head_k_dim=head_k_dim,
+            head_v_dim=head_v_dim,
+            eps=eps,
+        )
+        grad_input, grad_weight = torch.autograd.grad(
+            outputs=(q, k, v),
+            inputs=(qkv_ref, weight_ref),
+            grad_outputs=(grad_q, grad_k, grad_v),
+            allow_unused=False,
+        )
+    return grad_input.contiguous(), grad_weight.contiguous()
+
+
 def preact_silu_split_l2norm_nct_reference(
     preact_nct: Tensor,
     *,
