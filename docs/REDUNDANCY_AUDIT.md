@@ -1,6 +1,6 @@
 # Redundancy Audit
 
-Last updated: 2026-04-08 01:40 EDT
+Last updated: 2026-04-08 04:42 EDT
 
 This document is the interim cleanup checkpoint before returning to HGDN kernel work. The goal is to identify code and test paths that do not justify their independent existence.
 
@@ -23,6 +23,9 @@ The cleanest immediate cleanup target is the profiler/report toolchain. The risk
 - `scripts/hgdn_cuda_parity.py` now uses one parameterized packed-conv parity
   helper for the three backward-ownership variants instead of repeating the same
   test body three times.
+- `test_model.py` now shares one invalid-config helper and one packed-path CPU
+  fallback helper across the HGDN CUDA family tests instead of keeping those
+  cases as hand-expanded near-duplicates.
 
 ## Findings
 

@@ -44,7 +44,7 @@ from train_gpt_hybrid import (
 )
 
 
-def _make_bf16_gdn(**kwargs) -> GatedDeltaNet:
+def _make_bf16_gdn(**kwargs: object) -> GatedDeltaNet:
     """Build the standard bf16 GDN test fixture with fp32 control params restored.
 
     :param dict kwargs: Extra `GatedDeltaNet` keyword arguments.
@@ -103,6 +103,125 @@ def _load_packed_qkv_state(
             separate.w_v.weight.clone()
         )
     packed.load_state_dict(packed_state, strict=True)
+
+
+def _make_small_gdn(**kwargs: object) -> GatedDeltaNet:
+    """Build the standard tiny HGDN config used by validation tests.
+
+    :param dict kwargs: Extra `GatedDeltaNet` keyword arguments.
+    :return GatedDeltaNet: Tiny HGDN fixture.
+    """
+    return GatedDeltaNet(
+        d_model=64,
+        n_heads=4,
+        head_k_dim=8,
+        expand_v=1.0,
+        **kwargs,
+    )
+
+
+def _make_standard_packed_kwargs(**overrides: object) -> dict[str, object]:
+    """Build the default packed-path kwargs used by HGDN CPU fallback tests.
+
+    :param dict overrides: Keyword overrides applied to the shared packed-path config.
+    :return dict[str, object]: Packed-path kwargs for `GatedDeltaNet`.
+    """
+    kwargs: dict[str, object] = dict(
+        d_model=64,
+        n_heads=4,
+        head_k_dim=8,
+        expand_v=1.0,
+        allow_neg_eigval=True,
+        conv_size=4,
+        use_fla=False,
+        use_packed_qkv_conv=True,
+        use_packed_qkv_proj=True,
+        conv_output_contiguous=True,
+    )
+    kwargs.update(overrides)
+    return kwargs
+
+
+def _assert_gdn_init_rejected(message: str, **kwargs: object) -> None:
+    """Assert that a tiny HGDN fixture rejects an invalid configuration.
+
+    :param str message: Assertion message raised if the config is accepted.
+    :param dict kwargs: `GatedDeltaNet` keyword arguments expected to fail validation.
+    """
+    try:
+        _make_small_gdn(**kwargs)
+    except ValueError:
+        return
+    raise AssertionError(message)
+
+
+def _assert_gdn_cpu_fallback_matches_reference(
+    *,
+    base_kwargs: dict[str, object],
+    candidate_overrides: dict[str, object],
+    reference_overrides: dict[str, object] | None = None,
+    atol: float = 1e-5,
+    rtol: float = 1e-5,
+    grad_atol: float = 1e-5,
+    grad_rtol: float = 1e-5,
+    success_message: str,
+) -> None:
+    """Check that a CPU fallback path matches the packed HGDN reference path.
+
+    :param dict[str, object] base_kwargs: Shared kwargs for both reference and candidate layers.
+    :param dict[str, object] candidate_overrides: Candidate-only kwargs.
+    :param dict[str, object] | None reference_overrides: Optional reference-only kwargs.
+    :param float atol: Forward absolute tolerance, defaults to 1e-5.
+    :param float rtol: Forward relative tolerance, defaults to 1e-5.
+    :param float grad_atol: Backward absolute tolerance, defaults to 1e-5.
+    :param float grad_rtol: Backward relative tolerance, defaults to 1e-5.
+    :param str success_message: Message printed after the check passes.
+    """
+    torch.manual_seed(42)
+    reference_kwargs = dict(base_kwargs)
+    if reference_overrides is not None:
+        reference_kwargs.update(reference_overrides)
+    candidate_kwargs = dict(base_kwargs)
+    candidate_kwargs.update(candidate_overrides)
+
+    reference = GatedDeltaNet(**reference_kwargs)
+    candidate = GatedDeltaNet(**candidate_kwargs)
+    candidate.load_state_dict(reference.state_dict(), strict=True)
+
+    x_reference = torch.randn(2, 32, 64, requires_grad=True)
+    x_candidate = x_reference.detach().clone().requires_grad_(True)
+    y_reference = reference(x_reference)
+    y_candidate = candidate(x_candidate)
+    torch.testing.assert_close(y_candidate, y_reference, atol=atol, rtol=rtol)
+
+    grad = torch.randn_like(y_reference)
+    y_reference.backward(grad, retain_graph=True)
+    y_candidate.backward(grad)
+    torch.testing.assert_close(
+        x_candidate.grad,
+        x_reference.grad,
+        atol=grad_atol,
+        rtol=grad_rtol,
+    )
+    print(success_message)
+
+
+def _assert_bf16_packed_recurrence_inputs_contiguous(
+    success_message: str, **kwargs: object
+) -> None:
+    """Assert that a bf16 packed-path test fixture materializes contiguous q/k/v outputs.
+
+    :param str success_message: Message printed after the check passes.
+    :param dict kwargs: Extra `_make_bf16_gdn` keyword arguments.
+    """
+    layer = _make_bf16_gdn(**kwargs)
+    q, k, v, _, _ = layer._project_recurrence_inputs(
+        torch.randn(2, 16, 64, dtype=torch.bfloat16)
+    )
+    assert q.is_contiguous()
+    assert k.is_contiguous()
+    assert v.is_contiguous()
+    print(success_message)
 
 
 def test_recurrence():
@@ -269,49 +388,28 @@ def test_gdn_packed_qkv_conv_matches_separate_path():
     print("  ✓ packed qkv conv matches separate path")
 
 
-def test_gdn_packed_qkv_conv_requires_aligned_settings():
+def test_gdn_packed_qkv_conv_requires_aligned_settings() -> None:
     """Packed q/k/v conv should reject mixed enablement or layout settings."""
-    try:
-        GatedDeltaNet(
-            d_model=64,
-            n_heads=4,
-            head_k_dim=8,
-            expand_v=1.0,
-            use_packed_qkv_conv=True,
-            use_v_conv=False,
-        )
-        raise AssertionError("Expected packed qkv conv to reject disabled v conv")
-    except ValueError:
-        pass
-    try:
-        GatedDeltaNet(
-            d_model=64,
-            n_heads=4,
-            head_k_dim=8,
-            expand_v=1.0,
-            use_packed_qkv_conv=True,
-            q_conv_output_contiguous=True,
-            k_conv_output_contiguous=False,
-            v_conv_output_contiguous=True,
-        )
-        raise AssertionError(
-            "Expected packed qkv conv to reject mixed output_contiguous flags"
-        )
-    except ValueError:
-        pass
-    try:
-        GatedDeltaNet(
-            d_model=64,
-            n_heads=4,
-            head_k_dim=8,
-            expand_v=1.0,
-            use_packed_qkv_proj=True,
-        )
-        raise AssertionError(
-            "Expected packed qkv projection to require packed qkv conv"
-        )
-    except ValueError:
-        pass
+    for message, kwargs in [
+        (
+            "Expected packed qkv conv to reject disabled v conv",
+            dict(use_packed_qkv_conv=True, use_v_conv=False),
+        ),
+        (
+            "Expected packed qkv conv to reject mixed output_contiguous flags",
+            dict(
+                use_packed_qkv_conv=True,
+                q_conv_output_contiguous=True,
+                k_conv_output_contiguous=False,
+                v_conv_output_contiguous=True,
+            ),
+        ),
+        (
+            "Expected packed qkv projection to require packed qkv conv",
+            dict(use_packed_qkv_proj=True),
+        ),
+    ]:
+        _assert_gdn_init_rejected(message, **kwargs)
     print("  ✓ packed qkv conv rejects incompatible settings")
 
 
@@ -391,41 +489,28 @@ def test_gdn_packed_qkv_custom_backward_matches_default_path():
     print("  ✓ packed qkv custom backward matches default path")
 
 
-def test_gdn_packed_qkv_custom_backward_validation():
+def test_gdn_packed_qkv_custom_backward_validation() -> None:
     """Packed qkv custom backward should only run on the non-fused packed path."""
-    try:
-        GatedDeltaNet(
-            d_model=64,
-            n_heads=4,
-            head_k_dim=8,
-            expand_v=1.0,
-            use_packed_qkv_conv_custom_backward=True,
-        )
-        raise AssertionError(
-            "Expected packed qkv custom backward to require packed qkv conv"
-        )
-    except ValueError:
-        pass
-    try:
-        GatedDeltaNet(
-            d_model=64,
-            n_heads=4,
-            head_k_dim=8,
-            expand_v=1.0,
-            use_packed_qkv_conv=True,
-            use_packed_qkv_proj=True,
-            use_packed_qkv_conv_custom_backward=True,
-            use_cuda_fused_frontend=True,
-        )
-        raise AssertionError(
-            "Expected packed qkv custom backward to reject the CUDA fused frontend"
-        )
-    except ValueError:
-        pass
+    for message, kwargs in [
+        (
+            "Expected packed qkv custom backward to require packed qkv conv",
+            dict(use_packed_qkv_conv_custom_backward=True),
+        ),
+        (
+            "Expected packed qkv custom backward to reject the CUDA fused frontend",
+            dict(
+                use_packed_qkv_conv=True,
+                use_packed_qkv_proj=True,
+                use_packed_qkv_conv_custom_backward=True,
+                use_cuda_fused_frontend=True,
+            ),
+        ),
+    ]:
+        _assert_gdn_init_rejected(message, **kwargs)
     print("  ✓ packed qkv custom backward validates requirements")
 
 
-def test_gdn_packed_qkv_single_contig_matches_default_path():
+def test_gdn_packed_qkv_single_contig_matches_default_path() -> None:
     """Single packed materialization should preserve packed qkv outputs and grads."""
     torch.manual_seed(42)
     kwargs = dict(
@@ -471,72 +556,43 @@ def test_gdn_packed_qkv_single_contig_matches_default_path():
             atol=1e-5,
             rtol=1e-5,
         )
-    single_bf16 = _make_bf16_gdn(
+    _assert_bf16_packed_recurrence_inputs_contiguous(
+        "  ✓ packed qkv single-contig matches default path",
         use_packed_qkv_conv=True,
         use_packed_qkv_proj=True,
         use_packed_qkv_conv_custom_backward=True,
         use_packed_qkv_single_contig=True,
         conv_output_contiguous=True,
     )
-    q, k, v, _, _ = single_bf16._project_recurrence_inputs(
-        torch.randn(2, 16, 64, dtype=torch.bfloat16)
-    )
-    assert q.is_contiguous()
-    assert k.is_contiguous()
-    assert v.is_contiguous()
-    print("  ✓ packed qkv single-contig matches default path")
 
 
-def test_gdn_packed_qkv_single_contig_validation():
+def test_gdn_packed_qkv_single_contig_validation() -> None:
     """Single packed materialization should only run on the non-fused packed path."""
-    try:
-        GatedDeltaNet(
-            d_model=64,
-            n_heads=4,
-            head_k_dim=8,
-            expand_v=1.0,
-            use_packed_qkv_single_contig=True,
-        )
-        raise AssertionError(
-            "Expected packed qkv single-contig to require packed qkv conv"
-        )
-    except ValueError:
-        pass
-    try:
-        GatedDeltaNet(
-            d_model=64,
-            n_heads=4,
-            head_k_dim=8,
-            expand_v=1.0,
-            use_packed_qkv_conv=True,
-            use_packed_qkv_single_contig=True,
-        )
-        raise AssertionError(
-            "Expected packed qkv single-contig to require packed qkv output_contiguous"
-        )
-    except ValueError:
-        pass
-    try:
-        GatedDeltaNet(
-            d_model=64,
-            n_heads=4,
-            head_k_dim=8,
-            expand_v=1.0,
-            use_packed_qkv_conv=True,
-            use_packed_qkv_proj=True,
-            conv_output_contiguous=True,
-            use_packed_qkv_single_contig=True,
-            use_cuda_fused_frontend=True,
-        )
-        raise AssertionError(
-            "Expected packed qkv single-contig to reject the CUDA fused frontend"
-        )
-    except ValueError:
-        pass
+    for message, kwargs in [
+        (
+            "Expected packed qkv single-contig to require packed qkv conv",
+            dict(use_packed_qkv_single_contig=True),
+        ),
+        (
+            "Expected packed qkv single-contig to require packed qkv output_contiguous",
+            dict(use_packed_qkv_conv=True, use_packed_qkv_single_contig=True),
+        ),
+        (
+            "Expected packed qkv single-contig to reject the CUDA fused frontend",
+            dict(
+                use_packed_qkv_conv=True,
+                use_packed_qkv_proj=True,
+                conv_output_contiguous=True,
+                use_packed_qkv_single_contig=True,
+                use_cuda_fused_frontend=True,
+            ),
+        ),
+    ]:
+        _assert_gdn_init_rejected(message, **kwargs)
     print("  ✓ packed qkv single-contig validates requirements")
 
 
-def test_gdn_packed_qkv_split_copy_matches_default_path():
+def test_gdn_packed_qkv_split_copy_matches_default_path() -> None:
     """Generated split-copy should preserve packed qkv outputs, grads, and contiguity."""
     if not hasattr(torch.ops.aten, "split_with_sizes_copy"):
         print(
@@ -585,90 +641,54 @@ def test_gdn_packed_qkv_split_copy_matches_default_path():
             atol=1e-5,
             rtol=1e-5,
         )
-    split_bf16 = _make_bf16_gdn(
+    _assert_bf16_packed_recurrence_inputs_contiguous(
+        "  ✓ packed qkv split-copy matches default path",
         use_packed_qkv_conv=True,
         use_packed_qkv_proj=True,
         use_packed_qkv_conv_custom_backward=True,
         use_packed_qkv_split_copy=True,
         conv_output_contiguous=True,
     )
-    q, k, v, _, _ = split_bf16._project_recurrence_inputs(
-        torch.randn(2, 16, 64, dtype=torch.bfloat16)
-    )
-    assert q.is_contiguous()
-    assert k.is_contiguous()
-    assert v.is_contiguous()
-    print("  ✓ packed qkv split-copy matches default path")
 
 
-def test_gdn_packed_qkv_split_copy_validation():
+def test_gdn_packed_qkv_split_copy_validation() -> None:
     """Generated split-copy should only run on the non-fused packed path."""
     if not hasattr(torch.ops.aten, "split_with_sizes_copy"):
         print(
             "  - skipping packed qkv split-copy validation (aten.split_with_sizes_copy unavailable)"
         )
         return
-    try:
-        GatedDeltaNet(
-            d_model=64,
-            n_heads=4,
-            head_k_dim=8,
-            expand_v=1.0,
-            use_packed_qkv_split_copy=True,
-        )
-        raise AssertionError(
-            "Expected packed qkv split-copy to require packed qkv conv"
-        )
-    except ValueError:
-        pass
-    try:
-        GatedDeltaNet(
-            d_model=64,
-            n_heads=4,
-            head_k_dim=8,
-            expand_v=1.0,
-            use_packed_qkv_conv=True,
-            use_packed_qkv_split_copy=True,
-        )
-        raise AssertionError(
-            "Expected packed qkv split-copy to require packed qkv output_contiguous"
-        )
-    except ValueError:
-        pass
-    try:
-        GatedDeltaNet(
-            d_model=64,
-            n_heads=4,
-            head_k_dim=8,
-            expand_v=1.0,
-            use_packed_qkv_conv=True,
-            use_packed_qkv_proj=True,
-            conv_output_contiguous=True,
-            use_packed_qkv_split_copy=True,
-            use_cuda_fused_frontend=True,
-        )
-        raise AssertionError(
-            "Expected packed qkv split-copy to reject the CUDA fused frontend"
-        )
-    except ValueError:
-        pass
-    try:
-        GatedDeltaNet(
-            d_model=64,
-            n_heads=4,
-            head_k_dim=8,
-            expand_v=1.0,
-            use_packed_qkv_conv=True,
-            use_packed_qkv_proj=True,
-            conv_output_contiguous=True,
-            use_packed_qkv_single_contig=True,
-            use_packed_qkv_split_copy=True,
-        )
-        raise AssertionError(
-            "Expected packed qkv split-copy to reject packed qkv single-contig"
-        )
-    except ValueError:
-        pass
+    for message, kwargs in [
+        (
+            "Expected packed qkv split-copy to require packed qkv conv",
+            dict(use_packed_qkv_split_copy=True),
+        ),
+        (
+            "Expected packed qkv split-copy to require packed qkv output_contiguous",
+            dict(use_packed_qkv_conv=True, use_packed_qkv_split_copy=True),
+        ),
+        (
+            "Expected packed qkv split-copy to reject the CUDA fused frontend",
+            dict(
+                use_packed_qkv_conv=True,
+                use_packed_qkv_proj=True,
+                conv_output_contiguous=True,
+                use_packed_qkv_split_copy=True,
+                use_cuda_fused_frontend=True,
+            ),
+        ),
+        (
+            "Expected packed qkv split-copy to reject packed qkv single-contig",
+            dict(
+                use_packed_qkv_conv=True,
+                use_packed_qkv_proj=True,
+                conv_output_contiguous=True,
+                use_packed_qkv_single_contig=True,
+                use_packed_qkv_split_copy=True,
+            ),
+        ),
+    ]:
+        _assert_gdn_init_rejected(message, **kwargs)
     print("  ✓ packed qkv split-copy validates requirements")
 
 
@@ -793,340 +813,151 @@ def test_packed_qkv_conv_reference_matches_eager_ops():
     print("  ✓ packed conv reference matches eager ops")
 
 
-def test_gdn_cuda_split_norm_cpu_fallback_matches_packed_path():
+def test_gdn_cuda_split_norm_cpu_fallback_matches_packed_path() -> None:
     """CPU fallback for CUDA split+l2norm should preserve packed-path outputs and gradients."""
-    torch.manual_seed(42)
-    kwargs = dict(
-        d_model=64,
-        n_heads=4,
-        head_k_dim=8,
-        expand_v=1.0,
-        allow_neg_eigval=True,
-        conv_size=4,
-        use_fla=False,
-        use_packed_qkv_conv=True,
-        use_packed_qkv_proj=True,
-        use_packed_qkv_conv_custom_backward=True,
-        conv_output_contiguous=True,
+    _assert_gdn_cpu_fallback_matches_reference(
+        base_kwargs=_make_standard_packed_kwargs(
+            use_packed_qkv_conv_custom_backward=True
+        ),
+        candidate_overrides=dict(use_cuda_split_norm=True),
+        success_message="  ✓ CUDA split+l2norm CPU fallback matches packed path",
     )
-    eager = GatedDeltaNet(**kwargs)
-    split_norm = GatedDeltaNet(**kwargs, use_cuda_split_norm=True)
-    split_norm.load_state_dict(eager.state_dict(), strict=True)
-
-    x_eager = torch.randn(2, 32, 64, requires_grad=True)
-    x_split = x_eager.detach().clone().requires_grad_(True)
-    y_eager = eager(x_eager)
-    y_split = split_norm(x_split)
-    torch.testing.assert_close(y_split, y_eager, atol=1e-5, rtol=1e-5)
-
-    grad = torch.randn_like(y_eager)
-    y_eager.backward(grad, retain_graph=True)
-    y_split.backward(grad)
-    torch.testing.assert_close(x_split.grad, x_eager.grad, atol=1e-5, rtol=1e-5)
-    print("  ✓ CUDA split+l2norm CPU fallback matches packed path")
 
 
-def test_gdn_cuda_frontend_nct_cpu_fallback_matches_packed_path():
+def test_gdn_cuda_frontend_nct_cpu_fallback_matches_packed_path() -> None:
     """CPU fallback for the NCT frontend op should preserve packed-path outputs and gradients."""
-    torch.manual_seed(42)
-    kwargs = dict(
-        d_model=64,
-        n_heads=4,
-        head_k_dim=8,
-        expand_v=1.0,
-        allow_neg_eigval=True,
-        conv_size=4,
-        use_fla=False,
-        use_packed_qkv_conv=True,
-        use_packed_qkv_proj=True,
-        conv_output_contiguous=True,
+    _assert_gdn_cpu_fallback_matches_reference(
+        base_kwargs=_make_standard_packed_kwargs(),
+        candidate_overrides=dict(use_cuda_frontend_nct=True),
+        grad_atol=3e-4,
+        grad_rtol=5e-3,
+        success_message="  ✓ CUDA frontend NCT CPU fallback matches packed path",
     )
-    eager = GatedDeltaNet(**kwargs)
-    frontend_nct = GatedDeltaNet(**kwargs, use_cuda_frontend_nct=True)
-    frontend_nct.load_state_dict(eager.state_dict(), strict=True)
-
-    x_eager = torch.randn(2, 32, 64, requires_grad=True)
-    x_frontend = x_eager.detach().clone().requires_grad_(True)
-    y_eager = eager(x_eager)
-    y_frontend = frontend_nct(x_frontend)
-    torch.testing.assert_close(y_frontend, y_eager, atol=1e-5, rtol=1e-5)
-
-    grad = torch.randn_like(y_eager)
-    y_eager.backward(grad, retain_graph=True)
-    y_frontend.backward(grad)
-    torch.testing.assert_close(x_frontend.grad, x_eager.grad, atol=3e-4, rtol=5e-3)
-    print("  ✓ CUDA frontend NCT CPU fallback matches packed path")
 
 
-def test_gdn_cuda_frontend_nct_custom_backward_cpu_fallback_matches_custombwd_path():
+def test_gdn_cuda_frontend_nct_custom_backward_cpu_fallback_matches_custombwd_path() -> (
+    None
+):
     """CPU fallback for the NCT frontend should compose with the packed custom backward path."""
-    torch.manual_seed(42)
-    kwargs = dict(
-        d_model=64,
-        n_heads=4,
-        head_k_dim=8,
-        expand_v=1.0,
-        allow_neg_eigval=True,
-        conv_size=4,
-        use_fla=False,
-        use_packed_qkv_conv=True,
-        use_packed_qkv_proj=True,
-        conv_output_contiguous=True,
-        use_packed_qkv_conv_custom_backward=True,
+    _assert_gdn_cpu_fallback_matches_reference(
+        base_kwargs=_make_standard_packed_kwargs(
+            use_packed_qkv_conv_custom_backward=True
+        ),
+        candidate_overrides=dict(use_cuda_frontend_nct=True),
+        grad_atol=3e-4,
+        grad_rtol=5e-3,
+        success_message="  ✓ CUDA frontend NCT composes with packed custom backward",
     )
-    custombwd = GatedDeltaNet(**kwargs)
-    frontend_nct = GatedDeltaNet(**kwargs, use_cuda_frontend_nct=True)
-    frontend_nct.load_state_dict(custombwd.state_dict(), strict=True)
-
-    x_ref = torch.randn(2, 32, 64, requires_grad=True)
-    x_frontend = x_ref.detach().clone().requires_grad_(True)
-    y_ref = custombwd(x_ref)
-    y_frontend = frontend_nct(x_frontend)
-    torch.testing.assert_close(y_frontend, y_ref, atol=1e-5, rtol=1e-5)
-
-    grad = torch.randn_like(y_ref)
-    y_ref.backward(grad, retain_graph=True)
-    y_frontend.backward(grad)
-    torch.testing.assert_close(x_frontend.grad, x_ref.grad, atol=3e-4, rtol=5e-3)
-    print("  ✓ CUDA frontend NCT composes with packed custom backward")
 
 
-def test_gdn_cuda_packed_conv_cpu_fallback_matches_packed_path():
+def test_gdn_cuda_packed_conv_cpu_fallback_matches_packed_path() -> None:
     """CPU fallback for CUDA packed conv should preserve packed-path outputs and gradients."""
-    torch.manual_seed(42)
-    kwargs = dict(
-        d_model=64,
-        n_heads=4,
-        head_k_dim=8,
-        expand_v=1.0,
-        allow_neg_eigval=True,
-        conv_size=4,
-        use_fla=False,
-        use_packed_qkv_conv=True,
-        use_packed_qkv_proj=True,
-        conv_output_contiguous=True,
+    _assert_gdn_cpu_fallback_matches_reference(
+        base_kwargs=_make_standard_packed_kwargs(),
+        candidate_overrides=dict(use_cuda_packed_conv=True),
+        success_message="  ✓ CUDA packed conv CPU fallback matches packed path",
     )
-    eager = GatedDeltaNet(**kwargs)
-    packed_conv = GatedDeltaNet(**kwargs, use_cuda_packed_conv=True)
-    packed_conv.load_state_dict(eager.state_dict(), strict=True)
-
-    x_eager = torch.randn(2, 32, 64, requires_grad=True)
-    x_conv = x_eager.detach().clone().requires_grad_(True)
-    y_eager = eager(x_eager)
-    y_conv = packed_conv(x_conv)
-    torch.testing.assert_close(y_conv, y_eager, atol=1e-5, rtol=1e-5)
-
-    grad = torch.randn_like(y_eager)
-    y_eager.backward(grad, retain_graph=True)
-    y_conv.backward(grad)
-    torch.testing.assert_close(x_conv.grad, x_eager.grad, atol=1e-5, rtol=1e-5)
-    print("  ✓ CUDA packed conv CPU fallback matches packed path")
 
 
-def test_gdn_cuda_packed_conv_aten_bwd_cpu_fallback_matches_packed_path():
+def test_gdn_cuda_packed_conv_aten_bwd_cpu_fallback_matches_packed_path() -> None:
     """CPU fallback for CUDA packed-conv ATen-backward should preserve packed-path outputs and gradients."""
-    torch.manual_seed(42)
-    kwargs = dict(
-        d_model=64,
-        n_heads=4,
-        head_k_dim=8,
-        expand_v=1.0,
-        allow_neg_eigval=True,
-        conv_size=4,
-        use_fla=False,
-        use_packed_qkv_conv=True,
-        use_packed_qkv_proj=True,
-        conv_output_contiguous=True,
+    _assert_gdn_cpu_fallback_matches_reference(
+        base_kwargs=_make_standard_packed_kwargs(),
+        candidate_overrides=dict(use_cuda_packed_conv_aten_backward=True),
+        success_message="  ✓ CUDA packed conv ATen-backward CPU fallback matches packed path",
     )
-    eager = GatedDeltaNet(**kwargs)
-    packed_conv = GatedDeltaNet(**kwargs, use_cuda_packed_conv_aten_backward=True)
-    packed_conv.load_state_dict(eager.state_dict(), strict=True)
-
-    x_eager = torch.randn(2, 32, 64, requires_grad=True)
-    x_conv = x_eager.detach().clone().requires_grad_(True)
-    y_eager = eager(x_eager)
-    y_conv = packed_conv(x_conv)
-    torch.testing.assert_close(y_conv, y_eager, atol=1e-5, rtol=1e-5)
-
-    grad = torch.randn_like(y_eager)
-    y_eager.backward(grad, retain_graph=True)
-    y_conv.backward(grad)
-    torch.testing.assert_close(x_conv.grad, x_eager.grad, atol=1e-5, rtol=1e-5)
-    print("  ✓ CUDA packed conv ATen-backward CPU fallback matches packed path")
 
 
-def test_gdn_cuda_packed_conv_aten_weight_bwd_cpu_fallback_matches_packed_path():
+def test_gdn_cuda_packed_conv_aten_weight_bwd_cpu_fallback_matches_packed_path() -> (
+    None
+):
     """CPU fallback for CUDA packed-conv ATen-weight-backward should preserve the packed path."""
-    torch.manual_seed(42)
-    kwargs = dict(
-        d_model=64,
-        n_heads=4,
-        head_k_dim=8,
-        expand_v=1.0,
-        allow_neg_eigval=True,
-        conv_size=4,
-        use_fla=False,
-        use_packed_qkv_conv=True,
-        use_packed_qkv_proj=True,
-        conv_output_contiguous=True,
+    _assert_gdn_cpu_fallback_matches_reference(
+        base_kwargs=_make_standard_packed_kwargs(),
+        candidate_overrides=dict(use_cuda_packed_conv_aten_weight_backward=True),
+        success_message="  ✓ CUDA packed conv ATen-weight-backward CPU fallback matches packed path",
     )
-    eager = GatedDeltaNet(**kwargs)
-    packed_conv = GatedDeltaNet(
-        **kwargs, use_cuda_packed_conv_aten_weight_backward=True
-    )
-    packed_conv.load_state_dict(eager.state_dict(), strict=True)
-
-    x_eager = torch.randn(2, 32, 64, requires_grad=True)
-    x_conv = x_eager.detach().clone().requires_grad_(True)
-    y_eager = eager(x_eager)
-    y_conv = packed_conv(x_conv)
-    torch.testing.assert_close(y_conv, y_eager, atol=1e-5, rtol=1e-5)
-
-    grad = torch.randn_like(y_eager)
-    y_eager.backward(grad, retain_graph=True)
-    y_conv.backward(grad)
-    torch.testing.assert_close(x_conv.grad, x_eager.grad, atol=1e-5, rtol=1e-5)
-    print("  ✓ CUDA packed conv ATen-weight-backward CPU fallback matches packed path")
 
 
-def test_gdn_cuda_packed_conv_validation():
+def test_gdn_cuda_packed_conv_validation() -> None:
     """CUDA packed conv should only run on the packed non-fused front-end path."""
-    try:
-        GatedDeltaNet(
-            d_model=64,
-            n_heads=4,
-            head_k_dim=8,
-            expand_v=1.0,
-            use_cuda_packed_conv=True,
-        )
-        raise AssertionError(
-            "Expected CUDA packed conv to require packed qkv proj+conv"
-        )
-    except ValueError:
-        pass
-    try:
-        GatedDeltaNet(
-            d_model=64,
-            n_heads=4,
-            head_k_dim=8,
-            expand_v=1.0,
-            use_packed_qkv_conv=True,
-            use_packed_qkv_proj=True,
-            conv_output_contiguous=True,
-            use_cuda_packed_conv_aten_weight_backward=True,
-            use_cuda_packed_conv_aten_backward=True,
-        )
-        raise AssertionError(
-            "Expected CUDA packed conv ATen-weight-backward to reject ATen-backward"
-        )
-    except ValueError:
-        pass
-    try:
-        GatedDeltaNet(
-            d_model=64,
-            n_heads=4,
-            head_k_dim=8,
-            expand_v=1.0,
-            use_packed_qkv_conv=True,
-            use_packed_qkv_proj=True,
-            conv_output_contiguous=True,
-            use_packed_qkv_conv_custom_backward=True,
-            use_cuda_packed_conv_aten_weight_backward=True,
-        )
-        raise AssertionError(
-            "Expected CUDA packed conv ATen-weight-backward to reject packed qkv custom backward"
-        )
-    except ValueError:
-        pass
-    try:
-        GatedDeltaNet(
-            d_model=64,
-            n_heads=4,
-            head_k_dim=8,
-            expand_v=1.0,
-            use_packed_qkv_conv=True,
-            use_packed_qkv_proj=True,
-            conv_output_contiguous=True,
-            use_packed_qkv_conv_custom_backward=True,
-            use_cuda_packed_conv_aten_backward=True,
-        )
-        raise AssertionError(
-            "Expected CUDA packed conv ATen-backward to reject packed qkv custom backward"
-        )
-    except ValueError:
-        pass
-    try:
-        GatedDeltaNet(
-            d_model=64,
-            n_heads=4,
-            head_k_dim=8,
-            expand_v=1.0,
-            use_packed_qkv_conv=True,
-            use_packed_qkv_proj=True,
-            conv_output_contiguous=True,
-            use_cuda_packed_conv=True,
-            use_cuda_packed_conv_aten_backward=True,
-        )
-        raise AssertionError(
-            "Expected CUDA packed conv ATen-backward to reject full CUDA packed conv"
-        )
-    except ValueError:
-        pass
-    try:
-        GatedDeltaNet(
-            d_model=64,
-            n_heads=4,
-            head_k_dim=8,
-            expand_v=1.0,
-            use_packed_qkv_conv=True,
-            use_packed_qkv_proj=True,
-            conv_output_contiguous=True,
-            use_packed_qkv_conv_custom_backward=True,
-            use_cuda_packed_conv=True,
-        )
-        raise AssertionError(
-            "Expected CUDA packed conv to reject packed qkv custom backward"
-        )
-    except ValueError:
-        pass
-    try:
-        GatedDeltaNet(
-            d_model=64,
-            n_heads=4,
-            head_k_dim=8,
-            expand_v=1.0,
-            use_packed_qkv_conv=True,
-            use_packed_qkv_proj=True,
-            conv_output_contiguous=True,
-            use_cuda_packed_conv=True,
-            use_cuda_split_norm=True,
-        )
-        raise AssertionError("Expected CUDA packed conv to reject CUDA split+l2norm")
-    except ValueError:
-        pass
+    for message, kwargs in [
+        (
+            "Expected CUDA packed conv to require packed qkv proj+conv",
+            dict(use_cuda_packed_conv=True),
+        ),
+        (
+            "Expected CUDA packed conv ATen-weight-backward to reject ATen-backward",
+            dict(
+                use_packed_qkv_conv=True,
+                use_packed_qkv_proj=True,
+                conv_output_contiguous=True,
+                use_cuda_packed_conv_aten_weight_backward=True,
+                use_cuda_packed_conv_aten_backward=True,
+            ),
+        ),
+        (
+            "Expected CUDA packed conv ATen-weight-backward to reject packed qkv custom backward",
+            dict(
+                use_packed_qkv_conv=True,
+                use_packed_qkv_proj=True,
+                conv_output_contiguous=True,
+                use_packed_qkv_conv_custom_backward=True,
+                use_cuda_packed_conv_aten_weight_backward=True,
+            ),
+        ),
+        (
+            "Expected CUDA packed conv ATen-backward to reject packed qkv custom backward",
+            dict(
+                use_packed_qkv_conv=True,
+                use_packed_qkv_proj=True,
+                conv_output_contiguous=True,
+                use_packed_qkv_conv_custom_backward=True,
+                use_cuda_packed_conv_aten_backward=True,
+            ),
+        ),
+        (
+            "Expected CUDA packed conv ATen-backward to reject full CUDA packed conv",
+            dict(
+                use_packed_qkv_conv=True,
+                use_packed_qkv_proj=True,
+                conv_output_contiguous=True,
+                use_cuda_packed_conv=True,
+                use_cuda_packed_conv_aten_backward=True,
+            ),
+        ),
+        (
+            "Expected CUDA packed conv to reject packed qkv custom backward",
+            dict(
+                use_packed_qkv_conv=True,
+                use_packed_qkv_proj=True,
+                conv_output_contiguous=True,
+                use_packed_qkv_conv_custom_backward=True,
+                use_cuda_packed_conv=True,
+            ),
+        ),
+        (
+            "Expected CUDA packed conv to reject CUDA split+l2norm",
+            dict(
+                use_packed_qkv_conv=True,
+                use_packed_qkv_proj=True,
+                conv_output_contiguous=True,
+                use_cuda_packed_conv=True,
+                use_cuda_split_norm=True,
+            ),
+        ),
+    ]:
+        _assert_gdn_init_rejected(message, **kwargs)
     print("  ✓ CUDA packed conv validates requirements")
 
 
-def test_gdn_cuda_frontend_nct_validation():
+def test_gdn_cuda_frontend_nct_validation() -> None:
     """NCT frontend op should only run on the packed non-fused front-end path."""
-    try:
-        GatedDeltaNet(
-            d_model=64,
-            n_heads=4,
-            head_k_dim=8,
-            expand_v=1.0,
-            use_cuda_frontend_nct=True,
-        )
-        raise AssertionError(
-            "Expected CUDA frontend NCT to require packed qkv proj+conv"
-        )
-    except ValueError:
-        pass
-    layer = GatedDeltaNet(
-        d_model=64,
-        n_heads=4,
-        head_k_dim=8,
-        expand_v=1.0,
+    _assert_gdn_init_rejected(
+        "Expected CUDA frontend NCT to require packed qkv proj+conv",
+        use_cuda_frontend_nct=True,
+    )
+    layer = _make_small_gdn(
         use_packed_qkv_conv=True,
         use_packed_qkv_proj=True,
         conv_output_contiguous=True,
@@ -1135,73 +966,46 @@ def test_gdn_cuda_frontend_nct_validation():
     )
     assert layer.use_packed_qkv_conv_custom_backward
     assert layer.use_cuda_frontend_nct
-    try:
-        GatedDeltaNet(
-            d_model=64,
-            n_heads=4,
-            head_k_dim=8,
-            expand_v=1.0,
-            use_packed_qkv_conv=True,
-            use_packed_qkv_proj=True,
-            conv_output_contiguous=True,
-            use_cuda_frontend_nct=True,
-            use_cuda_split_norm=True,
-        )
-        raise AssertionError("Expected CUDA frontend NCT to reject CUDA split+l2norm")
-    except ValueError:
-        pass
+    _assert_gdn_init_rejected(
+        "Expected CUDA frontend NCT to reject CUDA split+l2norm",
+        use_packed_qkv_conv=True,
+        use_packed_qkv_proj=True,
+        conv_output_contiguous=True,
+        use_cuda_frontend_nct=True,
+        use_cuda_split_norm=True,
+    )
     print("  ✓ CUDA frontend NCT validates requirements")
 
 
-def test_gdn_cuda_split_norm_validation():
+def test_gdn_cuda_split_norm_validation() -> None:
     """CUDA split+l2norm should only run on the non-fused packed-projection path."""
-    try:
-        GatedDeltaNet(
-            d_model=64,
-            n_heads=4,
-            head_k_dim=8,
-            expand_v=1.0,
-            use_cuda_split_norm=True,
-        )
-        raise AssertionError(
-            "Expected CUDA split+l2norm to require packed qkv proj+conv"
-        )
-    except ValueError:
-        pass
-    try:
-        GatedDeltaNet(
-            d_model=64,
-            n_heads=4,
-            head_k_dim=8,
-            expand_v=1.0,
-            use_packed_qkv_conv=True,
-            use_packed_qkv_proj=True,
-            conv_output_contiguous=True,
-            use_cuda_split_norm=True,
-            use_cuda_fused_frontend=True,
-        )
-        raise AssertionError(
-            "Expected CUDA split+l2norm to reject the CUDA fused frontend"
-        )
-    except ValueError:
-        pass
-    try:
-        GatedDeltaNet(
-            d_model=64,
-            n_heads=4,
-            head_k_dim=8,
-            expand_v=1.0,
-            use_packed_qkv_conv=True,
-            use_packed_qkv_proj=True,
-            conv_output_contiguous=True,
-            use_cuda_split_norm=True,
-            use_packed_qkv_split_copy=True,
-        )
-        raise AssertionError(
-            "Expected CUDA split+l2norm to reject split-copy materialization"
-        )
-    except ValueError:
-        pass
+    for message, kwargs in [
+        (
+            "Expected CUDA split+l2norm to require packed qkv proj+conv",
+            dict(use_cuda_split_norm=True),
+        ),
+        (
+            "Expected CUDA split+l2norm to reject the CUDA fused frontend",
+            dict(
+                use_packed_qkv_conv=True,
+                use_packed_qkv_proj=True,
+                conv_output_contiguous=True,
+                use_cuda_split_norm=True,
+                use_cuda_fused_frontend=True,
+            ),
+        ),
+        (
+            "Expected CUDA split+l2norm to reject split-copy materialization",
+            dict(
+                use_packed_qkv_conv=True,
+                use_packed_qkv_proj=True,
+                conv_output_contiguous=True,
+                use_cuda_split_norm=True,
+                use_packed_qkv_split_copy=True,
+            ),
+        ),
+    ]:
+        _assert_gdn_init_rejected(message, **kwargs)
     print("  ✓ CUDA split+l2norm validates requirements")
 
 
@@ -1263,157 +1067,77 @@ def test_rmsnorm_silu_gate_reference_matches_eager_ops():
     print("  ✓ rmsnorm*silu reference matches eager ops")
 
 
-def test_gdn_cuda_fused_flags_validate_requirements():
+def test_gdn_cuda_fused_flags_validate_requirements() -> None:
     """Reject fused HGDN settings that the CUDA kernels do not implement."""
-    try:
-        GatedDeltaNet(
-            d_model=64,
-            n_heads=4,
-            head_k_dim=8,
-            expand_v=1.0,
-            use_cuda_fused_frontend=True,
-        )
-        raise AssertionError("Expected fused frontend to require packed qkv proj+conv")
-    except ValueError:
-        pass
-    try:
-        GatedDeltaNet(
-            d_model=64,
-            n_heads=4,
-            head_k_dim=8,
-            expand_v=1.0,
-            use_cuda_fused_output=True,
-            output_norm_fp32=False,
-        )
-        raise AssertionError("Expected fused output to require output_norm_fp32")
-    except ValueError:
-        pass
+    for message, kwargs in [
+        (
+            "Expected fused frontend to require packed qkv proj+conv",
+            dict(use_cuda_fused_frontend=True),
+        ),
+        (
+            "Expected fused output to require output_norm_fp32",
+            dict(use_cuda_fused_output=True, output_norm_fp32=False),
+        ),
+    ]:
+        _assert_gdn_init_rejected(message, **kwargs)
     print("  ✓ fused HGDN flag validation OK")
 
 
-def test_gdn_cuda_fused_cpu_fallback_matches_packed_path():
+def test_gdn_cuda_fused_cpu_fallback_matches_packed_path() -> None:
     """CPU fallback for fused HGDN paths should preserve outputs and gradients."""
-    torch.manual_seed(42)
-    kwargs = dict(
-        d_model=64,
-        n_heads=4,
-        head_k_dim=8,
-        expand_v=1.0,
-        allow_neg_eigval=True,
-        conv_size=4,
-        use_fla=False,
-        use_packed_qkv_conv=True,
-        use_packed_qkv_proj=True,
-        conv_output_contiguous=True,
-        output_norm_fp32=True,
-    )
-    eager = GatedDeltaNet(**kwargs)
-    fused = GatedDeltaNet(
-        **kwargs,
-        use_cuda_fused_frontend=True,
-        use_cuda_fused_output=True,
-    )
-    fused.load_state_dict(eager.state_dict(), strict=True)
-
-    x_eager = torch.randn(2, 32, 64, requires_grad=True)
-    x_fused = x_eager.detach().clone().requires_grad_(True)
-    y_eager = eager(x_eager)
-    y_fused = fused(x_fused)
-    torch.testing.assert_close(y_fused, y_eager, atol=1e-5, rtol=1e-5)
-
-    grad = torch.randn_like(y_eager)
-    y_eager.backward(grad, retain_graph=True)
-    y_fused.backward(grad)
-    torch.testing.assert_close(x_fused.grad, x_eager.grad, atol=3e-4, rtol=5e-3)
-    print("  ✓ fused HGDN CPU fallback matches packed path")
-
-
-def test_gdn_cuda_fused_frontend_lib_validation():
-    """Compile-visible fused frontend should validate the intended family contract."""
-    try:
-        GatedDeltaNet(
-            d_model=64,
-            n_heads=4,
-            head_k_dim=8,
-            expand_v=1.0,
-            use_cuda_fused_frontend_lib=True,
-        )
-        raise AssertionError(
-            "Expected compile-visible fused frontend to require packed qkv proj+conv"
-        )
-    except ValueError:
-        pass
-    try:
-        GatedDeltaNet(
-            d_model=64,
-            n_heads=4,
-            head_k_dim=8,
-            expand_v=1.0,
-            use_packed_qkv_conv=True,
-            use_packed_qkv_proj=True,
-            conv_output_contiguous=True,
-            use_packed_qkv_conv_custom_backward=True,
-            use_cuda_fused_frontend_lib=True,
-        )
-        raise AssertionError(
-            "Expected compile-visible fused frontend to reject packed qkv custom backward"
-        )
-    except ValueError:
-        pass
-    try:
-        GatedDeltaNet(
-            d_model=64,
-            n_heads=4,
-            head_k_dim=8,
-            expand_v=1.0,
-            use_packed_qkv_conv=True,
-            use_packed_qkv_proj=True,
-            conv_output_contiguous=True,
+    _assert_gdn_cpu_fallback_matches_reference(
+        base_kwargs=_make_standard_packed_kwargs(output_norm_fp32=True),
+        candidate_overrides=dict(
             use_cuda_fused_frontend=True,
-            use_cuda_fused_frontend_lib=True,
-        )
-        raise AssertionError(
-            "Expected compile-visible fused frontend to reject the old fused frontend path"
-        )
-    except ValueError:
-        pass
+            use_cuda_fused_output=True,
+        ),
+        grad_atol=3e-4,
+        grad_rtol=5e-3,
+        success_message="  ✓ fused HGDN CPU fallback matches packed path",
+    )
+
+
+def test_gdn_cuda_fused_frontend_lib_validation() -> None:
+    """Compile-visible fused frontend should validate the intended family contract."""
+    for message, kwargs in [
+        (
+            "Expected compile-visible fused frontend to require packed qkv proj+conv",
+            dict(use_cuda_fused_frontend_lib=True),
+        ),
+        (
+            "Expected compile-visible fused frontend to reject packed qkv custom backward",
+            dict(
+                use_packed_qkv_conv=True,
+                use_packed_qkv_proj=True,
+                conv_output_contiguous=True,
+                use_packed_qkv_conv_custom_backward=True,
+                use_cuda_fused_frontend_lib=True,
+            ),
+        ),
+        (
+            "Expected compile-visible fused frontend to reject the old fused frontend path",
+            dict(
+                use_packed_qkv_conv=True,
+                use_packed_qkv_proj=True,
+                conv_output_contiguous=True,
+                use_cuda_fused_frontend=True,
+                use_cuda_fused_frontend_lib=True,
+            ),
+        ),
+    ]:
+        _assert_gdn_init_rejected(message, **kwargs)
     print("  ✓ compile-visible fused frontend validates requirements")
 
 
-def test_gdn_cuda_fused_frontend_lib_cpu_fallback_matches_packed_path():
+def test_gdn_cuda_fused_frontend_lib_cpu_fallback_matches_packed_path() -> None:
     """Compile-visible fused frontend CPU fallback should preserve packed-path outputs and gradients."""
-    torch.manual_seed(42)
-    kwargs = dict(
-        d_model=64,
-        n_heads=4,
-        head_k_dim=8,
-        expand_v=1.0,
-        allow_neg_eigval=True,
-        conv_size=4,
-        use_fla=False,
-        use_packed_qkv_conv=True,
-        use_packed_qkv_proj=True,
-        conv_output_contiguous=True,
-        output_norm_fp32=True,
+    _assert_gdn_cpu_fallback_matches_reference(
+        base_kwargs=_make_standard_packed_kwargs(output_norm_fp32=True),
+        candidate_overrides=dict(use_cuda_fused_frontend_lib=True),
+        grad_atol=3e-4,
+        grad_rtol=5e-3,
+        success_message="  ✓ compile-visible fused frontend CPU fallback matches packed path",
     )
-    eager = GatedDeltaNet(**kwargs)
-    fused = GatedDeltaNet(
-        **kwargs,
-        use_cuda_fused_frontend_lib=True,
-    )
-    fused.load_state_dict(eager.state_dict(), strict=True)
-
-    x_eager = torch.randn(2, 32, 64, requires_grad=True)
-    x_fused = x_eager.detach().clone().requires_grad_(True)
-    y_eager = eager(x_eager)
-    y_fused = fused(x_fused)
-    torch.testing.assert_close(y_fused, y_eager, atol=1e-5, rtol=1e-5)
-
-    grad = torch.randn_like(y_eager)
-    y_eager.backward(grad, retain_graph=True)
-    y_fused.backward(grad)
-    torch.testing.assert_close(x_fused.grad, x_eager.grad, atol=3e-4, rtol=5e-3)
-    print("  ✓ compile-visible fused frontend CPU fallback matches packed path")
 
 
 def test_gdn_conv_output_contiguous():
