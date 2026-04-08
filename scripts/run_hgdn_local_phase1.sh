@@ -1,9 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd "$script_dir/.." && pwd)"
-cd "$repo_root"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/hgdn_shell_common.sh"
+hgdn_setup_repo_root "${BASH_SOURCE[0]}"
 
 usage() {
     cat <<'EOF'
@@ -56,7 +55,7 @@ export USE_WANDB="${USE_WANDB:-0}"
 export WANDB_MODE="${WANDB_MODE:-offline}"
 
 run_prefix="${RUN_PREFIX:-rtx4070_phase1}"
-profile_root="${PROFILE_ROOT:-$repo_root/profiles/$run_prefix}"
+profile_root="${PROFILE_ROOT:-$HGDN_REPO_ROOT/profiles/$run_prefix}"
 local_seq_len="${LOCAL_SEQ_LEN:-${TRAIN_SEQ_LEN:-2048}}"
 local_hotpath_batch_size="${LOCAL_HOTPATH_BATCH_SIZE:-2}"
 trainer_seq_len="${TRAIN_SEQ_LEN:-2048}"
@@ -91,34 +90,6 @@ print_gdn_env() {
     printf '%s\n' "${gdn_env[@]}"
 }
 
-run_with_gdn_env() {
-    local extra_env=()
-    while (($#)) && [[ "$1" == *=* ]]; do
-        extra_env+=("$1")
-        shift
-    done
-    env "${gdn_env[@]}" "${extra_env[@]}" "$@"
-}
-
-append_command() {
-    local path="$1"
-    shift
-    local extra_env=()
-    while (($#)) && [[ "$1" == *=* ]]; do
-        extra_env+=("$1")
-        shift
-    done
-    printf '%q ' "${gdn_env[@]}" "${extra_env[@]}" "$@" >> "$path"
-    printf '\n' >> "$path"
-}
-
-append_plain_command() {
-    local path="$1"
-    shift
-    printf '%q ' "$@" >> "$path"
-    printf '\n' >> "$path"
-}
-
 mkdir -p "$profile_root"/{preflight,hotpath,trainer,analysis}
 
 git rev-parse HEAD > "$profile_root/git_sha.txt"
@@ -140,16 +111,19 @@ git rev-parse HEAD > "$profile_root/git_sha.txt"
     print_gdn_env
 } > "$profile_root/env_snapshot.txt"
 : > "$profile_root/commands.sh"
-append_command "$profile_root/commands.sh" \
+hgdn_append_command "$profile_root/commands.sh" \
+    "${gdn_env[@]}" \
     USE_WANDB="$USE_WANDB" WANDB_MODE="$WANDB_MODE" \
     bash scripts/run_hgdn_cuda_preflight.sh
-append_command "$profile_root/commands.sh" \
+hgdn_append_command "$profile_root/commands.sh" \
+    "${gdn_env[@]}" \
     python scripts/profile_hgdn_local_hotpath.py \
     --mode gdn \
     --batch-size "$local_hotpath_batch_size" \
     --seq-len "$local_seq_len" \
     --output-dir "$profile_root/hotpath"
-append_command "$profile_root/commands.sh" \
+hgdn_append_command "$profile_root/commands.sh" \
+    "${gdn_env[@]}" \
     GDN_AUDIT_BOUNDARIES=1 \
     GDN_AUDIT_BOUNDARIES_PATH="$boundary_audit_path" \
     GDN_AUDIT_BOUNDARIES_LIMIT="${GDN_AUDIT_BOUNDARIES_LIMIT:-1}" \
@@ -158,13 +132,15 @@ append_command "$profile_root/commands.sh" \
     --batch-size "$local_hotpath_batch_size" \
     --seq-len "$local_seq_len" \
     --output-dir "$profile_root/hotpath"
-append_command "$profile_root/commands.sh" \
+hgdn_append_command "$profile_root/commands.sh" \
+    "${gdn_env[@]}" \
     python scripts/profile_hgdn_local_hotpath.py \
     --mode hybrid-opt \
     --batch-size "$local_hotpath_batch_size" \
     --seq-len "$local_seq_len" \
     --output-dir "$profile_root/hotpath"
-append_command "$profile_root/commands.sh" \
+hgdn_append_command "$profile_root/commands.sh" \
+    "${gdn_env[@]}" \
     USE_WANDB=0 WANDB_MODE=offline \
     RUN_PREFIX="$run_prefix" PROFILE_DIR="$profile_root/trainer" \
     TRAIN_BATCH_TOKENS="${TRAIN_BATCH_TOKENS:-131072}" \
@@ -175,7 +151,7 @@ append_command "$profile_root/commands.sh" \
     ITERATIONS="${ITERATIONS:-6}" \
     TRAIN_LOG_EVERY="${TRAIN_LOG_EVERY:-1}" \
     bash scripts/run_h100_single_gpu_hgdn_profile.sh hybrid-eager
-append_plain_command "$profile_root/commands.sh" \
+hgdn_append_plain_command "$profile_root/commands.sh" \
     python scripts/analyze_hgdn_phase1.py \
     --gdn "$profile_root/hotpath/gdn_fwd_bwd.json" \
     --hybrid-fwd-bwd "$profile_root/hotpath/hybrid_fwd_bwd.json" \
@@ -185,15 +161,17 @@ append_plain_command "$profile_root/commands.sh" \
     --output-dir "$profile_root/analysis"
 
 echo ">>> HGDN phase-1 preflight"
-run_with_gdn_env \
+hgdn_run_with_env \
+    "${gdn_env[@]}" \
     USE_WANDB="$USE_WANDB" WANDB_MODE="$WANDB_MODE" \
-    bash "$repo_root/scripts/run_hgdn_cuda_preflight.sh" \
+    bash "$HGDN_REPO_ROOT/scripts/run_hgdn_cuda_preflight.sh" \
     | tee "$profile_root/preflight/preflight.log"
 
 echo
 echo ">>> HGDN phase-1 hotpath: bare GDN"
-run_with_gdn_env \
-    python "$repo_root/scripts/profile_hgdn_local_hotpath.py" \
+hgdn_run_with_env \
+    "${gdn_env[@]}" \
+    python "$HGDN_REPO_ROOT/scripts/profile_hgdn_local_hotpath.py" \
     --mode gdn \
     --batch-size "$local_hotpath_batch_size" \
     --seq-len "$local_seq_len" \
@@ -201,11 +179,12 @@ run_with_gdn_env \
 
 echo
 echo ">>> HGDN phase-1 hotpath: hybrid forward/backward"
-run_with_gdn_env \
+hgdn_run_with_env \
+    "${gdn_env[@]}" \
     GDN_AUDIT_BOUNDARIES=1 \
     GDN_AUDIT_BOUNDARIES_PATH="$boundary_audit_path" \
     GDN_AUDIT_BOUNDARIES_LIMIT="${GDN_AUDIT_BOUNDARIES_LIMIT:-1}" \
-    python "$repo_root/scripts/profile_hgdn_local_hotpath.py" \
+    python "$HGDN_REPO_ROOT/scripts/profile_hgdn_local_hotpath.py" \
     --mode hybrid-fwd-bwd \
     --batch-size "$local_hotpath_batch_size" \
     --seq-len "$local_seq_len" \
@@ -213,8 +192,9 @@ run_with_gdn_env \
 
 echo
 echo ">>> HGDN phase-1 hotpath: hybrid optimizer"
-run_with_gdn_env \
-    python "$repo_root/scripts/profile_hgdn_local_hotpath.py" \
+hgdn_run_with_env \
+    "${gdn_env[@]}" \
+    python "$HGDN_REPO_ROOT/scripts/profile_hgdn_local_hotpath.py" \
     --mode hybrid-opt \
     --batch-size "$local_hotpath_batch_size" \
     --seq-len "$local_seq_len" \
@@ -222,7 +202,8 @@ run_with_gdn_env \
 
 echo
 echo ">>> HGDN phase-1 trainer eager profile"
-run_with_gdn_env \
+hgdn_run_with_env \
+    "${gdn_env[@]}" \
     RUN_PREFIX="$run_prefix" \
     PROFILE_DIR="$profile_root/trainer" \
     USE_WANDB=0 WANDB_MODE=offline \
@@ -233,11 +214,11 @@ run_with_gdn_env \
     PROFILE_ACTIVE="${PROFILE_ACTIVE:-2}" \
     ITERATIONS="${ITERATIONS:-6}" \
     TRAIN_LOG_EVERY="${TRAIN_LOG_EVERY:-1}" \
-    bash "$repo_root/scripts/run_h100_single_gpu_hgdn_profile.sh" hybrid-eager
+    bash "$HGDN_REPO_ROOT/scripts/run_h100_single_gpu_hgdn_profile.sh" hybrid-eager
 
 echo
 echo ">>> HGDN phase-1 analysis"
-python "$repo_root/scripts/analyze_hgdn_phase1.py" \
+python "$HGDN_REPO_ROOT/scripts/analyze_hgdn_phase1.py" \
     --gdn "$profile_root/hotpath/gdn_fwd_bwd.json" \
     --hybrid-fwd-bwd "$profile_root/hotpath/hybrid_fwd_bwd.json" \
     --hybrid-opt "$profile_root/hotpath/hybrid_optimizer.json" \

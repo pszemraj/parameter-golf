@@ -25,6 +25,7 @@ from profiler_report import (  # noqa: E402
     load_profile_report,
     profile_row_ms,
     profile_row_percent,
+    write_json,
     write_rows_csv,
 )
 
@@ -270,10 +271,7 @@ def main() -> None:
         encoding="utf-8",
     )
     write_rows_csv(output_dir / "boundary_deltas.csv", boundary_rows)
-    (output_dir / "summary.json").write_text(
-        json.dumps(summary, indent=2),
-        encoding="utf-8",
-    )
+    write_json(output_dir / "summary.json", summary)
 
     markdown = (
         "# HGDN Phase-1 Comparison\n\n"

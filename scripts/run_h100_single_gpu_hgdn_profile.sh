@@ -1,9 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd "$script_dir/.." && pwd)"
-cd "$repo_root"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/hgdn_shell_common.sh"
+hgdn_setup_repo_root "${BASH_SOURCE[0]}"
 
 mode="${1:-hybrid}"
 
@@ -76,58 +75,45 @@ Examples:
 EOF
 }
 
-require_cmd() {
-    local cmd="$1"
-    if ! command -v "$cmd" >/dev/null 2>&1; then
-        echo "Missing required command: $cmd" >&2
-        exit 1
-    fi
-}
-
 run_sweep() {
     local label="$1"
     local preset="$2"
     shift 2
-
-    echo
-    echo ">>> $label"
-    (
-        export NGPU=1
-        export USE_WANDB="${USE_WANDB:-0}"
-        export WANDB_MODE="${WANDB_MODE:-offline}"
-        export WANDB_WATCH="${WANDB_WATCH:-none}"
-        export COMPILE_STRATEGY="${COMPILE_STRATEGY:-model}"
-        export TRAIN_BATCH_TOKENS="${TRAIN_BATCH_TOKENS:-524288}"
-        export TRAIN_SEQ_LEN="${TRAIN_SEQ_LEN:-2048}"
-        export ITERATIONS="${ITERATIONS:-24}"
-        export MAX_WALLCLOCK_SECONDS=0
-        export WARMUP_STEPS="${WARMUP_STEPS:-20}"
-        export VAL_LOSS_EVERY=0
-        export TRAIN_LOG_EVERY="${TRAIN_LOG_EVERY:-10}"
-        export PERF_SKIP_FINAL_EVAL=1
-        export PERF_ISOLATE_COMPILE_CACHE="${PERF_ISOLATE_COMPILE_CACHE:-1}"
-        export PROFILE=1
-        export PROFILE_DIR="${PROFILE_DIR:-./profiles}"
-        export PROFILE_RANGES="${PROFILE_RANGES:-1}"
-        export PROFILE_WAIT="${PROFILE_WAIT:-5}"
-        export PROFILE_WARMUP="${PROFILE_WARMUP:-3}"
-        export PROFILE_ACTIVE="${PROFILE_ACTIVE:-4}"
-        export PROFILE_REPEAT="${PROFILE_REPEAT:-1}"
-        export PROFILE_RECORD_SHAPES="${PROFILE_RECORD_SHAPES:-1}"
-        export PROFILE_MEMORY="${PROFILE_MEMORY:-1}"
-        export PROFILE_WITH_STACK="${PROFILE_WITH_STACK:-0}"
-        export PROFILE_WITH_FLOPS="${PROFILE_WITH_FLOPS:-0}"
-        export PROFILE_WITH_MODULES="${PROFILE_WITH_MODULES:-0}"
-        export PROFILE_ROW_LIMIT="${PROFILE_ROW_LIMIT:-60}"
-        export PROFILE_SORT_BY="${PROFILE_SORT_BY:-self_cuda_time_total}"
-        export PROFILE_STOP_ON_COMPLETE="${PROFILE_STOP_ON_COMPLETE:-1}"
-        export GDN_LOG_LAYOUTS="${GDN_LOG_LAYOUTS:-0}"
-        export GDN_LOG_LAYOUTS_LIMIT="${GDN_LOG_LAYOUTS_LIMIT:-1}"
-        for kv in "$@"; do
-            export "$kv"
-        done
-        bash "$repo_root/scripts/sweep.sh" "$preset"
-    )
+    hgdn_run_sweep \
+        "$label" \
+        "$preset" \
+        "NGPU=1" \
+        "USE_WANDB=${USE_WANDB:-0}" \
+        "WANDB_MODE=${WANDB_MODE:-offline}" \
+        "WANDB_WATCH=${WANDB_WATCH:-none}" \
+        "COMPILE_STRATEGY=${COMPILE_STRATEGY:-model}" \
+        "TRAIN_BATCH_TOKENS=${TRAIN_BATCH_TOKENS:-524288}" \
+        "TRAIN_SEQ_LEN=${TRAIN_SEQ_LEN:-2048}" \
+        "ITERATIONS=${ITERATIONS:-24}" \
+        "MAX_WALLCLOCK_SECONDS=0" \
+        "WARMUP_STEPS=${WARMUP_STEPS:-20}" \
+        "VAL_LOSS_EVERY=0" \
+        "TRAIN_LOG_EVERY=${TRAIN_LOG_EVERY:-10}" \
+        "PERF_SKIP_FINAL_EVAL=1" \
+        "PERF_ISOLATE_COMPILE_CACHE=${PERF_ISOLATE_COMPILE_CACHE:-1}" \
+        "PROFILE=1" \
+        "PROFILE_DIR=${PROFILE_DIR:-./profiles}" \
+        "PROFILE_RANGES=${PROFILE_RANGES:-1}" \
+        "PROFILE_WAIT=${PROFILE_WAIT:-5}" \
+        "PROFILE_WARMUP=${PROFILE_WARMUP:-3}" \
+        "PROFILE_ACTIVE=${PROFILE_ACTIVE:-4}" \
+        "PROFILE_REPEAT=${PROFILE_REPEAT:-1}" \
+        "PROFILE_RECORD_SHAPES=${PROFILE_RECORD_SHAPES:-1}" \
+        "PROFILE_MEMORY=${PROFILE_MEMORY:-1}" \
+        "PROFILE_WITH_STACK=${PROFILE_WITH_STACK:-0}" \
+        "PROFILE_WITH_FLOPS=${PROFILE_WITH_FLOPS:-0}" \
+        "PROFILE_WITH_MODULES=${PROFILE_WITH_MODULES:-0}" \
+        "PROFILE_ROW_LIMIT=${PROFILE_ROW_LIMIT:-60}" \
+        "PROFILE_SORT_BY=${PROFILE_SORT_BY:-self_cuda_time_total}" \
+        "PROFILE_STOP_ON_COMPLETE=${PROFILE_STOP_ON_COMPLETE:-1}" \
+        "GDN_LOG_LAYOUTS=${GDN_LOG_LAYOUTS:-0}" \
+        "GDN_LOG_LAYOUTS_LIMIT=${GDN_LOG_LAYOUTS_LIMIT:-1}" \
+        "$@"
 }
 
 run_hybrid() {
@@ -169,7 +155,7 @@ run_depth() {
 }
 
 main() {
-    require_cmd bash
+    hgdn_require_cmd bash
     local run_prefix="${RUN_PREFIX:-h100_hgdn}"
     case "$mode" in
     hybrid)

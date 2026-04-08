@@ -3,14 +3,20 @@
 from __future__ import annotations
 
 import argparse
-import csv
-import json
 from collections.abc import Iterable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import wandb
+
+import sys
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from profiler_report import write_json, write_rows_csv  # noqa: E402
 
 
 DEFAULT_HISTORY_KEYS = [
@@ -134,39 +140,6 @@ def iter_history_rows(
             break
 
 
-def write_json(path: Path, payload: Any) -> None:
-    """Serialize a JSON payload to disk.
-
-    :param Path path: Output path.
-    :param Any payload: JSON-serializable payload.
-    :return None: Writes `payload` to `path`.
-    """
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-
-
-def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
-    """Write a heterogeneous list of dict rows to CSV.
-
-    :param Path path: Output path.
-    :param list[dict[str, Any]] rows: Heterogeneous row payload.
-    :return None: Writes `rows` to `path`.
-    """
-    if not rows:
-        path.write_text("", encoding="utf-8")
-        return
-    fieldnames: list[str] = []
-    seen: set[str] = set()
-    for row in rows:
-        for key in row:
-            if key not in seen:
-                seen.add(key)
-                fieldnames.append(key)
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
-
-
 def main() -> int:
     """Export summary and history tables for selected runs.
 
@@ -226,8 +199,8 @@ def main() -> int:
 
     write_json(output_dir / "manifest.json", manifest)
     write_json(output_dir / "summary.json", summary_rows)
-    write_csv(output_dir / "summary.csv", summary_rows)
-    write_csv(output_dir / "history.csv", history_rows)
+    write_rows_csv(output_dir / "summary.csv", summary_rows)
+    write_rows_csv(output_dir / "history.csv", history_rows)
 
     print(f"exported_runs:{len(selected_runs)} output_dir:{output_dir}")
     print(f"summary_csv:{output_dir / 'summary.csv'}")

@@ -272,6 +272,15 @@ def write_rows_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         writer.writerows(rows)
 
 
+def write_json(path: Path, payload: Any) -> None:
+    """Write a JSON-serializable payload with stable formatting.
+
+    :param Path path: Output JSON path.
+    :param Any payload: JSON-serializable payload.
+    """
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
 def build_profile_report(
     rows: Sequence[ProfileRow],
     *,
@@ -328,10 +337,7 @@ def write_profile_report(
     :param str stem: Basename prefix, defaults to `key_averages`.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / f"{stem}.json").write_text(
-        json.dumps(report, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
+    write_json(output_dir / f"{stem}.json", report)
     write_rows_csv(output_dir / f"{stem}.csv", report["rows"])
 
 

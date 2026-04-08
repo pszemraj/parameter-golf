@@ -1,9 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd "$script_dir/.." && pwd)"
-cd "$repo_root"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/hgdn_shell_common.sh"
+hgdn_setup_repo_root "${BASH_SOURCE[0]}"
 
 usage() {
     cat <<'EOF'
@@ -46,4 +45,4 @@ export WANDB_MODE="${WANDB_MODE:-offline}"
 export SEED="${SEED:-1337}"
 export PYTHONHASHSEED="${PYTHONHASHSEED:-$SEED}"
 export CUDNN_BENCHMARK="${CUDNN_BENCHMARK:-0}"
-"${PYTHON_BIN:-python}" "$repo_root/scripts/hgdn_cuda_preflight.py"
+"${PYTHON_BIN:-python}" "$HGDN_REPO_ROOT/scripts/hgdn_cuda_preflight.py"

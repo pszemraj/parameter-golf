@@ -23,6 +23,7 @@ from profiler_report import (  # noqa: E402
     find_profile_row,
     format_profile_bucket_cell,
     load_profile_report,
+    write_json,
     write_rows_csv,
 )
 
@@ -237,20 +238,11 @@ def main() -> None:
         "buckets": bucket_rows,
         "boundary_rows": boundary_rows,
     }
-    (args.output_dir / "bucket_attribution.json").write_text(
-        json.dumps(bucket_rows, indent=2),
-        encoding="utf-8",
-    )
+    write_json(args.output_dir / "bucket_attribution.json", bucket_rows)
     write_rows_csv(args.output_dir / "bucket_attribution.csv", bucket_rows)
-    (args.output_dir / "boundary_audit.json").write_text(
-        json.dumps(boundary_rows, indent=2),
-        encoding="utf-8",
-    )
+    write_json(args.output_dir / "boundary_audit.json", boundary_rows)
     write_rows_csv(args.output_dir / "boundary_audit.csv", boundary_rows)
-    (args.output_dir / "summary.json").write_text(
-        json.dumps(summary, indent=2),
-        encoding="utf-8",
-    )
+    write_json(args.output_dir / "summary.json", summary)
 
     markdown = (
         "# HGDN Phase-1 Analysis\n\n"

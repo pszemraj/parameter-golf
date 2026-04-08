@@ -1,9 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd "$script_dir/.." && pwd)"
-cd "$repo_root"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/hgdn_shell_common.sh"
+hgdn_setup_repo_root "${BASH_SOURCE[0]}"
 
 mode="${1:-perf}"
 
@@ -83,32 +82,19 @@ Examples:
 EOF
 }
 
-require_cmd() {
-    local cmd="$1"
-    if ! command -v "$cmd" >/dev/null 2>&1; then
-        echo "Missing required command: $cmd" >&2
-        exit 1
-    fi
-}
-
 run_sweep() {
     local label="$1"
     local preset="$2"
     shift 2
-
-    echo
-    echo ">>> $label"
-    (
-        export NGPU=1
-        export USE_WANDB="${USE_WANDB:-1}"
-        export WANDB_MODE="${WANDB_MODE:-online}"
-        export WANDB_WATCH="${WANDB_WATCH:-none}"
-        export COMPILE_STRATEGY="${COMPILE_STRATEGY:-model}"
-        for kv in "$@"; do
-            export "$kv"
-        done
-        bash "$repo_root/scripts/sweep.sh" "$preset"
-    )
+    hgdn_run_sweep \
+        "$label" \
+        "$preset" \
+        "NGPU=1" \
+        "USE_WANDB=${USE_WANDB:-1}" \
+        "WANDB_MODE=${WANDB_MODE:-online}" \
+        "WANDB_WATCH=${WANDB_WATCH:-none}" \
+        "COMPILE_STRATEGY=${COMPILE_STRATEGY:-model}" \
+        "$@"
 }
 
 run_perf_pair() {
@@ -225,8 +211,8 @@ run_fixed2k_hybrid() {
         "PERF_SKIP_FINAL_EVAL=0"
 }
 
-require_cmd bash
-require_cmd torchrun
+hgdn_require_cmd bash
+hgdn_require_cmd torchrun
 
 run_stamp="$(date +%Y%m%d_%H%M%S)"
 run_prefix="${RUN_PREFIX:-h1001_${run_stamp}}"
