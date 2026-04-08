@@ -1,6 +1,6 @@
 # HGDN Branch Status
 
-Last updated: 2026-04-07 14:20 EDT
+Last updated: 2026-04-07 23:35 EDT
 
 Branch: `exp/hgdn`
 
@@ -90,6 +90,7 @@ What has not been claimed:
 - `configs/hgdn/winner_20260405_19.toml`: reusable config for the active H100-confirmed HGDN kernel winner
 - `configs/hgdn/winner_20260405_19_cuda_packed_conv_atenbwd.toml`: rejected H100 sidecar that keeps the exact-length CUDA packed-conv forward but hands backward back to ATen/cuDNN
 - `configs/hgdn/winner_20260405_19_cuda_packed_conv_aten_weightbwd.toml`: local-only ownership split that keeps custom forward and input-grad but hands only weight-grad back to ATen
+- `configs/hgdn/winner_20260405_19_cuda_fused_frontend.toml`: next H100 sidecar candidate that keeps the promoted packed custom-backward conv path and fuses only the post-conv frontend shell
 - `configs/hgdn/winner_20260405_19_cuda_frontend_nct_custombwd.toml`: composed sidecar candidate that keeps the promoted exact-length packed custom-backward conv path and layers the compile-visible NCT frontend op above `preact_nct`
 - `configs/hgdn/winner_20260405_19_cuda_frontend_nct.toml`: compile-visible NCT frontend sidecar candidate that keeps depthwise conv in ATen and moves post-conv `SiLU + split + q/k norm` one boundary earlier
 - `configs/hgdn/winner_20260405_19_cuda_packed_conv.toml`: exact-length CUDA packed-conv sidecar candidate that replaces the packed qkv causal depthwise conv family itself
@@ -147,6 +148,7 @@ Active timestamped presets:
 - `winner-20260405-19`
 - `winner-20260405-19-cuda-packed-conv-aten-bwd`
 - `winner-20260405-19-cuda-packed-conv-aten-weight-bwd`
+- `winner-20260405-19-cuda-fused-frontend`
 - `winner-20260405-19-cuda-frontend-nct-custom-bwd`
 - `winner-20260405-19-cuda-frontend-nct`
 - `winner-20260405-19-cuda-packed-conv`
@@ -216,6 +218,16 @@ Kernel-work guardrail:
   - the ATen-weight split did not win the clean local screen
   - the full-custom packed-conv family only became live again after a material
     rewrite of the custom weight-backward kernel
+  - the rewritten full-custom packed-conv then lost only narrowly on H100:
+    - `880.95 -> 903.33 ms` (`+2.54%`)
+    - copy tax actually improved
+    - the remaining loss moved into the post-conv frontend shell
+  - the existing frontend-only fused CUDA path is locally strong on top of the
+    promoted winner:
+    - `ProfilerStep*`: `6154.71 -> 4994.66 ms` (`-18.85%`)
+    - `aten::copy_`: `646.49 -> 197.54 ms`
+    - `aten::mul`: `1165.79 -> 834.38 ms`
+  - that makes `winner-20260405-19-cuda-fused-frontend` the next H100 sidecar
   - the standalone compile-visible NCT frontend follow-up lost badly on H100
     because it reopened copy tax and dropped the promoted custom-backward win
   - the composed `k10 + k13` follow-up also lost on H100:

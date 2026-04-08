@@ -1,9 +1,166 @@
 # Profiling Log
 
-Last updated: 2026-04-07 14:20 EDT
+Last updated: 2026-04-07 23:35 EDT
 
 This file records profiler-driven checkpoints that should survive beyond the raw
 artifacts under `profiles/`.
+
+## 2026-04-07 — Rewritten full-custom packed-conv is still an H100 integration bottleneck (`h100k17`)
+
+Bundle:
+
+- H100 bundle:
+  - `local-scratch/profiling-out-h100k17-hgdn.7z`
+
+Contract:
+
+- active H100 baseline:
+  - `winner-20260405-19`
+- candidate delta:
+  - `GDN_USE_CUDA_PACKED_CONV=1`
+- family read:
+  - exact-length CUDA packed qkv depthwise conv
+  - rewritten full custom backward ownership
+  - materially better weight-backward kernel than the original `h100k15` loss
+
+### Main finding
+
+Reject `winner-20260405-19-cuda-packed-conv` again on H100.
+
+Same-day H100 compiled perf:
+
+- controls:
+  - `880.62 ms`
+  - `881.28 ms`
+- candidate:
+  - `904.21 ms`
+  - `902.45 ms`
+- mean delta:
+  - `880.95 -> 903.33 ms` (`+2.54%`)
+
+### What changed relative to the old packed-conv failure
+
+This is no longer the catastrophic `h100k15` failure mode.
+
+The rewritten custom conv rows are now sane on compiled H100:
+
+- `_PackedQKVConvFunctionBackward`:
+  - `585.07 ms`
+- `causal_dwconv_weight_backward_kernel_k4`:
+  - `396.58 ms`
+- `_PackedQKVConvFunction`:
+  - `184.90 ms`
+- `causal_dwconv_preact_forward_kernel`:
+  - `139.11 ms`
+- `causal_dwconv_input_backward_kernel`:
+  - `133.81 ms`
+
+So the weight-backward rewrite worked. The remaining miss is the post-conv
+frontend shell around split, `SiLU`, and q/k normalization:
+
+- `triton_poi_fused_add_cat_0`:
+  - `76.09 ms`
+- `silu_grad_from_preact_kernel`:
+  - `54.68 ms`
+- `silu_from_preact_kernel`:
+  - `45.79 ms`
+
+### Scoreboard read
+
+This family is still an `INTEGRATION_BOTTLENECK`, but for a much narrower
+reason than `h100k15`.
+
+- compile-specific penalty:
+  - `+690.07 ms`
+- compiled copy tax:
+  - `-46.95 ms`
+- eager `ProfilerStep*` improved:
+  - `-513.03 ms`
+- compiled `ProfilerStep*` still worsened:
+  - `+177.05 ms`
+
+The packed-conv kernels themselves no longer dominate the loss. The remaining
+problem is the post-conv shell at the current boundary.
+
+### Decision
+
+Reject `winner-20260405-19-cuda-packed-conv` on H100 as currently composed.
+
+Do not abandon the packed-conv rewrite itself. The custom weight-backward
+problem is materially better now.
+
+The next targeted sidecar should keep the promoted packed custom-backward conv
+winner and fuse only the post-conv frontend shell:
+
+- keep `winner-20260405-19` active
+- test `winner-20260405-19-cuda-fused-frontend` next
+
+## 2026-04-07 — Frontend-only fused CUDA is locally strong after the packed-conv rewrite (`rtx5090_phase1_cuda_fusedfrontend_fix1`)
+
+Bundle:
+
+- fresh same-day local baseline:
+  - `profiles/rtx5090_phase1_winner20260405_19_r8/`
+- fresh same-day local candidate:
+  - `profiles/rtx5090_phase1_cuda_fusedfrontend_fix1/`
+- direct comparison:
+  - `profiles/rtx5090_phase1_cuda_fusedfrontend_fix1/compare_vs_rtx5090_phase1_winner20260405_19_r8/comparison.md`
+
+Contract:
+
+- active H100 baseline:
+  - `winner-20260405-19`
+- candidate delta:
+  - `GDN_USE_CUDA_FUSED_FRONTEND=1`
+- family read:
+  - keep the promoted packed qkv front-end and custom depthwise backward
+  - replace only the post-conv frontend shell with the existing fused CUDA op
+  - preserve the recurrence-facing contiguous contract
+
+### Main finding
+
+This is the right next H100 sidecar.
+
+Same-day local phase-1 result:
+
+- trainer `ProfilerStep*`:
+  - `6154.71 -> 4994.66 ms` (`-18.85%`)
+- trainer `DistributedDataParallel.forward`:
+  - `1792.51 -> 1520.00 ms` (`-15.20%`)
+- trainer `aten::copy_`:
+  - `646.49 -> 197.54 ms`
+- trainer `aten::mul`:
+  - `1165.79 -> 834.38 ms`
+- trainer `_PackedQKVFrontendFunctionBackward`:
+  - `342.39 ms`
+- trainer `causal_dwconv_weight_backward_kernel_k4`:
+  - `190.19 ms`
+
+### Boundary audit
+
+The recurrence-facing boundary stayed clean through:
+
+- `conv_qkv`
+- `norm_qkv`
+- `recurrence_inputs`
+
+All remain contiguous and in the expected `bf16` layouts.
+
+### Decision
+
+Promote this from local screen to the next H100 sidecar family.
+
+### H100 validation
+
+- `python setup_hgdn_cuda.py build_ext --inplace`
+- `python scripts/hgdn_cuda_parity.py`
+- `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k18ctl_a --offline`
+- `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k18ctl_b --offline`
+- `python scripts/hgdn.py preflight --preset winner-20260405-19-cuda-fused-frontend --compile-strategy model --offline`
+- `python scripts/hgdn.py h100-profile hybrid-eager --preset winner-20260405-19-cuda-fused-frontend --run-prefix h100k18a --offline`
+- `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-cuda-fused-frontend --run-prefix h100k18a --offline`
+- `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-cuda-fused-frontend --run-prefix h100k18b --offline`
+- `python scripts/hgdn.py h100-profile hybrid --preset winner-20260405-19-cuda-fused-frontend --run-prefix h100k18a --offline`
 
 ## 2026-04-07 — CUDA packed-conv forward plus ATen backward is an H100 integration bottleneck (`h100k16`)
 

@@ -60,49 +60,48 @@ This file tracks follow-up work that is intentionally not enabled by default in 
         meaningful-win threshold
       - stop after repeated `FLAT` or repeated `INTEGRATION_BOTTLENECK` results
 - Latest screened candidate:
-  - `winner-20260405-19-cuda-packed-conv`
+  - `winner-20260405-19-cuda-fused-frontend`
   - equivalent to:
     - `winner-20260405-19`
-    - `GDN_USE_CUDA_PACKED_CONV=1`
+    - `GDN_USE_CUDA_FUSED_FRONTEND=1`
   - purpose:
-    - keep the exact-length CUDA packed qkv depthwise conv family
-    - keep full custom backward ownership
-    - use the rewritten weight-backward kernel that accumulates all four taps
-      per channel block instead of rereading the grad stream once per
-      `(channel, tap)` block
+    - keep the promoted packed qkv front-end and custom depthwise backward
+    - fuse only the post-conv frontend shell that still shows up after the
+      packed-conv weight-backward rewrite
+    - preserve the recurrence-facing contiguous contract
   - local result:
     - same-day local baseline:
       - `profiles/rtx5090_phase1_winner20260405_19_r8/`
     - candidate:
-      - `profiles/rtx5090_phase1_cuda_packedconv_wgradv3_fix2/`
+      - `profiles/rtx5090_phase1_cuda_fusedfrontend_fix1/`
     - direct comparison:
-      - `profiles/rtx5090_phase1_cuda_packedconv_wgradv3_fix2/compare_vs_rtx5090_phase1_winner20260405_19_r8/comparison.md`
-    - console step average:
-      - `3085.62 -> 2874.43 ms` (`-6.84%`)
+      - `profiles/rtx5090_phase1_cuda_fusedfrontend_fix1/compare_vs_rtx5090_phase1_winner20260405_19_r8/comparison.md`
     - trainer `ProfilerStep*`:
-      - `6154.71 -> 5707.37 ms` (`-7.27%`)
+      - `6154.71 -> 4994.66 ms` (`-18.85%`)
     - trainer buckets moved in the right direction:
-      - `DistributedDataParallel.forward`: `1792.51 -> 1627.82 ms`
-      - `aten::copy_`: `646.49 -> 364.96 ms`
-      - `aten::mul`: `1165.79 -> 969.75 ms`
-      - `gdn.qkv_conv_output_contiguous`: `76.26 -> 40.70 ms`
+      - `DistributedDataParallel.forward`: `1792.51 -> 1520.00 ms`
+      - `aten::copy_`: `646.49 -> 197.54 ms`
+      - `aten::mul`: `1165.79 -> 834.38 ms`
+      - `_PackedQKVFrontendFunctionBackward`: `342.39 ms`
+      - `causal_dwconv_weight_backward_kernel_k4`: `190.19 ms`
     - boundary audit stayed clean through `conv_qkv`, `norm_qkv`, and
       `recurrence_inputs`
   - current decision:
-    - this family is live again only because the weight-backward kernel changed
-      materially after the original `h100k15` failure
-    - this is now the next H100 sidecar family
+    - the `h100k17` packed-conv rewrite showed the custom weight-backward
+      problem is no longer the dominant failure
+    - the remaining live target is the post-conv frontend shell
+    - this frontend-only fused preset is now the next H100 sidecar family
     - keep `winner-20260405-19` active until H100 confirms or rejects it
     - H100 batch:
       - `python setup_hgdn_cuda.py build_ext --inplace`
       - `python scripts/hgdn_cuda_parity.py`
-      - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k17ctl_a --offline`
-      - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k17ctl_b --offline`
-      - `python scripts/hgdn.py preflight --preset winner-20260405-19-cuda-packed-conv --compile-strategy model --offline`
-      - `python scripts/hgdn.py h100-profile hybrid-eager --preset winner-20260405-19-cuda-packed-conv --run-prefix h100k17a --offline`
-      - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-cuda-packed-conv --run-prefix h100k17a --offline`
-      - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-cuda-packed-conv --run-prefix h100k17b --offline`
-      - `python scripts/hgdn.py h100-profile hybrid --preset winner-20260405-19-cuda-packed-conv --run-prefix h100k17a --offline`
+      - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k18ctl_a --offline`
+      - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k18ctl_b --offline`
+      - `python scripts/hgdn.py preflight --preset winner-20260405-19-cuda-fused-frontend --compile-strategy model --offline`
+      - `python scripts/hgdn.py h100-profile hybrid-eager --preset winner-20260405-19-cuda-fused-frontend --run-prefix h100k18a --offline`
+      - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-cuda-fused-frontend --run-prefix h100k18a --offline`
+      - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-cuda-fused-frontend --run-prefix h100k18b --offline`
+      - `python scripts/hgdn.py h100-profile hybrid --preset winner-20260405-19-cuda-fused-frontend --run-prefix h100k18a --offline`
 - Older screened candidate:
   - `winner-20260405-19-cuda-packed-conv-aten-bwd`
   - equivalent to:
@@ -148,27 +147,35 @@ This file tracks follow-up work that is intentionally not enabled by default in 
   - equivalent to:
     - `winner-20260405-19`
     - `GDN_USE_CUDA_PACKED_CONV=1`
-  - first H100 result:
+  - latest H100 result:
     - reject
     - same-day controls:
-      - `848.75 ms`
-      - `848.76 ms`
+      - `880.62 ms`
+      - `881.28 ms`
     - candidate:
-      - `1796.70 ms`
-      - `1793.67 ms`
+      - `904.21 ms`
+      - `902.45 ms`
     - mean delta:
-      - `848.75 -> 1795.19 ms` (`+111.51%`)
+      - `880.95 -> 903.33 ms` (`+2.54%`)
     - scoreboard status:
       - `INTEGRATION_BOTTLENECK`
   - mechanism read:
-    - the old custom weight-backward kernel dominated the compiled step
-    - dominant compiled rows:
-      - `_PackedQKVConvFunctionBackward`: `4161.58 ms`
-      - `causal_dwconv_weight_backward_kernel`: `3973.02 ms`
+    - the rewritten custom weight-backward kernel is no longer the disaster
+      from `h100k15`
+    - main compiled custom rows:
+      - `_PackedQKVConvFunctionBackward`: `585.07 ms`
+      - `causal_dwconv_weight_backward_kernel_k4`: `396.58 ms`
+      - `_PackedQKVConvFunction`: `184.90 ms`
+    - the remaining shell rows now matter more:
+      - `triton_poi_fused_add_cat_0`: `76.09 ms`
+      - `silu_grad_from_preact_kernel`: `54.68 ms`
+      - `silu_from_preact_kernel`: `45.79 ms`
+    - copy tax actually improved:
+      - `compiled_copy_tax = -46.95 ms`
   - current decision:
-    - reject the original implementation
-    - keep the family alive only because the weight-backward kernel changed
-      materially
+    - reject this packed-conv composition on H100
+    - keep the weight-backward rewrite as a useful building block
+    - move the next sidecar one boundary later to the fused frontend shell
 - Older screened candidate:
   - `winner-20260405-19-cuda-frontend-nct-custom-bwd`
   - equivalent to:
