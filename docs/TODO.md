@@ -4,7 +4,7 @@ This file tracks follow-up work that is intentionally not enabled by default in 
 
 ## Active next steps
 
-### Strategic path if the current front-end seam stalls
+### Strategic path after the current front-end seam stalled
 
 - Main objective:
   - beat or match the attention-only baseline on final wall-clock outcome, not
@@ -19,10 +19,12 @@ This file tracks follow-up work that is intentionally not enabled by default in 
   - that is a real learning-per-step advantage even though the current HGDN
     systems winner is still materially slower on H100
 - Practical implication:
-  - if the current split-norm seam dies, the branch still has several live ways
-    to improve the overall HGDN-vs-GPT result
-  - the next tranche should then stop trying to rescue this exact front-end
-    boundary and move to the higher-payoff levers below
+  - `h100k20` closed the current post-conv front-end seam as an
+    `INTEGRATION_BOTTLENECK`
+  - the branch still has several live ways to improve the overall
+    HGDN-vs-GPT result
+  - the next tranche should stop trying to rescue this exact front-end boundary
+    and move to the higher-payoff levers below
 - Priority order after the current seam:
   1. compute-optimal HGDN resize on H100
      - best immediate candidates already prepared:
@@ -231,35 +233,46 @@ This file tracks follow-up work that is intentionally not enabled by default in 
     - keep the packed frontend math idea only if backward ownership changes
       materially
     - do not send this exact family back to H100 again
-- Next screened candidate:
+- Last screened candidate:
   - `winner-20260405-19-cuda-split-norm-lib`
   - equivalent to:
     - `winner-20260405-19`
     - `GDN_USE_CUDA_SPLIT_NORM_LIB=1`
-  - purpose:
-    - keep the promoted packed custom-backward conv winner exactly as-is
-    - move only the post-conv q/k split plus L2-normalization shell to a
-      compile-visible `torch.library` op
-    - test the narrower boundary that `h100k17` actually pointed at without
-      re-owning the whole packed frontend backward
-  - local validation:
-    - `python scripts/hgdn.py preflight --preset winner-20260405-19-cuda-split-norm-lib --compile-strategy model --offline`
-      passed
-    - `python scripts/hgdn_cuda_parity.py` passed
-    - `python test_model.py` passed with new coverage for this family
-  - next H100 batch:
-    - `python setup_hgdn_cuda.py build_ext --inplace`
-    - `python scripts/hgdn_cuda_parity.py`
-    - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k20ctl_a --offline`
-    - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k20ctl_b --offline`
-    - `python scripts/hgdn.py h100-profile hybrid-eager --preset winner-20260405-19 --run-prefix h100k20ctl --offline`
-    - `python scripts/hgdn.py h100-profile hybrid --preset winner-20260405-19 --run-prefix h100k20ctl --offline`
-    - `python scripts/hgdn.py preflight --preset winner-20260405-19-cuda-split-norm-lib --compile-strategy model --offline`
-    - `python scripts/hgdn.py h100-profile hybrid-eager --preset winner-20260405-19-cuda-split-norm-lib --run-prefix h100k20a --offline`
-    - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-cuda-split-norm-lib --run-prefix h100k20a --offline`
-    - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-cuda-split-norm-lib --run-prefix h100k20b --offline`
-    - `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-cuda-split-norm-lib --run-prefix h100k20c --offline`
-    - `python scripts/hgdn.py h100-profile hybrid --preset winner-20260405-19-cuda-split-norm-lib --run-prefix h100k20a --offline`
+  - H100 result:
+    - reject
+    - same-day controls:
+      - `881.35 ms`
+      - `880.18 ms`
+    - candidate:
+      - `961.05 ms`
+      - `959.47 ms`
+      - `959.11 ms`
+    - mean delta:
+      - `880.77 -> 959.88 ms` (`+8.98%`)
+    - scoreboard status:
+      - `INTEGRATION_BOTTLENECK`
+  - mechanism read:
+    - eager improved:
+      - `ProfilerStep* delta = -392.33 ms`
+    - compiled worsened:
+      - `ProfilerStep* delta = +306.66 ms`
+      - `compile_specific_penalty = +698.99 ms`
+    - graph-shell tax reopened:
+      - `CompiledFxGraph delta = +307.55 ms`
+      - `DDP.forward delta = +240.12 ms`
+    - copy tax reopened materially:
+      - `compiled_copy_tax = +306.55 ms`
+    - the split/norm kernels themselves were visible, but not the dominant
+      explanation for the total loss:
+      - `hgdn_cuda_v4::packed_qkv_split_l2norm_backward = 194.72 ms`
+      - `hgdn_cuda_v4::packed_qkv_split_l2norm = 145.95 ms`
+  - current decision:
+    - close the current post-conv front-end seam
+    - keep `winner-20260405-19` as the active HGDN kernel baseline
+    - do not send `cuda-fused-frontend`, `cuda-fused-frontend-lib`, or
+      `cuda-split-norm-lib` back to H100 at this abstraction level
+    - do not spend a forward-only split/norm follow-up on current evidence
+    - move the next tranche to compute-optimal HGDN resize on H100
 - Older screened candidate:
   - `winner-20260405-19-cuda-packed-conv-aten-bwd`
   - equivalent to:

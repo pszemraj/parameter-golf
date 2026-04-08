@@ -1,9 +1,99 @@
 # Profiling Log
 
-Last updated: 2026-04-08 03:05 EDT
+Last updated: 2026-04-08 14:21 EDT
 
 This file records profiler-driven checkpoints that should survive beyond the raw
 artifacts under `profiles/`.
+
+## 2026-04-08 — Compile-visible split/norm also closes the current front-end seam (`h100k20`)
+
+Bundle:
+
+- H100 bundle:
+  - `local-scratch/profiling-out-h100k20-hgdn.7z`
+
+Contract:
+
+- active H100 baseline:
+  - `winner-20260405-19`
+- candidate delta:
+  - `GDN_USE_CUDA_SPLIT_NORM_LIB=1`
+- family read:
+  - keep the promoted packed custom-backward conv winner intact
+  - move only the post-conv q/k split plus L2-normalization shell to a
+    compile-visible `torch.library` op with registered backward
+  - this was the one justified narrower follow-up after `h100k19`
+
+### Main finding
+
+Reject `winner-20260405-19-cuda-split-norm-lib` on H100.
+
+Same-day H100 compiled perf:
+
+- controls:
+  - `881.35 ms`
+  - `880.18 ms`
+- candidate:
+  - `961.05 ms`
+  - `959.47 ms`
+  - `959.11 ms`
+- mean delta:
+  - `880.77 -> 959.88 ms` (`+8.98%`)
+
+### What went wrong
+
+This family improved eager time, but it did not localize the compiled miss to
+split/norm backward ownership.
+
+The new custom split/norm rows were visible and nontrivial:
+
+- `hgdn_cuda_v4::packed_qkv_split_l2norm_backward`:
+  - `194.72 ms`
+- `hgdn_cuda_v4::packed_qkv_split_l2norm`:
+  - `145.95 ms`
+
+But the larger regression remained graph-shell and copy-boundary tax:
+
+- scoreboard `compiled_copy_tax`:
+  - `+306.55 ms`
+- `CompiledFxGraph` delta:
+  - `+307.55 ms`
+- `DDP.forward` delta:
+  - `+240.12 ms`
+
+The scoreboard read stayed clearly eager-positive / compiled-negative:
+
+- eager `ProfilerStep*` delta:
+  - `-392.33 ms`
+- compiled `ProfilerStep*` delta:
+  - `+306.66 ms`
+- compile-specific penalty:
+  - `+698.99 ms`
+
+### Scoreboard read
+
+This family is an `INTEGRATION_BOTTLENECK`.
+
+It does not satisfy the rule for one more ownership follow-up on this seam,
+because the loss did not collapse primarily into the split/norm backward kernel
+itself. The compiled boundary fallout was still larger than the targeted custom
+rows.
+
+### Decision
+
+Close the current post-conv front-end seam.
+
+- keep `winner-20260405-19` active
+- park `winner-20260405-19-cuda-fused-frontend`
+- park `winner-20260405-19-cuda-fused-frontend-lib`
+- park `winner-20260405-19-cuda-split-norm-lib`
+- do not send a forward-only split/norm follow-up on current evidence
+- do not spend more H100 time on compile-visible post-conv frontend ownership
+  variants at this abstraction level unless the decomposition changes
+  materially
+
+The next active HGDN lever is now compute-optimal resize on H100, followed by
+norm-placement screening if resize does not settle the wall-clock tradeoff.
 
 ## 2026-04-08 — Compile-visible full packed frontend is still an H100 integration bottleneck (`h100k19`)
 

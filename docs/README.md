@@ -264,11 +264,30 @@ Kernel-work guardrail:
       - eager improved and copy tax improved, but the packed frontend backward,
         conv weight-backward, and surrounding `CompiledFxGraph` rows still got
         materially worse
-    - the full packed frontend library family is now also an integration
-      bottleneck at its current ownership split
-    - the next live family is a narrower compile-visible split-norm sidecar on
-      top of the promoted custom-conv winner:
-      `winner-20260405-19-cuda-split-norm-lib`
+  - the full packed frontend library family is now also an integration
+    bottleneck at its current ownership split
+  - the narrower compile-visible split-norm sidecar also lost on H100:
+    - controls:
+      - `881.35 ms`
+      - `880.18 ms`
+    - candidate:
+      - `961.05 ms`
+      - `959.47 ms`
+      - `959.11 ms`
+    - mean delta:
+      - `880.77 -> 959.88 ms` (`+8.98%`)
+    - the custom split/norm rows were real:
+      - `hgdn_cuda_v4::packed_qkv_split_l2norm_backward = 194.72 ms`
+      - `hgdn_cuda_v4::packed_qkv_split_l2norm = 145.95 ms`
+    - but compiled copy tax, `CompiledFxGraph`, and `DDP.forward` all still
+      worsened materially
+  - practical conclusion:
+    - the current post-conv front-end seam is now closed at this abstraction
+      level
+    - do not spend more H100 time on compile-visible post-conv frontend
+      ownership variants unless the decomposition changes materially
+    - move the next HGDN tranche to compute-optimal resize, then norm placement
+      and other non-seam hotspots
     - the current compile-visible NCT frontend family is an integration
       bottleneck at this abstraction level
     - do not spend more H100 time on that family unless the boundary changes
@@ -1160,10 +1179,12 @@ So the right stop rule is not “quit after N rejects.” It is:
 
 ## Likely Next Work
 
-- Continue HGDN-native hotspot work on top of the current winner, especially the packed qkv front-end and remaining norm/gate/layout glue.
+- Run the compute-optimal HGDN resize tranche on top of the current winner using the prepared `retune_*` configs.
+- After resize, run the norm-placement screen (`pre` vs `post` vs `keel`) if the wall-clock tradeoff is still unresolved.
+- Keep HGDN-native hotspot work focused on non-seam systems costs such as gate/output projection and residual-shell glue unless a materially different front-end decomposition appears.
 - If exact local size matching is still required, bracket the attention-only baseline between `MLP_MULT=4.0` and a slightly larger fixed-step candidate. Do not use 600-second local runs as the final size-matching proxy.
 - Add the trainer's new byte-audit fields to any future quality-run summaries when comparing branches.
-- Once the next kernel tranche stalls, run a small wall-clock-capped HGDN scaling sweep to find the real compute-optimal size.
+- The current post-conv front-end seam is closed after `h100k20`; do not reopen it without a material decomposition change.
 - If possible later, re-check throughput and compile strategy on the target H100 environment.
   - The branch now includes `scripts/run_h100_single_gpu_hgdn.sh` for that 1xH100 calibration step.
 
