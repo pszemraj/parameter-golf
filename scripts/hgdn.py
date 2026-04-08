@@ -136,6 +136,13 @@ HGDN_PRESETS: dict[str, dict[str, str]] = {
         "GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD": "1",
         "GDN_USE_CUDA_FRONTEND_NCT": "1",
     },
+    "winner-20260405-19-cuda-fused-frontend": {
+        "GDN_CONV_OUTPUT_CONTIGUOUS": "1",
+        "GDN_USE_PACKED_QKV_CONV": "1",
+        "GDN_USE_PACKED_QKV_PROJ": "1",
+        "GDN_CONTROL_PROJ_FP32": "0",
+        "GDN_USE_CUDA_FUSED_FRONTEND": "1",
+    },
     "winner-20260405-19-cuda-packed-conv": {
         "GDN_CONV_OUTPUT_CONTIGUOUS": "1",
         "GDN_USE_PACKED_QKV_CONV": "1",
