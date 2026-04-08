@@ -137,9 +137,13 @@ def parse_perf_logs(root: Path) -> dict[str, PerfRecord]:
 
     records: dict[str, PerfRecord] = {}
     for path in list(root.rglob("*.txt")) + list(root.rglob("*.log")):
-        match = PERF_RE.search(path.read_text(errors="ignore"))
-        if not match:
+        matches = list(PERF_RE.finditer(path.read_text(errors="ignore")))
+        if not matches:
             continue
+        # Some archived logs contain an earlier partial perf block followed by the
+        # final rerun in the same file. Use the last summary so family scoring
+        # reflects the terminal result rather than stale appended output.
+        match = matches[-1]
         records[path.stem] = PerfRecord(
             run_stem=path.stem,
             step_ms=float(match.group(1)),
