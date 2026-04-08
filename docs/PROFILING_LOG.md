@@ -1,9 +1,119 @@
 # Profiling Log
 
-Last updated: 2026-04-08 00:31 EDT
+Last updated: 2026-04-08 03:05 EDT
 
 This file records profiler-driven checkpoints that should survive beyond the raw
 artifacts under `profiles/`.
+
+## 2026-04-08 — Compile-visible full packed frontend is still an H100 integration bottleneck (`h100k19`)
+
+Bundle:
+
+- H100 bundle:
+  - `local-scratch/profiling-out-h100k19-hgdn.7z`
+
+Contract:
+
+- active H100 baseline:
+  - `winner-20260405-19`
+- candidate delta:
+  - `GDN_USE_CUDA_FUSED_FRONTEND_LIB=1`
+- family read:
+  - packed qkv projection remains packed
+  - the candidate moves packed conv plus post-conv split+q/k norm under a
+    compile-visible `torch.library` boundary with registered backward
+  - this is a material boundary change relative to the old
+    `_PackedQKVFrontendFunction` family, but it still owns the full frontend
+    backward
+
+### Main finding
+
+Reject `winner-20260405-19-cuda-fused-frontend-lib` on H100.
+
+Same-day H100 compiled perf:
+
+- controls:
+  - `853.15 ms`
+  - `855.07 ms`
+- candidate:
+  - `931.88 ms`
+  - `931.62 ms`
+  - `929.84 ms`
+- mean delta:
+  - `854.11 -> 931.11 ms` (`+9.02%`)
+
+### What went wrong
+
+This is still an eager-positive, compiled-negative integration miss.
+
+The new library boundary preserved the eager improvement and copy-tax win, but
+the full packed frontend backward remained too expensive once compiled:
+
+- `hgdn_cuda_v3::packed_qkv_frontend_backward`:
+  - `755.78 ms`
+- `causal_dwconv_weight_backward_kernel_k4`:
+  - `398.00 ms`
+- `build_grad_preact_kernel`:
+  - `224.08 ms`
+- `split_norm_from_preact_kernel`:
+  - `153.26 ms`
+- `hgdn_cuda_v3::packed_qkv_frontend`:
+  - `292.29 ms`
+
+The graph-shell tax also stayed open:
+
+- `CompiledFxGraph` delta:
+  - `+316.07 ms`
+- `DDP.forward` delta:
+  - `-2.19 ms`
+
+Copy tax was not the problem:
+
+- `aten::copy_` delta:
+  - `-23.26 ms`
+- scoreboard `compiled_copy_tax`:
+  - `-46.50 ms`
+
+### Scoreboard read
+
+This family is an `INTEGRATION_BOTTLENECK`.
+
+- compile-specific penalty:
+  - `+1348.59 ms`
+- eager `ProfilerStep*` improved:
+  - `-1039.88 ms`
+- compiled `ProfilerStep*` worsened:
+  - `+308.71 ms`
+
+### Decision
+
+Reject the full packed frontend library family at the current ownership split.
+
+Do not discard the post-conv split/norm idea. `h100k19` says the mistake is
+letting the compile-visible frontend op own the full conv+frontend backward.
+
+The next targeted family should keep the promoted packed custom-backward conv
+winner exactly as-is and move only the post-conv split+q/k norm shell to a
+compile-visible `torch.library` op:
+
+- keep `winner-20260405-19` active
+- park `winner-20260405-19-cuda-fused-frontend-lib`
+- test `winner-20260405-19-cuda-split-norm-lib` next
+
+### H100 validation
+
+- `python setup_hgdn_cuda.py build_ext --inplace`
+- `python scripts/hgdn_cuda_parity.py`
+- `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k20ctl_a --offline`
+- `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k20ctl_b --offline`
+- `python scripts/hgdn.py h100-profile hybrid-eager --preset winner-20260405-19 --run-prefix h100k20ctl --offline`
+- `python scripts/hgdn.py h100-profile hybrid --preset winner-20260405-19 --run-prefix h100k20ctl --offline`
+- `python scripts/hgdn.py preflight --preset winner-20260405-19-cuda-split-norm-lib --compile-strategy model --offline`
+- `python scripts/hgdn.py h100-profile hybrid-eager --preset winner-20260405-19-cuda-split-norm-lib --run-prefix h100k20a --offline`
+- `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-cuda-split-norm-lib --run-prefix h100k20a --offline`
+- `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-cuda-split-norm-lib --run-prefix h100k20b --offline`
+- `python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-cuda-split-norm-lib --run-prefix h100k20c --offline`
+- `python scripts/hgdn.py h100-profile hybrid --preset winner-20260405-19-cuda-split-norm-lib --run-prefix h100k20a --offline`
 
 ## 2026-04-08 — Old fused frontend is another H100 integration bottleneck (`h100k18`)
 

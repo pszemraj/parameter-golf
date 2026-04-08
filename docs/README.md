@@ -1,6 +1,6 @@
 # HGDN Branch Status
 
-Last updated: 2026-04-08 00:31 EDT
+Last updated: 2026-04-08 03:05 EDT
 
 Branch: `exp/hgdn`
 
@@ -91,7 +91,8 @@ What has not been claimed:
 - `configs/hgdn/winner_20260405_19_cuda_packed_conv_atenbwd.toml`: rejected H100 sidecar that keeps the exact-length CUDA packed-conv forward but hands backward back to ATen/cuDNN
 - `configs/hgdn/winner_20260405_19_cuda_packed_conv_aten_weightbwd.toml`: local-only ownership split that keeps custom forward and input-grad but hands only weight-grad back to ATen
 - `configs/hgdn/winner_20260405_19_cuda_fused_frontend.toml`: rejected H100 sidecar that keeps the promoted packed custom-backward conv path and fuses only the post-conv frontend shell behind the old custom-op boundary
-- `configs/hgdn/winner_20260405_19_cuda_fused_frontend_lib.toml`: next H100 sidecar candidate that keeps the packed frontend math but moves it to a compile-visible `torch.library` boundary
+- `configs/hgdn/winner_20260405_19_cuda_fused_frontend_lib.toml`: rejected H100 sidecar that keeps the packed frontend math but moves it to a compile-visible `torch.library` boundary
+- `configs/hgdn/winner_20260405_19_cuda_split_norm_lib.toml`: next H100 sidecar candidate that keeps the promoted packed custom-backward conv winner and moves only post-conv split+q/k norm to a compile-visible `torch.library` boundary
 - `configs/hgdn/winner_20260405_19_cuda_frontend_nct_custombwd.toml`: composed sidecar candidate that keeps the promoted exact-length packed custom-backward conv path and layers the compile-visible NCT frontend op above `preact_nct`
 - `configs/hgdn/winner_20260405_19_cuda_frontend_nct.toml`: compile-visible NCT frontend sidecar candidate that keeps depthwise conv in ATen and moves post-conv `SiLU + split + q/k norm` one boundary earlier
 - `configs/hgdn/winner_20260405_19_cuda_packed_conv.toml`: exact-length CUDA packed-conv sidecar candidate that replaces the packed qkv causal depthwise conv family itself
@@ -151,6 +152,7 @@ Active timestamped presets:
 - `winner-20260405-19-cuda-packed-conv-aten-weight-bwd`
 - `winner-20260405-19-cuda-fused-frontend`
 - `winner-20260405-19-cuda-fused-frontend-lib`
+- `winner-20260405-19-cuda-split-norm-lib`
 - `winner-20260405-19-cuda-frontend-nct-custom-bwd`
 - `winner-20260405-19-cuda-frontend-nct`
 - `winner-20260405-19-cuda-packed-conv`
@@ -249,14 +251,32 @@ Kernel-work guardrail:
       custom-op boundary
     - keep the fused post-conv math idea only if the boundary changes
       materially
-    - the next live family is the compile-visible packed fused frontend:
-      `winner-20260405-19-cuda-fused-frontend-lib`
+    - the compile-visible packed fused frontend also lost badly on H100:
+      - controls:
+        - `853.15 ms`
+        - `855.07 ms`
+      - candidate:
+        - `931.88 ms`
+        - `931.62 ms`
+        - `929.84 ms`
+      - mean delta:
+        - `854.11 -> 931.11 ms` (`+9.02%`)
+      - eager improved and copy tax improved, but the packed frontend backward,
+        conv weight-backward, and surrounding `CompiledFxGraph` rows still got
+        materially worse
+    - the full packed frontend library family is now also an integration
+      bottleneck at its current ownership split
+    - the next live family is a narrower compile-visible split-norm sidecar on
+      top of the promoted custom-conv winner:
+      `winner-20260405-19-cuda-split-norm-lib`
     - the current compile-visible NCT frontend family is an integration
       bottleneck at this abstraction level
     - do not spend more H100 time on that family unless the boundary changes
       materially
     - do not reopen the old fused-frontend autograd island again without a
       material implementation change
+    - do not send the full packed frontend library family back to H100 unless
+      its backward ownership changes materially
 
 H100 batch protocol:
 
