@@ -59,6 +59,27 @@ This file tracks follow-up work that is intentionally not enabled by default in 
       - `SATURATED` if the control compiled upper bound is already below the
         meaningful-win threshold
       - stop after repeated `FLAT` or repeated `INTEGRATION_BOTTLENECK` results
+  - H100 batching policy:
+    - when only one family is genuinely live, prefer one larger same-day H100
+      batch instead of multiple tiny consecutive rounds
+    - default shape:
+      - 2 control perf runs
+      - control eager and compiled profiles when attribution still matters
+      - candidate preflight
+      - candidate eager profile
+      - 2 candidate perf runs, or 3 if tighter confidence is worth more than a
+        second family
+      - candidate compiled profile
+    - do not batch a second family unless it is genuinely orthogonal and a
+      loss would still teach something independent
+  - timing reminder:
+    - trainer warmup and compile priming are outside the `MAX_WALLCLOCK_SECONDS`
+      training timer
+    - validation time is also outside the training timer
+    - serialization and final roundtrip eval are outside the training timer
+    - the challenge still has a separate external 10-minute evaluation cap
+    - use compile-heavy kernels when they help steady-state runtime, but do not
+      treat compile time as a reason to ignore runtime or eval regressions
 - Latest screened candidate:
   - `winner-20260405-19-cuda-fused-frontend`
   - equivalent to:

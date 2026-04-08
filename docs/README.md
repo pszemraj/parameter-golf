@@ -243,6 +243,39 @@ Kernel-work guardrail:
     - the next live family should stay at the packed-conv stage, but with
       different backward ownership
 
+H100 batch protocol:
+
+- when there is only one live kernel family, prefer one larger same-day H100
+  batch over multiple tiny consecutive rounds
+- default shape for that batch:
+  - 2 control perf runs
+  - control eager and compiled profiles when attribution is still evolving
+  - candidate preflight
+  - candidate eager profile
+  - 2 candidate perf runs, or 3 if we want tighter confidence without opening a
+    second family
+  - candidate compiled profile
+- do not batch a second kernel family unless it is genuinely orthogonal and a
+  loss would still teach us something independent
+- practical reason:
+  - this improves same-day noise estimates and profiler attribution without
+    muddying the family decision
+
+Training-clock reminder:
+
+- the trainer's `MAX_WALLCLOCK_SECONDS=600` cap measures training time, not
+  simple process wallclock
+- warmup and compile priming happen before the training timer starts
+- validation time is also excluded from the training timer
+- serialization and final roundtrip eval are outside the training timer too
+- the challenge still has a separate external 10-minute evaluation cap on top
+  of the 10-minute training budget
+- practical consequence:
+  - expensive compile-heavy CUDA kernels are not automatically disqualified by
+    startup cost alone
+  - but compile time is not a reason to ignore steady-state runtime regressions
+    or evaluation-time constraints
+
 Latest screened front-end candidate:
 
 - `winner-20260405-19-cuda-frontend-nct-custom-bwd`
