@@ -105,7 +105,7 @@ run_perf_pair() {
     local perf_ignore_steps="${PERF_IGNORE_STEPS:-10}"
     local perf_train_log_every="${PERF_TRAIN_LOG_EVERY:-10}"
     local hybrid_gdn_ratio="${HYBRID_GDN_RATIO:-1}"
-    local hybrid_mlp_mult="${HYBRID_MLP_MULT:-3.25}"
+    local hybrid_mlp_mult="${HYBRID_MLP_MULT:-${MLP_MULT:-3.25}}"
     local depth_mlp_mult="${DEPTH_MLP_MULT:-4.0}"
 
     run_sweep \
@@ -150,7 +150,7 @@ run_fixed2k_pair() {
     local val_loss_every="${FIXED2K_VAL_LOSS_EVERY:-500}"
     local train_log_every="${FIXED2K_TRAIN_LOG_EVERY:-200}"
     local hybrid_gdn_ratio="${HYBRID_GDN_RATIO:-1}"
-    local hybrid_mlp_mult="${HYBRID_MLP_MULT:-3.25}"
+    local hybrid_mlp_mult="${HYBRID_MLP_MULT:-${MLP_MULT:-3.25}}"
     local depth_mlp_mult="${DEPTH_MLP_MULT:-4.0}"
 
     run_sweep \
@@ -193,7 +193,7 @@ run_fixed2k_hybrid() {
     local val_loss_every="${FIXED2K_VAL_LOSS_EVERY:-500}"
     local train_log_every="${FIXED2K_TRAIN_LOG_EVERY:-200}"
     local hybrid_gdn_ratio="${HYBRID_GDN_RATIO:-1}"
-    local hybrid_mlp_mult="${HYBRID_MLP_MULT:-3.25}"
+    local hybrid_mlp_mult="${HYBRID_MLP_MULT:-${MLP_MULT:-3.25}}"
 
     run_sweep \
         "1xH100 fixed2k: hybrid GDN_RATIO=${hybrid_gdn_ratio} MLP_MULT=${hybrid_mlp_mult}" \

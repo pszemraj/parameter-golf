@@ -120,7 +120,7 @@ run_hybrid() {
     local prefix="$1"
     local compile_enabled="${2:-1}"
     local hybrid_gdn_ratio="${HYBRID_GDN_RATIO:-1}"
-    local hybrid_mlp_mult="${HYBRID_MLP_MULT:-3.25}"
+    local hybrid_mlp_mult="${HYBRID_MLP_MULT:-${MLP_MULT:-3.25}}"
     local seq_len="${TRAIN_SEQ_LEN:-2048}"
     local compile_label="compiled"
     if [[ "$compile_enabled" == "0" ]]; then

@@ -14,7 +14,8 @@ from typing import Any
 
 import wandb
 
-from export_wandb_hgdn_runs import flatten_config, matches, write_csv, write_json
+from export_wandb_hgdn_runs import flatten_config, matches
+from profiler_report import write_json, write_rows_csv
 
 DEFAULT_EVAL_STEPS = (500, 1000, 1500, 2000)
 DEFAULT_HISTORY_KEYS = ("_step", "train/step_ms", "eval/loss", "eval/bpb")
@@ -427,7 +428,7 @@ def main() -> int:
     }
     write_json(output_dir / "manifest.json", manifest)
     write_json(output_dir / "rows.json", rows)
-    write_csv(output_dir / "rows.csv", rows)
+    write_rows_csv(output_dir / "rows.csv", rows)
     markdown = render_markdown(rows, reference, eval_steps, output_dir)
     (output_dir / "comparison.md").write_text(markdown, encoding="utf-8")
 
