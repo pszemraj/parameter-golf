@@ -755,6 +755,12 @@ Stage split:
     - `WANDB_WATCH=none`
     - `TORCHINDUCTOR_MAX_AUTOTUNE=0`
     - `TORCHINDUCTOR_MAX_AUTOTUNE_GEMM=0`
+  - compile diagnostics:
+    - set `TORCH_LOGS=recompiles,graph_breaks` on the runner invocation when
+      you want Dynamo/Inductor diagnostics in the text log
+    - optional `TORCH_TRACE=/tmp/tracedir` is passed through too
+    - both values are echoed in the launch summary and saved in the bundle
+      manifest
   - sanity check on the WSL laptop with the corrected defaults:
     - `localsmoke_retune_current_seq1024_it2`
     - `step:1 = 1026 ms`
@@ -892,6 +898,13 @@ PERF_SKIP_FINAL_EVAL=1 RUN_ID=diag_recompiles scripts/sweep.sh single
 ```
 
 For a richer trace, PyTorch recommends `TORCH_TRACE=/tmp/tracedir` plus `tlparse` on the trace directory.
+
+The single-entry batch helpers also pass these through directly, for example:
+
+```bash
+TORCH_LOGS=recompiles,graph_breaks bash scripts/run_local_hgdn_resize_round.sh
+TORCH_LOGS=recompiles,graph_breaks bash scripts/run_h100_hgdn_resize_round.sh
+```
 
 ## Throughput Screening Results
 

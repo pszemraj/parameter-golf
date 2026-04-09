@@ -51,6 +51,7 @@ print_launch_summary() {
     echo "data_path=$DATA_PATH"
     echo "tokenizer_path=$TOKENIZER_PATH"
     echo "compile_strategy=$COMPILE_STRATEGY perf_timing=${PERF_TIMING:-0} perf_ignore_steps=${PERF_IGNORE_STEPS:-0}"
+    echo "torch_logs=${TORCH_LOGS:-<unset>} torch_trace=${TORCH_TRACE:-<unset>}"
     if [[ -n "${TORCHINDUCTOR_CACHE_DIR:-}" || -n "${TRITON_CACHE_DIR:-}" ]]; then
         echo "inductor_cache_dir=${TORCHINDUCTOR_CACHE_DIR:-<default>}"
         echo "triton_cache_dir=${TRITON_CACHE_DIR:-<default>}"

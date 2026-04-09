@@ -22,6 +22,8 @@ compare_reference="${COMPARE_REFERENCE:-h100k6_fixed2k_hybrid_r1_mlp3.25_seq2048
 compare_output_dir="${COMPARE_OUTPUT_DIR:-profiles/fixed2k_compare/${run_prefix_base}_round}"
 bundle_stage_dir="${BUNDLE_STAGE_DIR:-local-scratch/${run_prefix_base}_bundle}"
 archive_output="${ARCHIVE_OUTPUT:-local-scratch/${run_prefix_base}_bundle.7z}"
+torch_logs="${TORCH_LOGS:-}"
+torch_trace="${TORCH_TRACE:-}"
 
 case "${wandb_mode}" in
 online)
@@ -78,6 +80,8 @@ print_plan() {
     echo "wandb_project=${wandb_project}"
     echo "wandb_watch=${wandb_watch}"
     echo "wandb_mode=${wandb_mode}"
+    echo "TORCH_LOGS=${torch_logs:-<unset>}"
+    echo "TORCH_TRACE=${torch_trace:-<unset>}"
     echo "compare_reference=${compare_reference}"
     echo "compare_output_dir=${compare_output_dir}"
     echo "archive_output=${archive_output}"
@@ -89,11 +93,20 @@ print_plan() {
 }
 
 run_batch() {
+    local diagnostic_env=()
+    if [[ -n "${torch_logs}" ]]; then
+        diagnostic_env+=("TORCH_LOGS=${torch_logs}")
+    fi
+    if [[ -n "${torch_trace}" ]]; then
+        diagnostic_env+=("TORCH_TRACE=${torch_trace}")
+    fi
+
     local i
     for ((i = 0; i < ${#configs[@]}; i++)); do
         echo
         echo ">>> 1xH100 fixed2k-hybrid: ${labels[$i]}"
         hgdn_run_with_env \
+            "${diagnostic_env[@]}" \
             WANDB_PROJECT="${wandb_project}" \
             WANDB_WATCH="${wandb_watch}" \
             WANDB_MODE="${wandb_mode}" \
@@ -149,6 +162,8 @@ build_bundle() {
         "${compare_output_dir}" \
         "${archive_output}" \
         "${matched_logs}" \
+        "${torch_logs}" \
+        "${torch_trace}" \
         "${run_prefixes[@]}" <<'PY'
 from pathlib import Path
 import json
@@ -160,7 +175,9 @@ compare_reference = sys.argv[3]
 compare_output_dir = sys.argv[4]
 archive_output = sys.argv[5]
 matched_logs = bool(int(sys.argv[6]))
-run_prefixes = sys.argv[7:]
+torch_logs = sys.argv[7]
+torch_trace = sys.argv[8]
+run_prefixes = sys.argv[9:]
 
 manifest = {
     "run_prefix_base": run_prefix_base,
@@ -169,6 +186,8 @@ manifest = {
     "compare_output_dir": compare_output_dir,
     "archive_output": archive_output,
     "matched_logs": matched_logs,
+    "torch_logs": torch_logs or None,
+    "torch_trace": torch_trace or None,
 }
 (bundle_dir / "bundle_manifest.json").write_text(
     json.dumps(manifest, indent=2, sort_keys=True) + "\n",

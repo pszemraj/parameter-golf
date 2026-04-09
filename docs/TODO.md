@@ -75,6 +75,11 @@ This file tracks follow-up work that is intentionally not enabled by default in 
            - `WANDB_WATCH=none`
            - `TORCHINDUCTOR_MAX_AUTOTUNE=0`
            - `TORCHINDUCTOR_MAX_AUTOTUNE_GEMM=0`
+         - compile diagnostics should stay opt-in via existing Torch env vars:
+           - `TORCH_LOGS=recompiles,graph_breaks`
+           - optional `TORCH_TRACE=/tmp/tracedir`
+         - helper launch summaries and bundle manifests should record those env
+           values when used
          - sanity smoke for the corrected local contract:
            - `localsmoke_retune_current_seq1024_it2`
            - `step:1 = 1026 ms`
