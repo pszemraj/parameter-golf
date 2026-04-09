@@ -746,6 +746,19 @@ Stage split:
   - broad local fixed-data architecture search
   - use this first when the candidate family fits local VRAM
   - writes a handoff archive to `local-scratch/<RUN_PREFIX_BASE>_bundle.7z`
+  - local helper defaults:
+    - `TRAIN_BATCH_TOKENS=65536`
+    - `TRAIN_SEQ_LEN=1024`
+    - `ITERATIONS=750`
+    - `COMPILE=1`
+    - `COMPILE_STRATEGY=model`
+    - `WANDB_WATCH=none`
+    - `TORCHINDUCTOR_MAX_AUTOTUNE=0`
+    - `TORCHINDUCTOR_MAX_AUTOTUNE_GEMM=0`
+  - sanity check on the WSL laptop with the corrected defaults:
+    - `localsmoke_retune_current_seq1024_it2`
+    - `step:1 = 1026 ms`
+    - `step:2 = 991 ms`
 - `scripts/run_h100_hgdn_resize_round.sh`
   - finalist confirmation and ranking on H100
 

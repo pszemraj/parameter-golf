@@ -19,16 +19,18 @@ python_bin="${PYTHON_BIN:-python}"
 use_wandb="${USE_WANDB:-1}"
 wandb_mode="${WANDB_MODE:-online}"
 wandb_project="${WANDB_PROJECT:-pg-hconv-ablations}"
-wandb_watch="${WANDB_WATCH:-gradients}"
+wandb_watch="${WANDB_WATCH:-none}"
 wandb_watch_log_freq="${WANDB_WATCH_LOG_FREQ:-25}"
 run_prefix_base="${RUN_PREFIX_BASE:-localretune1}"
 bundle_stage_dir="${BUNDLE_STAGE_DIR:-local-scratch/${run_prefix_base}_bundle}"
 archive_output="${ARCHIVE_OUTPUT:-local-scratch/${run_prefix_base}_bundle.7z}"
 command_log="${COMMAND_LOG:-local-scratch/${run_prefix_base}_commands.sh}"
+torchinductor_max_autotune="${TORCHINDUCTOR_MAX_AUTOTUNE:-0}"
+torchinductor_max_autotune_gemm="${TORCHINDUCTOR_MAX_AUTOTUNE_GEMM:-0}"
 
 ngpu="${NGPU:-1}"
 iterations="${ITERATIONS:-750}"
-train_batch_tokens="${TRAIN_BATCH_TOKENS:-262144}"
+train_batch_tokens="${TRAIN_BATCH_TOKENS:-65536}"
 train_seq_len="${TRAIN_SEQ_LEN:-1024}"
 val_loss_every="${VAL_LOSS_EVERY:-100}"
 train_log_every="${TRAIN_LOG_EVERY:-25}"
@@ -115,6 +117,8 @@ print_plan() {
     echo "wandb_project=${wandb_project}"
     echo "wandb_watch=${wandb_watch}"
     echo "wandb_watch_log_freq=${wandb_watch_log_freq}"
+    echo "TORCHINDUCTOR_MAX_AUTOTUNE=${torchinductor_max_autotune}"
+    echo "TORCHINDUCTOR_MAX_AUTOTUNE_GEMM=${torchinductor_max_autotune_gemm}"
     echo "ngpu=${ngpu}"
     echo "iterations=${iterations}"
     echo "train_batch_tokens=${train_batch_tokens}"
@@ -162,6 +166,8 @@ run_batch() {
             "WANDB_PROJECT=${wandb_project}" \
             "WANDB_WATCH=${wandb_watch}" \
             "WANDB_WATCH_LOG_FREQ=${wandb_watch_log_freq}" \
+            "TORCHINDUCTOR_MAX_AUTOTUNE=${torchinductor_max_autotune}" \
+            "TORCHINDUCTOR_MAX_AUTOTUNE_GEMM=${torchinductor_max_autotune_gemm}" \
             "COMPILE=${compile}" \
             "COMPILE_STRATEGY=${compile_strategy}" \
             "RUN_ID=${run_id}" \
@@ -184,6 +190,8 @@ run_batch() {
             "WANDB_PROJECT=${wandb_project}" \
             "WANDB_WATCH=${wandb_watch}" \
             "WANDB_WATCH_LOG_FREQ=${wandb_watch_log_freq}" \
+            "TORCHINDUCTOR_MAX_AUTOTUNE=${torchinductor_max_autotune}" \
+            "TORCHINDUCTOR_MAX_AUTOTUNE_GEMM=${torchinductor_max_autotune_gemm}" \
             "COMPILE=${compile}" \
             "COMPILE_STRATEGY=${compile_strategy}" \
             "RUN_ID=${run_id}" \
@@ -229,6 +237,8 @@ build_bundle() {
         "${wandb_mode}" \
         "${archive_output}" \
         "${matched_logs}" \
+        "${torchinductor_max_autotune}" \
+        "${torchinductor_max_autotune_gemm}" \
         "${iterations}" \
         "${train_batch_tokens}" \
         "${train_seq_len}" \
@@ -248,15 +258,17 @@ wandb_project = sys.argv[3]
 wandb_mode = sys.argv[4]
 archive_output = sys.argv[5]
 matched_logs = bool(int(sys.argv[6]))
-iterations = int(sys.argv[7])
-train_batch_tokens = int(sys.argv[8])
-train_seq_len = int(sys.argv[9])
-val_loss_every = int(sys.argv[10])
-train_log_every = int(sys.argv[11])
-val_batch_size = int(sys.argv[12])
-compile_enabled = bool(int(sys.argv[13]))
-compile_strategy = sys.argv[14]
-run_ids = sys.argv[15:]
+torchinductor_max_autotune = int(sys.argv[7])
+torchinductor_max_autotune_gemm = int(sys.argv[8])
+iterations = int(sys.argv[9])
+train_batch_tokens = int(sys.argv[10])
+train_seq_len = int(sys.argv[11])
+val_loss_every = int(sys.argv[12])
+train_log_every = int(sys.argv[13])
+val_batch_size = int(sys.argv[14])
+compile_enabled = bool(int(sys.argv[15]))
+compile_strategy = sys.argv[16]
+run_ids = sys.argv[17:]
 
 manifest = {
     "run_prefix_base": run_prefix_base,
@@ -265,6 +277,8 @@ manifest = {
     "archive_output": archive_output,
     "matched_logs": matched_logs,
     "contract": {
+        "torchinductor_max_autotune": torchinductor_max_autotune,
+        "torchinductor_max_autotune_gemm": torchinductor_max_autotune_gemm,
         "iterations": iterations,
         "train_batch_tokens": train_batch_tokens,
         "train_seq_len": train_seq_len,

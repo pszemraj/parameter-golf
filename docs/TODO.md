@@ -68,6 +68,17 @@ This file tracks follow-up work that is intentionally not enabled by default in 
          - `scripts/run_local_hgdn_resize_round.sh`
          - the script should be a single-entry protocol file with no
            extra subcommands
+         - local defaults should stay laptop-friendly:
+           - `TRAIN_BATCH_TOKENS=65536`
+           - `TRAIN_SEQ_LEN=1024`
+           - `ITERATIONS=750`
+           - `WANDB_WATCH=none`
+           - `TORCHINDUCTOR_MAX_AUTOTUNE=0`
+           - `TORCHINDUCTOR_MAX_AUTOTUNE_GEMM=0`
+         - sanity smoke for the corrected local contract:
+           - `localsmoke_retune_current_seq1024_it2`
+           - `step:1 = 1026 ms`
+           - `step:2 = 991 ms`
          - the script should package matching logs and a batch manifest into
            one `local-scratch` archive automatically
          - `scripts/run_h100_hgdn_resize_round.sh`
