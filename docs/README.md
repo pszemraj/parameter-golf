@@ -852,10 +852,10 @@ The branch now includes the following major changes:
 
 ### FLA / `torch.compile`
 
-- Upstream FLA currently ships `chunk_gated_delta_rule` wrapped in
-  `@torch.compiler.disable()`.
-- This branch now explicitly unwraps that outer wrapper on import so the HGDN
-  recurrence call does not force a graph break at every block invocation.
+- Upstream FLA currently graph-breaks under Dynamo inside backend dispatch.
+- This branch now routes the HGDN recurrence through a compile-visible
+  `torch.library` op boundary, so Dynamo sees one recurrence op instead of
+  stepping into FLA backend internals.
 - `fullgraph=True` is still not the default for the whole hybrid model.
 - The correct stable top-level setting is `fullgraph=False`.
 
@@ -879,15 +879,15 @@ Conclusion:
 
 Using `TORCH_LOGS=recompiles` on a short compiled HGDN run previously showed:
 
-- one recurrence graph break because upstream FLA wrapped
-  `chunk_gated_delta_rule` in `torch.compiler.disable()`
+- one recurrence graph break because Dynamo stepped into FLA backend dispatch
+  and hit an unsupported `lock` context manager
 - one attention recompile when the rotary cache transitions from `None` to populated
 - a few Muon helper recompiles because `zeropower_via_newtonschulz5` sees several distinct matrix shapes
 
 Current conclusion:
 
-- the recurrence graph-break source is now patched locally by unwrapping the
-  imported FLA disable wrapper
+- the recurrence graph-break source is now patched locally by routing the FLA
+  recurrence through a compile-visible `torch.library` op
 - the Muon helper is now compiled with `dynamic=True` so its per-parameter
   matrix shapes do not force repeated shape-specialized recompiles
 - the rotary cache transition is still a one-time startup recompile

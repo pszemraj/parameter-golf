@@ -26,8 +26,16 @@ from .reference import (
     rmsnorm_silu_gate_reference,
 )
 
+try:
+    from fla.ops.gated_delta_rule import (
+        chunk_gated_delta_rule as _fla_chunk_gated_delta_rule,
+    )
+except ImportError:
+    _fla_chunk_gated_delta_rule = None
+
 _EXTENSION_NAME = "hgdn_cuda_ext"
 _WARNED_KEYS: set[str] = set()
+HAS_FLA_GATED_DELTA_RULE = _fla_chunk_gated_delta_rule is not None
 
 
 def _warn_once(key: str, message: str) -> None:
@@ -151,6 +159,88 @@ _FRONTEND_V4_LIB.define(
     "int n_heads, int head_k_dim, int head_v_dim, float eps"
     ") -> Tensor"
 )
+
+_FLA_V1_LIB = torch.library.Library("hgdn_fla_v1", "DEF")
+_FLA_V1_LIB.define(
+    "chunk_gated_delta_rule(Tensor q, Tensor k, Tensor v, Tensor g, Tensor beta) -> Tensor"
+)
+
+
+def _run_fla_chunk_gated_delta_rule(
+    q: Tensor,
+    k: Tensor,
+    v: Tensor,
+    g: Tensor,
+    beta: Tensor,
+) -> Tensor:
+    """Run the upstream FLA gated-delta recurrence and return only the output.
+
+    This keeps the recurrence behind one compile-visible operator boundary so
+    Dynamo does not step into FLA backend dispatch internals.
+
+    :param Tensor q: Query tensor shaped ``(batch, seq, heads, head_k)``.
+    :param Tensor k: Key tensor shaped ``(batch, seq, heads, head_k)``.
+    :param Tensor v: Value tensor shaped ``(batch, seq, heads, head_v)``.
+    :param Tensor g: Log-space gate tensor shaped ``(batch, seq, heads)``.
+    :param Tensor beta: Beta tensor shaped ``(batch, seq, heads)``.
+    :raises RuntimeError: If FLA is unavailable.
+    :return Tensor: Recurrence output shaped like ``v``.
+    """
+    if _fla_chunk_gated_delta_rule is None:
+        raise RuntimeError(
+            "FLA chunk_gated_delta_rule is unavailable; the compile-visible "
+            "HGDN recurrence op cannot run."
+        )
+    out, _final_state = _fla_chunk_gated_delta_rule(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        scale=1.0,
+        output_final_state=False,
+    )
+    return out
+
+
+@torch.library.impl("hgdn_fla_v1::chunk_gated_delta_rule", "CPU")
+def _fla_chunk_gated_delta_rule_cpu(
+    q: Tensor,
+    k: Tensor,
+    v: Tensor,
+    g: Tensor,
+    beta: Tensor,
+) -> Tensor:
+    """CPU implementation for the compile-visible FLA recurrence op.
+
+    :param Tensor q: Query tensor.
+    :param Tensor k: Key tensor.
+    :param Tensor v: Value tensor.
+    :param Tensor g: Log-space gate tensor.
+    :param Tensor beta: Beta tensor.
+    :return Tensor: Recurrence output.
+    """
+    return _run_fla_chunk_gated_delta_rule(q, k, v, g, beta)
+
+
+@torch.library.impl("hgdn_fla_v1::chunk_gated_delta_rule", "CUDA")
+def _fla_chunk_gated_delta_rule_cuda(
+    q: Tensor,
+    k: Tensor,
+    v: Tensor,
+    g: Tensor,
+    beta: Tensor,
+) -> Tensor:
+    """CUDA implementation for the compile-visible FLA recurrence op.
+
+    :param Tensor q: Query tensor.
+    :param Tensor k: Key tensor.
+    :param Tensor v: Value tensor.
+    :param Tensor g: Log-space gate tensor.
+    :param Tensor beta: Beta tensor.
+    :return Tensor: Recurrence output.
+    """
+    return _run_fla_chunk_gated_delta_rule(q, k, v, g, beta)
 
 
 @torch.library.impl("hgdn_cuda_v2::preact_silu_split_l2norm_nct", "CPU")
@@ -872,6 +962,27 @@ def _packed_qkv_split_l2norm_lib_backward_fake(
     return packed.new_empty(packed.shape)
 
 
+@torch.library.register_fake("hgdn_fla_v1::chunk_gated_delta_rule")
+def _fla_chunk_gated_delta_rule_fake(
+    q: Tensor,
+    k: Tensor,
+    v: Tensor,
+    g: Tensor,
+    beta: Tensor,
+) -> Tensor:
+    """Meta kernel for the compile-visible FLA recurrence op.
+
+    :param Tensor q: Query tensor.
+    :param Tensor k: Key tensor.
+    :param Tensor v: Value tensor.
+    :param Tensor g: Log-space gate tensor.
+    :param Tensor beta: Beta tensor.
+    :return Tensor: Meta tensor matching the recurrence output.
+    """
+    del q, k, g, beta
+    return v.new_empty(v.shape)
+
+
 def _setup_preact_silu_split_l2norm_nct_context(
     ctx: torch.autograd.function.FunctionCtx,
     inputs: tuple[Tensor, int, int, int, float],
@@ -929,6 +1040,22 @@ def _setup_packed_qkv_split_l2norm_context(
     ctx.head_k_dim = int(head_k_dim)
     ctx.head_v_dim = int(head_v_dim)
     ctx.eps = float(eps)
+
+
+def _setup_fla_chunk_gated_delta_rule_context(
+    ctx: torch.autograd.function.FunctionCtx,
+    inputs: tuple[Tensor, Tensor, Tensor, Tensor, Tensor],
+    output: Tensor,
+) -> None:
+    """Save tensors needed by the compile-visible FLA recurrence backward formula.
+
+    :param torch.autograd.function.FunctionCtx ctx: Autograd context.
+    :param tuple[Tensor, Tensor, Tensor, Tensor, Tensor] inputs: Forward inputs.
+    :param Tensor output: Forward output tensor.
+    :return None: Saves tensors onto ``ctx``.
+    """
+    del output
+    ctx.save_for_backward(*inputs)
 
 
 def _preact_silu_split_l2norm_nct_backward_formula(
@@ -1055,6 +1182,35 @@ def _packed_qkv_split_l2norm_backward_formula(
     return grad_packed, None, None, None, None
 
 
+def _fla_chunk_gated_delta_rule_backward_formula(
+    ctx: torch.autograd.function.FunctionCtx,
+    grad_output: Tensor | None,
+) -> tuple[Tensor | None, Tensor | None, Tensor | None, Tensor | None, Tensor | None]:
+    """Backward formula for the compile-visible FLA recurrence op.
+
+    :param torch.autograd.function.FunctionCtx ctx: Autograd context.
+    :param Tensor | None grad_output: Gradient for the recurrence output.
+    :return tuple[Tensor | None, ...]: Gradients for ``q, k, v, g, beta``.
+    """
+    q, k, v, g, beta = ctx.saved_tensors
+    if grad_output is None:
+        grad_output = torch.zeros_like(v)
+    with torch.enable_grad():
+        q_req = q.detach().requires_grad_(True)
+        k_req = k.detach().requires_grad_(True)
+        v_req = v.detach().requires_grad_(True)
+        g_req = g.detach().requires_grad_(True)
+        beta_req = beta.detach().requires_grad_(True)
+        out = _run_fla_chunk_gated_delta_rule(q_req, k_req, v_req, g_req, beta_req)
+    grads = torch.autograd.grad(
+        out,
+        (q_req, k_req, v_req, g_req, beta_req),
+        grad_outputs=grad_output,
+        allow_unused=False,
+    )
+    return grads
+
+
 torch.library.register_autograd(
     "hgdn_cuda_v2::preact_silu_split_l2norm_nct",
     _preact_silu_split_l2norm_nct_backward_formula,
@@ -1071,6 +1227,12 @@ torch.library.register_autograd(
     "hgdn_cuda_v4::packed_qkv_split_l2norm",
     _packed_qkv_split_l2norm_backward_formula,
     setup_context=_setup_packed_qkv_split_l2norm_context,
+)
+
+torch.library.register_autograd(
+    "hgdn_fla_v1::chunk_gated_delta_rule",
+    _fla_chunk_gated_delta_rule_backward_formula,
+    setup_context=_setup_fla_chunk_gated_delta_rule_context,
 )
 
 
@@ -1750,6 +1912,25 @@ def packed_qkv_split_l2norm_compile_visible(
         float(eps),
     )
     return q, k, v
+
+
+def fla_chunk_gated_delta_rule_compile_visible(
+    q: Tensor,
+    k: Tensor,
+    v: Tensor,
+    g: Tensor,
+    beta: Tensor,
+) -> Tensor:
+    """Run the FLA gated-delta recurrence through a compile-visible library op.
+
+    :param Tensor q: Query tensor shaped ``(batch, seq, heads, head_k)``.
+    :param Tensor k: Key tensor shaped ``(batch, seq, heads, head_k)``.
+    :param Tensor v: Value tensor shaped ``(batch, seq, heads, head_v)``.
+    :param Tensor g: Log-space gate tensor shaped ``(batch, seq, heads)``.
+    :param Tensor beta: Beta tensor shaped ``(batch, seq, heads)``.
+    :return Tensor: Recurrence output shaped like ``v``.
+    """
+    return torch.ops.hgdn_fla_v1.chunk_gated_delta_rule(q, k, v, g, beta)
 
 
 def frontend_preact_silu_split_l2norm_nct(

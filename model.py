@@ -23,6 +23,8 @@ from torch import Tensor, nn
 from torch.nn import grad as nn_grad
 
 from hgdn_cuda import (
+    HAS_FLA_GATED_DELTA_RULE,
+    fla_chunk_gated_delta_rule_compile_visible,
     fused_packed_qkv_conv,
     fused_packed_qkv_conv_aten_backward,
     fused_packed_qkv_conv_aten_weight_backward,
@@ -34,36 +36,7 @@ from hgdn_cuda import (
     packed_qkv_split_l2norm_compile_visible,
 )
 
-
-def _unwrap_dynamo_disabled_callable(fn: object) -> object:
-    """Return the original callable when wrapped by `torch.compiler.disable`.
-
-    Upstream FLA currently decorates `chunk_gated_delta_rule` with
-    `@torch.compiler.disable`, which forces a graph break at every recurrence
-    call. Unwrapping the outer Dynamo-disable shim keeps the recurrence call
-    visible to the surrounding compiled graph without patching the installed
-    dependency.
-
-    :param object fn: Imported callable that may carry a Dynamo-disable wrapper.
-    :return object: Unwrapped callable when available, otherwise the original.
-    """
-    raw = getattr(fn, "__wrapped__", None)
-    if raw is not None and getattr(fn, "_torchdynamo_disable", False):
-        return raw
-    return fn
-
-
-_HAS_FLA = False
-try:
-    from fla.ops.gated_delta_rule import (
-        chunk_gated_delta_rule as _chunk_gated_delta_rule,
-    )
-
-    chunk_gated_delta_rule = _unwrap_dynamo_disabled_callable(_chunk_gated_delta_rule)
-
-    _HAS_FLA = True
-except ImportError:
-    pass
+_HAS_FLA = HAS_FLA_GATED_DELTA_RULE
 
 # Parameters routed to Adam (not Muon). Muon is for 2D feature maps only.
 SCALAR_PARAM_PATTERNS = (
@@ -1555,9 +1528,7 @@ class GatedDeltaNet(nn.Module):
 
             with profile_range("gdn.recurrence"):
                 if self.use_fla and x.is_cuda:
-                    o, _ = chunk_gated_delta_rule(
-                        q, k, v, g, beta, scale=1.0, output_final_state=False
-                    )
+                    o = fla_chunk_gated_delta_rule_compile_visible(q, k, v, g, beta)
                 else:
                     o, _ = gdn_recurrent_naive(q, k, v, g.exp(), beta)
             audit_gdn_boundary("recurrence_output", audit_call_index, o=o)

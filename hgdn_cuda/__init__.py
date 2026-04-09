@@ -1,8 +1,10 @@
 """HGDN fused CUDA kernels and safe fallbacks."""
 
 from .ops import (
+    HAS_FLA_GATED_DELTA_RULE,
     extension_loaded,
     extension_status,
+    fla_chunk_gated_delta_rule_compile_visible,
     fused_packed_qkv_conv,
     fused_packed_qkv_conv_aten_backward,
     fused_packed_qkv_conv_aten_weight_backward,
@@ -26,6 +28,8 @@ from .reference import (
 __all__ = [
     "extension_loaded",
     "extension_status",
+    "HAS_FLA_GATED_DELTA_RULE",
+    "fla_chunk_gated_delta_rule_compile_visible",
     "fused_packed_qkv_conv",
     "fused_packed_qkv_conv_aten_backward",
     "fused_packed_qkv_conv_aten_weight_backward",

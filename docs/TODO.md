@@ -1286,9 +1286,9 @@ the packed depthwise backward path, not another front-end topology change.
 - Trigger: hybrid remains worse than `1.3x` the depth-control baseline after the current selective-compile quick hits, or compile-time behavior becomes erratic across repeated runs.
 - What to do: run short screens with `TORCH_LOGS="graph_breaks,recompiles,perf_hints"` and inspect whether breaks are only at `GDNBlock.gdn` boundaries.
 - Current status:
-  - the upstream FLA `chunk_gated_delta_rule` Dynamo-disable wrapper is now
-    unwrapped locally at import time so it no longer forces a graph break at
-    every HGDN recurrence call
+  - the upstream FLA recurrence is now routed through a compile-visible
+    `torch.library` op so Dynamo does not step into FLA backend dispatch
+    internals during the HGDN block loop
   - `zeropower_via_newtonschulz5` is now compiled with `dynamic=True` to avoid
     repeated Muon shape-specialization recompiles
 - Expected upside: `2-8%` on the 4070, `5-12%` on H100 if extra Python-side breaks are still present.
