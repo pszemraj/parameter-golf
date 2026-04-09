@@ -1289,8 +1289,15 @@ the packed depthwise backward path, not another front-end topology change.
   - the upstream FLA recurrence is now routed through a compile-visible
     `torch.library` op so Dynamo does not step into FLA backend dispatch
     internals during the HGDN block loop
-  - `zeropower_via_newtonschulz5` is now compiled with `dynamic=True` to avoid
-    repeated Muon shape-specialization recompiles
+  - the recurrence backward is also opaque now, so AOT no longer traces into
+    FLA Triton kernels on fake tensors during compiled training
+  - `zeropower_via_newtonschulz5` now keeps the shape-dependent
+    `rows > cols` branch outside the compiled body by dispatching to separate
+    wide/tall compiled helpers
+  - remaining compile noise after the local 2-step smoke is reduced to:
+    - one-time rotary-cache warmup
+    - one Muon duck-shape/equal-dim specialization
+    - the final eval / `grad_mode` transition
 - Expected upside: `2-8%` on the 4070, `5-12%` on H100 if extra Python-side breaks are still present.
 - Expected cost: low. Mostly logging and a small cleanup patch.
 

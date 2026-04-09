@@ -887,10 +887,23 @@ Using `TORCH_LOGS=recompiles` on a short compiled HGDN run previously showed:
 Current conclusion:
 
 - the recurrence graph-break source is now patched locally by routing the FLA
-  recurrence through a compile-visible `torch.library` op
-- the Muon helper is now compiled with `dynamic=True` so its per-parameter
-  matrix shapes do not force repeated shape-specialized recompiles
-- the rotary cache transition is still a one-time startup recompile
+  recurrence through a compile-visible `torch.library` op and keeping both its
+  forward and backward behind opaque custom-op boundaries
+- the Muon helper no longer branches on the symbolic `rows > cols` test inside
+  the compiled body; it now dispatches to separate compiled wide/tall helpers
+- the remaining local smoke recompiles are:
+  - one-time rotary cache population (`self._cos is None`)
+  - one Muon duck-shape/equal-dim specialization in the wide helper
+  - one `grad_mode` transition when the trainer flips into final eval/no-grad
+- a direct compiled 2-step local smoke now trains through forward and backward
+  without the old recurrence graph break or the fake-tensor backward failure:
+  - `localsmoke_diag2_retune_current_seq1024_it2`
+  - `step:1 = 1021 ms`
+  - `step:2 = 986 ms`
+  - after the Muon branch split:
+    - `localsmoke_diag3_retune_current_seq1024_it2`
+    - `step:1 = 992 ms`
+    - `step:2 = 969 ms`
 - if a run appears to freeze every 25 steps, check W&B watch/logging before blaming Dynamo
 
 Recommended diagnostics:

@@ -412,27 +412,49 @@ def build_profiler(
 # =====================================================================
 
 
+def _zeropower_via_newtonschulz5_wide(X: Tensor, steps: int = 10) -> Tensor:
+    """Run Newton-Schulz iterations for matrices with rows <= columns.
+
+    :param Tensor X: Normalized matrix update with ``rows <= columns``.
+    :param int steps: Iteration count, defaults to 10.
+    :return Tensor: Approximate zeroth-power normalized update.
+    """
+    a, b, c = (3.4445, -4.7750, 2.0315)
+    for _ in range(steps):
+        A = X @ X.T
+        B = b * A + c * A @ A
+        X = a * X + B @ X
+    return X
+
+
+def _zeropower_via_newtonschulz5_tall(X: Tensor, steps: int = 10) -> Tensor:
+    """Run Newton-Schulz iterations for matrices with rows > columns.
+
+    :param Tensor X: Normalized matrix update with ``rows > columns``.
+    :param int steps: Iteration count, defaults to 10.
+    :return Tensor: Approximate zeroth-power normalized update.
+    """
+    return _zeropower_via_newtonschulz5_wide(X.T, steps=steps).T
+
+
 def zeropower_via_newtonschulz5(
     G: Tensor, steps: int = 10, eps: float = 1e-7
 ) -> Tensor:
     """Orthogonalize a matrix gradient with Newton-Schulz iterations.
+
+    Keep the shape-dependent orientation branch outside the compiled helpers so
+    Dynamo does not need to specialize on the symbolic ``rows > cols`` guard.
 
     :param Tensor G: Matrix-shaped gradient update.
     :param int steps: Iteration count, defaults to 10.
     :param float eps: Numerical stability epsilon, defaults to 1e-7.
     :return Tensor: Approximate zeroth-power normalized update.
     """
-    a, b, c = (3.4445, -4.7750, 2.0315)
     X = G.bfloat16()
     X /= X.norm() + eps
-    transposed = G.size(0) > G.size(1)
-    if transposed:
-        X = X.T
-    for _ in range(steps):
-        A = X @ X.T
-        B = b * A + c * A @ A
-        X = a * X + B @ X
-    return X.T if transposed else X
+    if G.size(0) > G.size(1):
+        return _zeropower_via_newtonschulz5_tall(X, steps=steps)
+    return _zeropower_via_newtonschulz5_wide(X, steps=steps)
 
 
 class Muon(torch.optim.Optimizer):
@@ -1019,13 +1041,21 @@ def prepare_hybrid_compile(
 
 def main() -> None:
     """Run hybrid training, validation, and roundtrip artifact checks."""
+    global _zeropower_via_newtonschulz5_tall
+    global _zeropower_via_newtonschulz5_wide
     global zeropower_via_newtonschulz5
 
     code = Path(__file__).read_text(encoding="utf-8")
     args = Hyperparameters()
     wandb_watch_mode = normalize_wandb_watch_mode(args.wandb_watch)
+    _zeropower_via_newtonschulz5_wide = maybe_compile(
+        _zeropower_via_newtonschulz5_wide, enabled=args.compile, dynamic=True
+    )
+    _zeropower_via_newtonschulz5_tall = maybe_compile(
+        _zeropower_via_newtonschulz5_tall, enabled=args.compile, dynamic=True
+    )
     zeropower_via_newtonschulz5 = maybe_compile(
-        zeropower_via_newtonschulz5, enabled=args.compile, dynamic=True
+        zeropower_via_newtonschulz5, enabled=False, dynamic=True
     )
 
     # ── Distributed + CUDA ────────────────────────────────────────────
