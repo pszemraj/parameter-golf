@@ -62,6 +62,8 @@ This file tracks follow-up work that is intentionally not enabled by default in 
          - `scripts/run_h100_hgdn_resize_round.sh`
          - the script should be a single-entry protocol file with no
            train/compare subcommands
+         - the script should also package the compare output and matching logs
+           into one `local-scratch` archive automatically
   2. norm placement screen
      - compare `pre`, `post`, and `keel`
      - rationale:

@@ -736,6 +736,12 @@ individual commands:
 scripts/run_h100_hgdn_resize_round.sh
 ```
 
+That script now also builds a handoff archive by default at:
+
+```bash
+local-scratch/<RUN_PREFIX_BASE>_bundle.7z
+```
+
 Using the reusable TOML config:
 
 ```bash

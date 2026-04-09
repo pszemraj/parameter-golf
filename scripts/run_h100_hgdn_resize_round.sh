@@ -20,6 +20,8 @@ wandb_mode="${WANDB_MODE:-online}"
 run_prefix_base="${RUN_PREFIX_BASE:-h100retune2}"
 compare_reference="${COMPARE_REFERENCE:-h100k6_fixed2k_hybrid_r1_mlp3.25_seq2048}"
 compare_output_dir="${COMPARE_OUTPUT_DIR:-profiles/fixed2k_compare/${run_prefix_base}_round}"
+bundle_stage_dir="${BUNDLE_STAGE_DIR:-local-scratch/${run_prefix_base}_bundle}"
+archive_output="${ARCHIVE_OUTPUT:-local-scratch/${run_prefix_base}_bundle.7z}"
 
 case "${wandb_mode}" in
 online)
@@ -78,6 +80,7 @@ print_plan() {
     echo "wandb_mode=${wandb_mode}"
     echo "compare_reference=${compare_reference}"
     echo "compare_output_dir=${compare_output_dir}"
+    echo "archive_output=${archive_output}"
     echo "batch:"
     local i
     for ((i = 0; i < ${#configs[@]}; i++)); do
@@ -112,6 +115,74 @@ run_compare() {
         --output-dir "${compare_output_dir}"
 }
 
+build_bundle() {
+    echo
+    echo ">>> bundle outputs"
+
+    rm -rf "${bundle_stage_dir}"
+    mkdir -p "${bundle_stage_dir}/logs"
+
+    if [[ -d "${compare_output_dir}" ]]; then
+        mkdir -p "${bundle_stage_dir}/profiles/fixed2k_compare"
+        cp -R "${compare_output_dir}" "${bundle_stage_dir}/profiles/fixed2k_compare/"
+    else
+        echo "Missing compare output dir: ${compare_output_dir}" >&2
+        exit 1
+    fi
+
+    local matched_logs=0
+    local prefix
+    for prefix in "${run_prefixes[@]}"; do
+        local log_path
+        for log_path in logs/"${prefix}"*.txt; do
+            if [[ -f "${log_path}" ]]; then
+                cp "${log_path}" "${bundle_stage_dir}/logs/"
+                matched_logs=1
+            fi
+        done
+    done
+
+    "${python_bin}" - \
+        "${bundle_stage_dir}" \
+        "${run_prefix_base}" \
+        "${compare_reference}" \
+        "${compare_output_dir}" \
+        "${archive_output}" \
+        "${matched_logs}" \
+        "${run_prefixes[@]}" <<'PY'
+from pathlib import Path
+import json
+import sys
+
+bundle_dir = Path(sys.argv[1])
+run_prefix_base = sys.argv[2]
+compare_reference = sys.argv[3]
+compare_output_dir = sys.argv[4]
+archive_output = sys.argv[5]
+matched_logs = bool(int(sys.argv[6]))
+run_prefixes = sys.argv[7:]
+
+manifest = {
+    "run_prefix_base": run_prefix_base,
+    "run_prefixes": run_prefixes,
+    "compare_reference": compare_reference,
+    "compare_output_dir": compare_output_dir,
+    "archive_output": archive_output,
+    "matched_logs": matched_logs,
+}
+(bundle_dir / "bundle_manifest.json").write_text(
+    json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+PY
+
+    rm -f "${archive_output}"
+    mkdir -p "$(dirname "${archive_output}")"
+    7z a -t7z "${archive_output}" "${bundle_stage_dir}" >/dev/null
+    echo "bundle_archive=${archive_output}"
+}
+
 print_plan
 run_batch
 run_compare
+build_bundle
