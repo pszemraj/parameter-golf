@@ -852,8 +852,11 @@ The branch now includes the following major changes:
 
 ### FLA / `torch.compile`
 
-- FLA internally uses `torch.compiler.disable()` on the GDN kernel dispatch path.
-- `fullgraph=True` is therefore not viable for the whole hybrid model.
+- Upstream FLA currently ships `chunk_gated_delta_rule` wrapped in
+  `@torch.compiler.disable()`.
+- This branch now explicitly unwraps that outer wrapper on import so the HGDN
+  recurrence call does not force a graph break at every block invocation.
+- `fullgraph=True` is still not the default for the whole hybrid model.
 - The correct stable top-level setting is `fullgraph=False`.
 
 ### Compile strategy comparison
@@ -874,16 +877,20 @@ Conclusion:
 
 ### Recompile diagnosis
 
-Using `TORCH_LOGS=recompiles` on a short compiled HGDN run shows startup-only recompiles, not a steady-state recompile loop:
+Using `TORCH_LOGS=recompiles` on a short compiled HGDN run previously showed:
 
-- one alias-guard recompile in the GDN block because the first block initially sees `x is x0`
+- one recurrence graph break because upstream FLA wrapped
+  `chunk_gated_delta_rule` in `torch.compiler.disable()`
 - one attention recompile when the rotary cache transitions from `None` to populated
 - a few Muon helper recompiles because `zeropower_via_newtonschulz5` sees several distinct matrix shapes
 
 Current conclusion:
 
-- the branch does recompile during startup and warmup
-- the branch does not currently show evidence of recompiling every 25 steps during steady-state training
+- the recurrence graph-break source is now patched locally by unwrapping the
+  imported FLA disable wrapper
+- the Muon helper is now compiled with `dynamic=True` so its per-parameter
+  matrix shapes do not force repeated shape-specialized recompiles
+- the rotary cache transition is still a one-time startup recompile
 - if a run appears to freeze every 25 steps, check W&B watch/logging before blaming Dynamo
 
 Recommended diagnostics:

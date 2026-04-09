@@ -34,9 +34,32 @@ from hgdn_cuda import (
     packed_qkv_split_l2norm_compile_visible,
 )
 
+
+def _unwrap_dynamo_disabled_callable(fn: object) -> object:
+    """Return the original callable when wrapped by `torch.compiler.disable`.
+
+    Upstream FLA currently decorates `chunk_gated_delta_rule` with
+    `@torch.compiler.disable`, which forces a graph break at every recurrence
+    call. Unwrapping the outer Dynamo-disable shim keeps the recurrence call
+    visible to the surrounding compiled graph without patching the installed
+    dependency.
+
+    :param object fn: Imported callable that may carry a Dynamo-disable wrapper.
+    :return object: Unwrapped callable when available, otherwise the original.
+    """
+    raw = getattr(fn, "__wrapped__", None)
+    if raw is not None and getattr(fn, "_torchdynamo_disable", False):
+        return raw
+    return fn
+
+
 _HAS_FLA = False
 try:
-    from fla.ops.gated_delta_rule import chunk_gated_delta_rule
+    from fla.ops.gated_delta_rule import (
+        chunk_gated_delta_rule as _chunk_gated_delta_rule,
+    )
+
+    chunk_gated_delta_rule = _unwrap_dynamo_disabled_callable(_chunk_gated_delta_rule)
 
     _HAS_FLA = True
 except ImportError:

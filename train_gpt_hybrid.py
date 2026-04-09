@@ -1025,7 +1025,7 @@ def main() -> None:
     args = Hyperparameters()
     wandb_watch_mode = normalize_wandb_watch_mode(args.wandb_watch)
     zeropower_via_newtonschulz5 = maybe_compile(
-        zeropower_via_newtonschulz5, enabled=args.compile
+        zeropower_via_newtonschulz5, enabled=args.compile, dynamic=True
     )
 
     # ── Distributed + CUDA ────────────────────────────────────────────
