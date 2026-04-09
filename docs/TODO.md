@@ -47,8 +47,17 @@ This file tracks follow-up work that is intentionally not enabled by default in 
          helper ignored plain `MLP_MULT`; rerun it after the shell fallback fix
      - immediate next resize step:
        - rerun corrected `14L x 384d x mlp3.0`
-       - test one headroom-spend variant around the live leader
+       - replicate the live `14L x 384d x mlp3.25` winner once
+       - bracket the live winner with nearby MLP variants:
+         - `14L x 384d x mlp3.125`
+         - `14L x 384d x mlp3.375`
+       - include one orthogonal deeper candidate:
+         - `15L x 384d x mlp2.75`
        - keep the width-trim branch parked unless later evidence changes
+     - batching rule:
+       - kernel-seam work should stay narrow
+       - resize work should use a wider simultaneous H100 batch when the
+         candidates are simple architecture variants around a live winner
   2. norm placement screen
      - compare `pre`, `post`, and `keel`
      - rationale:

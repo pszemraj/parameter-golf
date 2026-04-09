@@ -291,6 +291,10 @@ Kernel-work guardrail:
   - the first H100 resize round already found one live architecture win:
     - `14L x 384d x mlp3.25` improved both roundtrip and step time while moving
       from `OVER_LIMIT` to `UNDER_LIMIT`
+  - process rule from here:
+    - keep kernel-seam work narrow
+    - use wider simultaneous H100 batches for simple resize variants around a
+      live architecture winner
   - the width trim lost:
     - `16L x 320d x mlp3.25` was both slower and worse
   - the original balanced rerun was invalid:
