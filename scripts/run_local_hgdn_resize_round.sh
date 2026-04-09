@@ -21,7 +21,7 @@ wandb_mode="${WANDB_MODE:-online}"
 wandb_project="${WANDB_PROJECT:-pg-hconv-ablations}"
 wandb_watch="${WANDB_WATCH:-none}"
 wandb_watch_log_freq="${WANDB_WATCH_LOG_FREQ:-25}"
-run_prefix_base="${RUN_PREFIX_BASE:-localretune1}"
+run_prefix_base="${RUN_PREFIX_BASE:-localretune2}"
 bundle_stage_dir="${BUNDLE_STAGE_DIR:-local-scratch/${run_prefix_base}_bundle}"
 archive_output="${ARCHIVE_OUTPUT:-local-scratch/${run_prefix_base}_bundle.7z}"
 command_log="${COMMAND_LOG:-local-scratch/${run_prefix_base}_commands.sh}"
@@ -57,6 +57,7 @@ default_prefixes=(
     "${run_prefix_base}_e"
     "${run_prefix_base}_f"
     "${run_prefix_base}_g"
+    "${run_prefix_base}_h"
 )
 
 if [[ -n "${RUN_PREFIXES:-}" ]]; then
@@ -68,21 +69,23 @@ fi
 configs=(
     "configs/hgdn/retune_current.toml"
     "configs/hgdn/retune_balanced_14l_mlp3.toml"
-    "configs/hgdn/retune_trim_layers_14.toml"
-    "configs/hgdn/retune_trim_layers_14_mlp3p125.toml"
     "configs/hgdn/retune_trim_layers_14_mlp3p375.toml"
-    "configs/hgdn/retune_trim_layers_14_mlp3p5.toml"
+    "configs/hgdn/retune_deepen_15l_mlp2p625.toml"
     "configs/hgdn/retune_deepen_15l_mlp2p75.toml"
+    "configs/hgdn/retune_deepen_15l_mlp2p875.toml"
+    "configs/hgdn/retune_deepen_15l_mlp3.toml"
+    "configs/hgdn/retune_deepen_15l_mlp3p125.toml"
 )
 
 labels=(
     "current 16L reference"
-    "balanced 14L rerun"
-    "live 14L winner"
-    "winner bracket low"
-    "winner bracket high"
-    "winner upper bracket"
-    "deeper orthogonal"
+    "fast 14L anchor"
+    "best 14L anchor"
+    "15L lower bracket"
+    "15L local winner rerun"
+    "15L upper bracket low"
+    "15L upper bracket mid"
+    "15L upper bracket high"
 )
 
 if [[ "${#run_prefixes[@]}" -ne "${#configs[@]}" ]]; then

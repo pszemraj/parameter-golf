@@ -27,11 +27,6 @@ This file tracks follow-up work that is intentionally not enabled by default in 
     and move to the higher-payoff levers below
 - Priority order after the current seam:
   1. compute-optimal HGDN resize
-     - best immediate candidates already prepared:
-       - `configs/hgdn/retune_trim_layers_14.toml`
-       - `configs/hgdn/retune_trim_layers_14_mlp3p5.toml`
-       - `configs/hgdn/retune_trim_width_320.toml`
-       - `configs/hgdn/retune_balanced_14l_mlp3.toml`
      - rationale:
        - the hybrid already learns faster per step on H100
        - a slightly smaller or better-balanced HGDN may keep most of that
@@ -49,15 +44,30 @@ This file tracks follow-up work that is intentionally not enabled by default in 
          - worse quality and slower than the reference
        - the original `14L x 384d x mlp3.0` run was invalid because the H100
          helper ignored plain `MLP_MULT`; rerun it after the shell fallback fix
-     - immediate next resize step:
-       - rerun corrected `14L x 384d x mlp3.0`
-       - replicate the live `14L x 384d x mlp3.25` winner once
-       - bracket the live winner with nearby MLP variants:
-         - `14L x 384d x mlp3.125`
-         - `14L x 384d x mlp3.375`
-       - include one orthogonal deeper candidate:
-         - `15L x 384d x mlp2.75`
-       - keep the width-trim branch parked unless later evidence changes
+     - first local resize round (`localretune1`) on the corrected compiled path:
+       - all seven runs completed cleanly to step `750/750`
+       - `15L x 384d x mlp2.75` is the local winner:
+         - `2.6788 -> 2.6349` final roundtrip vs current `16L x 384d x mlp3.25`
+         - `711,180 -> 692,562 ms` train time vs current reference
+       - `14L x 384d x mlp3.375` is the best surviving 14-layer branch:
+         - `2.6788 -> 2.6640` final roundtrip
+         - `711,180 -> 651,598 ms` train time
+       - `14L x 384d x mlp3.0` is useful only as a speed anchor:
+         - `2.6788 -> 2.6784` final roundtrip
+         - `711,180 -> 605,508 ms` train time
+       - the old `14L` branch variants are effectively dead:
+         - `14L x 384d x mlp3.125`, `3.25`, and `3.5` all lost to the current reference
+       - keep the `16L x 320d` width-trim branch parked unless later evidence changes
+     - immediate next local resize step:
+       - push the live `15L x 384d` family harder with MLP brackets:
+         - `2.625`
+         - `2.75` rerun
+         - `2.875`
+         - `3.0`
+         - `3.125`
+       - keep two anchors in the same batch:
+         - current `16L x 384d x mlp3.25`
+         - best `14L x 384d x mlp3.375`
      - batching rule:
        - kernel-seam work should stay narrow
        - resize work should use a wider simultaneous local batch for the broad
@@ -84,6 +94,9 @@ This file tracks follow-up work that is intentionally not enabled by default in 
            - `localsmoke_retune_current_seq1024_it2`
            - `step:1 = 1026 ms`
            - `step:2 = 991 ms`
+         - current default batch (`localretune2`) should now focus on the live
+           `15L x 384d` family plus the two surviving anchors rather than keep
+           spending local budget on dead 14-layer variants
          - the script should package matching logs and a batch manifest into
            one `local-scratch` archive automatically
          - `scripts/run_h100_hgdn_resize_round.sh`

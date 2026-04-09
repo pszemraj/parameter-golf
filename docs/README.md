@@ -765,6 +765,24 @@ Stage split:
     - `localsmoke_retune_current_seq1024_it2`
     - `step:1 = 1026 ms`
     - `step:2 = 991 ms`
+  - first broad local resize round (`localretune1`) established the live local
+    branch:
+    - `15L x 384d x mlp2.75` was the best overall local candidate:
+      - final roundtrip `2.6349`
+      - train time `692,562 ms`
+    - `14L x 384d x mlp3.375` was the best surviving 14-layer branch:
+      - final roundtrip `2.6640`
+      - train time `651,598 ms`
+    - `14L x 384d x mlp3.0` remains useful as a fast anchor:
+      - final roundtrip `2.6784`
+      - train time `605,508 ms`
+    - `14L x 384d x mlp3.125`, `3.25`, and `3.5` all lost to the current
+      `16L x 384d x mlp3.25` reference
+  - the current default batch (`localretune2`) therefore shifts to:
+    - current `16L x 384d x mlp3.25` reference
+    - fast `14L x 384d x mlp3.0` anchor
+    - best `14L x 384d x mlp3.375` anchor
+    - `15L x 384d` MLP brackets at `2.625`, `2.75`, `2.875`, `3.0`, `3.125`
 - `scripts/run_h100_hgdn_resize_round.sh`
   - finalist confirmation and ranking on H100
 
