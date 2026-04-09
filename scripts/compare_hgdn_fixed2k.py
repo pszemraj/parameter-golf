@@ -112,7 +112,7 @@ def infer_family(run_name: str, config: dict[str, Any]) -> str:
     :param dict[str, Any] config: Flattened W&B config.
     :return str: Human-readable family label.
     """
-    gdn_ratio = coerce_int(pick(config, "gdn_ratio", "GDN_RATIO"))
+    gdn_ratio = coerce_int(pick(config, "GDN_RATIO", "gdn_ratio"))
     if "_depth_" in run_name or gdn_ratio == 0:
         return "attention_only_baseline"
     if "_hybrid_" in run_name or gdn_ratio is not None:
@@ -180,17 +180,33 @@ def build_run_row(run: Any, eval_steps: tuple[int, ...]) -> dict[str, Any]:
         "run_url": run.url,
         "state": run.state,
         "family": infer_family(run.name, config),
-        "num_layers": coerce_int(pick(config, "num_layers", "NUM_LAYERS")),
-        "model_dim": coerce_int(pick(config, "model_dim", "MODEL_DIM")),
-        "mlp_mult": coerce_float(pick(config, "mlp_mult", "MLP_MULT")),
-        "gdn_ratio": coerce_int(pick(config, "gdn_ratio", "GDN_RATIO")),
-        "n_params": coerce_int(pick(config, "n_params", "N_PARAMS")),
-        "n_gdn_blocks": coerce_int(pick(config, "n_gdn_blocks", "CONV_BLOCKS")),
-        "n_attn_blocks": coerce_int(pick(config, "n_attn_blocks", "ATTN_BLOCKS")),
-        "gdn_use_packed_qkv_conv": pick(config, "gdn_use_packed_qkv_conv"),
-        "gdn_use_packed_qkv_proj": pick(config, "gdn_use_packed_qkv_proj"),
-        "gdn_conv_output_contiguous": pick(config, "gdn_conv_output_contiguous"),
-        "gdn_control_proj_fp32": pick(config, "gdn_control_proj_fp32"),
+        "num_layers": coerce_int(pick(config, "NUM_LAYERS", "num_layers")),
+        "model_dim": coerce_int(pick(config, "MODEL_DIM", "model_dim")),
+        "mlp_mult": coerce_float(pick(config, "MLP_MULT", "mlp_mult")),
+        "gdn_ratio": coerce_int(pick(config, "GDN_RATIO", "gdn_ratio")),
+        "n_params": coerce_int(pick(config, "N_PARAMS", "n_params")),
+        "n_gdn_blocks": coerce_int(pick(config, "CONV_BLOCKS", "n_gdn_blocks")),
+        "n_attn_blocks": coerce_int(pick(config, "ATTN_BLOCKS", "n_attn_blocks")),
+        "gdn_use_packed_qkv_conv": pick(
+            config,
+            "GDN_USE_PACKED_QKV_CONV",
+            "gdn_use_packed_qkv_conv",
+        ),
+        "gdn_use_packed_qkv_proj": pick(
+            config,
+            "GDN_USE_PACKED_QKV_PROJ",
+            "gdn_use_packed_qkv_proj",
+        ),
+        "gdn_conv_output_contiguous": pick(
+            config,
+            "GDN_CONV_OUTPUT_CONTIGUOUS",
+            "gdn_conv_output_contiguous",
+        ),
+        "gdn_control_proj_fp32": pick(
+            config,
+            "GDN_CONTROL_PROJ_FP32",
+            "gdn_control_proj_fp32",
+        ),
         "sampled_eval_step_last": history["last_eval_step"],
         "sampled_eval_bpb_last": history["last_eval_bpb"],
         "sampled_eval_loss_last": history["last_eval_loss"],

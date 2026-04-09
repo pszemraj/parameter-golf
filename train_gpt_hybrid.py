@@ -230,17 +230,6 @@ class Hyperparameters:
     grad_clip_norm = float(os.environ.get("GRAD_CLIP_NORM", 0.0))
     weight_decay = float(os.environ.get("WEIGHT_DECAY", 0.04))
 
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize the class-level hyperparameters for logging.
-
-        :return dict[str, Any]: Flat hyperparameter mapping.
-        """
-        return {
-            k: v
-            for k, v in vars(type(self)).items()
-            if not k.startswith("_") and not callable(v) and k != "to_dict"
-        }
-
 
 def normalize_wandb_watch_mode(mode: str) -> str:
     """Normalize the requested W&B watch mode.
@@ -255,6 +244,118 @@ def normalize_wandb_watch_mode(mode: str) -> str:
     if normalized in {"gradients", "all"}:
         return normalized
     raise ValueError(f"WANDB_WATCH must be one of: none, gradients, all (got {mode!r})")
+
+
+def build_wandb_config(
+    args: Hyperparameters,
+    *,
+    compile_stats: dict[str, int | str],
+    local_batch_size: int,
+    grad_accum_steps: int,
+    planned_train_tokens: int,
+    n_attn: int,
+    n_gdn: int,
+    n_params: int,
+    sdp_backend: str,
+    wandb_watch_mode: str,
+) -> dict[str, Any]:
+    """Build the canonical W&B config schema for HGDN runs.
+
+    This schema is intentionally explicit and uses env-style uppercase keys only.
+    Do not mirror lowercase Python attribute names into W&B config.
+
+    :param Hyperparameters args: Trainer hyperparameters.
+    :param dict[str, int | str] compile_stats: Compile status summary.
+    :param int local_batch_size: Per-rank microbatch size.
+    :param int grad_accum_steps: Gradient accumulation steps.
+    :param int planned_train_tokens: Planned training-token budget.
+    :param int n_attn: Number of attention blocks in the instantiated model.
+    :param int n_gdn: Number of GDN blocks in the instantiated model.
+    :param int n_params: Total parameter count.
+    :param str sdp_backend: Active SDPA backend label.
+    :param str wandb_watch_mode: Normalized W&B watch mode.
+    :return dict[str, Any]: Canonical HGDN W&B config mapping.
+    """
+    return {
+        "NUM_LAYERS": args.num_layers,
+        "MODEL_DIM": args.model_dim,
+        "MLP_MULT": args.mlp_mult,
+        "GDN_RATIO": args.gdn_ratio,
+        "ATTN_BLOCKS": n_attn,
+        "CONV_BLOCKS": n_gdn,
+        "N_PARAMS": n_params,
+        "NUM_HEADS": args.num_heads,
+        "NUM_KV_HEADS": args.num_kv_heads,
+        "GDN_N_HEADS": args.gdn_n_heads,
+        "GDN_EXPAND_V": args.gdn_expand_v,
+        "GDN_HEAD_K_DIM": args.gdn_head_k_dim,
+        "GDN_CONV_SIZE": args.gdn_conv_size,
+        "NORM_STYLE": args.norm_style,
+        "RESIDUAL_ALPHA": args.residual_alpha,
+        "TIE_EMBEDDINGS": args.tie_embeddings,
+        "TRAIN_BATCH_TOKENS": args.train_batch_tokens,
+        "TRAIN_SEQ_LEN": args.train_seq_len,
+        "GRAD_ACCUM_STEPS": grad_accum_steps,
+        "LOCAL_BATCH_SIZE": local_batch_size,
+        "ITERATIONS": args.iterations,
+        "WARMDOWN_ITERS": args.warmdown_iters,
+        "WARMUP_STEPS": args.warmup_steps,
+        "VAL_BATCH_SIZE": args.val_batch_size,
+        "VAL_LOSS_EVERY": args.val_loss_every,
+        "TRAIN_LOG_EVERY": args.train_log_every,
+        "MAX_WALLCLOCK_SECONDS": args.max_wallclock_seconds,
+        "PLANNED_TRAIN_TOKENS": planned_train_tokens,
+        "ARTIFACT_LIMIT_BYTES": args.artifact_limit_bytes,
+        "COMPILE": args.compile,
+        "COMPILE_STRATEGY": args.compile_strategy,
+        "COMPILE_GDN_DISABLED": compile_stats["gdn_disabled"],
+        "COMPILE_GDN_MLPS_COMPILED": compile_stats["gdn_mlps_compiled"],
+        "COMPILE_ATTN_BLOCKS_COMPILED": compile_stats["attn_blocks_compiled"],
+        "COMPILE_MODEL_COMPILED": compile_stats["model_compiled"],
+        "SDPA_BACKEND": sdp_backend,
+        "CUDNN_BENCHMARK": args.cudnn_benchmark,
+        "FLA_AVAILABLE": _HAS_FLA,
+        "EMBED_LR": args.embed_lr,
+        "HEAD_LR": args.head_lr,
+        "TIED_EMBED_LR": args.tied_embed_lr,
+        "MATRIX_LR": args.matrix_lr,
+        "SCALAR_LR": args.scalar_lr,
+        "MUON_MOMENTUM": args.muon_momentum,
+        "MUON_BACKEND_STEPS": args.muon_backend_steps,
+        "MUON_MOMENTUM_WARMUP_START": args.muon_momentum_warmup_start,
+        "MUON_MOMENTUM_WARMUP_STEPS": args.muon_momentum_warmup_steps,
+        "BETA1": args.beta1,
+        "BETA2": args.beta2,
+        "ADAM_EPS": args.adam_eps,
+        "GRAD_CLIP_NORM": args.grad_clip_norm,
+        "WEIGHT_DECAY": args.weight_decay,
+        "GDN_USE_Q_CONV": args.gdn_use_q_conv,
+        "GDN_USE_K_CONV": args.gdn_use_k_conv,
+        "GDN_USE_V_CONV": args.gdn_use_v_conv,
+        "GDN_USE_PACKED_QKV_CONV": args.gdn_use_packed_qkv_conv,
+        "GDN_USE_PACKED_QKV_PROJ": args.gdn_use_packed_qkv_proj,
+        "GDN_CONV_OUTPUT_CONTIGUOUS": args.gdn_conv_output_contiguous,
+        "GDN_Q_CONV_OUTPUT_CONTIGUOUS": args.gdn_q_conv_output_contiguous,
+        "GDN_K_CONV_OUTPUT_CONTIGUOUS": args.gdn_k_conv_output_contiguous,
+        "GDN_V_CONV_OUTPUT_CONTIGUOUS": args.gdn_v_conv_output_contiguous,
+        "GDN_CONTROL_PROJ_FP32": args.gdn_control_proj_fp32,
+        "GDN_GATES_FP32": args.gdn_gates_fp32,
+        "GDN_OUTPUT_NORM_FP32": args.gdn_output_norm_fp32,
+        "GDN_USE_CUDA_FRONTEND_NCT": args.gdn_use_cuda_frontend_nct,
+        "GDN_USE_CUDA_PACKED_CONV": args.gdn_use_cuda_packed_conv,
+        "GDN_USE_CUDA_PACKED_CONV_ATEN_BACKWARD": args.gdn_use_cuda_packed_conv_aten_backward,
+        "GDN_USE_CUDA_PACKED_CONV_ATEN_WEIGHT_BACKWARD": args.gdn_use_cuda_packed_conv_aten_weight_backward,
+        "GDN_USE_CUDA_FUSED_FRONTEND": args.gdn_use_cuda_fused_frontend,
+        "GDN_USE_CUDA_FUSED_FRONTEND_LIB": args.gdn_use_cuda_fused_frontend_lib,
+        "GDN_USE_CUDA_FUSED_OUTPUT": args.gdn_use_cuda_fused_output,
+        "GDN_USE_CUDA_SPLIT_NORM": args.gdn_use_cuda_split_norm,
+        "GDN_USE_CUDA_SPLIT_NORM_LIB": args.gdn_use_cuda_split_norm_lib,
+        "GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD": args.gdn_use_packed_qkv_conv_custom_backward,
+        "GDN_PACKED_QKV_SINGLE_CONTIG": args.gdn_use_packed_qkv_single_contig,
+        "GDN_PACKED_QKV_SPLIT_COPY": args.gdn_use_packed_qkv_split_copy,
+        "WANDB_WATCH": wandb_watch_mode,
+        "WANDB_WATCH_LOG_FREQ": args.wandb_watch_log_freq,
+    }
 
 
 def build_profiler(
@@ -1005,7 +1106,6 @@ def main() -> None:
         wandb.init(
             project=os.environ.get("WANDB_PROJECT", "param-golf-hybrid"),
             name=args.run_id,
-            config=args.to_dict(),
             tags=[
                 f"gdn_ratio={args.gdn_ratio}",
                 f"layers={args.num_layers}",
@@ -1198,59 +1298,18 @@ def main() -> None:
 
     if master_process and _USE_WANDB:
         wandb.config.update(
-            {
-                "artifact_limit_bytes": args.artifact_limit_bytes,
-                "compile": args.compile,
-                "compile_strategy": args.compile_strategy,
-                "cudnn_benchmark": args.cudnn_benchmark,
-                "fla_available": _HAS_FLA,
-                "local_batch_size": local_batch_size,
-                "compile_gdn_disabled": compile_stats["gdn_disabled"],
-                "compile_gdn_mlps_compiled": compile_stats["gdn_mlps_compiled"],
-                "compile_attn_blocks_compiled": compile_stats["attn_blocks_compiled"],
-                "compile_model_compiled": compile_stats["model_compiled"],
-                "n_attn_blocks": n_attn,
-                "n_gdn_blocks": n_gdn,
-                "n_params": n_params,
-                # Keep explicit aliases for the runs table. The canonical
-                # lowercase fields remain, but these match the env contract and
-                # older human-oriented column names people actually sort on.
-                "NUM_LAYERS": args.num_layers,
-                "MODEL_DIM": args.model_dim,
-                "MLP_MULT": args.mlp_mult,
-                "GDN_RATIO": args.gdn_ratio,
-                "ATTN_BLOCKS": n_attn,
-                "CONV_BLOCKS": n_gdn,
-                "N_PARAMS": n_params,
-                "planned_train_tokens": planned_train_tokens,
-                "sdp_backend": sdp_backend,
-                "gdn_use_q_conv": args.gdn_use_q_conv,
-                "gdn_use_k_conv": args.gdn_use_k_conv,
-                "gdn_use_v_conv": args.gdn_use_v_conv,
-                "gdn_use_packed_qkv_conv": args.gdn_use_packed_qkv_conv,
-                "gdn_use_packed_qkv_proj": args.gdn_use_packed_qkv_proj,
-                "gdn_conv_output_contiguous": args.gdn_conv_output_contiguous,
-                "gdn_q_conv_output_contiguous": args.gdn_q_conv_output_contiguous,
-                "gdn_k_conv_output_contiguous": args.gdn_k_conv_output_contiguous,
-                "gdn_v_conv_output_contiguous": args.gdn_v_conv_output_contiguous,
-                "gdn_control_proj_fp32": args.gdn_control_proj_fp32,
-                "gdn_gates_fp32": args.gdn_gates_fp32,
-                "gdn_output_norm_fp32": args.gdn_output_norm_fp32,
-                "gdn_use_cuda_frontend_nct": args.gdn_use_cuda_frontend_nct,
-                "gdn_use_cuda_packed_conv": args.gdn_use_cuda_packed_conv,
-                "gdn_use_cuda_packed_conv_aten_backward": args.gdn_use_cuda_packed_conv_aten_backward,
-                "gdn_use_cuda_packed_conv_aten_weight_backward": args.gdn_use_cuda_packed_conv_aten_weight_backward,
-                "gdn_use_cuda_fused_frontend": args.gdn_use_cuda_fused_frontend,
-                "gdn_use_cuda_fused_frontend_lib": args.gdn_use_cuda_fused_frontend_lib,
-                "gdn_use_cuda_fused_output": args.gdn_use_cuda_fused_output,
-                "gdn_use_cuda_split_norm": args.gdn_use_cuda_split_norm,
-                "gdn_use_cuda_split_norm_lib": args.gdn_use_cuda_split_norm_lib,
-                "gdn_use_packed_qkv_conv_custom_backward": args.gdn_use_packed_qkv_conv_custom_backward,
-                "gdn_use_packed_qkv_single_contig": args.gdn_use_packed_qkv_single_contig,
-                "gdn_use_packed_qkv_split_copy": args.gdn_use_packed_qkv_split_copy,
-                "wandb_watch": wandb_watch_mode,
-                "wandb_watch_log_freq": args.wandb_watch_log_freq,
-            }
+            build_wandb_config(
+                args,
+                compile_stats=compile_stats,
+                local_batch_size=local_batch_size,
+                grad_accum_steps=grad_accum_steps,
+                planned_train_tokens=planned_train_tokens,
+                n_attn=n_attn,
+                n_gdn=n_gdn,
+                n_params=n_params,
+                sdp_backend=sdp_backend,
+                wandb_watch_mode=wandb_watch_mode,
+            )
         )
 
     # ── Optimizers ────────────────────────────────────────────────────
