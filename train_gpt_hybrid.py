@@ -1212,6 +1212,16 @@ def main() -> None:
                 "n_attn_blocks": n_attn,
                 "n_gdn_blocks": n_gdn,
                 "n_params": n_params,
+                # Keep explicit aliases for the runs table. The canonical
+                # lowercase fields remain, but these match the env contract and
+                # older human-oriented column names people actually sort on.
+                "NUM_LAYERS": args.num_layers,
+                "MODEL_DIM": args.model_dim,
+                "MLP_MULT": args.mlp_mult,
+                "GDN_RATIO": args.gdn_ratio,
+                "ATTN_BLOCKS": n_attn,
+                "CONV_BLOCKS": n_gdn,
+                "N_PARAMS": n_params,
                 "planned_train_tokens": planned_train_tokens,
                 "sdp_backend": sdp_backend,
                 "gdn_use_q_conv": args.gdn_use_q_conv,

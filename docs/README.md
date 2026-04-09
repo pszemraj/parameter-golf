@@ -41,6 +41,10 @@ What is now true:
 - A larger attention-only baseline (`MLP_MULT=4.0`) was re-run under the same 2k-step contract and still failed to close the hybrid gap.
 - The hybrid stack now has an experimental residual normalization knob: `NORM_STYLE=pre|post|keel`.
 - Large feature-map `CastedLinear` weights now stay in `bf16` after model init; only low-dimensional and explicitly routed control parameters are restored to `fp32`.
+- W&B config now preserves both canonical lowercase HGDN fields and explicit
+  run-table aliases such as `NUM_LAYERS`, `MODEL_DIM`, `MLP_MULT`,
+  `GDN_RATIO`, `ATTN_BLOCKS`, and `CONV_BLOCKS` so the branch's runs table
+  stays sortable across rounds.
 
 ## Norm Placement Aside
 
