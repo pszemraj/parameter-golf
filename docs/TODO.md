@@ -29,12 +29,26 @@ This file tracks follow-up work that is intentionally not enabled by default in 
   1. compute-optimal HGDN resize on H100
      - best immediate candidates already prepared:
        - `configs/hgdn/retune_trim_layers_14.toml`
+       - `configs/hgdn/retune_trim_layers_14_mlp3p5.toml`
        - `configs/hgdn/retune_trim_width_320.toml`
        - `configs/hgdn/retune_balanced_14l_mlp3.toml`
      - rationale:
        - the hybrid already learns faster per step on H100
        - a slightly smaller or better-balanced HGDN may keep most of that
          quality edge while buying back enough throughput to win on wall clock
+     - first H100 resize read:
+       - `14L x 384d x mlp3.25` is live:
+         - `2.4438 -> 2.4243` roundtrip vs `h100k6`
+         - `915.10 -> 897.96 ms` last step time vs `h100k6`
+         - `OVER_LIMIT -> UNDER_LIMIT`
+       - `16L x 320d x mlp3.25` is rejected:
+         - worse quality and slower than the reference
+       - the original `14L x 384d x mlp3.0` run was invalid because the H100
+         helper ignored plain `MLP_MULT`; rerun it after the shell fallback fix
+     - immediate next resize step:
+       - rerun corrected `14L x 384d x mlp3.0`
+       - test one headroom-spend variant around the live leader
+       - keep the width-trim branch parked unless later evidence changes
   2. norm placement screen
      - compare `pre`, `post`, and `keel`
      - rationale:
@@ -968,8 +982,11 @@ Latest local attribution checkpoint:
       - run sequential fixed-step checks for:
         - `configs/hgdn/retune_trim_layers_14.toml`
         - `configs/hgdn/retune_trim_width_320.toml`
-      - keep `configs/hgdn/retune_balanced_14l_mlp3.toml` as the next fallback
-        if both primary cuts land too conservative or too weak
+      - update after the first resize round:
+        - `configs/hgdn/retune_trim_layers_14.toml` is the live winner
+        - `configs/hgdn/retune_trim_width_320.toml` is rejected
+        - `configs/hgdn/retune_balanced_14l_mlp3.toml` must be rerun because
+          the original H100 helper ignored plain `MLP_MULT`
       - use the hybrid-only helper mode so the attention-only baseline does not
         get rerun every time:
         - `python scripts/hgdn.py h100-perf fixed2k-hybrid --config configs/hgdn/retune_trim_layers_14.toml --run-prefix h100k7a --online --set WANDB_PROJECT=pg-hconv-ablations --set WANDB_WATCH=gradients`

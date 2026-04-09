@@ -288,6 +288,15 @@ Kernel-work guardrail:
       ownership variants unless the decomposition changes materially
     - move the next HGDN tranche to compute-optimal resize, then norm placement
       and other non-seam hotspots
+  - the first H100 resize round already found one live architecture win:
+    - `14L x 384d x mlp3.25` improved both roundtrip and step time while moving
+      from `OVER_LIMIT` to `UNDER_LIMIT`
+  - the width trim lost:
+    - `16L x 320d x mlp3.25` was both slower and worse
+  - the original balanced rerun was invalid:
+    - the H100 helper ignored plain `MLP_MULT`
+    - that launch contract is now fixed, so the intended `14L x 384d x mlp3.0`
+      candidate should be rerun before resizing conclusions are closed
     - the current compile-visible NCT frontend family is an integration
       bottleneck at this abstraction level
     - do not spend more H100 time on that family unless the boundary changes

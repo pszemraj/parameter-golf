@@ -1,9 +1,95 @@
 # Profiling Log
 
-Last updated: 2026-04-08 14:21 EDT
+Last updated: 2026-04-08 19:05 EDT
 
 This file records profiler-driven checkpoints that should survive beyond the raw
 artifacts under `profiles/`.
+
+## 2026-04-08 — First H100 resize round found one live winner and one launch-contract bug
+
+Artifacts:
+
+- W&B compare bundle:
+  - `profiles/fixed2k_compare/h100retune_round1_regen`
+- local logs:
+  - `local-scratch/logs-3xsizing-apr8.zip`
+
+Contract:
+
+- active HGDN kernel baseline:
+  - `winner-20260405-19`
+- reference run:
+  - `h100k6_fixed2k_hybrid_r1_mlp3.25_seq2048`
+- resize candidates:
+  - `configs/hgdn/retune_trim_layers_14.toml`
+  - `configs/hgdn/retune_trim_width_320.toml`
+  - `configs/hgdn/retune_balanced_14l_mlp3.toml`
+
+### Main finding
+
+The first H100 resize tranche produced one clearly useful winner:
+
+- `h100retune_a_fixed2k_hybrid_r1_mlp3.25_seq2048`
+  - shape:
+    - `14L x 384d x mlp3.25`
+  - sampled eval:
+    - `2.4137`
+  - final roundtrip:
+    - `2.4243`
+  - last step time:
+    - `897.96 ms`
+  - artifact total:
+    - `15,397,504`
+  - headroom:
+    - `602,496`
+
+Compared with the previous `h100k6` hybrid reference:
+
+- roundtrip improved:
+  - `2.4438 -> 2.4243` (`-0.0195`)
+- last step time improved:
+  - `915.10 ms -> 897.96 ms` (`-17.14 ms`)
+- artifact status improved:
+  - `OVER_LIMIT -> UNDER_LIMIT`
+
+### Rejects and caveats
+
+Reject the width trim:
+
+- `h100retune_b_fixed2k_hybrid_r1_mlp3.25_seq2048`
+  - shape:
+    - `16L x 320d x mlp3.25`
+  - final roundtrip:
+    - `2.4950`
+  - last step time:
+    - `984.69 ms`
+  - read:
+    - materially worse quality and slower despite much more headroom
+
+Treat the original balanced run as invalid:
+
+- `h100retune_c_fixed2k_hybrid_r1_mlp3.25_seq2048`
+  - it was intended to be `14L x 384d x mlp3.0`
+  - the H100 helper ignored plain `MLP_MULT` and only read
+    `HYBRID_MLP_MULT`
+  - result:
+    - the run actually executed as another `14L x 384d x mlp3.25` launch
+    - it is not valid evidence about the intended balanced candidate
+
+### Decision
+
+- keep `14L x 384d x mlp3.25` as the live resize leader
+- reject the `16L x 320d x mlp3.25` width-trim branch
+- rerun the intended `14L x 384d x mlp3.0` balanced candidate after fixing the
+  H100 launch contract
+- spend one follow-up round bracketing around the live leader rather than
+  reopening closed HGDN kernel seams
+
+### Follow-up implementation fix
+
+The H100 and local HGDN shell helpers now honor plain `MLP_MULT` as the hybrid
+fallback when `HYBRID_MLP_MULT` is unset. This restores the intended contract
+for the `retune_*` TOML configs.
 
 ## 2026-04-08 — Compile-visible split/norm also closes the current front-end seam (`h100k20`)
 
