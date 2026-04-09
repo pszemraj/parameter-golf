@@ -58,6 +58,8 @@ This file tracks follow-up work that is intentionally not enabled by default in 
        - kernel-seam work should stay narrow
        - resize work should use a wider simultaneous H100 batch when the
          candidates are simple architecture variants around a live winner
+       - operationally, prefer the reusable batch helper:
+         - `scripts/run_h100_hgdn_resize_round.sh`
   2. norm placement screen
      - compare `pre`, `post`, and `keel`
      - rationale:

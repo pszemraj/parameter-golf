@@ -727,6 +727,13 @@ python scripts/hgdn.py h100-perf fixed2k-hybrid \
   --set WANDB_WATCH=gradients
 ```
 
+For the current resize tranche, use the batch helper instead of pasting
+individual commands:
+
+```bash
+scripts/run_h100_hgdn_resize_round.sh all
+```
+
 Using the reusable TOML config:
 
 ```bash
