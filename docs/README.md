@@ -1,6 +1,6 @@
 # HGDN Branch Status
 
-Last updated: 2026-04-08 22:15 EDT
+Last updated: 2026-04-09 03:49 EDT
 
 Branch: `exp/hgdn`
 
@@ -106,6 +106,7 @@ What has not been claimed:
 - `configs/hgdn/winner_20260405_11_cuda_fused.toml`: experimental fused-CUDA variant of that winner
 - `scripts/screen_hgdn_arch_sizes.py`: CPU-only artifact-proxy screen for resized HGDN architecture candidates
 - `scripts/compare_hgdn_fixed2k.py`: structured W&B comparator for completed HGDN fixed-step H100 runs
+- `scripts/run_local_hgdn_resize_round.sh`: single-entry local fixed-data resize batch for broad HGDN architecture search, with automatic log/manifest archiving
 - `scripts/hgdn_kernel_scoreboard.py`: family-level H100 kernel gatekeeper that scores same-day controls and candidates against explicit `meaningful_win`, `flat_band`, copy-tax, and compile-penalty rules; accepts extracted trees and direct `.7z` bundles via `py7zr` or a system `7z` fallback
 - `configs/hgdn/winner_20260405_11_retune.toml`: first-pass retune family around the active timestamped HGDN kernel winner
 - `configs/hgdn/retune_*.toml`: named runnable configs for the first resized-HGDN shortlist
@@ -295,8 +296,10 @@ Kernel-work guardrail:
       from `OVER_LIMIT` to `UNDER_LIMIT`
   - process rule from here:
     - keep kernel-seam work narrow
-    - use wider simultaneous H100 batches for simple resize variants around a
-      live architecture winner
+    - do the broad resize screen locally first when the candidates fit local
+      VRAM
+    - use wider simultaneous H100 batches only for the shortlisted finalists
+      from that local screen
   - the width trim lost:
     - `16L x 320d x mlp3.25` was both slower and worse
   - the original balanced rerun was invalid:
@@ -731,6 +734,22 @@ python scripts/hgdn.py h100-perf fixed2k-hybrid \
 
 For the current resize tranche, use the batch helper instead of pasting
 individual commands:
+
+```bash
+scripts/run_local_hgdn_resize_round.sh
+scripts/run_h100_hgdn_resize_round.sh
+```
+
+Stage split:
+
+- `scripts/run_local_hgdn_resize_round.sh`
+  - broad local fixed-data architecture search
+  - use this first when the candidate family fits local VRAM
+  - writes a handoff archive to `local-scratch/<RUN_PREFIX_BASE>_bundle.7z`
+- `scripts/run_h100_hgdn_resize_round.sh`
+  - finalist confirmation and ranking on H100
+
+The H100 helper remains:
 
 ```bash
 scripts/run_h100_hgdn_resize_round.sh
@@ -1181,9 +1200,12 @@ The important current read is:
 
 That means the next serious HGDN levers, in order, are:
 
-1. Compute-optimal resize on H100.
+1. Compute-optimal resize.
    - The hybrid quality edge is large enough that a slightly smaller HGDN may
      still beat the attention-only baseline overall.
+   - The right process is:
+     - broad local fixed-data architecture search first
+     - finalist confirmation and ranking on H100 second
    - The existing retune shortlist is the first place to spend that budget once
      the current narrow kernel seam stops paying.
 2. Norm placement.
@@ -1207,7 +1229,9 @@ So the right stop rule is not “quit after N rejects.” It is:
 
 ## Likely Next Work
 
-- Run the compute-optimal HGDN resize tranche on top of the current winner using the prepared `retune_*` configs.
+- Run the compute-optimal HGDN resize tranche on top of the current winner using the prepared `retune_*` configs:
+  - local broad search first
+  - H100 finalist batch second
 - After resize, run the norm-placement screen (`pre` vs `post` vs `keel`) if the wall-clock tradeoff is still unresolved.
 - Keep HGDN-native hotspot work focused on non-seam systems costs such as gate/output projection and residual-shell glue unless a materially different front-end decomposition appears.
 - If exact local size matching is still required, bracket the attention-only baseline between `MLP_MULT=4.0` and a slightly larger fixed-step candidate. Do not use 600-second local runs as the final size-matching proxy.

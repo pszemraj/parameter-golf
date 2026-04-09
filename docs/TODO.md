@@ -26,7 +26,7 @@ This file tracks follow-up work that is intentionally not enabled by default in 
   - the next tranche should stop trying to rescue this exact front-end boundary
     and move to the higher-payoff levers below
 - Priority order after the current seam:
-  1. compute-optimal HGDN resize on H100
+  1. compute-optimal HGDN resize
      - best immediate candidates already prepared:
        - `configs/hgdn/retune_trim_layers_14.toml`
        - `configs/hgdn/retune_trim_layers_14_mlp3p5.toml`
@@ -36,6 +36,10 @@ This file tracks follow-up work that is intentionally not enabled by default in 
        - the hybrid already learns faster per step on H100
        - a slightly smaller or better-balanced HGDN may keep most of that
          quality edge while buying back enough throughput to win on wall clock
+     - staging rule:
+       - broad local fixed-data search first when the candidate family fits
+         local VRAM
+       - finalist confirmation and ranking on H100 second
      - first H100 resize read:
        - `14L x 384d x mlp3.25` is live:
          - `2.4438 -> 2.4243` roundtrip vs `h100k6`
@@ -56,9 +60,16 @@ This file tracks follow-up work that is intentionally not enabled by default in 
        - keep the width-trim branch parked unless later evidence changes
      - batching rule:
        - kernel-seam work should stay narrow
-       - resize work should use a wider simultaneous H100 batch when the
-         candidates are simple architecture variants around a live winner
+       - resize work should use a wider simultaneous local batch for the broad
+         search stage
+       - resize work should use a wider simultaneous H100 batch only for the
+         shortlisted finalists around a live winner
        - operationally, prefer the reusable batch helper:
+         - `scripts/run_local_hgdn_resize_round.sh`
+         - the script should be a single-entry protocol file with no
+           extra subcommands
+         - the script should package matching logs and a batch manifest into
+           one `local-scratch` archive automatically
          - `scripts/run_h100_hgdn_resize_round.sh`
          - the script should be a single-entry protocol file with no
            train/compare subcommands
