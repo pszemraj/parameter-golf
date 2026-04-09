@@ -60,6 +60,8 @@ This file tracks follow-up work that is intentionally not enabled by default in 
          candidates are simple architecture variants around a live winner
        - operationally, prefer the reusable batch helper:
          - `scripts/run_h100_hgdn_resize_round.sh`
+         - the script should be a single-entry protocol file with no
+           train/compare subcommands
   2. norm placement screen
      - compare `pre`, `post`, and `keel`
      - rationale:

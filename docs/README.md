@@ -733,7 +733,7 @@ For the current resize tranche, use the batch helper instead of pasting
 individual commands:
 
 ```bash
-scripts/run_h100_hgdn_resize_round.sh all
+scripts/run_h100_hgdn_resize_round.sh
 ```
 
 Using the reusable TOML config:
