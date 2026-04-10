@@ -9,7 +9,6 @@ This script converts the phase-1 profiler bundle into two decision aids:
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -22,7 +21,9 @@ from profiler_report import (  # noqa: E402
     HGDN_TRANSFER_BUCKETS,
     find_profile_row,
     format_profile_bucket_cell,
+    load_boundary_audit_jsonl,
     load_profile_report,
+    markdown_table,
     write_json,
     write_rows_csv,
 )
@@ -133,10 +134,7 @@ def render_bucket_table(
     :return tuple[list[dict[str, Any]], str]: Table rows and markdown rendering.
     """
     rows: list[dict[str, Any]] = []
-    md_lines = [
-        "| Bucket | bare_gdn | hybrid_fwd_bwd | hybrid_opt | trainer_eager | Dominant view | Suggested owner |",
-        "|---|---:|---:|---:|---:|---|---|",
-    ]
+    md_rows: list[tuple[str, str, str, str, str, str, str]] = []
     for bucket in buckets:
         view_rows = {
             VIEW_LABELS[name]: find_profile_row(report, bucket)
@@ -153,41 +151,30 @@ def render_bucket_table(
             "suggested_owner": owner,
         }
         rows.append(row)
-        md_lines.append(
-            f"| `{bucket}` | {row['bare_gdn']} | {row['hybrid_fwd_bwd']} | "
-            f"{row['hybrid_opt']} | {row['trainer_eager']} | "
-            f"`{dominant_view}` | `{owner}` |"
-        )
-    return rows, "\n".join(md_lines) + "\n"
-
-
-def load_boundary_audit(path: Path | None) -> list[dict[str, Any]]:
-    """Load structured HGDN boundary audit JSONL records.
-
-    :param Path | None path: Audit path.
-    :return list[dict[str, Any]]: Flat per-tensor boundary records.
-    """
-    if path is None or not path.is_file():
-        return []
-    rows: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        record = json.loads(line)
-        for tensor in record["tensors"]:
-            rows.append(
-                {
-                    "call_index": record["call_index"],
-                    "boundary": record["boundary"],
-                    "tensor": tensor["name"],
-                    "dtype": tensor["dtype"],
-                    "device": tensor["device"],
-                    "shape": tuple(tensor["shape"]),
-                    "stride": tuple(tensor["stride"]),
-                    "contiguous": int(tensor["contiguous"]),
-                }
+        md_rows.append(
+            (
+                f"`{bucket}`",
+                row["bare_gdn"],
+                row["hybrid_fwd_bwd"],
+                row["hybrid_opt"],
+                row["trainer_eager"],
+                f"`{dominant_view}`",
+                f"`{owner}`",
             )
-    return rows
+        )
+    return rows, markdown_table(
+        [
+            "Bucket",
+            "bare_gdn",
+            "hybrid_fwd_bwd",
+            "hybrid_opt",
+            "trainer_eager",
+            "Dominant view",
+            "Suggested owner",
+        ],
+        md_rows,
+        aligns=["---", "---:", "---:", "---:", "---:", "---", "---"],
+    )
 
 
 def render_boundary_table(rows: list[dict[str, Any]]) -> str:
@@ -198,17 +185,32 @@ def render_boundary_table(rows: list[dict[str, Any]]) -> str:
     """
     if not rows:
         return "_No boundary audit captured._\n"
-    lines = [
-        "| Call | Boundary | Tensor | Dtype | Shape | Stride | Contiguous | Device |",
-        "|---:|---|---|---|---|---|---:|---|",
-    ]
-    for row in rows:
-        lines.append(
-            f"| {row['call_index']} | `{row['boundary']}` | `{row['tensor']}` | "
-            f"`{row['dtype']}` | `{row['shape']}` | `{row['stride']}` | "
-            f"{row['contiguous']} | `{row['device']}` |"
-        )
-    return "\n".join(lines) + "\n"
+    return markdown_table(
+        [
+            "Call",
+            "Boundary",
+            "Tensor",
+            "Dtype",
+            "Shape",
+            "Stride",
+            "Contiguous",
+            "Device",
+        ],
+        [
+            (
+                row["call_index"],
+                f"`{row['boundary']}`",
+                f"`{row['tensor']}`",
+                f"`{row['dtype']}`",
+                f"`{row['shape']}`",
+                f"`{row['stride']}`",
+                row["contiguous"],
+                f"`{row['device']}`",
+            )
+            for row in rows
+        ],
+        aligns=["---:", "---", "---", "---", "---", "---", "---:", "---"],
+    )
 
 
 def main() -> None:
@@ -224,7 +226,7 @@ def main() -> None:
     }
 
     bucket_rows, bucket_markdown = render_bucket_table(reports, args.buckets)
-    boundary_rows = load_boundary_audit(args.boundary_audit)
+    boundary_rows = load_boundary_audit_jsonl(args.boundary_audit)
     boundary_markdown = render_boundary_table(boundary_rows)
 
     summary = {

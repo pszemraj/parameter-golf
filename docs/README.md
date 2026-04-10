@@ -110,8 +110,6 @@ Local analysis helpers:
   - [`../configs/hgdn/winner_20260405_19.toml`](../configs/hgdn/winner_20260405_19.toml)
 - Norm helper:
   - [`../scripts/run_laptop_norm_compare.sh`](../scripts/run_laptop_norm_compare.sh)
-- Baseline norm ablation helper:
-  - [`../scripts/run_train_gpt_norm_ablate.sh`](../scripts/run_train_gpt_norm_ablate.sh)
 - CUDA extension entrypoints:
   - [`../setup_hgdn_cuda.py`](../setup_hgdn_cuda.py)
   - [`../scripts/hgdn_cuda_parity.py`](../scripts/hgdn_cuda_parity.py)

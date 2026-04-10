@@ -9,7 +9,6 @@ actually changed.
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -22,7 +21,10 @@ from profiler_report import (  # noqa: E402
     HGDN_TRANSFER_BUCKETS,
     find_profile_row,
     format_profile_bucket_cell,
+    index_first_rows,
+    load_json_rows,
     load_profile_report,
+    markdown_table,
     profile_row_ms,
     profile_row_percent,
     write_json,
@@ -99,18 +101,6 @@ def load_phase1_reports(bundle_root: Path) -> dict[str, dict[str, Any]]:
     return reports
 
 
-def load_boundary_rows(bundle_root: Path) -> list[dict[str, Any]]:
-    """Load flattened boundary-audit rows from one phase-1 bundle.
-
-    :param Path bundle_root: Phase-1 bundle root.
-    :return list[dict[str, Any]]: Boundary rows, or an empty list if missing.
-    """
-    path = bundle_root / "analysis" / "boundary_audit.json"
-    if not path.is_file():
-        return []
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
 def build_bucket_rows(
     baseline: dict[str, dict[str, Any]],
     candidate: dict[str, dict[str, Any]],
@@ -152,32 +142,28 @@ def render_bucket_markdown(rows: list[dict[str, Any]]) -> str:
     :param list[dict[str, Any]] rows: Flat comparison rows.
     :return str: Markdown table.
     """
-    lines = [
-        "| Bucket | View | Baseline | Candidate | Δ self CUDA ms | Δ self CUDA pp |",
-        "|---|---|---:|---:|---:|---:|",
-    ]
-    for row in rows:
-        lines.append(
-            f"| `{row['bucket']}` | `{row['view']}` | {row['baseline']} | "
-            f"{row['candidate']} | {row['delta_ms']:+.2f} | {row['delta_pct_points']:+.2f} |"
-        )
-    return "\n".join(lines) + "\n"
-
-
-def boundary_lookup(
-    rows: list[dict[str, Any]],
-) -> dict[tuple[str, str], dict[str, Any]]:
-    """Index boundary-audit rows by boundary/tensor pair for the first call.
-
-    :param list[dict[str, Any]] rows: Flat boundary rows.
-    :return dict[tuple[str, str], dict[str, Any]]: Indexed rows.
-    """
-    indexed: dict[tuple[str, str], dict[str, Any]] = {}
-    for row in rows:
-        key = (row["boundary"], row["tensor"])
-        if key not in indexed or row["call_index"] < indexed[key]["call_index"]:
-            indexed[key] = row
-    return indexed
+    return markdown_table(
+        [
+            "Bucket",
+            "View",
+            "Baseline",
+            "Candidate",
+            "Δ self CUDA ms",
+            "Δ self CUDA pp",
+        ],
+        [
+            (
+                f"`{row['bucket']}`",
+                f"`{row['view']}`",
+                row["baseline"],
+                row["candidate"],
+                f"{row['delta_ms']:+.2f}",
+                f"{row['delta_pct_points']:+.2f}",
+            )
+            for row in rows
+        ],
+        aligns=["---", "---", "---:", "---:", "---:", "---:"],
+    )
 
 
 def build_boundary_rows(
@@ -190,8 +176,16 @@ def build_boundary_rows(
     :param list[dict[str, Any]] candidate: Candidate boundary rows.
     :return list[dict[str, Any]]: Flat boundary comparison rows.
     """
-    base_index = boundary_lookup(baseline)
-    cand_index = boundary_lookup(candidate)
+    base_index = index_first_rows(
+        baseline,
+        key_fields=("boundary", "tensor"),
+        order_field="call_index",
+    )
+    cand_index = index_first_rows(
+        candidate,
+        key_fields=("boundary", "tensor"),
+        order_field="call_index",
+    )
     rows: list[dict[str, Any]] = []
     for boundary, tensor in BOUNDARY_KEYS:
         base_row = base_index.get((boundary, tensor))
@@ -221,18 +215,32 @@ def render_boundary_markdown(rows: list[dict[str, Any]]) -> str:
     :param list[dict[str, Any]] rows: Boundary comparison rows.
     :return str: Markdown table.
     """
-    lines = [
-        "| Boundary | Tensor | Baseline dtype | Candidate dtype | Baseline stride | Candidate stride | Baseline contig | Candidate contig |",
-        "|---|---|---|---|---|---|---:|---:|",
-    ]
-    for row in rows:
-        lines.append(
-            f"| `{row['boundary']}` | `{row['tensor']}` | `{row['baseline_dtype']}` | "
-            f"`{row['candidate_dtype']}` | `{row['baseline_stride']}` | "
-            f"`{row['candidate_stride']}` | {row['baseline_contiguous']} | "
-            f"{row['candidate_contiguous']} |"
-        )
-    return "\n".join(lines) + "\n"
+    return markdown_table(
+        [
+            "Boundary",
+            "Tensor",
+            "Baseline dtype",
+            "Candidate dtype",
+            "Baseline stride",
+            "Candidate stride",
+            "Baseline contig",
+            "Candidate contig",
+        ],
+        [
+            (
+                f"`{row['boundary']}`",
+                f"`{row['tensor']}`",
+                f"`{row['baseline_dtype']}`",
+                f"`{row['candidate_dtype']}`",
+                f"`{row['baseline_stride']}`",
+                f"`{row['candidate_stride']}`",
+                row["baseline_contiguous"],
+                row["candidate_contiguous"],
+            )
+            for row in rows
+        ],
+        aligns=["---", "---", "---", "---", "---", "---", "---:", "---:"],
+    )
 
 
 def main() -> None:
@@ -245,8 +253,12 @@ def main() -> None:
 
     baseline_reports = load_phase1_reports(args.baseline)
     candidate_reports = load_phase1_reports(args.candidate)
-    baseline_boundaries = load_boundary_rows(args.baseline)
-    candidate_boundaries = load_boundary_rows(args.candidate)
+    baseline_boundaries = load_json_rows(
+        args.baseline / "analysis" / "boundary_audit.json"
+    )
+    candidate_boundaries = load_json_rows(
+        args.candidate / "analysis" / "boundary_audit.json"
+    )
 
     bucket_rows = build_bucket_rows(
         baseline_reports,
@@ -261,15 +273,9 @@ def main() -> None:
         "bucket_rows": bucket_rows,
         "boundary_rows": boundary_rows,
     }
-    (output_dir / "bucket_deltas.json").write_text(
-        json.dumps(bucket_rows, indent=2),
-        encoding="utf-8",
-    )
+    write_json(output_dir / "bucket_deltas.json", bucket_rows)
     write_rows_csv(output_dir / "bucket_deltas.csv", bucket_rows)
-    (output_dir / "boundary_deltas.json").write_text(
-        json.dumps(boundary_rows, indent=2),
-        encoding="utf-8",
-    )
+    write_json(output_dir / "boundary_deltas.json", boundary_rows)
     write_rows_csv(output_dir / "boundary_deltas.csv", boundary_rows)
     write_json(output_dir / "summary.json", summary)
 

@@ -281,6 +281,94 @@ def write_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
+def load_json_rows(path: Path | None) -> list[dict[str, Any]]:
+    """Load a JSON array-of-rows payload when the file exists.
+
+    :param Path | None path: Optional JSON path.
+    :return list[dict[str, Any]]: Parsed row list, or an empty list when absent.
+    """
+    if path is None or not path.is_file():
+        return []
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def load_boundary_audit_jsonl(path: Path | None) -> list[dict[str, Any]]:
+    """Load flattened HGDN boundary-audit rows from JSONL.
+
+    :param Path | None path: Optional JSONL path.
+    :return list[dict[str, Any]]: Flat per-tensor boundary rows.
+    """
+    if path is None or not path.is_file():
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        record = json.loads(line)
+        for tensor in record["tensors"]:
+            rows.append(
+                {
+                    "call_index": record["call_index"],
+                    "boundary": record["boundary"],
+                    "tensor": tensor["name"],
+                    "dtype": tensor["dtype"],
+                    "device": tensor["device"],
+                    "shape": tuple(tensor["shape"]),
+                    "stride": tuple(tensor["stride"]),
+                    "contiguous": int(tensor["contiguous"]),
+                }
+            )
+    return rows
+
+
+def index_first_rows(
+    rows: list[dict[str, Any]],
+    *,
+    key_fields: Sequence[str],
+    order_field: str,
+) -> dict[tuple[Any, ...], dict[str, Any]]:
+    """Index rows by key, keeping the smallest `order_field` entry per key.
+
+    :param list[dict[str, Any]] rows: Flat row payloads.
+    :param Sequence[str] key_fields: Fields that define one logical row key.
+    :param str order_field: Field used to keep the earliest row.
+    :return dict[tuple[Any, ...], dict[str, Any]]: Indexed first-row mapping.
+    """
+    indexed: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for row in rows:
+        key = tuple(row[field] for field in key_fields)
+        if key not in indexed or row[order_field] < indexed[key][order_field]:
+            indexed[key] = row
+    return indexed
+
+
+def markdown_table(
+    headers: Sequence[str],
+    rows: Iterable[Sequence[Any]],
+    *,
+    aligns: Sequence[str] | None = None,
+) -> str:
+    """Render a markdown table from headers and row cells.
+
+    :param Sequence[str] headers: Header cells.
+    :param Iterable[Sequence[Any]] rows: Table row cells.
+    :param Sequence[str] | None aligns: Markdown alignment markers per column.
+    :raises ValueError: Raised when `aligns` length does not match `headers`.
+    :return str: Markdown table with trailing newline.
+    """
+    if aligns is None:
+        aligns = ["---"] * len(headers)
+    if len(aligns) != len(headers):
+        raise ValueError("aligns must match header count")
+    lines = [
+        f"| {' | '.join(headers)} |",
+        f"| {' | '.join(aligns)} |",
+    ]
+    for row in rows:
+        lines.append(f"| {' | '.join(str(cell) for cell in row)} |")
+    return "\n".join(lines) + "\n"
+
+
 def build_profile_report(
     rows: Sequence[ProfileRow],
     *,
