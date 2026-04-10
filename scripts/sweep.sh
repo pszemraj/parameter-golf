@@ -1,9 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd "$script_dir/.." && pwd)"
-cd "$repo_root"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/hgdn_shell_common.sh"
+hgdn_setup_repo_root "${BASH_SOURCE[0]}"
 
 NGPU="${NGPU:-1}"
 if (( 8 % NGPU != 0 )); then
@@ -11,13 +10,13 @@ if (( 8 % NGPU != 0 )); then
     exit 1
 fi
 
-trainer_path="$repo_root/train_gpt_hybrid.py"
-sweep_agent_path="$repo_root/scripts/sweep_agent.sh"
-sweep_config_path="$repo_root/scripts/sweep_config.yaml"
+trainer_path="$HGDN_REPO_ROOT/train_gpt_hybrid.py"
+sweep_agent_path="$HGDN_REPO_ROOT/scripts/sweep_agent.sh"
+sweep_config_path="$HGDN_REPO_ROOT/scripts/sweep_config.yaml"
 
 export WANDB_PROJECT="${WANDB_PROJECT:-pg-hgdn-ablations}"
-export DATA_PATH="${DATA_PATH:-$repo_root/data/datasets/fineweb10B_sp1024}"
-export TOKENIZER_PATH="${TOKENIZER_PATH:-$repo_root/data/tokenizers/fineweb_1024_bpe.model}"
+export DATA_PATH="${DATA_PATH:-$HGDN_REPO_ROOT/data/datasets/fineweb10B_sp1024}"
+export TOKENIZER_PATH="${TOKENIZER_PATH:-$HGDN_REPO_ROOT/data/tokenizers/fineweb_1024_bpe.model}"
 export USE_WANDB="${USE_WANDB:-1}"
 export VOCAB_SIZE="${VOCAB_SIZE:-1024}"
 export COMPILE_STRATEGY="${COMPILE_STRATEGY:-model}"
@@ -26,7 +25,7 @@ chmod +x "$sweep_agent_path"
 setup_perf_env() {
     unset TORCHINDUCTOR_CACHE_DIR TRITON_CACHE_DIR TORCHINDUCTOR_FORCE_DISABLE_CACHES
     if [[ "${PERF_ISOLATE_COMPILE_CACHE:-0}" == "1" ]]; then
-        local cache_root="$repo_root/.cache/perf/${RUN_ID}"
+        local cache_root="$HGDN_REPO_ROOT/.cache/perf/${RUN_ID}"
         export TORCHINDUCTOR_CACHE_DIR="$cache_root/inductor"
         export TRITON_CACHE_DIR="$cache_root/triton"
         rm -rf "$TORCHINDUCTOR_CACHE_DIR" "$TRITON_CACHE_DIR"
@@ -75,6 +74,8 @@ export_default() {
     local value="$2"
     export "$name=${!name:-$value}"
 }
+
+hgdn_require_cmd torchrun
 
 case "${1:-single}" in
 # ── hybrid_tight: 8h Dk48 Dv48 mlp3.0 r3 (15.8MB, 1.1% HR) ──

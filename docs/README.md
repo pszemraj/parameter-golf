@@ -70,6 +70,11 @@ Single-entry batch helpers:
 - [`../scripts/run_local_hgdn_resize_round.sh`](../scripts/run_local_hgdn_resize_round.sh)
 - [`../scripts/run_h100_hgdn_resize_round.sh`](../scripts/run_h100_hgdn_resize_round.sh)
 
+Data / setup helpers:
+
+- [`../scripts/bootstrap_challenge_data.sh`](../scripts/bootstrap_challenge_data.sh)
+- [`../scripts/build_hgdn_cuda.sh`](../scripts/build_hgdn_cuda.sh)
+
 1xH100 perf / profiling helpers:
 
 - [`../scripts/run_h100_single_gpu_hgdn.sh`](../scripts/run_h100_single_gpu_hgdn.sh)
@@ -84,6 +89,7 @@ Local analysis helpers:
 - [`../scripts/compare_hgdn_fixed2k.py`](../scripts/compare_hgdn_fixed2k.py)
 - [`../scripts/export_wandb_hgdn_runs.py`](../scripts/export_wandb_hgdn_runs.py)
 - [`../scripts/hgdn_kernel_scoreboard.py`](../scripts/hgdn_kernel_scoreboard.py)
+- [`../scripts/screen_hgdn_arch_sizes.py`](../scripts/screen_hgdn_arch_sizes.py)
 
 ## Related docs
 
@@ -104,6 +110,8 @@ Local analysis helpers:
   - [`../configs/hgdn/winner_20260405_19.toml`](../configs/hgdn/winner_20260405_19.toml)
 - Norm helper:
   - [`../scripts/run_laptop_norm_compare.sh`](../scripts/run_laptop_norm_compare.sh)
+- Baseline norm ablation helper:
+  - [`../scripts/run_train_gpt_norm_ablate.sh`](../scripts/run_train_gpt_norm_ablate.sh)
 - CUDA extension entrypoints:
   - [`../setup_hgdn_cuda.py`](../setup_hgdn_cuda.py)
   - [`../scripts/hgdn_cuda_parity.py`](../scripts/hgdn_cuda_parity.py)

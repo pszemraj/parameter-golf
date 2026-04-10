@@ -1,9 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd "$script_dir/.." && pwd)"
-cd "$repo_root"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/hgdn_shell_common.sh"
+hgdn_setup_repo_root "${BASH_SOURCE[0]}"
 
 mode="${1:-all}"
 
@@ -63,14 +62,6 @@ Examples:
   RUN_PREFIX=postln_h100 TRAIN_SEQ_LEN=2048 ITERATIONS=750 scripts/run_train_gpt_norm_ablate.sh all
   NGPU=8 RUN_PREFIX=postln_8gpu scripts/run_train_gpt_norm_ablate.sh shortlist
 EOF
-}
-
-require_cmd() {
-    local cmd="$1"
-    if ! command -v "$cmd" >/dev/null 2>&1; then
-        echo "Missing required command: $cmd" >&2
-        exit 1
-    fi
 }
 
 run_case() {
@@ -160,7 +151,7 @@ run_all() {
         "USE_SKIP_WEIGHTS=0"
 }
 
-require_cmd torchrun
+hgdn_require_cmd torchrun
 
 run_stamp="$(date +%Y%m%d_%H%M%S)"
 run_prefix="${RUN_PREFIX:-gpt_norm_${run_stamp}}"

@@ -1,9 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd "$script_dir/.." && pwd)"
-cd "$repo_root"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/hgdn_shell_common.sh"
+hgdn_setup_repo_root "${BASH_SOURCE[0]}"
 
 mode="${1:-h100}"
 
@@ -60,14 +59,6 @@ Examples:
 EOF
 }
 
-require_cmd() {
-    local cmd="$1"
-    if ! command -v "$cmd" >/dev/null 2>&1; then
-        echo "Missing required command: $cmd" >&2
-        exit 1
-    fi
-}
-
 dataset_dir_for_variant() {
     local variant="$1"
     if [[ "$variant" == "byte260" ]]; then
@@ -96,10 +87,9 @@ tokenizer_model_for_variant() {
     exit 1
 }
 
-require_cmd bash
-
 python_bin="${PYTHON_BIN:-python3}"
-require_cmd "$python_bin"
+hgdn_require_cmd bash
+hgdn_require_cmd "$python_bin"
 
 variant="${VARIANT:-sp1024}"
 case "$mode" in
@@ -169,5 +159,5 @@ echo "train_shards_present=$train_count"
 echo "val_shards_present=$val_count"
 echo
 echo "Training helpers can use:"
-echo "  DATA_PATH=$repo_root/$dataset_dir"
-echo "  TOKENIZER_PATH=$repo_root/$tokenizer_path"
+echo "  DATA_PATH=$HGDN_REPO_ROOT/$dataset_dir"
+echo "  TOKENIZER_PATH=$HGDN_REPO_ROOT/$tokenizer_path"
