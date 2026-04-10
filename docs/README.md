@@ -799,6 +799,8 @@ Stage split:
     - `14L x 384d x mlp3.375` is now only an H100 anchor, not the local leader
 - `scripts/run_h100_hgdn_resize_round.sh`
   - finalist confirmation and ranking on H100
+  - this is still a fixed-token architecture-quality screen, not the final
+    8xH100 packing protocol
   - builds the HGDN CUDA extension and runs CUDA parity by default before the
     batch; set `BUILD_HGDN_CUDA=0` or `RUN_HGDN_CUDA_PARITY=0` only when you
     are deliberately reusing a known-good runtime
@@ -819,6 +821,15 @@ Stage split:
       - `15L mlp2.6666666666666665` gives hidden width `1024`
       - `15L mlp2.5` checks the lower side of the local optimum
       - `16L mlp2.6666666666666665` preserves depth while trimming MLP
+  - standard follow-up after this ranking:
+    - take the top `2-3` candidates into a separate H100 batch-scale /
+      packing pass
+    - vary `TRAIN_BATCH_TOKENS`, `GRAD_ACCUM_STEPS`, and resulting per-GPU
+      `local_batch_size` explicitly
+    - interpret low VRAM use in the fixed-token screen as headroom, not as a
+      reason to restart, when GPU utilization is already saturated
+    - use that follow-up to judge final effective-batch dynamics and
+      wallclock-style training behavior
 
 The H100 helper remains:
 

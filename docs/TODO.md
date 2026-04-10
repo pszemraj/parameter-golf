@@ -103,6 +103,18 @@ This file tracks follow-up work that is intentionally not enabled by default in 
          - `15L mlp2.5` tests the lower side of the local optimum
          - `16L mlp2.6666666666666665` checks whether preserving `8G+8A`
            depth with lower MLP beats the `15L` depth trim on H100
+     - standard post-ranking step:
+       - do not make the final architecture call directly from the fixed-token
+         H100 ranking
+       - take the top `2-3` H100 finalists into a separate batch-scale /
+         packing pass
+       - explicitly vary `TRAIN_BATCH_TOKENS`, `GRAD_ACCUM_STEPS`, and
+         resulting per-GPU `local_batch_size`
+       - reason about two effects separately:
+         - microbatch/VRAM packing and kernel efficiency
+         - global effective-batch optimizer dynamics
+       - if fixed-token H100 utilization is saturated, low VRAM usage is
+         headroom for this follow-up pass, not a reason to restart the ranking
      - batching rule:
        - kernel-seam work should stay narrow
        - resize work should use a wider simultaneous local batch for the broad
