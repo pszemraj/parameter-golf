@@ -1,9 +1,118 @@
 # Profiling Log
 
-Last updated: 2026-04-08 19:05 EDT
+Last updated: 2026-04-10 13:32 EDT
 
 Profiler-driven checkpoints that should survive beyond the raw artifacts under
 `profiles/`.
+
+## 2026-04-10 — H100 fixed-token resize ranking kept the 14-layer anchor and killed the live 15-layer family (`h100retune3`)
+
+Artifacts:
+
+- W&B compare bundle:
+  - `profiles/fixed2k_compare/h100retune3_round`
+
+Contract:
+
+- active HGDN kernel baseline:
+  - `winner_20260405_19`
+- reference run:
+  - `h100k6_fixed2k_hybrid_r1_mlp3.25_seq2048`
+- candidate bracket:
+  - `16L x 384d x mlp3.25` rerun
+  - `14L x 384d x mlp3.375`
+  - `15L x 384d` with `MLP_MULT=2.5-3.125`
+  - `16L x 384d x mlp2.6666666666666665`
+
+### Main finding
+
+Keep `14L x 384d x mlp3.375` as the live under-limit architecture leader:
+
+- `h100retune3_b_fixed2k_hybrid_r1_mlp3.375_seq2048`
+  - sampled eval:
+    - `2.4245`
+  - final roundtrip:
+    - `2.4365`
+  - last step time:
+    - `948.72 ms`
+  - artifact total:
+    - `15,358,333`
+  - headroom:
+    - `641,667`
+
+This is the only eligible point in the `h100retune3` bracket that stayed close
+to the old `16L x 384d x mlp3.25` quality ceiling without reopening the size
+problem.
+
+### What got disciplined
+
+Reject the active `15L x 384d` family as the live branch:
+
+- best `15L` point:
+  - `h100retune3_i_fixed2k_hybrid_r1_mlp3.125_seq2048`
+  - sampled eval:
+    - `2.4298`
+  - final roundtrip:
+    - `2.4450`
+  - last step time:
+    - `987.48 ms`
+  - artifact total:
+    - `16,068,592`
+  - headroom:
+    - `-68,592`
+- lower-MLP `15L` points stayed under limit, but quality fell off too far:
+  - `mlp2.875`: roundtrip `2.4656`
+  - `mlp2.75`: roundtrip `2.4804`
+  - `mlp2.625`: roundtrip `2.5552`
+  - `mlp2.5`: roundtrip `2.6279`
+
+Reject the depth-preserving under-limit check too:
+
+- `h100retune3_j_fixed2k_hybrid_r1_mlp2.6666666666666665_seq2048`
+  - `16L x 384d x mlp2.6666666666666665`
+  - final roundtrip:
+    - `2.4499`
+  - last step time:
+    - `1024.70 ms`
+  - artifact total:
+    - `15,745,500`
+  - headroom:
+    - `254,500`
+  - read:
+    - under limit, but worse and slower than the `14L x 384d x mlp3.375` leader
+
+### Speed read
+
+Do not use the historical `h100k6` absolute `step_ms` as the clean speed
+control for this round.
+
+Same-arch rerun:
+
+- `h100retune3_a_fixed2k_hybrid_r1_mlp3.25_seq2048`
+  - shape:
+    - `16L x 384d x mlp3.25`
+  - sampled eval:
+    - `2.4124`
+  - final roundtrip:
+    - `2.4241`
+  - last step time:
+    - `1034.46 ms`
+  - artifact total:
+    - `17,518,650`
+
+That rerun improved quality relative to `h100k6`, but it also ran much slower
+than the old `915.10 ms` reference. That is enough runtime drift that the clean
+speed read for architecture selection should come from the within-round H100
+ordering first, then from the dedicated batch-scale / packing follow-up.
+
+### Decision
+
+- keep `14L x 384d x mlp3.375` as the active under-limit architecture leader
+- keep `16L x 384d x mlp3.25` only as the over-limit quality ceiling
+- reject the `15L x 384d` family as the active architecture branch
+- spend the next architecture work either:
+  - around the remaining bytes near the `14L` leader
+  - or in the separate H100 batch-scale / packing pass
 
 ## 2026-04-08 — First H100 resize round found one live winner and one launch-contract bug
 
