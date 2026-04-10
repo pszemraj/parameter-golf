@@ -19,167 +19,39 @@ from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-
-HGDN_PRESETS: dict[str, dict[str, str]] = {
+HGDN_CONFIG_DIR = REPO_ROOT / "configs" / "hgdn"
+HGDN_INLINE_PRESETS: dict[str, dict[str, str]] = {
     "default": {},
-    "convcontig": {
-        "GDN_CONV_OUTPUT_CONTIGUOUS": "1",
-    },
+    "convcontig": {"GDN_CONV_OUTPUT_CONTIGUOUS": "1"},
     "packed-qkv": {
         "GDN_CONV_OUTPUT_CONTIGUOUS": "1",
         "GDN_USE_PACKED_QKV_CONV": "1",
         "GDN_USE_PACKED_QKV_PROJ": "1",
     },
-    "current-winner": {
-        "GDN_CONV_OUTPUT_CONTIGUOUS": "1",
-        "GDN_USE_PACKED_QKV_CONV": "1",
-        "GDN_USE_PACKED_QKV_PROJ": "1",
-        "GDN_CONTROL_PROJ_FP32": "0",
-    },
-    "current-winner-cuda-fused": {
-        "GDN_CONV_OUTPUT_CONTIGUOUS": "1",
-        "GDN_USE_PACKED_QKV_CONV": "1",
-        "GDN_USE_PACKED_QKV_PROJ": "1",
-        "GDN_CONTROL_PROJ_FP32": "0",
-        "GDN_OUTPUT_NORM_FP32": "1",
-        "GDN_USE_CUDA_FUSED_FRONTEND": "1",
-        "GDN_USE_CUDA_FUSED_OUTPUT": "1",
-    },
-    "current-winner-cuda-output-only": {
-        "GDN_CONV_OUTPUT_CONTIGUOUS": "1",
-        "GDN_USE_PACKED_QKV_CONV": "1",
-        "GDN_USE_PACKED_QKV_PROJ": "1",
-        "GDN_CONTROL_PROJ_FP32": "0",
-        "GDN_OUTPUT_NORM_FP32": "1",
-        "GDN_USE_CUDA_FUSED_OUTPUT": "1",
-    },
-    "current-winner-custom-bwd": {
-        "GDN_CONV_OUTPUT_CONTIGUOUS": "1",
-        "GDN_USE_PACKED_QKV_CONV": "1",
-        "GDN_USE_PACKED_QKV_PROJ": "1",
-        "GDN_CONTROL_PROJ_FP32": "0",
-        "GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD": "1",
-    },
-    "winner-20260405-11": {
-        "GDN_CONV_OUTPUT_CONTIGUOUS": "1",
-        "GDN_USE_PACKED_QKV_CONV": "1",
-        "GDN_USE_PACKED_QKV_PROJ": "1",
-        "GDN_CONTROL_PROJ_FP32": "0",
-    },
-    "winner-20260405-11-cuda-fused": {
-        "GDN_CONV_OUTPUT_CONTIGUOUS": "1",
-        "GDN_USE_PACKED_QKV_CONV": "1",
-        "GDN_USE_PACKED_QKV_PROJ": "1",
-        "GDN_CONTROL_PROJ_FP32": "0",
-        "GDN_OUTPUT_NORM_FP32": "1",
-        "GDN_USE_CUDA_FUSED_FRONTEND": "1",
-        "GDN_USE_CUDA_FUSED_OUTPUT": "1",
-    },
-    "winner-20260405-11-cuda-output-only": {
-        "GDN_CONV_OUTPUT_CONTIGUOUS": "1",
-        "GDN_USE_PACKED_QKV_CONV": "1",
-        "GDN_USE_PACKED_QKV_PROJ": "1",
-        "GDN_CONTROL_PROJ_FP32": "0",
-        "GDN_OUTPUT_NORM_FP32": "1",
-        "GDN_USE_CUDA_FUSED_OUTPUT": "1",
-    },
-    "winner-20260405-11-custom-bwd": {
-        "GDN_CONV_OUTPUT_CONTIGUOUS": "1",
-        "GDN_USE_PACKED_QKV_CONV": "1",
-        "GDN_USE_PACKED_QKV_PROJ": "1",
-        "GDN_CONTROL_PROJ_FP32": "0",
-        "GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD": "1",
-    },
-    "winner-20260405-19": {
-        "GDN_CONV_OUTPUT_CONTIGUOUS": "1",
-        "GDN_USE_PACKED_QKV_CONV": "1",
-        "GDN_USE_PACKED_QKV_PROJ": "1",
-        "GDN_CONTROL_PROJ_FP32": "0",
-        "GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD": "1",
-    },
-    "winner-20260405-19-single-contig": {
-        "GDN_CONV_OUTPUT_CONTIGUOUS": "1",
-        "GDN_USE_PACKED_QKV_CONV": "1",
-        "GDN_USE_PACKED_QKV_PROJ": "1",
-        "GDN_CONTROL_PROJ_FP32": "0",
-        "GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD": "1",
-        "GDN_PACKED_QKV_SINGLE_CONTIG": "1",
-    },
-    "winner-20260405-19-split-copy": {
-        "GDN_CONV_OUTPUT_CONTIGUOUS": "1",
-        "GDN_USE_PACKED_QKV_CONV": "1",
-        "GDN_USE_PACKED_QKV_PROJ": "1",
-        "GDN_CONTROL_PROJ_FP32": "0",
-        "GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD": "1",
-        "GDN_PACKED_QKV_SPLIT_COPY": "1",
-    },
-    "winner-20260405-19-cuda-split-norm": {
-        "GDN_CONV_OUTPUT_CONTIGUOUS": "1",
-        "GDN_USE_PACKED_QKV_CONV": "1",
-        "GDN_USE_PACKED_QKV_PROJ": "1",
-        "GDN_CONTROL_PROJ_FP32": "0",
-        "GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD": "1",
-        "GDN_USE_CUDA_SPLIT_NORM": "1",
-    },
-    "winner-20260405-19-cuda-frontend-nct": {
-        "GDN_CONV_OUTPUT_CONTIGUOUS": "1",
-        "GDN_USE_PACKED_QKV_CONV": "1",
-        "GDN_USE_PACKED_QKV_PROJ": "1",
-        "GDN_CONTROL_PROJ_FP32": "0",
-        "GDN_USE_CUDA_FRONTEND_NCT": "1",
-    },
-    "winner-20260405-19-cuda-frontend-nct-custom-bwd": {
-        "GDN_CONV_OUTPUT_CONTIGUOUS": "1",
-        "GDN_USE_PACKED_QKV_CONV": "1",
-        "GDN_USE_PACKED_QKV_PROJ": "1",
-        "GDN_CONTROL_PROJ_FP32": "0",
-        "GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD": "1",
-        "GDN_USE_CUDA_FRONTEND_NCT": "1",
-    },
-    "winner-20260405-19-cuda-fused-frontend": {
-        "GDN_CONV_OUTPUT_CONTIGUOUS": "1",
-        "GDN_USE_PACKED_QKV_CONV": "1",
-        "GDN_USE_PACKED_QKV_PROJ": "1",
-        "GDN_CONTROL_PROJ_FP32": "0",
-        "GDN_USE_CUDA_FUSED_FRONTEND": "1",
-    },
-    "winner-20260405-19-cuda-fused-frontend-lib": {
-        "GDN_CONV_OUTPUT_CONTIGUOUS": "1",
-        "GDN_USE_PACKED_QKV_CONV": "1",
-        "GDN_USE_PACKED_QKV_PROJ": "1",
-        "GDN_CONTROL_PROJ_FP32": "0",
-        "GDN_USE_CUDA_FUSED_FRONTEND_LIB": "1",
-    },
-    "winner-20260405-19-cuda-split-norm-lib": {
-        "GDN_CONV_OUTPUT_CONTIGUOUS": "1",
-        "GDN_USE_PACKED_QKV_CONV": "1",
-        "GDN_USE_PACKED_QKV_PROJ": "1",
-        "GDN_CONTROL_PROJ_FP32": "0",
-        "GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD": "1",
-        "GDN_USE_CUDA_SPLIT_NORM_LIB": "1",
-    },
-    "winner-20260405-19-cuda-packed-conv": {
-        "GDN_CONV_OUTPUT_CONTIGUOUS": "1",
-        "GDN_USE_PACKED_QKV_CONV": "1",
-        "GDN_USE_PACKED_QKV_PROJ": "1",
-        "GDN_CONTROL_PROJ_FP32": "0",
-        "GDN_USE_CUDA_PACKED_CONV": "1",
-    },
-    "winner-20260405-19-cuda-packed-conv-aten-bwd": {
-        "GDN_CONV_OUTPUT_CONTIGUOUS": "1",
-        "GDN_USE_PACKED_QKV_CONV": "1",
-        "GDN_USE_PACKED_QKV_PROJ": "1",
-        "GDN_CONTROL_PROJ_FP32": "0",
-        "GDN_USE_CUDA_PACKED_CONV_ATEN_BACKWARD": "1",
-    },
-    "winner-20260405-19-cuda-packed-conv-aten-weight-bwd": {
-        "GDN_CONV_OUTPUT_CONTIGUOUS": "1",
-        "GDN_USE_PACKED_QKV_CONV": "1",
-        "GDN_USE_PACKED_QKV_PROJ": "1",
-        "GDN_CONTROL_PROJ_FP32": "0",
-        "GDN_USE_CUDA_PACKED_CONV_ATEN_WEIGHT_BACKWARD": "1",
-    },
 }
+HGDN_PRESET_CONFIGS: dict[str, str] = {
+    "current-winner": "current_winner.toml",
+    "current-winner-cuda-fused": "current_winner_cuda_fused.toml",
+    "current-winner-cuda-output-only": "current_winner_cuda_output_only.toml",
+    "current-winner-custom-bwd": "current_winner_custombwd.toml",
+    "winner-20260405-11": "winner_20260405_11.toml",
+    "winner-20260405-11-cuda-fused": "winner_20260405_11_cuda_fused.toml",
+    "winner-20260405-11-cuda-output-only": "winner_20260405_11_cuda_output_only.toml",
+    "winner-20260405-11-custom-bwd": "winner_20260405_11_custombwd.toml",
+    "winner-20260405-19": "winner_20260405_19.toml",
+    "winner-20260405-19-single-contig": "winner_20260405_19_single_contig.toml",
+    "winner-20260405-19-split-copy": "winner_20260405_19_split_copy.toml",
+    "winner-20260405-19-cuda-split-norm": "winner_20260405_19_cuda_split_norm.toml",
+    "winner-20260405-19-cuda-frontend-nct": "winner_20260405_19_cuda_frontend_nct.toml",
+    "winner-20260405-19-cuda-frontend-nct-custom-bwd": "winner_20260405_19_cuda_frontend_nct_custombwd.toml",
+    "winner-20260405-19-cuda-fused-frontend": "winner_20260405_19_cuda_fused_frontend.toml",
+    "winner-20260405-19-cuda-fused-frontend-lib": "winner_20260405_19_cuda_fused_frontend_lib.toml",
+    "winner-20260405-19-cuda-split-norm-lib": "winner_20260405_19_cuda_split_norm_lib.toml",
+    "winner-20260405-19-cuda-packed-conv": "winner_20260405_19_cuda_packed_conv.toml",
+    "winner-20260405-19-cuda-packed-conv-aten-bwd": "winner_20260405_19_cuda_packed_conv_atenbwd.toml",
+    "winner-20260405-19-cuda-packed-conv-aten-weight-bwd": "winner_20260405_19_cuda_packed_conv_aten_weightbwd.toml",
+}
+HGDN_PRESETS = tuple(sorted((*HGDN_INLINE_PRESETS, *HGDN_PRESET_CONFIGS)))
 
 COMMON_ENV_ARGS: tuple[tuple[str, str], ...] = (
     ("run_prefix", "RUN_PREFIX"),
@@ -247,10 +119,28 @@ def load_env_config(path: Path | None) -> dict[str, str]:
         return {}
     with path.open("rb") as fh:
         data = tomllib.load(fh)
+    alias = data.get("alias")
+    if alias is not None:
+        if not isinstance(alias, str):
+            raise TypeError(f"Expected string alias in {path}, got {type(alias)!r}")
+        return load_env_config(path.parent / alias)
     env_table = data.get("env", data)
     if not isinstance(env_table, dict):
         raise TypeError(f"Expected [env] table in {path}, got {type(env_table)!r}")
     return {str(k): scalar_to_env(v) for k, v in env_table.items()}
+
+
+def load_preset_env(name: str) -> dict[str, str]:
+    """Load one named preset from inline defaults and/or config files.
+
+    :param str name: Preset name from the CLI.
+    :return dict[str, str]: Environment overrides for the preset.
+    """
+    env = dict(HGDN_INLINE_PRESETS.get(name, {}))
+    config_name = HGDN_PRESET_CONFIGS.get(name)
+    if config_name is not None:
+        env.update(load_env_config(HGDN_CONFIG_DIR / config_name))
+    return env
 
 
 def add_common_args(parser: argparse.ArgumentParser) -> None:
@@ -266,7 +156,7 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--preset",
-        choices=sorted(HGDN_PRESETS),
+        choices=HGDN_PRESETS,
         default="default",
         help="Named HGDN preset. CLI flags override preset values.",
     )
@@ -561,7 +451,7 @@ def build_env(args: argparse.Namespace) -> dict[str, str]:
     """
     env: dict[str, str] = {}
     env.update(load_env_config(args.config))
-    env.update(HGDN_PRESETS[args.preset])
+    env.update(load_preset_env(args.preset))
 
     for arg_name, env_name in COMMON_ENV_ARGS:
         value = getattr(args, arg_name, None)

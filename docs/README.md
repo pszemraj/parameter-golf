@@ -82,6 +82,7 @@ Local analysis helpers:
 - [`../scripts/analyze_hgdn_phase1.py`](../scripts/analyze_hgdn_phase1.py)
 - [`../scripts/compare_hgdn_phase1.py`](../scripts/compare_hgdn_phase1.py)
 - [`../scripts/compare_hgdn_fixed2k.py`](../scripts/compare_hgdn_fixed2k.py)
+- [`../scripts/export_wandb_hgdn_runs.py`](../scripts/export_wandb_hgdn_runs.py)
 - [`../scripts/hgdn_kernel_scoreboard.py`](../scripts/hgdn_kernel_scoreboard.py)
 
 ## Related docs

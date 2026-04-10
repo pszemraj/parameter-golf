@@ -16,6 +16,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from hgdn_wandb_utils import (  # noqa: E402
+    DEFAULT_PROJECT,
+    flatten_config,
+    matches,
+)
 from profiler_report import write_json, write_rows_csv  # noqa: E402
 
 
@@ -44,7 +49,6 @@ DEFAULT_SUMMARY_KEYS = [
     "system/peak_mem_alloc_mib",
     "system/peak_mem_reserved_mib",
 ]
-DEFAULT_PROJECT = "pg-hgdn-ablations"
 
 
 def parse_args() -> argparse.Namespace:
@@ -94,30 +98,6 @@ def parse_args() -> argparse.Namespace:
         help="Additional summary key to export. Repeat as needed.",
     )
     return parser.parse_args()
-
-
-def matches(run_name: str, exact_names: set[str], substrings: list[str]) -> bool:
-    """Return whether a run name matches the provided exact or substring filters.
-
-    :param str run_name: Candidate W&B run name.
-    :param set[str] exact_names: Exact-match filters.
-    :param list[str] substrings: Substring filters.
-    :return bool: ``True`` when the run should be selected.
-    """
-    if exact_names and run_name in exact_names:
-        return True
-    if substrings and any(substr in run_name for substr in substrings):
-        return True
-    return not exact_names and not substrings
-
-
-def flatten_config(config: dict[str, Any]) -> dict[str, Any]:
-    """Drop internal W&B config keys from a run config mapping.
-
-    :param dict[str, Any] config: Raw W&B config mapping.
-    :return dict[str, Any]: Public config entries only.
-    """
-    return {k: v for k, v in config.items() if not k.startswith("_")}
 
 
 def iter_history_rows(

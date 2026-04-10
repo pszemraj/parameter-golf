@@ -18,6 +18,17 @@ The cleanest immediate cleanup target is the profiler/report toolchain. The risk
 
 ## Progress
 
+- `scripts/hgdn.py` now resolves HGDN named presets through
+  `configs/hgdn/*.toml`, and the duplicated `current_winner*` content is
+  represented as aliases instead of separately maintained copies.
+- `scripts/compare_profiler_reports.py` is already gone; the dead-script item
+  from the earlier audit is closed.
+- `hgdn_runtime_utils.py` now carries the shared HGDN runtime/artifact helpers
+  that had been imported directly from `train_gpt_hybrid.py` by tests and local
+  tooling.
+- `scripts/export_wandb_hgdn_runs.py` and `scripts/compare_hgdn_fixed2k.py`
+  now share one W&B selection helper module instead of depending on each other
+  for config flattening and run matching.
 - `scripts/hgdn_cuda_preflight.py` and `scripts/profile_hgdn_local_hotpath.py`
   now share the same CUDA module-preparation helper instead of carrying their
   own copies of the mixed-precision and conv-freeze logic.
@@ -32,7 +43,6 @@ The cleanest immediate cleanup target is the profiler/report toolchain. The risk
 
 | ID | Area | Type | Recommendation | Risk |
 |---|---|---|---|---|
-| A1 | `scripts/compare_profiler_reports.py` | dead-ish duplicate | Delete or merge into the phase-1 comparator | low |
 | A2 | profiler comparison helpers | semantic duplicates | Extract shared row/CSV/markdown helpers | low |
 | A3 | `scripts/run_hgdn_local_phase1.sh` | semantic duplication | Extract shared env-contract builder | low-medium |
 | A4 | `env_flag` in local GPU tools | semantic duplicate | Extract shared helper | low |
@@ -40,32 +50,9 @@ The cleanest immediate cleanup target is the profiler/report toolchain. The risk
 | A6 | baseline vs hybrid quantization helpers | drifted near-duplicates | Extract a shared core, keep trainer wrapper | high |
 | A7 | baseline vs `model.py` transformer utilities | duplicate by design but drifting | Defer, document boundary | high |
 | A8 | contiguity/parity tests in `test_model.py` | test redundancy | Parameterize and extract test helpers | low-medium |
-| A9 | `scripts/export_wandb_hgdn_runs.py` | orphan utility | Defer: either document it or archive it | low |
+| A9 | `scripts/export_wandb_hgdn_runs.py` | formerly orphan utility | Documented and sharing the W&B helper boundary now; keep | low |
 
 ## Detailed Findings
-
-### A1. Generic profiler comparator is effectively superseded
-
-Files:
-
-- `scripts/compare_profiler_reports.py:1-206`
-- `scripts/compare_hgdn_phase1.py:1-344`
-
-Why this is a finding:
-
-- `compare_profiler_reports.py` compares two structured reports across the same default HGDN transfer buckets.
-- `compare_hgdn_phase1.py` already does that, but on the real artifact shape we now use: full phase-1 bundles plus boundary-layout deltas.
-- `compare_profiler_reports.py` is not referenced from `docs/README.md`, `docs/TODO.md`, or `docs/HARDWARE_TRANSFER.md`.
-
-Recommendation: `Delete`
-
-- Preferred outcome: fold any genuinely useful generic comparison behavior into `compare_hgdn_phase1.py`.
-- If a generic report-vs-report comparison is still needed, keep one tool and add an explicit `--generic-report` mode rather than maintaining two separate scripts.
-
-Risk flags:
-
-- Low risk if no one is using the generic script manually.
-- Before deletion, confirm there is no external notebook or shell alias depending on it.
 
 ### A2. Profiler-analysis helpers are duplicated across three scripts
 
@@ -73,7 +60,6 @@ Files:
 
 - `scripts/analyze_hgdn_phase1.py:24-42,103-128,256-268`
 - `scripts/compare_hgdn_phase1.py:24-42,126-186`
-- `scripts/compare_profiler_reports.py:18-36,57-103`
 - `scripts/export_wandb_hgdn_runs.py:115-135`
 - `profiler_report.py:17-281`
 
@@ -291,7 +277,7 @@ Risk flags:
 - Low-medium risk.
 - Do not collapse the utility-level conv test and the HGDN integration-level contiguity test into one; they cover different semantic layers.
 
-### A9. `export_wandb_hgdn_runs.py` is an orphan utility
+### A9. `export_wandb_hgdn_runs.py` was an orphan utility
 
 File:
 
@@ -299,18 +285,25 @@ File:
 
 Why this is a finding:
 
-- It is not referenced in the current docs workflow.
-- It reimplements CSV/JSON writing instead of sharing the existing reporting utilities.
-- It may still be useful, but right now it reads like a one-off script that became part of the permanent surface by inertia.
+- It had not been referenced in the current docs workflow.
+- It previously carried its own run-selection helpers instead of sharing them
+  with the fixed-2k comparator.
 
-Recommendation: `Defer`
+Current state:
 
-- Either document it properly as the canonical W&B export tool, or move it to an archive/one-off location.
+- It now shares W&B selection helpers with `compare_hgdn_fixed2k.py`.
+- It is now listed in `docs/README.md` alongside the other local analysis
+  helpers.
+
+Recommendation: `Keep`
+
+- Keep the exporter as the raw structured-export path.
+- Keep `compare_hgdn_fixed2k.py` as the fixed-budget comparison/report path.
+- Do not let either script grow private helper copies again.
 
 Risk flags:
 
-- Low risk if left alone temporarily.
-- Medium maintenance risk if we keep adding one-off export scripts without a tool boundary.
+- Low risk at the current size/boundary.
 
 ## Test-side non-findings
 
@@ -327,7 +320,7 @@ These should be parameterized or helper-ized, not deleted.
 
 Strong dead-code candidates found in this pass:
 
-- `scripts/compare_profiler_reports.py` is the only clear one.
+- No additional clear dead-script candidates remain outside `records/`.
 
 What this audit did **not** find:
 
@@ -339,10 +332,8 @@ So the cleanup priority is not "delete lots of dead branches." It is "stop carry
 
 ## Recommended cleanup order
 
-1. Remove or merge `scripts/compare_profiler_reports.py`.
-2. Extract shared profiler/report helpers and default HGDN buckets.
-3. Deduplicate the HGDN env-contract plumbing in `scripts/run_hgdn_local_phase1.sh`.
-4. Consolidate `env_flag`.
-5. Decide whether the W&B export script is canonical or archival.
-6. Only then touch baseline-vs-hybrid trainer utility extraction.
-7. Defer `train_gpt.py` vs `model.py` consolidation until there is an explicit decision to stop treating the baseline as a standalone reference.
+1. Extract shared profiler/report helpers and default HGDN buckets.
+2. Deduplicate the HGDN env-contract plumbing in `scripts/run_hgdn_local_phase1.sh`.
+3. Consolidate `env_flag`.
+4. Only then touch baseline-vs-hybrid trainer utility extraction.
+5. Defer `train_gpt.py` vs `model.py` consolidation until there is an explicit decision to stop treating the baseline as a standalone reference.

@@ -37,7 +37,7 @@ from profiler_report import (
     load_profile_report,
     write_profile_report,
 )
-from train_gpt_hybrid import (
+from hgdn_runtime_utils import (
     normalize_wandb_watch_mode,
     restore_low_dim_params_to_fp32,
     serialize_quantized_state_dict_int8,

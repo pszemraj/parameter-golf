@@ -26,22 +26,22 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from hgdn_runtime_utils import restore_low_dim_params_to_fp32 as restore_fp32  # noqa: E402
+from local_env import env_flag  # noqa: E402
+from scripts.hgdn_script_utils import prepare_cuda_module  # noqa: E402
+
 GatedDeltaNet = None
 HybridGPT = None
 Muon = None
-restore_low_dim_params_to_fp32 = None
 SCALAR_PARAM_PATTERNS = ()
 build_profile_report = None
 build_profile_rows = None
 write_profile_report = None
 
-from local_env import env_flag  # noqa: E402
-from scripts.hgdn_script_utils import prepare_cuda_module  # noqa: E402
-
 
 def load_repo_symbols() -> None:
     """Import repo modules after env-backed profiling knobs are finalized."""
-    global GatedDeltaNet, HybridGPT, Muon, restore_low_dim_params_to_fp32
+    global GatedDeltaNet, HybridGPT, Muon
     global SCALAR_PARAM_PATTERNS
 
     if GatedDeltaNet is not None:
@@ -55,15 +55,11 @@ def load_repo_symbols() -> None:
         write_profile_report,
     )
     from train_gpt_hybrid import Muon as muon_cls  # noqa: WPS433
-    from train_gpt_hybrid import (  # noqa: WPS433
-        restore_low_dim_params_to_fp32 as restore_fp32,
-    )
 
     globals()["GatedDeltaNet"] = gdn_cls
     globals()["HybridGPT"] = hybrid_cls
     globals()["SCALAR_PARAM_PATTERNS"] = scalar_patterns
     globals()["Muon"] = muon_cls
-    globals()["restore_low_dim_params_to_fp32"] = restore_fp32
     globals()["build_profile_report"] = build_profile_report
     globals()["build_profile_rows"] = build_profile_rows
     globals()["write_profile_report"] = write_profile_report
@@ -140,7 +136,7 @@ def prepare_model(module: torch.nn.Module) -> torch.nn.Module:
     load_repo_symbols()
     return prepare_cuda_module(
         module,
-        restore_low_dim_params_to_fp32=restore_low_dim_params_to_fp32,
+        restore_low_dim_params_to_fp32=restore_fp32,
         freeze_conv_weights=env_flag("GDN_FREEZE_CONV_WEIGHTS"),
     )
 

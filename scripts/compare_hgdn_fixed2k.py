@@ -8,18 +8,22 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import wandb
 
-from export_wandb_hgdn_runs import flatten_config, matches
-from profiler_report import write_json, write_rows_csv
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from hgdn_wandb_utils import DEFAULT_PROJECT, flatten_config, matches  # noqa: E402
+from profiler_report import write_json, write_rows_csv  # noqa: E402
 
 DEFAULT_EVAL_STEPS = (500, 1000, 1500, 2000)
 DEFAULT_HISTORY_KEYS = ("_step", "train/step_ms", "eval/loss", "eval/bpb")
-DEFAULT_PROJECT = "pg-hgdn-ablations"
 
 
 def parse_args() -> argparse.Namespace:

@@ -19,13 +19,13 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from hgdn_cuda import extension_status  # noqa: E402
-from local_env import env_flag  # noqa: E402
-from model import GatedDeltaNet, HybridGPT  # noqa: E402
-from scripts.hgdn_script_utils import prepare_cuda_module  # noqa: E402
-from train_gpt_hybrid import (  # noqa: E402
+from hgdn_runtime_utils import (  # noqa: E402
     prepare_hybrid_compile,
     restore_low_dim_params_to_fp32,
 )
+from local_env import env_flag  # noqa: E402
+from model import GatedDeltaNet, HybridGPT  # noqa: E402
+from scripts.hgdn_script_utils import prepare_cuda_module  # noqa: E402
 
 
 @dataclass(frozen=True)

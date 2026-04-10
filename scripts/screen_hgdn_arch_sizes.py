@@ -20,6 +20,11 @@ from typing import Any
 
 import torch
 
+from hgdn_runtime_utils import (
+    restore_low_dim_params_to_fp32,
+    serialize_quantized_state_dict_int8,
+)
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = REPO_ROOT / "configs" / "hgdn" / "current_winner_retune.toml"
 TRAINER_PATH = REPO_ROOT / "train_gpt_hybrid.py"
@@ -78,10 +83,6 @@ def load_project_bindings() -> tuple[Any, Any, Any]:
     if str(REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(REPO_ROOT))
     from model import HybridGPT
-    from train_gpt_hybrid import (
-        restore_low_dim_params_to_fp32,
-        serialize_quantized_state_dict_int8,
-    )
 
     return (
         HybridGPT,
