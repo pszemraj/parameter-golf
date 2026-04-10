@@ -29,6 +29,26 @@ Branch: `exp/hgdn`
   - `TORCH_LOGS=recompiles,graph_breaks`
   - optional `TORCH_TRACE=/tmp/tracedir`
 
+## Checkpoint proxy protocol
+
+- Keep local and H100 screening as separate stages. They do not stabilize at the same step count.
+- Local broad architecture screen:
+  - default to `300` steps
+  - keep `VAL_LOSS_EVERY=100`
+  - use this to kill bad families cheaply
+- Local shortlist confirmation:
+  - rerun the survivors for `500` steps
+  - use this only when the `300`-step top group is close
+- H100 fixed-token finalist screen:
+  - default to `1500` steps
+  - keep `VAL_LOSS_EVERY=500`
+  - use this as the main fixed-token ranking pass
+- Only pay for `2000` H100 steps when the `1500`-step finalists are still crossing, the margin is tiny, or a final tie-break is needed.
+- The current evidence behind those defaults:
+  - local `retune2`: ranking was already mostly stable by `300` and very stable by `500`
+  - H100 `retune3`: `500` was misleading, `1000` was only a coarse filter, and `1500` was the first checkpoint that looked like the `2000` result
+- Do not use the `500`-step H100 screen to kill viable candidates. It was early enough to bury the eventual legal winner.
+
 ## Competition timing
 
 - The challenge has two separate 10-minute budgets:

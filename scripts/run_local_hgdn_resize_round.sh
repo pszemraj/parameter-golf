@@ -21,7 +21,7 @@ wandb_mode="${WANDB_MODE:-online}"
 wandb_project="${WANDB_PROJECT:-pg-hgdn-ablations}"
 wandb_watch="${WANDB_WATCH:-none}"
 wandb_watch_log_freq="${WANDB_WATCH_LOG_FREQ:-25}"
-run_prefix_base="${RUN_PREFIX_BASE:-localretune2}"
+run_prefix_base="${RUN_PREFIX_BASE:-localretune3}"
 bundle_stage_dir="${BUNDLE_STAGE_DIR:-local-scratch/${run_prefix_base}_bundle}"
 archive_output="${ARCHIVE_OUTPUT:-local-scratch/${run_prefix_base}_bundle.7z}"
 command_log="${COMMAND_LOG:-local-scratch/${run_prefix_base}_commands.sh}"
@@ -31,7 +31,7 @@ torch_logs="${TORCH_LOGS:-}"
 torch_trace="${TORCH_TRACE:-}"
 
 ngpu="${NGPU:-1}"
-iterations="${ITERATIONS:-750}"
+iterations="${ITERATIONS:-300}"
 train_batch_tokens="${TRAIN_BATCH_TOKENS:-65536}"
 train_seq_len="${TRAIN_SEQ_LEN:-1024}"
 val_loss_every="${VAL_LOSS_EVERY:-100}"
@@ -115,7 +115,7 @@ PY
 
 print_plan() {
     echo
-    echo ">>> Local HGDN resize round"
+    echo ">>> Local HGDN resize round (300-step broad screen)"
     echo "python_bin=${python_bin}"
     echo "use_wandb=${use_wandb}"
     echo "wandb_mode=${wandb_mode}"

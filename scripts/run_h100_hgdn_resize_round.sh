@@ -17,7 +17,7 @@ python_bin="${PYTHON_BIN:-python}"
 wandb_project="${WANDB_PROJECT:-pg-hgdn-ablations}"
 wandb_watch="${WANDB_WATCH:-gradients}"
 wandb_mode="${WANDB_MODE:-online}"
-run_prefix_base="${RUN_PREFIX_BASE:-h100retune3}"
+run_prefix_base="${RUN_PREFIX_BASE:-h100retune4}"
 compare_reference="${COMPARE_REFERENCE:-h100k6_fixed2k_hybrid_r1_mlp3.25_seq2048}"
 compare_output_dir="${COMPARE_OUTPUT_DIR:-profiles/fixed2k_compare/${run_prefix_base}_round}"
 bundle_stage_dir="${BUNDLE_STAGE_DIR:-local-scratch/${run_prefix_base}_bundle}"
@@ -27,6 +27,11 @@ torch_logs="${TORCH_LOGS:-}"
 torch_trace="${TORCH_TRACE:-}"
 build_hgdn_cuda="${BUILD_HGDN_CUDA:-1}"
 run_hgdn_cuda_parity="${RUN_HGDN_CUDA_PARITY:-1}"
+fixed2k_iterations="${FIXED2K_ITERATIONS:-1500}"
+fixed2k_train_batch_tokens="${TRAIN_BATCH_TOKENS:-524288}"
+fixed2k_seq_len="${FIXED2K_SEQ_LEN:-2048}"
+fixed2k_val_loss_every="${FIXED2K_VAL_LOSS_EVERY:-500}"
+fixed2k_train_log_every="${FIXED2K_TRAIN_LOG_EVERY:-200}"
 
 case "${wandb_mode}" in
 online)
@@ -93,7 +98,7 @@ fi
 
 print_plan() {
     echo
-    echo ">>> H100 HGDN resize round"
+    echo ">>> H100 HGDN resize round (1500-step finalist screen)"
     echo "python_bin=${python_bin}"
     echo "wandb_project=${wandb_project}"
     echo "wandb_watch=${wandb_watch}"
@@ -102,6 +107,11 @@ print_plan() {
     echo "TORCH_TRACE=${torch_trace:-<unset>}"
     echo "build_hgdn_cuda=${build_hgdn_cuda}"
     echo "run_hgdn_cuda_parity=${run_hgdn_cuda_parity}"
+    echo "fixed2k_iterations=${fixed2k_iterations}"
+    echo "fixed2k_train_batch_tokens=${fixed2k_train_batch_tokens}"
+    echo "fixed2k_seq_len=${fixed2k_seq_len}"
+    echo "fixed2k_val_loss_every=${fixed2k_val_loss_every}"
+    echo "fixed2k_train_log_every=${fixed2k_train_log_every}"
     echo "compare_reference=${compare_reference}"
     echo "compare_output_dir=${compare_output_dir}"
     echo "archive_output=${archive_output}"
@@ -158,6 +168,11 @@ run_batch() {
             "WANDB_PROJECT=${wandb_project}" \
             "WANDB_WATCH=${wandb_watch}" \
             "WANDB_MODE=${wandb_mode}" \
+            "FIXED2K_ITERATIONS=${fixed2k_iterations}" \
+            "TRAIN_BATCH_TOKENS=${fixed2k_train_batch_tokens}" \
+            "FIXED2K_SEQ_LEN=${fixed2k_seq_len}" \
+            "FIXED2K_VAL_LOSS_EVERY=${fixed2k_val_loss_every}" \
+            "FIXED2K_TRAIN_LOG_EVERY=${fixed2k_train_log_every}" \
             "${python_bin}" scripts/hgdn.py h100-perf fixed2k-hybrid \
             --config "${configs[$i]}" \
             --run-prefix "${run_prefixes[$i]}" \
@@ -168,6 +183,11 @@ run_batch() {
             WANDB_PROJECT="${wandb_project}" \
             WANDB_WATCH="${wandb_watch}" \
             WANDB_MODE="${wandb_mode}" \
+            FIXED2K_ITERATIONS="${fixed2k_iterations}" \
+            TRAIN_BATCH_TOKENS="${fixed2k_train_batch_tokens}" \
+            FIXED2K_SEQ_LEN="${fixed2k_seq_len}" \
+            FIXED2K_VAL_LOSS_EVERY="${fixed2k_val_loss_every}" \
+            FIXED2K_TRAIN_LOG_EVERY="${fixed2k_train_log_every}" \
             "${python_bin}" scripts/hgdn.py h100-perf fixed2k-hybrid \
             --config "${configs[$i]}" \
             --run-prefix "${run_prefixes[$i]}" \
@@ -237,6 +257,11 @@ build_bundle() {
         "${torch_logs}" \
         "${torch_trace}" \
         "${command_log}" \
+        "${fixed2k_iterations}" \
+        "${fixed2k_train_batch_tokens}" \
+        "${fixed2k_seq_len}" \
+        "${fixed2k_val_loss_every}" \
+        "${fixed2k_train_log_every}" \
         "${configs[*]}" \
         "${run_prefixes[@]}" <<'PY'
 from pathlib import Path
@@ -252,8 +277,13 @@ matched_logs = bool(int(sys.argv[6]))
 torch_logs = sys.argv[7]
 torch_trace = sys.argv[8]
 command_log = sys.argv[9]
-configs = sys.argv[10].split()
-run_prefixes = sys.argv[11:]
+fixed2k_iterations = int(sys.argv[10])
+fixed2k_train_batch_tokens = int(sys.argv[11])
+fixed2k_seq_len = int(sys.argv[12])
+fixed2k_val_loss_every = int(sys.argv[13])
+fixed2k_train_log_every = int(sys.argv[14])
+configs = sys.argv[15].split()
+run_prefixes = sys.argv[16:]
 
 manifest = {
     "run_prefix_base": run_prefix_base,
@@ -266,6 +296,13 @@ manifest = {
     "matched_logs": matched_logs,
     "torch_logs": torch_logs or None,
     "torch_trace": torch_trace or None,
+    "contract": {
+        "fixed2k_iterations": fixed2k_iterations,
+        "train_batch_tokens": fixed2k_train_batch_tokens,
+        "fixed2k_seq_len": fixed2k_seq_len,
+        "fixed2k_val_loss_every": fixed2k_val_loss_every,
+        "fixed2k_train_log_every": fixed2k_train_log_every,
+    },
 }
 (bundle_dir / "bundle_manifest.json").write_text(
     json.dumps(manifest, indent=2, sort_keys=True) + "\n",
