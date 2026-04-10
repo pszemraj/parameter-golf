@@ -22,6 +22,7 @@ compare_reference="${COMPARE_REFERENCE:-h100k6_fixed2k_hybrid_r1_mlp3.25_seq2048
 compare_output_dir="${COMPARE_OUTPUT_DIR:-profiles/fixed2k_compare/${run_prefix_base}_round}"
 bundle_stage_dir="${BUNDLE_STAGE_DIR:-local-scratch/${run_prefix_base}_bundle}"
 archive_output="${ARCHIVE_OUTPUT:-local-scratch/${run_prefix_base}_bundle.7z}"
+command_log="${COMMAND_LOG:-local-scratch/${run_prefix_base}_commands.sh}"
 torch_logs="${TORCH_LOGS:-}"
 torch_trace="${TORCH_TRACE:-}"
 
@@ -45,6 +46,10 @@ default_prefixes=(
     "${run_prefix_base}_d"
     "${run_prefix_base}_e"
     "${run_prefix_base}_f"
+    "${run_prefix_base}_g"
+    "${run_prefix_base}_h"
+    "${run_prefix_base}_i"
+    "${run_prefix_base}_j"
 )
 
 if [[ -n "${RUN_PREFIXES:-}" ]]; then
@@ -56,19 +61,27 @@ fi
 configs=(
     "configs/hgdn/retune_current.toml"
     "configs/hgdn/retune_trim_layers_14_mlp3p375.toml"
+    "configs/hgdn/retune_deepen_15l_mlp2p5.toml"
     "configs/hgdn/retune_deepen_15l_mlp2p625.toml"
+    "configs/hgdn/retune_deepen_15l_mlp2p667.toml"
     "configs/hgdn/retune_deepen_15l_mlp2p75.toml"
     "configs/hgdn/retune_deepen_15l_mlp2p875.toml"
     "configs/hgdn/retune_deepen_15l_mlp3.toml"
+    "configs/hgdn/retune_deepen_15l_mlp3p125.toml"
+    "configs/hgdn/retune_depth16_mlp2p667.toml"
 )
 
 labels=(
     "current 16L reference"
     "best 14L local anchor"
+    "15L lower clean bracket"
     "15L local winner"
+    "15L tensor-core bracket"
     "15L previous winner rerun"
     "15L upper bracket low"
     "15L upper bracket mid"
+    "15L upper bracket high"
+    "16L reduced-MLP depth check"
 )
 
 if [[ "${#run_prefixes[@]}" -ne "${#configs[@]}" ]]; then
@@ -88,6 +101,7 @@ print_plan() {
     echo "compare_reference=${compare_reference}"
     echo "compare_output_dir=${compare_output_dir}"
     echo "archive_output=${archive_output}"
+    echo "command_log=${command_log}"
     echo "batch:"
     local i
     for ((i = 0; i < ${#configs[@]}; i++)); do
@@ -96,6 +110,12 @@ print_plan() {
 }
 
 run_batch() {
+    mkdir -p "$(dirname "${command_log}")"
+    {
+        echo "#!/bin/bash"
+        echo "set -euo pipefail"
+    } >"${command_log}"
+
     local diagnostic_env=()
     if [[ -n "${torch_logs}" ]]; then
         diagnostic_env+=("TORCH_LOGS=${torch_logs}")
@@ -108,6 +128,17 @@ run_batch() {
     for ((i = 0; i < ${#configs[@]}; i++)); do
         echo
         echo ">>> 1xH100 fixed2k-hybrid: ${labels[$i]}"
+        hgdn_append_command \
+            "${command_log}" \
+            "${diagnostic_env[@]}" \
+            "WANDB_PROJECT=${wandb_project}" \
+            "WANDB_WATCH=${wandb_watch}" \
+            "WANDB_MODE=${wandb_mode}" \
+            "${python_bin}" scripts/hgdn.py h100-perf fixed2k-hybrid \
+            --config "${configs[$i]}" \
+            --run-prefix "${run_prefixes[$i]}" \
+            "${wandb_flag}"
+
         hgdn_run_with_env \
             "${diagnostic_env[@]}" \
             WANDB_PROJECT="${wandb_project}" \
@@ -123,6 +154,14 @@ run_batch() {
 run_compare() {
     echo
     echo ">>> fixed2k compare"
+    hgdn_append_command \
+        "${command_log}" \
+        "${python_bin}" scripts/hgdn.py fixed2k-compare \
+        --contains "${run_prefix_base}_" \
+        --name "${compare_reference}" \
+        --reference "${compare_reference}" \
+        --output-dir "${compare_output_dir}"
+
     hgdn_run_with_env \
         "${python_bin}" scripts/hgdn.py fixed2k-compare \
         --contains "${run_prefix_base}_" \
@@ -136,7 +175,8 @@ build_bundle() {
     echo ">>> bundle outputs"
 
     rm -rf "${bundle_stage_dir}"
-    mkdir -p "${bundle_stage_dir}/logs"
+    mkdir -p "${bundle_stage_dir}/configs" "${bundle_stage_dir}/logs"
+    cp "${command_log}" "${bundle_stage_dir}/commands.sh"
 
     if [[ -d "${compare_output_dir}" ]]; then
         mkdir -p "${bundle_stage_dir}/profiles/fixed2k_compare"
@@ -145,6 +185,11 @@ build_bundle() {
         echo "Missing compare output dir: ${compare_output_dir}" >&2
         exit 1
     fi
+
+    local config_path
+    for config_path in "${configs[@]}"; do
+        cp "${config_path}" "${bundle_stage_dir}/configs/"
+    done
 
     local matched_logs=0
     local prefix
@@ -167,6 +212,8 @@ build_bundle() {
         "${matched_logs}" \
         "${torch_logs}" \
         "${torch_trace}" \
+        "${command_log}" \
+        "${configs[*]}" \
         "${run_prefixes[@]}" <<'PY'
 from pathlib import Path
 import json
@@ -180,14 +227,18 @@ archive_output = sys.argv[5]
 matched_logs = bool(int(sys.argv[6]))
 torch_logs = sys.argv[7]
 torch_trace = sys.argv[8]
-run_prefixes = sys.argv[9:]
+command_log = sys.argv[9]
+configs = sys.argv[10].split()
+run_prefixes = sys.argv[11:]
 
 manifest = {
     "run_prefix_base": run_prefix_base,
     "run_prefixes": run_prefixes,
+    "configs": configs,
     "compare_reference": compare_reference,
     "compare_output_dir": compare_output_dir,
     "archive_output": archive_output,
+    "command_log": command_log,
     "matched_logs": matched_logs,
     "torch_logs": torch_logs or None,
     "torch_trace": torch_trace or None,

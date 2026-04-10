@@ -84,10 +84,22 @@ This file tracks follow-up work that is intentionally not enabled by default in 
        - finalists:
          - current `16L x 384d x mlp3.25` reference
          - best `14L x 384d x mlp3.375` local anchor
+         - `15L x 384d x mlp2.5`
          - `15L x 384d x mlp2.625`
+         - `15L x 384d x mlp2.6666666666666665`
          - `15L x 384d x mlp2.75`
          - `15L x 384d x mlp2.875`
          - `15L x 384d x mlp3.0`
+         - `15L x 384d x mlp3.125`
+         - `16L x 384d x mlp2.6666666666666665`
+       - added adjacent ablations because the H100 batch is the expensive
+         finalist stage and is easier to run wide than repeatedly:
+         - `15L mlp2.625` local winner uses hidden width `1008`
+         - `15L mlp2.6666666666666665` tests the nearby tensor-core-friendly
+           hidden width `1024`
+         - `15L mlp2.5` tests the lower side of the local optimum
+         - `16L mlp2.6666666666666665` checks whether preserving `8G+8A`
+           depth with lower MLP beats the `15L` depth trim on H100
      - batching rule:
        - kernel-seam work should stay narrow
        - resize work should use a wider simultaneous local batch for the broad

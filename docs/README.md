@@ -800,13 +800,22 @@ Stage split:
 - `scripts/run_h100_hgdn_resize_round.sh`
   - finalist confirmation and ranking on H100
   - current default batch (`h100retune3`) promotes the `localretune2`
-    finalists to H100:
+    finalists to H100, plus a few high-value adjacent ablations:
     - current `16L x 384d x mlp3.25` reference
     - best `14L x 384d x mlp3.375` local anchor
+    - `15L x 384d x mlp2.5`
     - `15L x 384d x mlp2.625`
+    - `15L x 384d x mlp2.6666666666666665`
     - `15L x 384d x mlp2.75`
     - `15L x 384d x mlp2.875`
     - `15L x 384d x mlp3.0`
+    - `15L x 384d x mlp3.125`
+    - `16L x 384d x mlp2.6666666666666665`
+    - rationale:
+      - `15L mlp2.625` was the local winner but has hidden width `1008`
+      - `15L mlp2.6666666666666665` gives hidden width `1024`
+      - `15L mlp2.5` checks the lower side of the local optimum
+      - `16L mlp2.6666666666666665` preserves depth while trimming MLP
 
 The H100 helper remains:
 
