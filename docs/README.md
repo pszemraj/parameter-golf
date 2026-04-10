@@ -783,8 +783,30 @@ Stage split:
     - fast `14L x 384d x mlp3.0` anchor
     - best `14L x 384d x mlp3.375` anchor
     - `15L x 384d` MLP brackets at `2.625`, `2.75`, `2.875`, `3.0`, `3.125`
+  - second broad local resize round (`localretune2`) completed all eight runs
+    but took several hours because validation and final roundtrip eval are
+    real wall time even though they are excluded from `train_time`
+    - best local candidate: `15L x 384d x mlp2.625`
+      - final roundtrip `2.6199`
+      - train time `637,684 ms`
+      - artifact headroom `2,563,593 bytes`
+    - close quality runner-up: `15L x 384d x mlp3.0`
+      - final roundtrip `2.6210`
+      - train time `671,239 ms`
+      - artifact headroom `1,561,739 bytes`
+    - `15L x 384d x mlp2.875` and `2.75` remain viable but were behind the
+      `2.625` point locally
+    - `14L x 384d x mlp3.375` is now only an H100 anchor, not the local leader
 - `scripts/run_h100_hgdn_resize_round.sh`
   - finalist confirmation and ranking on H100
+  - current default batch (`h100retune3`) promotes the `localretune2`
+    finalists to H100:
+    - current `16L x 384d x mlp3.25` reference
+    - best `14L x 384d x mlp3.375` local anchor
+    - `15L x 384d x mlp2.625`
+    - `15L x 384d x mlp2.75`
+    - `15L x 384d x mlp2.875`
+    - `15L x 384d x mlp3.0`
 
 The H100 helper remains:
 

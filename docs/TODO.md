@@ -59,15 +59,35 @@ This file tracks follow-up work that is intentionally not enabled by default in 
          - `14L x 384d x mlp3.125`, `3.25`, and `3.5` all lost to the current reference
        - keep the `16L x 320d` width-trim branch parked unless later evidence changes
      - immediate next local resize step:
-       - push the live `15L x 384d` family harder with MLP brackets:
-         - `2.625`
-         - `2.75` rerun
-         - `2.875`
-         - `3.0`
-         - `3.125`
-       - keep two anchors in the same batch:
-         - current `16L x 384d x mlp3.25`
-         - best `14L x 384d x mlp3.375`
+       - completed as `localretune2`; all eight runs reached step `750/750`
+       - strongest local point:
+         - `15L x 384d x mlp2.625`
+         - final roundtrip `2.6199`
+         - train time `637,684 ms`
+         - artifact headroom `2,563,593 bytes`
+       - near-tie quality point with more parameters:
+         - `15L x 384d x mlp3.0`
+         - final roundtrip `2.6210`
+         - train time `671,239 ms`
+         - artifact headroom `1,561,739 bytes`
+       - viable but behind locally:
+         - `15L x 384d x mlp2.875`
+         - `15L x 384d x mlp2.75`
+       - `14L x 384d x mlp3.375` is retained only as an H100 anchor
+       - no more broad full-cadence local batches before H100 finalist ranking;
+         the local batch took too much real wall time because every validation
+         and final roundtrip pass evaluates the validation shard outside the
+         training timer
+     - immediate H100 resize step:
+       - run `scripts/run_h100_hgdn_resize_round.sh`
+       - current default batch is `h100retune3`
+       - finalists:
+         - current `16L x 384d x mlp3.25` reference
+         - best `14L x 384d x mlp3.375` local anchor
+         - `15L x 384d x mlp2.625`
+         - `15L x 384d x mlp2.75`
+         - `15L x 384d x mlp2.875`
+         - `15L x 384d x mlp3.0`
      - batching rule:
        - kernel-seam work should stay narrow
        - resize work should use a wider simultaneous local batch for the broad
