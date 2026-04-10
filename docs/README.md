@@ -799,6 +799,9 @@ Stage split:
     - `14L x 384d x mlp3.375` is now only an H100 anchor, not the local leader
 - `scripts/run_h100_hgdn_resize_round.sh`
   - finalist confirmation and ranking on H100
+  - builds the HGDN CUDA extension and runs CUDA parity by default before the
+    batch; set `BUILD_HGDN_CUDA=0` or `RUN_HGDN_CUDA_PARITY=0` only when you
+    are deliberately reusing a known-good runtime
   - current default batch (`h100retune3`) promotes the `localretune2`
     finalists to H100, plus a few high-value adjacent ablations:
     - current `16L x 384d x mlp3.25` reference

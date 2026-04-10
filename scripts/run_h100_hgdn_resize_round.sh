@@ -25,6 +25,8 @@ archive_output="${ARCHIVE_OUTPUT:-local-scratch/${run_prefix_base}_bundle.7z}"
 command_log="${COMMAND_LOG:-local-scratch/${run_prefix_base}_commands.sh}"
 torch_logs="${TORCH_LOGS:-}"
 torch_trace="${TORCH_TRACE:-}"
+build_hgdn_cuda="${BUILD_HGDN_CUDA:-1}"
+run_hgdn_cuda_parity="${RUN_HGDN_CUDA_PARITY:-1}"
 
 case "${wandb_mode}" in
 online)
@@ -98,6 +100,8 @@ print_plan() {
     echo "wandb_mode=${wandb_mode}"
     echo "TORCH_LOGS=${torch_logs:-<unset>}"
     echo "TORCH_TRACE=${torch_trace:-<unset>}"
+    echo "build_hgdn_cuda=${build_hgdn_cuda}"
+    echo "run_hgdn_cuda_parity=${run_hgdn_cuda_parity}"
     echo "compare_reference=${compare_reference}"
     echo "compare_output_dir=${compare_output_dir}"
     echo "archive_output=${archive_output}"
@@ -109,13 +113,33 @@ print_plan() {
     done
 }
 
-run_batch() {
+prepare_cuda() {
     mkdir -p "$(dirname "${command_log}")"
     {
         echo "#!/bin/bash"
         echo "set -euo pipefail"
     } >"${command_log}"
 
+    if [[ "${build_hgdn_cuda}" == "1" ]]; then
+        echo
+        echo ">>> build HGDN CUDA extension"
+        hgdn_append_plain_command \
+            "${command_log}" \
+            "${python_bin}" setup_hgdn_cuda.py build_ext --inplace
+        "${python_bin}" setup_hgdn_cuda.py build_ext --inplace
+    fi
+
+    if [[ "${run_hgdn_cuda_parity}" == "1" ]]; then
+        echo
+        echo ">>> HGDN CUDA parity"
+        hgdn_append_plain_command \
+            "${command_log}" \
+            "${python_bin}" scripts/hgdn_cuda_parity.py
+        "${python_bin}" scripts/hgdn_cuda_parity.py
+    fi
+}
+
+run_batch() {
     local diagnostic_env=()
     if [[ -n "${torch_logs}" ]]; then
         diagnostic_env+=("TORCH_LOGS=${torch_logs}")
@@ -256,6 +280,7 @@ PY
 }
 
 print_plan
+prepare_cuda
 run_batch
 run_compare
 build_bundle

@@ -80,6 +80,9 @@ This file tracks follow-up work that is intentionally not enabled by default in 
          training timer
      - immediate H100 resize step:
        - run `scripts/run_h100_hgdn_resize_round.sh`
+       - the script now builds the HGDN CUDA extension and runs CUDA parity by
+         default before launching the batch, so a fresh H100 runtime needs only
+         the one script invocation
        - current default batch is `h100retune3`
        - finalists:
          - current `16L x 384d x mlp3.25` reference
