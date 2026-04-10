@@ -73,13 +73,12 @@ Single-entry batch helpers:
 Data / setup helpers:
 
 - [`../scripts/bootstrap_challenge_data.sh`](../scripts/bootstrap_challenge_data.sh)
-- [`../scripts/build_hgdn_cuda.sh`](../scripts/build_hgdn_cuda.sh)
 
 1xH100 perf / profiling helpers:
 
 - [`../scripts/run_h100_single_gpu_hgdn.sh`](../scripts/run_h100_single_gpu_hgdn.sh)
 - [`../scripts/run_h100_single_gpu_hgdn_profile.sh`](../scripts/run_h100_single_gpu_hgdn_profile.sh)
-- [`../scripts/run_hgdn_cuda_preflight.sh`](../scripts/run_hgdn_cuda_preflight.sh)
+- [`../scripts/hgdn_cuda_preflight.py`](../scripts/hgdn_cuda_preflight.py)
 
 Local analysis helpers:
 

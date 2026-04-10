@@ -53,6 +53,7 @@ esac
 
 export USE_WANDB="${USE_WANDB:-0}"
 export WANDB_MODE="${WANDB_MODE:-offline}"
+python_bin="${PYTHON_BIN:-python}"
 
 run_prefix="${RUN_PREFIX:-rtx4070_phase1}"
 profile_root="${PROFILE_ROOT:-$HGDN_REPO_ROOT/profiles/$run_prefix}"
@@ -114,7 +115,7 @@ git rev-parse HEAD > "$profile_root/git_sha.txt"
 hgdn_append_command "$profile_root/commands.sh" \
     "${gdn_env[@]}" \
     USE_WANDB="$USE_WANDB" WANDB_MODE="$WANDB_MODE" \
-    bash scripts/run_hgdn_cuda_preflight.sh
+    "$python_bin" scripts/hgdn_cuda_preflight.py
 hgdn_append_command "$profile_root/commands.sh" \
     "${gdn_env[@]}" \
     python scripts/profile_hgdn_local_hotpath.py \
@@ -164,7 +165,7 @@ echo ">>> HGDN phase-1 preflight"
 hgdn_run_with_env \
     "${gdn_env[@]}" \
     USE_WANDB="$USE_WANDB" WANDB_MODE="$WANDB_MODE" \
-    bash "$HGDN_REPO_ROOT/scripts/run_hgdn_cuda_preflight.sh" \
+    "$python_bin" "$HGDN_REPO_ROOT/scripts/hgdn_cuda_preflight.py" \
     | tee "$profile_root/preflight/preflight.log"
 
 echo

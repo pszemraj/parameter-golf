@@ -515,7 +515,7 @@ def command_for_args(args: argparse.Namespace) -> list[str]:
     :return list[str]: Backend command vector.
     """
     if args.command == "preflight":
-        return ["bash", str(REPO_ROOT / "scripts" / "run_hgdn_cuda_preflight.sh")]
+        return [sys.executable, str(REPO_ROOT / "scripts" / "hgdn_cuda_preflight.py")]
     if args.command == "local-phase1":
         return ["bash", str(REPO_ROOT / "scripts" / "run_hgdn_local_phase1.sh")]
     if args.command == "arch-size-screen":

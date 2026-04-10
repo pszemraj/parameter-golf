@@ -21,7 +21,6 @@ Last updated: 2026-04-10
 - [`../hgdn_cuda/ops.py`](../hgdn_cuda/ops.py)
 - [`../hgdn_cuda/reference.py`](../hgdn_cuda/reference.py)
 - [`../setup_hgdn_cuda.py`](../setup_hgdn_cuda.py)
-- [`../scripts/build_hgdn_cuda.sh`](../scripts/build_hgdn_cuda.sh)
 - [`../scripts/hgdn_cuda_parity.py`](../scripts/hgdn_cuda_parity.py)
 
 ## Build
@@ -33,10 +32,6 @@ conda run -s --name pg python setup_hgdn_cuda.py build_ext --inplace
 ```
 
 or
-
-```bash
-conda run -s --name pg bash scripts/build_hgdn_cuda.sh
-```
 
 Opt-in JIT build remains available through `hgdn_cuda/ops.py` when:
 

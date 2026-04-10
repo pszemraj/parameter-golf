@@ -26,9 +26,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from hgdn_runtime_utils import restore_low_dim_params_to_fp32 as restore_fp32  # noqa: E402
+from hgdn_runtime_utils import (  # noqa: E402
+    prepare_cuda_module,
+    restore_low_dim_params_to_fp32 as restore_fp32,
+)
 from local_env import env_flag  # noqa: E402
-from scripts.hgdn_script_utils import prepare_cuda_module  # noqa: E402
 
 GatedDeltaNet = None
 HybridGPT = None
