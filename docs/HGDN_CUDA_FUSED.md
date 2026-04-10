@@ -1,32 +1,32 @@
-# HGDN fused CUDA path
+# HGDN CUDA Extension
 
-This branch adds an optional CUDA extension for the current HGDN hotspot cluster:
+Last updated: 2026-04-10
 
-- packed `qkv` front-end: packed projection result -> packed depthwise causal conv -> SiLU -> split -> q/k L2 norm
-- output glue: `RMSNorm(o) * SiLU(g_out)`
+## What is in the extension
 
-The intended targets are the HGDN-native buckets that remain after the packed qkv winner:
-
-- `gdn.qkv_conv_packed`
-- `gdn.q_norm`
-- `gdn.k_norm`
-- `gdn.output_norm`
-- `gdn.output_gate_mul`
+- packed `qkv` front-end:
+  - packed projection result
+  - packed depthwise causal conv
+  - SiLU
+  - split
+  - q/k L2 norm
+- output glue:
+  - `RMSNorm(o) * SiLU(g_out)`
 
 ## Files
 
-- `hgdn_cuda/csrc/binding.cpp`
-- `hgdn_cuda/csrc/frontend_kernel.cu`
-- `hgdn_cuda/csrc/output_kernel.cu`
-- `hgdn_cuda/ops.py`
-- `hgdn_cuda/reference.py`
-- `setup_hgdn_cuda.py`
-- `scripts/build_hgdn_cuda.sh`
-- `scripts/hgdn_cuda_parity.py`
+- [`../hgdn_cuda/csrc/binding.cpp`](../hgdn_cuda/csrc/binding.cpp)
+- [`../hgdn_cuda/csrc/frontend_kernel.cu`](../hgdn_cuda/csrc/frontend_kernel.cu)
+- [`../hgdn_cuda/csrc/output_kernel.cu`](../hgdn_cuda/csrc/output_kernel.cu)
+- [`../hgdn_cuda/ops.py`](../hgdn_cuda/ops.py)
+- [`../hgdn_cuda/reference.py`](../hgdn_cuda/reference.py)
+- [`../setup_hgdn_cuda.py`](../setup_hgdn_cuda.py)
+- [`../scripts/build_hgdn_cuda.sh`](../scripts/build_hgdn_cuda.sh)
+- [`../scripts/hgdn_cuda_parity.py`](../scripts/hgdn_cuda_parity.py)
 
 ## Build
 
-From the repo root on a CUDA machine:
+Build on the machine where the extension will run.
 
 ```bash
 conda run -s --name pg python setup_hgdn_cuda.py build_ext --inplace
@@ -38,18 +38,15 @@ or
 conda run -s --name pg bash scripts/build_hgdn_cuda.sh
 ```
 
-A slower opt-in JIT build path also exists through `hgdn_cuda/ops.py` when:
+Opt-in JIT build remains available through `hgdn_cuda/ops.py` when:
 
 ```bash
 export GDN_CUDA_ALLOW_JIT_BUILD=1
 ```
 
-Build the extension on the machine where it will run. The locally built `.so`
-is not treated as portable across the laptop and H100 boxes.
-
 ## Runtime flags
 
-These flags are off by default.
+These flags are off by default:
 
 ```bash
 export GDN_USE_PACKED_QKV_CONV=1
@@ -58,208 +55,36 @@ export GDN_USE_CUDA_FUSED_FRONTEND=1
 export GDN_USE_CUDA_FUSED_OUTPUT=1
 ```
 
-`GDN_USE_CUDA_FUSED_FRONTEND=1` currently requires both packed qkv projection and packed qkv conv.
+`GDN_USE_CUDA_FUSED_FRONTEND=1` requires packed qkv projection and packed qkv conv.
 
-`GDN_USE_CUDA_FUSED_OUTPUT=1` currently requires `GDN_OUTPUT_NORM_FP32=1`.
+`GDN_USE_CUDA_FUSED_OUTPUT=1` requires `GDN_OUTPUT_NORM_FP32=1`.
 
 ## Validation
 
-Use the single-process smoke test before long runs:
+Run the single-process smoke test before long jobs:
 
 ```bash
 conda run -s --name pg python scripts/hgdn_cuda_preflight.py
 ```
 
-For direct kernel-vs-reference checks on GPU after the extension is built, run:
+Run direct kernel-vs-reference checks after the extension is built:
 
 ```bash
 conda run -s --name pg python scripts/hgdn_cuda_parity.py
 ```
 
-The fused path currently uses eager-island wrapping around the extension calls so TorchDynamo does not try to trace the raw pybind extension directly.
-
 ## Fallback behavior
 
-If the extension is not available, the model falls back to PyTorch reference implementations in `hgdn_cuda/reference.py`.
+If the extension is unavailable, the model falls back to the PyTorch reference path in [`../hgdn_cuda/reference.py`](../hgdn_cuda/reference.py).
 
-That keeps CPU testing and non-CUDA environments working while preserving the same model math.
+## Current status
 
-## Local checkpoint
+- The extension builds and parity checks pass on supported CUDA machines.
+- The extension is not part of the active H100 winner path.
+- The full fused front-end variants lost on H100 (`h100k18`, `h100k19`).
+- The compile-visible split / norm follow-up also lost on H100 (`h100k20`).
+- Output-only fusion also failed to justify promotion.
+- Keep the extension in-tree only for narrower future kernel work.
+- Do not use extension presets for architecture ranking or quality sweeps unless the kernel family itself is the question.
 
-Current local status on the laptop/WSL `pg` environment:
-
-- extension build passed with `python setup_hgdn_cuda.py build_ext --inplace`
-- direct parity passed with `python scripts/hgdn_cuda_parity.py`
-- constructor validation and CPU fallback parity landed in `test_model.py`
-- compile-safe eager-island wrapping is required
-  - the raw external pybind path caused TorchDynamo tracing warnings and a large
-    compiled-preflight regression
-  - wrapping the extension calls behind `torch._dynamo.disable(...)` recovered a
-    compile-safe local path
-
-First full local phase-1 checkpoint versus the current winner:
-
-- baseline bundle:
-  - `profiles/rtx4070_cuda_base/`
-- fused candidate bundle:
-  - `profiles/rtx4070_cuda_fused/`
-- structured comparison:
-  - `profiles/rtx4070_cuda_fused/compare_vs_rtx4070_cuda_base/comparison.md`
-
-Main local read:
-
-- trainer eager self-device total:
-  - `25561.13 -> 21352.84 ms` (`-16.46%`)
-- trainer eager step average from the console:
-  - `3320.37 -> 2804.76 ms` (`-15.53%`)
-- trainer eager peak memory:
-  - `6184 -> 5696 MiB`
-- replaced trainer buckets:
-  - baseline front-end/output cluster:
-    - `gdn.qkv_conv_depthwise`
-    - `gdn.qkv_conv_output_contiguous`
-    - `gdn.q_norm`
-    - `gdn.k_norm`
-    - `gdn.output_norm`
-    - `gdn.output_gate_mul`
-    - summed to `536.57 ms`
-  - fused replacement buckets:
-    - `gdn.qkv_frontend_fused = 158.06 ms`
-    - `gdn.output_fused = 68.34 ms`
-    - summed to `226.40 ms`
-- trainer eager glue deltas:
-  - `aten::copy_`: `785.65 -> 137.73 ms`
-  - `aten::mul`: `1012.30 -> 837.35 ms`
-
-Interpretation:
-
-- this is a real local step-level win, not just a microbenchmark win
-- the fused path is still experimental
-- the next gate is H100 validation, not default promotion
-
-## H100 gate (`h100k8`)
-
-Completed on the H100 box with plain `python`:
-
-```bash
-python setup_hgdn_cuda.py build_ext --inplace
-python scripts/hgdn_cuda_parity.py
-python scripts/hgdn.py preflight --preset winner-20260405-11-cuda-fused --compile-strategy hybrid
-python scripts/hgdn.py h100-profile hybrid-eager --preset winner-20260405-11-cuda-fused --run-prefix h100k8
-python scripts/hgdn.py h100-perf perf --preset winner-20260405-11-cuda-fused --run-prefix h100k8 --offline
-python scripts/hgdn.py h100-profile hybrid --preset winner-20260405-11-cuda-fused --run-prefix h100k8
-```
-
-### Result
-
-Build, parity, and preflight all passed on H100.
-
-The fused preset did **not** transfer as a performance win.
-
-Compared against the current H100 winner `h100k5`:
-
-- eager hybrid profile step average:
-  - `1670.55 -> 2248.98 ms` (`+34.6%`)
-- compiled hybrid perf:
-  - `901.05 -> 1863.41 ms` (`+106.8%`)
-  - `581,860 -> 281,359 tok/s` (`-51.6%`)
-
-### Root cause from the H100 profiles
-
-The regression is dominated by the fused packed-front-end backward path, not by
-build issues and not primarily by TorchDynamo.
-
-Largest compiled-profile regressors on `h100k8`:
-
-- `_PackedQKVFrontendFunctionBackward = 4316.51 ms`
-- `causal_dwconv_weight_backward = 3959.04 ms`
-- `_PackedQKVFrontendFunction = 291.11 ms`
-- `_RMSNormSiluGateFunctionBackward = 105.65 ms`
-
-The eager profile shows the same pattern:
-
-- `_PackedQKVFrontendFunctionBackward = 4341.02 ms`
-- `causal_dwconv_weight_backward = 3983.38 ms`
-- `gdn.qkv_frontend_fused = 291.47 ms`
-- `gdn.output_fused = 102.59 ms`
-
-This matters because it rules out the simple story that “compile interaction
-made it slow.” The fused frontend itself is currently too expensive on H100,
-especially in backward.
-
-### Decision
-
-Keep the extension in-tree for future kernel work, but drop
-`winner-20260405-11-cuda-fused` from the active H100 kernel path.
-
-Do **not** promote it, and do **not** use it for architecture retuning or
-quality runs.
-
-If this path is revisited later, the first targets are:
-
-1. packed frontend backward
-2. depthwise-conv weight gradient kernel
-3. only then output-side fusion as an isolated follow-up
-
-## Next isolated experiment
-
-The first salvage attempt should be output-side fusion only:
-
-```bash
-python scripts/hgdn.py preflight --preset winner-20260405-11-cuda-output-only --compile-strategy hybrid
-```
-
-Current local status:
-
-- local preflight passed with the extension loaded
-- local phase-1 completed and lost vs the non-extension current winner
-  - trainer eager self-device total:
-    - `25561.13 -> 25978.10 ms` (`+1.63%`)
-  - trainer eager console step average:
-    - `3320.37 -> 3379.27 ms` (`+1.77%`)
-- that was the correct local read; the follow-up H100 probe also lost
-
-Local gate after that:
-
-```bash
-conda run -s --name pg python scripts/hgdn.py local-phase1 --preset winner-20260405-11-cuda-output-only --run-prefix rtx4070_cuda_output_only
-```
-
-The later H100 probe confirmed the reject:
-
-```bash
-python scripts/hgdn.py preflight --preset winner-20260405-11-cuda-output-only --compile-strategy hybrid
-python scripts/hgdn.py h100-profile hybrid-eager --preset winner-20260405-11-cuda-output-only --run-prefix h100k10out
-python scripts/hgdn.py h100-perf perf --preset winner-20260405-11-cuda-output-only --run-prefix h100k10out --offline
-```
-
-H100 result:
-
-- compiled perf:
-  - `904.46 -> 944.37 ms` (`+4.41%`)
-  - `579,671 -> 555,174 tok/s` (`-4.23%`)
-- eager profile step average:
-  - `1670.55 -> 1644.61 ms` (`-1.55%`)
-
-Decision:
-
-- keep the preset for future isolated rework
-- do **not** use it in the active H100 kernel path
-
-### Why it lost locally
-
-Output-only fusion did remove the explicit output buckets from the trainer view:
-
-- `gdn.output_norm: 95.59 -> 0.00 ms`
-- `gdn.output_gate_mul: 25.46 -> 0.00 ms`
-
-But that saving was offset by slightly worse costs elsewhere on the current
-winner path:
-
-- `gdn.qkv_conv_depthwise: 228.25 -> 236.92 ms`
-- `gdn.qkv_conv_output_contiguous: 89.32 -> 92.65 ms`
-- `gdn.q_norm: 48.81 -> 50.82 ms`
-- `gdn.k_norm: 49.14 -> 50.95 ms`
-- `gdn.recurrence: 177.23 -> 182.66 ms`
-
-So the output-side win was real but not enough at the full-step level.
+Exact result history and scoreboards live in [PROFILING_LOG.md](PROFILING_LOG.md).

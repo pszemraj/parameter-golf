@@ -1,9 +1,9 @@
 # HGDN W&B Schema
 
-Last updated: 2026-04-08
+Last updated: 2026-04-10
 
-This file defines the committed Weights & Biases logging contract for the hybrid
-Gated DeltaNet (HGDN) trainer in [train_gpt_hybrid.py](/home/pszemraj/workspace/projects/parameter-golf/train_gpt_hybrid.py).
+HGDN runs log W&B config, history, and summary fields under the schema below.
+The relevant trainer is [train_gpt_hybrid.py](../train_gpt_hybrid.py).
 
 ## Scope
 

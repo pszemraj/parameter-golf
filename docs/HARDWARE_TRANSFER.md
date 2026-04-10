@@ -1,18 +1,14 @@
 # Hardware Transfer Notes: RTX 4070 vs 1xH100
 
-Last updated: 2026-04-04 15:35 EDT
+Last updated: 2026-04-10
 
 Branch: `exp/hgdn`
 
-## Purpose
+Local RTX 4070 profiling is useful for ranking HGDN glue, conv, norm, and gate
+work. H100 still decides final throughput and overall payoff.
 
-This note records what did and did not transfer from local RTX 4070 Laptop profiling to 1xH100 profiling for the current HGDN operating point.
-
-The main question is practical:
-
-- can local profiling be trusted to guide kernel work?
-- if yes, which hotspot classes transfer well?
-- which buckets need H100 confirmation before drawing conclusions?
+Use this note to separate hotspots that transfer well from hotspots that still
+need H100 confirmation.
 
 ## Runs Compared
 

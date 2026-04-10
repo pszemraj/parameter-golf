@@ -1,8 +1,9 @@
 # Redundancy Audit
 
-Last updated: 2026-04-08 04:42 EDT
+Last updated: 2026-04-10
 
-This document is the interim cleanup checkpoint before returning to HGDN kernel work. The goal is to identify code and test paths that do not justify their independent existence.
+Parallel implementations and helper drift are the main redundancy issue in this
+branch. Large amounts of obviously dead model logic are not.
 
 ## Summary
 

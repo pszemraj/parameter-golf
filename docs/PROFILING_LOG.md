@@ -2,8 +2,8 @@
 
 Last updated: 2026-04-08 19:05 EDT
 
-This file records profiler-driven checkpoints that should survive beyond the raw
-artifacts under `profiles/`.
+Profiler-driven checkpoints that should survive beyond the raw artifacts under
+`profiles/`.
 
 ## 2026-04-08 — First H100 resize round found one live winner and one launch-contract bug
 

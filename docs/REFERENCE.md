@@ -8,10 +8,10 @@
 
 OLMo Hybrid 7B is a **hybrid RNN-Transformer model** from AllenAI that replaces 75% of standard attention layers with Gated DeltaNet (GDN) recurrent layers. The core claim is ~2x data efficiency over OLMo 3 7B on core evals and 75% improvement in inference throughput/memory at long context lengths.
 
-It is not a new architecture from scratch - it is a **surgical modification** of OLMo 3 7B, with three targeted changes:
+It is not a new architecture from scratch. It is a **surgical modification** of OLMo 3 7B, with three targeted changes:
 
 1. Replace 3 out of every 4 attention layers with GDN recurrent layers
-2. Reduce head count (32 30) and d_model (4096 3840) to equalize parameter count
+2. Reduce head count (`32 -> 30`) and `d_model` (`4096 -> 3840`) to equalize parameter count
 3. Switch LR schedule from OLMo 3's piecewise schedule to standard cosine decay
 
 ---
@@ -39,17 +39,17 @@ GDN layers add extra projections (`w_a`, `w_b`, `w_g`, short convolutions, `A_lo
 
 ## 3. The Gated DeltaNet Layer
 
-GDN is a linear RNN sequence mixer based on the **chunk gated delta rule**. It replaces softmax attention's O(n2) compute with O(n) recurrent state updates, at the cost of bounded state capacity.
+GDN is a linear RNN sequence mixer based on the **chunk gated delta rule**. It replaces softmax attention's `O(n^2)` compute with `O(n)` recurrent state updates, at the cost of bounded state capacity.
 
 ### 3.1 Projections
 
 Given input `x (B, T, d_model)`, the GDN layer computes:
 
 ```
-q, k w_q(x), w_k(x)          shape: (B, T, n_heads x head_k_dim)
-v w_v(x)                   shape: (B, T, n_v_heads x head_v_dim)
-beta sigmoid(w_b(x))          scalar gate (0, 1) per head
-g_dt -exp(A_log) * softplus(w_a(x) + dt_bias)   decay rate
+q, k = w_q(x), w_k(x)          shape: (B, T, n_heads x head_k_dim)
+v = w_v(x)                    shape: (B, T, n_v_heads x head_v_dim)
+beta = sigmoid(w_b(x))        scalar gate (0, 1) per head
+g_dt = -exp(A_log) * softplus(w_a(x) + dt_bias)   decay rate
 ```
 
 ### 3.2 Head Dimensions
@@ -128,7 +128,7 @@ The pattern `["gdn", "gdn", "gdn", "attn"]` repeats 8 times across 32 layers, yi
 | Data              | OLMo-mix-0925 (dolma3)                                        |
 | Sequence length   | 8,192                                                         |
 | Global batch size | ~4M tokens                                                    |
-| Optimizer         | SkipStepAdamW (lr=3e-4, wd=0.1, =(0.9, 0.95))                 |
+| Optimizer         | SkipStepAdamW (`lr=3e-4`, `wd=0.1`, `betas=(0.9, 0.95)`)     |
 | **LR Schedule**   | **CosWithWarmup (warmup=2000 steps)** key change vs OLMo 3 7B |
 | Parallelism       | HSDP, bf16 params / fp32 reduce                               |
 | RoPE              | Enabled                                                       |
@@ -164,8 +164,8 @@ model_config = TransformerConfig.olmo3_7B(vocab_size=vocab_size)
 
 # 2. Reduce heads and d_model to equalize params vs. pure-transformer baseline
 REMOVE_HEADS = 2
-model_config.d_model -= REMOVE_HEADS * 128          # 4096 3840
-num_heads = attn_cfg.n_heads - REMOVE_HEADS          # 32 30
+model_config.d_model -= REMOVE_HEADS * 128          # 4096 -> 3840
+num_heads = attn_cfg.n_heads - REMOVE_HEADS         # 32 -> 30
 # head_dim stays fixed at 128
 
 # 3. Build GDN block
@@ -244,12 +244,12 @@ The paper makes a formal theoretical argument for *why* hybrid models should be 
 The core thesis is that a good architecture should maximize expressivity while preserving parallelizability. The complexity hierarchy relevant here:
 
 ```
-TC0 NC1 PNC1
+TC0 < NC1 < PNC1
 ```
 
 - **Transformers** are bounded by TC0. They cannot robustly solve state-tracking tasks (e.g., the shell game, composing permutations) under the standard conjecture TC0 = NC1, because attention cannot aggregate sequential state updates in an order-sensitive way across arbitrary lengths.
 - **GDN (linear RNNs)** can express NC1-complete problems including state tracking, by using time-dependent non-diagonal transition matrices. The negative eigenvalue extension is critical here - without it, GDN is still limited to TC0.
-- **Linear RNNs are bounded by recall capacity.** Their fixed-size hidden state limits performance on copy/retrieval tasks. The state must compress an entire context prefix into a constant-size matrix, which fails for tasks requiring (n) bits from prefix to suffix.
+- **Linear RNNs are bounded by recall capacity.** Their fixed-size hidden state limits performance on copy/retrieval tasks. The state must compress an entire context prefix into a constant-size matrix, which fails for tasks requiring `O(n)` bits from prefix to suffix.
 
 ### 11.2 Hybrid Models Are More Than the Sum of Their Parts (Theorem 1)
 
