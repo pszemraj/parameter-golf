@@ -156,6 +156,14 @@ One-shot and final outcomes belong in W&B summary:
 - `artifact/code_bytes_final`
 - `artifact/int8_payload_zlib_bytes_final`
 
+Artifact summary is legality/compliance reporting, not an optimization target:
+
+- `artifact_status_final` should distinguish legal vs illegal outputs.
+- `artifact_warning_final` should be reserved for real problems such as
+  disqualification, not for ordinary under-limit runs.
+- `artifact_headroom_bytes_final` is useful context, but spare bytes alone do
+  not imply a worse model.
+
 ## Compatibility
 
 - New HGDN runs must emit the canonical uppercase config schema above.

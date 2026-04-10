@@ -354,18 +354,23 @@ def render_markdown(
         "sampled_eval_bpb_last",
         "roundtrip_bpb",
         "step_ms_last",
-        "artifact_bytes",
-        "headroom_bytes",
-        "status",
     ]
     if reference is not None:
         header.extend(
             [
                 "delta_roundtrip_bpb",
                 "delta_step_ms",
-                "delta_artifact_bytes",
             ]
         )
+    header.extend(
+        [
+            "status",
+            "artifact_bytes",
+            "headroom_bytes",
+        ]
+    )
+    if reference is not None:
+        header.append("delta_artifact_bytes")
     lines.append("| " + " | ".join(header) + " |")
     lines.append("|" + "|".join(["---"] * len(header)) + "|")
     for row in rows:
@@ -378,18 +383,23 @@ def render_markdown(
             format_float(row.get("sampled_eval_bpb_last")),
             format_float(row.get("roundtrip_val_bpb_final")),
             format_float(row.get("train_step_ms_last"), decimals=2),
-            format_int(row.get("artifact_bytes_final")),
-            format_int(row.get("artifact_headroom_bytes_final")),
-            str(row.get("artifact_status_final") or "-"),
         ]
         if reference is not None:
             cells.extend(
                 [
                     format_float(row.get("delta_roundtrip_val_bpb_final")),
                     format_float(row.get("delta_train_step_ms_last"), decimals=2),
-                    format_int(row.get("delta_artifact_bytes_final")),
                 ]
             )
+        cells.extend(
+            [
+                str(row.get("artifact_status_final") or "-"),
+                format_int(row.get("artifact_bytes_final")),
+                format_int(row.get("artifact_headroom_bytes_final")),
+            ]
+        )
+        if reference is not None:
+            cells.append(format_int(row.get("delta_artifact_bytes_final")))
         lines.append("| " + " | ".join(cells) + " |")
 
     lines.append("")

@@ -41,8 +41,8 @@ Keep `14L x 384d x mlp3.375` as the live under-limit architecture leader:
     - `641,667`
 
 This is the only eligible point in the `h100retune3` bracket that stayed close
-to the old `16L x 384d x mlp3.25` quality ceiling without reopening the size
-problem.
+to the old `16L x 384d x mlp3.25` quality ceiling without paying the same
+throughput and artifact cost.
 
 ### What got disciplined
 
@@ -111,8 +111,8 @@ ordering first, then from the dedicated batch-scale / packing follow-up.
 - keep `16L x 384d x mlp3.25` only as the over-limit quality ceiling
 - reject the `15L x 384d` family as the active architecture branch
 - spend the next architecture work either:
-  - around the remaining bytes near the `14L` leader
-  - or in the separate H100 batch-scale / packing pass
+  - on a nearby `14L x 384d` bracket if another fixed-token point is justified
+  - or in the separate H100 wallclock finalist pass
 
 ## 2026-04-08 — First H100 resize round found one live winner and one launch-contract bug
 

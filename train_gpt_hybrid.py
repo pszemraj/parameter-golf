@@ -1501,7 +1501,7 @@ def main() -> None:
             artifact_warning = "DISQUALIFIED"
         elif artifact_headroom > 0:
             artifact_status = "UNDER_LIMIT"
-            artifact_warning = "LEFT_ON_TABLE"
+            artifact_warning = ""
         else:
             artifact_status = "ON_BUDGET"
             artifact_warning = ""

@@ -10,7 +10,6 @@ Last updated: 2026-04-10
   - `h100retune3_b_fixed2k_hybrid_r1_mlp3.375_seq2048`
   - `14L x 384d x mlp3.375`
   - roundtrip `2.4365`
-  - headroom `641,667`
 - `h100retune3` rejected the active `15L x 384d` family:
   - the best `15L` point was still over limit and slower than the `14L` leader
   - the lower-MLP `15L` points gave back too much quality
@@ -20,7 +19,7 @@ Last updated: 2026-04-10
   - `h100retune3_a_fixed2k_hybrid_r1_mlp3.25_seq2048` as the over-limit ceiling anchor
 - Do not spend more H100 fixed-token runs on the `15L x 384d` bracket unless a new size bracket changes the artifact tradeoff.
 
-## 2. Run the H100 batch-scale / packing follow-up
+## 2. Run the H100 wallclock finalist pass
 
 - Start with:
   - `14L x 384d x mlp3.375`
@@ -32,8 +31,8 @@ Last updated: 2026-04-10
 - Separate:
   - microbatch / kernel-efficiency effects
   - effective-batch optimizer dynamics
-- Use this pass to decide whether H100 headroom converts into wall-clock wins under the current stack.
-- Do not restart the fixed-token ranking just because VRAM headroom exists.
+- Use this pass to decide which finalist wins under the actual 10-minute contract.
+- Do not restart the fixed-token ranking just because a legal model leaves spare bytes or VRAM unused.
 
 ## 3. Run the norm-placement screen
 

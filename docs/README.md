@@ -14,7 +14,7 @@ Branch: `exp/hgdn`
   - `GDN_CONTROL_PROJ_FP32=0`
   - `GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=1`
 - The current post-conv front-end seam is closed after `h100k20`.
-- The current architecture stage is compute-optimal resize under matched fixed-token contracts, followed by a separate H100 batch-scale / packing pass on the top `2-3` finalists.
+- The current architecture stage is fixed-token screening followed by a separate H100 wallclock-aware finalist pass on the top `2-3` candidates.
 - Real HGDN ablations go to `pg-hgdn-ablations`.
 - Local Python commands on this checkout use `conda run -s --name pg ...`.
 
@@ -22,12 +22,24 @@ Branch: `exp/hgdn`
 
 - Use the local GPU for broad fixed-data architecture search when the candidate family fits.
 - Use 1xH100 for finalist ranking under the same fixed-token contract.
-- After fixed-token ranking, run a separate H100 batch-scale / packing follow-up before the final architecture call.
-- Treat low VRAM use during saturated fixed-token H100 runs as headroom for the follow-up pass, not as a reason to restart the ranking.
+- After fixed-token ranking, run a separate H100 wallclock-aware batch-scale / packing pass before the final architecture call.
+- Treat low VRAM use during saturated fixed-token H100 runs as a signal to study batch-scale behavior later, not as evidence that the fixed-token winner should be replaced.
 - On the compiled HGDN path, default to changes that alter the generated path. Python-side view reshuffles and `.contiguous()` edits are not the main lever.
 - Enable compile diagnostics only when needed:
   - `TORCH_LOGS=recompiles,graph_breaks`
   - optional `TORCH_TRACE=/tmp/tracedir`
+
+## Competition timing
+
+- The challenge has two separate 10-minute budgets:
+  - training time inside the trainer
+  - evaluation time enforced externally
+- In both `train_gpt.py` and `train_gpt_hybrid.py`, the training timer excludes:
+  - compile/kernel warmup steps
+  - validation passes
+  - final serialization and roundtrip eval
+- Fixed-token sweeps are therefore a screening tool for learning efficiency, not the final leaderboard objective.
+- Final architecture selection must still answer the wallclock question on H100.
 
 ## Current architecture read
 
@@ -50,7 +62,6 @@ Branch: `exp/hgdn`
   - final roundtrip `2.4365`
   - last step time `948.72 ms`
   - artifact total `15,358,333`
-  - headroom `641,667`
 - `h100retune3` disciplined the local `15L x 384d` family:
   - best `15L` point was `h100retune3_i_fixed2k_hybrid_r1_mlp3.125_seq2048`
   - it still finished over limit by `68,592` bytes and slower than the `14L` leader
@@ -61,9 +72,9 @@ Branch: `exp/hgdn`
   - under limit, but slower and worse than the `14L x 384d x mlp3.375` leader
 - Historical absolute `step_ms` deltas to `h100k6` are not the clean speed control anymore:
   - same-arch rerun `h100retune3_a_fixed2k_hybrid_r1_mlp3.25_seq2048` improved quality but ran much slower than `h100k6`
-  - use the within-round H100 ranking for speed, then rerun finalists in the separate batch-scale / packing pass
+  - use the within-round H100 ranking for the fixed-token screen, then rerun finalists in the separate wallclock-aware batch-scale / packing pass
 - Live architecture call:
-  - keep `14L x 384d x mlp3.375` as the active under-limit leader
+  - keep `14L x 384d x mlp3.375` as the active fixed-token leader
   - keep the current `16L x 384d x mlp3.25` rerun only as an over-limit quality ceiling
   - do not keep the `15L x 384d` family as the active branch unless a new size bracket changes the result
 
