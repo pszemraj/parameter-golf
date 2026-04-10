@@ -9,7 +9,7 @@ cd "$repo_root"
 
 NGPU="${NGPU:-1}"
 export RUN_ID="${RUN_ID:-sweep_${WANDB_RUN_ID:-$(date +%s)}}"
-export WANDB_PROJECT="${WANDB_PROJECT:-param-golf-hybrid}"
+export WANDB_PROJECT="${WANDB_PROJECT:-pg-hgdn-ablations}"
 export DATA_PATH="${DATA_PATH:-$repo_root/data/datasets/fineweb10B_sp1024}"
 export TOKENIZER_PATH="${TOKENIZER_PATH:-$repo_root/data/tokenizers/fineweb_1024_bpe.model}"
 export USE_WANDB="${USE_WANDB:-1}"

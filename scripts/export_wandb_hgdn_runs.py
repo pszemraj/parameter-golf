@@ -44,7 +44,7 @@ DEFAULT_SUMMARY_KEYS = [
     "system/peak_mem_alloc_mib",
     "system/peak_mem_reserved_mib",
 ]
-DEFAULT_PROJECT = "pg-hconv-ablations"
+DEFAULT_PROJECT = "pg-hgdn-ablations"
 
 
 def parse_args() -> argparse.Namespace:

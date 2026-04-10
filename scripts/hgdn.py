@@ -483,7 +483,7 @@ def parse_args() -> argparse.Namespace:
         help="Compare completed HGDN fixed-step W&B runs into a structured bundle.",
     )
     fixed2k_compare.add_argument("--entity", default="pszemraj")
-    fixed2k_compare.add_argument("--project", default="pg-hconv-ablations")
+    fixed2k_compare.add_argument("--project", default="pg-hgdn-ablations")
     fixed2k_compare.add_argument(
         "--name",
         action="append",

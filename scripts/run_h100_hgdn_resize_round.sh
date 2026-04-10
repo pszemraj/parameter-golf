@@ -14,7 +14,7 @@ hgdn_require_cmd bash
 hgdn_require_cmd python
 
 python_bin="${PYTHON_BIN:-python}"
-wandb_project="${WANDB_PROJECT:-pg-hconv-ablations}"
+wandb_project="${WANDB_PROJECT:-pg-hgdn-ablations}"
 wandb_watch="${WANDB_WATCH:-gradients}"
 wandb_mode="${WANDB_MODE:-online}"
 run_prefix_base="${RUN_PREFIX_BASE:-h100retune3}"

@@ -15,7 +15,7 @@ trainer_path="$repo_root/train_gpt_hybrid.py"
 sweep_agent_path="$repo_root/scripts/sweep_agent.sh"
 sweep_config_path="$repo_root/scripts/sweep_config.yaml"
 
-export WANDB_PROJECT="${WANDB_PROJECT:-param-golf-hybrid}"
+export WANDB_PROJECT="${WANDB_PROJECT:-pg-hgdn-ablations}"
 export DATA_PATH="${DATA_PATH:-$repo_root/data/datasets/fineweb10B_sp1024}"
 export TOKENIZER_PATH="${TOKENIZER_PATH:-$repo_root/data/tokenizers/fineweb_1024_bpe.model}"
 export USE_WANDB="${USE_WANDB:-1}"

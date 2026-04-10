@@ -1134,7 +1134,7 @@ def main() -> None:
     # ── wandb init ────────────────────────────────────────────────────
     if master_process and _USE_WANDB:
         wandb.init(
-            project=os.environ.get("WANDB_PROJECT", "param-golf-hybrid"),
+            project=os.environ.get("WANDB_PROJECT", "pg-hgdn-ablations"),
             name=args.run_id,
             tags=[
                 f"gdn_ratio={args.gdn_ratio}",

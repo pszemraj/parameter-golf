@@ -728,7 +728,7 @@ python scripts/hgdn.py h100-perf fixed2k-hybrid \
   --config configs/hgdn/retune_trim_layers_14.toml \
   --run-prefix h100k7a \
   --online \
-  --set WANDB_PROJECT=pg-hconv-ablations \
+  --set WANDB_PROJECT=pg-hgdn-ablations \
   --set WANDB_WATCH=gradients
 ```
 

@@ -18,7 +18,7 @@ hgdn_require_cmd 7z
 python_bin="${PYTHON_BIN:-python}"
 use_wandb="${USE_WANDB:-1}"
 wandb_mode="${WANDB_MODE:-online}"
-wandb_project="${WANDB_PROJECT:-pg-hconv-ablations}"
+wandb_project="${WANDB_PROJECT:-pg-hgdn-ablations}"
 wandb_watch="${WANDB_WATCH:-none}"
 wandb_watch_log_freq="${WANDB_WATCH_LOG_FREQ:-25}"
 run_prefix_base="${RUN_PREFIX_BASE:-localretune2}"

@@ -19,7 +19,7 @@ from profiler_report import write_json, write_rows_csv
 
 DEFAULT_EVAL_STEPS = (500, 1000, 1500, 2000)
 DEFAULT_HISTORY_KEYS = ("_step", "train/step_ms", "eval/loss", "eval/bpb")
-DEFAULT_PROJECT = "pg-hconv-ablations"
+DEFAULT_PROJECT = "pg-hgdn-ablations"
 
 
 def parse_args() -> argparse.Namespace:
