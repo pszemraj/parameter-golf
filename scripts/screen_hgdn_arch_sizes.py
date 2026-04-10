@@ -20,12 +20,15 @@ from typing import Any
 
 import torch
 
-from hgdn_runtime_utils import (
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from hgdn_runtime_utils import (  # noqa: E402
     restore_low_dim_params_to_fp32,
     serialize_quantized_state_dict_int8,
 )
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = REPO_ROOT / "configs" / "hgdn" / "current_winner_retune.toml"
 TRAINER_PATH = REPO_ROOT / "train_gpt_hybrid.py"
 PROFILE_ROOT = REPO_ROOT / "profiles" / "arch_size"
