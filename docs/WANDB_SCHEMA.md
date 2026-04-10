@@ -9,8 +9,8 @@ Gated DeltaNet (HGDN) trainer in [train_gpt_hybrid.py](/home/pszemraj/workspace/
 
 - Applies to HGDN branch runs only.
 - Default project for real HGDN ablations: `pg-hgdn-ablations`.
-- `pg-hconv-ablations` belongs to the separate hybrid-convolutional-network
-  workstream; do not use it for new HGDN runs.
+- Do not query or default to older HGDN runs in other W&B projects; migrate them
+  into `pg-hgdn-ablations` instead.
 - Treat this schema as experiment protocol.
 - Do not use `args.to_dict()` or any other blanket config dump.
 - Do not log lowercase Python attribute mirrors alongside the canonical keys.
