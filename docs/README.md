@@ -1,6 +1,6 @@
 # HGDN Branch Status
 
-Last updated: 2026-04-10
+Last updated: 2026-04-11
 
 Branch: `exp/hgdn`
 
@@ -66,37 +66,36 @@ Branch: `exp/hgdn`
 - Fixed-2k H100 reference:
   - `h100k6_fixed2k_hybrid_r1_mlp3.25_seq2048`
   - `16L x 384d x mlp3.25`
-- First H100 resize leader:
-  - `h100retune_a_fixed2k_hybrid_r1_mlp3.25_seq2048`
+  - over limit at `17,580,964` bytes
+- Current fixed-token H100 leader:
+  - `h100retune6_f_fixed2k_hybrid_r1_mlp3.5_seq2048`
+  - `14L x 384d x mlp3.5`
+  - final roundtrip `2.4224`
+  - last-step time `905.68 ms`
+  - artifact total `15,878,878`
+  - headroom `121,122`
+- Current speed-and-headroom companion:
+  - `h100retune6_d_fixed2k_hybrid_r1_mlp3.25_seq2048`
   - `14L x 384d x mlp3.25`
-  - roundtrip improved `2.4438 -> 2.4243`
-  - last-step time improved `915.10 -> 897.96 ms`
-  - artifact status moved from over-limit to under-limit
-- Rejected resize branch:
-  - `16L x 320d x mlp3.25`
-  - worse quality and slower than the reference
-- Fixed-token H100 ranking after the broader local search:
-  - `h100retune3_b_fixed2k_hybrid_r1_mlp3.375_seq2048`
-  - `14L x 384d x mlp3.375`
-  - sampled eval `2.4245`
-  - final roundtrip `2.4365`
-  - last step time `948.72 ms`
-  - artifact total `15,358,333`
-- `h100retune3` disciplined the local `15L x 384d` family:
-  - best `15L` point was `h100retune3_i_fixed2k_hybrid_r1_mlp3.125_seq2048`
-  - it still finished over limit by `68,592` bytes and slower than the `14L` leader
-  - lower-MLP `15L` points gave back too much quality
-- The depth-preserving under-limit check also lost:
-  - `h100retune3_j_fixed2k_hybrid_r1_mlp2.6666666666666665_seq2048`
-  - `16L x 384d x mlp2.666...`
-  - under limit, but slower and worse than the `14L x 384d x mlp3.375` leader
-- Historical absolute `step_ms` deltas to `h100k6` are not the clean speed control anymore:
-  - same-arch rerun `h100retune3_a_fixed2k_hybrid_r1_mlp3.25_seq2048` improved quality but ran much slower than `h100k6`
-  - use the within-round H100 ranking for the fixed-token screen, then rerun finalists in the separate wallclock-aware batch-scale / packing pass
+  - final roundtrip `2.4245`
+  - last-step time `898.55 ms`
+  - artifact total `15,052,320`
+  - headroom `947,680`
+- The old `14L x 384d x mlp3.375` point was superseded:
+  - `h100retune6_e_fixed2k_hybrid_r1_mlp3.375_seq2048`
+  - slower and worse than both `mlp3.25` and `mlp3.5`
+- `h100retune6` killed the revived `15L x 384d` family again:
+  - `mlp2.375`: roundtrip `2.4594`, last step `970.81 ms`
+  - `mlp2.4375`: roundtrip `2.4663`, last step `979.52 ms`
+  - `mlp2.5`: roundtrip `2.4640`, last step `987.09 ms`
+  - read: slower and materially worse than the `14L x 384d` bracket
+- Historical absolute `step_ms` deltas to `h100k6` are still not the clean speed control:
+  - use the within-round H100 ordering for the fixed-token screen
+  - use the separate H100 batch-scale / packing pass for the wallclock decision
 - Live architecture call:
-  - keep `14L x 384d x mlp3.375` as the active fixed-token leader
-  - keep the current `16L x 384d x mlp3.25` rerun only as an over-limit quality ceiling
-  - do not keep the `15L x 384d` family as the active branch unless a new size bracket changes the result
+  - carry only `14L x 384d x mlp3.25` and `14L x 384d x mlp3.5` into the next H100 finalist pass
+  - treat `mlp3.5` as the quality lead and `mlp3.25` as the efficiency hedge
+  - stop spending fixed-token H100 runs on the `15L x 384d` bracket
 
 Exact run history, scoreboards, and reject rationale live in [PROFILING_LOG.md](PROFILING_LOG.md).
 

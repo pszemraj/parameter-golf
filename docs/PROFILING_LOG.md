@@ -1,9 +1,111 @@
 # Profiling Log
 
-Last updated: 2026-04-10 13:32 EDT
+Last updated: 2026-04-11 16:10 EDT
 
 Profiler-driven checkpoints that should survive beyond the raw artifacts under
 `profiles/`.
+
+## 2026-04-11 — H100 fixed-token retune6 kept the 14-layer family live and killed the revived 15-layer bracket again (`h100retune6`)
+
+Artifacts:
+
+- raw bundle:
+  - `local-scratch/h100retune6_bundle.7z`
+- W&B compare bundle:
+  - `profiles/fixed2k_compare/h100retune6_round`
+
+Contract:
+
+- active HGDN kernel baseline:
+  - `winner_20260405_19`
+- reference run:
+  - `h100k6_fixed2k_hybrid_r1_mlp3.25_seq2048`
+- candidate bracket:
+  - `15L x 384d` with `MLP_MULT=2.375-2.5`
+  - `14L x 384d` with `MLP_MULT=3.25-3.5`
+
+### Main finding
+
+Keep `14L x 384d x mlp3.5` as the new fixed-token HGDN leader:
+
+- `h100retune6_f_fixed2k_hybrid_r1_mlp3.5_seq2048`
+  - sampled eval:
+    - `2.4907`
+  - final roundtrip:
+    - `2.4224`
+  - last step time:
+    - `905.68 ms`
+  - artifact total:
+    - `15,878,878`
+  - headroom:
+    - `121,122`
+
+This run is legal, beats the old over-limit `h100k6` reference by `0.0214`
+roundtrip bpb, and is also `9.42 ms` faster on the final fixed2k step.
+
+### What stays live beside it
+
+Keep `14L x 384d x mlp3.25` as the speed-and-headroom companion for the next
+batch-scale / packing pass:
+
+- `h100retune6_d_fixed2k_hybrid_r1_mlp3.25_seq2048`
+  - final roundtrip:
+    - `2.4245`
+  - last step time:
+    - `898.55 ms`
+  - artifact total:
+    - `15,052,320`
+  - headroom:
+    - `947,680`
+
+Read:
+
+- it gave back only `0.0021` roundtrip bpb relative to `mlp3.5`
+- it ran `7.13 ms` faster
+- it recovered `826,558` bytes of extra artifact headroom
+
+That is close enough that the real wallclock-aware finalist pass should carry
+both `mlp3.25` and `mlp3.5`.
+
+### What got disciplined
+
+Reject the revived `15L x 384d` family again:
+
+- `h100retune6_a_fixed2k_hybrid_r1_mlp2.375_seq2048`
+  - final roundtrip:
+    - `2.4594`
+  - last step time:
+    - `970.81 ms`
+- `h100retune6_b_fixed2k_hybrid_r1_mlp2.4375_seq2048`
+  - final roundtrip:
+    - `2.4663`
+  - last step time:
+    - `979.52 ms`
+- `h100retune6_c_fixed2k_hybrid_r1_mlp2.5_seq2048`
+  - final roundtrip:
+    - `2.4640`
+  - last step time:
+    - `987.09 ms`
+
+These are all slower and materially worse than the live `14L` bracket.
+
+Reject the intermediate `14L x 384d x mlp3.375` point too:
+
+- `h100retune6_e_fixed2k_hybrid_r1_mlp3.375_seq2048`
+  - final roundtrip:
+    - `2.4364`
+  - last step time:
+    - `917.60 ms`
+  - read:
+    - dominated by both `mlp3.25` and `mlp3.5`
+
+### Decision
+
+- narrow the active architecture family to `14L x 384d`
+- carry only `mlp3.25` and `mlp3.5` into the H100 batch-scale / packing pass
+- stop spending more fixed-token H100 ranking runs on the `15L x 384d` bracket
+- keep `h100k6` only as the historical over-limit reference, not as the live
+  quality ceiling
 
 ## 2026-04-10 — H100 fixed-token resize ranking kept the 14-layer anchor and killed the live 15-layer family (`h100retune3`)
 

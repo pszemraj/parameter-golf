@@ -1,29 +1,28 @@
 # HGDN Next Steps
 
-Last updated: 2026-04-10
+Last updated: 2026-04-11
 
-## 1. Close the H100 resize ranking
+## 1. Run the H100 batch-scale finalist pass on the live 14-layer bracket
 
 - Keep the active kernel baseline at [`winner_20260405_19.toml`](../configs/hgdn/winner_20260405_19.toml).
 - Keep the fixed-token H100 reference anchored on `h100k6_fixed2k_hybrid_r1_mlp3.25_seq2048`.
-- Current fixed-token H100 winner:
-  - `h100retune3_b_fixed2k_hybrid_r1_mlp3.375_seq2048`
-  - `14L x 384d x mlp3.375`
-  - roundtrip `2.4365`
-- `h100retune3` rejected the active `15L x 384d` family:
-  - the best `15L` point was still over limit and slower than the `14L` leader
-  - the lower-MLP `15L` points gave back too much quality
-- `16L x 384d x mlp2.6666666666666665` also lost the under-limit ranking.
-- If rerunning for noise control, rerun only:
-  - `h100retune3_b_fixed2k_hybrid_r1_mlp3.375_seq2048`
-  - `h100retune3_a_fixed2k_hybrid_r1_mlp3.25_seq2048` as the over-limit ceiling anchor
-- Do not spend more H100 fixed-token runs on the `15L x 384d` bracket unless a new size bracket changes the artifact tradeoff.
-
-## 2. Run the H100 wallclock finalist pass
-
-- Start with:
-  - `14L x 384d x mlp3.375`
-  - optional over-limit ceiling control: `16L x 384d x mlp3.25`
+- Current fixed-token H100 finalists:
+  - `h100retune6_f_fixed2k_hybrid_r1_mlp3.5_seq2048`
+    - `14L x 384d x mlp3.5`
+    - roundtrip `2.4224`
+    - last step `905.68 ms`
+    - headroom `121,122`
+  - `h100retune6_d_fixed2k_hybrid_r1_mlp3.25_seq2048`
+    - `14L x 384d x mlp3.25`
+    - roundtrip `2.4245`
+    - last step `898.55 ms`
+    - headroom `947,680`
+- `h100retune6` rejected:
+  - the `15L x 384d` bracket at `mlp2.375-2.5`
+  - the intermediate `14L x 384d x mlp3.375` point
+- Start the wallclock-aware pass with:
+  - `14L x 384d x mlp3.5`
+  - `14L x 384d x mlp3.25`
 - Vary:
   - `TRAIN_BATCH_TOKENS`
   - `GRAD_ACCUM_STEPS`
@@ -34,14 +33,14 @@ Last updated: 2026-04-10
 - Use this pass to decide which finalist wins under the actual 10-minute contract.
 - Do not restart the fixed-token ranking just because a legal model leaves spare bytes or VRAM unused.
 
-## 3. Run the norm-placement screen
+## 2. Run the norm-placement screen
 
 - Compare `NORM_STYLE=pre`, `post`, and `keel`.
 - Keep the architecture and training contract fixed.
 - Compare within HGDN first.
 - Add the attention-only baseline only after the HGDN-side direction is clear.
 
-## 4. Work the remaining non-seam HGDN hotspots
+## 3. Work the remaining non-seam HGDN hotspots
 
 - output / gate projection path
 - residual-shell glue on the compiled path
@@ -49,7 +48,7 @@ Last updated: 2026-04-10
 
 Do not reopen the current post-conv front-end seam for more ownership or packing tweaks unless the decomposition changes materially.
 
-## 5. Use compile/backend work only on finalists
+## 4. Use compile/backend work only on finalists
 
 - graph-break and recompile audit with `TORCH_LOGS`
 - `compiled_autograd`
@@ -57,7 +56,7 @@ Do not reopen the current post-conv front-end seam for more ownership or packing
 - dynamic-shape handling only where the logs justify it
 - Nsight or backend swaps only if the compiled H100 profile says the backend is the bottleneck
 
-## 6. Finish the cleanup backlog
+## 5. Finish the cleanup backlog
 
 - profiler/report toolchain consolidation
 - shared env-flag and launch-contract helpers
