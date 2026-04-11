@@ -17,7 +17,7 @@ python_bin="${PYTHON_BIN:-python}"
 wandb_project="${WANDB_PROJECT:-pg-hgdn-ablations}"
 wandb_watch="${WANDB_WATCH:-gradients}"
 wandb_mode="${WANDB_MODE:-online}"
-run_prefix_base="${RUN_PREFIX_BASE:-h100retune4}"
+run_prefix_base="${RUN_PREFIX_BASE:-h100retune5}"
 compare_reference="${COMPARE_REFERENCE:-h100k6_fixed2k_hybrid_r1_mlp3.25_seq2048}"
 compare_output_dir="${COMPARE_OUTPUT_DIR:-profiles/fixed2k_compare/${run_prefix_base}_round}"
 bundle_stage_dir="${BUNDLE_STAGE_DIR:-local-scratch/${run_prefix_base}_bundle}"
@@ -51,12 +51,6 @@ default_prefixes=(
     "${run_prefix_base}_b"
     "${run_prefix_base}_c"
     "${run_prefix_base}_d"
-    "${run_prefix_base}_e"
-    "${run_prefix_base}_f"
-    "${run_prefix_base}_g"
-    "${run_prefix_base}_h"
-    "${run_prefix_base}_i"
-    "${run_prefix_base}_j"
 )
 
 if [[ -n "${RUN_PREFIXES:-}" ]]; then
@@ -66,29 +60,17 @@ else
 fi
 
 configs=(
-    "configs/hgdn/retune_current.toml"
-    "configs/hgdn/retune_trim_layers_14_mlp3p375.toml"
     "configs/hgdn/retune_deepen_15l_mlp2p5.toml"
     "configs/hgdn/retune_deepen_15l_mlp2p625.toml"
-    "configs/hgdn/retune_deepen_15l_mlp2p667.toml"
-    "configs/hgdn/retune_deepen_15l_mlp2p75.toml"
     "configs/hgdn/retune_deepen_15l_mlp2p875.toml"
     "configs/hgdn/retune_deepen_15l_mlp3.toml"
-    "configs/hgdn/retune_deepen_15l_mlp3p125.toml"
-    "configs/hgdn/retune_depth16_mlp2p667.toml"
 )
 
 labels=(
-    "current 16L reference"
-    "best 14L local anchor"
-    "15L lower clean bracket"
-    "15L local winner"
-    "15L tensor-core bracket"
-    "15L previous winner rerun"
-    "15L upper bracket low"
-    "15L upper bracket mid"
-    "15L upper bracket high"
-    "16L reduced-MLP depth check"
+    "15L low-width hedge"
+    "15L long-horizon local winner"
+    "15L post-fix local winner"
+    "15L higher-width hedge"
 )
 
 if [[ "${#run_prefixes[@]}" -ne "${#configs[@]}" ]]; then
