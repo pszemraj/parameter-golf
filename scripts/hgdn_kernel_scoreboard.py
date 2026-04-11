@@ -19,7 +19,6 @@ import json
 import re
 import shutil
 import statistics
-import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -95,7 +94,7 @@ def extract_input(src: Path, dst_root: Path) -> Path:
 
     :param Path src: Directory or `.7z` path.
     :param Path dst_root: Extraction root.
-    :raises RuntimeError: If `.7z` support is unavailable.
+    :raises RuntimeError: If `py7zr` is unavailable for `.7z` extraction.
     :raises ValueError: If the input type is unsupported.
     :return Path: Extracted directory path.
     """
@@ -109,21 +108,13 @@ def extract_input(src: Path, dst_root: Path) -> Path:
         dst.mkdir(parents=True, exist_ok=True)
         try:
             import py7zr  # type: ignore
-        except Exception:
-            seven_zip = shutil.which("7z")
-            if seven_zip is None:  # pragma: no cover - env-specific fallback
-                raise RuntimeError(
-                    "Need either `py7zr` or a `7z` binary to read .7z archives."
-                )
-            subprocess.run(
-                [seven_zip, "x", "-y", str(src), f"-o{dst}"],
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.STDOUT,
-            )
-        else:
-            with py7zr.SevenZipFile(src, "r") as archive:
-                archive.extractall(dst)
+        except Exception as exc:
+            raise RuntimeError(
+                "Missing `py7zr` for .7z extraction. Install it with "
+                "`python -m pip install py7zr`."
+            ) from exc
+        with py7zr.SevenZipFile(src, "r") as archive:
+            archive.extractall(dst)
         return dst
     raise ValueError(f"Unsupported input: {src}")
 

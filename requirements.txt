@@ -4,6 +4,7 @@ fla-core
 huggingface-hub
 kernels
 numpy
+py7zr
 sentencepiece
 setuptools
 tiktoken

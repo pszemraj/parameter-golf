@@ -34,6 +34,8 @@ fixed2k_seq_len="${FIXED2K_SEQ_LEN:-2048}"
 fixed2k_val_loss_every="${FIXED2K_VAL_LOSS_EVERY:-500}"
 fixed2k_train_log_every="${FIXED2K_TRAIN_LOG_EVERY:-200}"
 
+hgdn_ensure_python_module "${python_bin}" py7zr py7zr
+
 if [[ -z "${compare_reference_project}" \
     && "${wandb_project}" == "pg-hgdn-ablations" \
     && "${compare_reference}" == "h100k6_fixed2k_hybrid_r1_mlp3.25_seq2048" ]]; then
@@ -276,9 +278,7 @@ manifest = {
 )
 PY
 
-    rm -f "${archive_output}"
-    mkdir -p "$(dirname "${archive_output}")"
-    7z a -t7z "${archive_output}" "${bundle_stage_dir}" >/dev/null
+    hgdn_create_7z_archive "${python_bin}" "${archive_output}" "${bundle_stage_dir}"
     echo "bundle_archive=${archive_output}"
     echo "local_compare_hint=conda run -s --name pg python scripts/hgdn.py fixed2k-compare --project ${wandb_project} --reference-entity ${compare_reference_entity} --reference-project ${compare_reference_project:-${wandb_project}} --contains ${run_prefix_base}_ --name ${compare_reference} --reference ${compare_reference}"
 }

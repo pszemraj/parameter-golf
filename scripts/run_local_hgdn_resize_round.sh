@@ -13,7 +13,6 @@ fi
 hgdn_require_cmd bash
 hgdn_require_cmd torchrun
 hgdn_require_cmd python
-hgdn_require_cmd 7z
 
 python_bin="${PYTHON_BIN:-python}"
 use_wandb="${USE_WANDB:-1}"
@@ -40,6 +39,8 @@ val_batch_size="${VAL_BATCH_SIZE:-524288}"
 max_wallclock_seconds="${MAX_WALLCLOCK_SECONDS:-0}"
 compile="${COMPILE:-1}"
 compile_strategy="${COMPILE_STRATEGY:-model}"
+
+hgdn_ensure_python_module "${python_bin}" py7zr py7zr
 
 case "${wandb_mode}" in
 online | offline) ;;
@@ -313,9 +314,7 @@ manifest = {
 )
 PY
 
-    rm -f "${archive_output}"
-    mkdir -p "$(dirname "${archive_output}")"
-    7z a -t7z "${archive_output}" "${bundle_stage_dir}" >/dev/null
+    hgdn_create_7z_archive "${python_bin}" "${archive_output}" "${bundle_stage_dir}"
     echo "bundle_archive=${archive_output}"
 }
 
