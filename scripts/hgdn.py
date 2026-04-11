@@ -375,6 +375,14 @@ def parse_args() -> argparse.Namespace:
     fixed2k_compare.add_argument("--entity", default="pszemraj")
     fixed2k_compare.add_argument("--project", default="pg-hgdn-ablations")
     fixed2k_compare.add_argument(
+        "--reference-entity",
+        help="Optional W&B entity for the reference run.",
+    )
+    fixed2k_compare.add_argument(
+        "--reference-project",
+        help="Optional W&B project for the reference run.",
+    )
+    fixed2k_compare.add_argument(
         "--name",
         action="append",
         default=[],
@@ -539,6 +547,10 @@ def command_for_args(args: argparse.Namespace) -> list[str]:
             "--project",
             args.project,
         ]
+        if args.reference_entity is not None:
+            command.extend(["--reference-entity", args.reference_entity])
+        if args.reference_project is not None:
+            command.extend(["--reference-project", args.reference_project])
         for name in args.name:
             command.extend(["--name", name])
         for value in args.contains:

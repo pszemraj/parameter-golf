@@ -37,6 +37,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--entity", default="pszemraj")
     parser.add_argument("--project", default=DEFAULT_PROJECT)
     parser.add_argument(
+        "--reference-entity",
+        default=None,
+        help="Optional W&B entity for the reference run. Defaults to --entity.",
+    )
+    parser.add_argument(
+        "--reference-project",
+        default=None,
+        help="Optional W&B project for the reference run. Defaults to --project.",
+    )
+    parser.add_argument(
         "--name",
         action="append",
         default=[],
@@ -66,6 +76,27 @@ def parse_args() -> argparse.Namespace:
         help="Sampled eval step to include. Repeatable. Defaults to 500/1000/1500/2000.",
     )
     return parser.parse_args()
+
+
+def fetch_exact_run(
+    api: Any, entity: str, project: str, run_name: str
+) -> Any | None:
+    """Fetch one exact-display-name W&B run from a project.
+
+    :param Any api: W&B API client.
+    :param str entity: W&B entity.
+    :param str project: W&B project.
+    :param str run_name: Exact display name to search for.
+    :return Any | None: Matching run, or ``None`` when absent.
+    """
+    matches = list(api.runs(f"{entity}/{project}", filters={"display_name": run_name}))
+    if not matches:
+        return None
+    if len(matches) > 1:
+        raise SystemExit(
+            f"Reference run name is ambiguous in {entity}/{project}: {run_name!r}"
+        )
+    return matches[0]
 
 
 def pick(mapping: dict[str, Any], *keys: str) -> Any:
@@ -256,7 +287,9 @@ def add_reference_deltas(
         return None
     reference = next((row for row in rows if row["run_name"] == reference_name), None)
     if reference is None:
-        raise SystemExit(f"Reference run not found in selection: {reference_name!r}")
+        raise SystemExit(
+            f"Reference run not found in comparison rows: {reference_name!r}"
+        )
 
     delta_fields = (
         "sampled_eval_bpb_last",
@@ -444,6 +477,24 @@ def main() -> int:
     if not selected:
         raise SystemExit("No matching runs found.")
 
+    reference_entity = args.reference_entity or args.entity
+    reference_project = args.reference_project or args.project
+    if args.reference is not None and not any(
+        run.name == args.reference for run in selected
+    ):
+        reference_run = fetch_exact_run(
+            api, reference_entity, reference_project, args.reference
+        )
+        if reference_run is None:
+            raise SystemExit(
+                "Reference run not found. "
+                f"selected_project={args.entity}/{args.project} "
+                f"reference_project={reference_entity}/{reference_project} "
+                f"reference_name={args.reference!r}"
+            )
+        if not any(run.id == reference_run.id for run in selected):
+            selected.append(reference_run)
+
     eval_steps = tuple(args.eval_step) if args.eval_step else DEFAULT_EVAL_STEPS
     rows = [build_run_row(run, eval_steps) for run in selected]
     reference = add_reference_deltas(rows, args.reference)
@@ -453,6 +504,8 @@ def main() -> int:
         "entity": args.entity,
         "project": args.project,
         "selected_runs": [row["run_name"] for row in rows],
+        "reference_entity": None if reference is None else reference_entity,
+        "reference_project": None if reference is None else reference_project,
         "reference_run": None if reference is None else reference["run_name"],
         "eval_steps": list(eval_steps),
     }

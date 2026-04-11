@@ -19,7 +19,8 @@ wandb_watch="${WANDB_WATCH:-gradients}"
 wandb_mode="${WANDB_MODE:-online}"
 run_prefix_base="${RUN_PREFIX_BASE:-h100retune5}"
 compare_reference="${COMPARE_REFERENCE:-h100k6_fixed2k_hybrid_r1_mlp3.25_seq2048}"
-compare_output_dir="${COMPARE_OUTPUT_DIR:-profiles/fixed2k_compare/${run_prefix_base}_round}"
+compare_reference_entity="${COMPARE_REFERENCE_ENTITY:-pszemraj}"
+compare_reference_project="${COMPARE_REFERENCE_PROJECT:-}"
 bundle_stage_dir="${BUNDLE_STAGE_DIR:-local-scratch/${run_prefix_base}_bundle}"
 archive_output="${ARCHIVE_OUTPUT:-local-scratch/${run_prefix_base}_bundle.7z}"
 command_log="${COMMAND_LOG:-local-scratch/${run_prefix_base}_commands.sh}"
@@ -32,6 +33,12 @@ fixed2k_train_batch_tokens="${TRAIN_BATCH_TOKENS:-524288}"
 fixed2k_seq_len="${FIXED2K_SEQ_LEN:-2048}"
 fixed2k_val_loss_every="${FIXED2K_VAL_LOSS_EVERY:-500}"
 fixed2k_train_log_every="${FIXED2K_TRAIN_LOG_EVERY:-200}"
+
+if [[ -z "${compare_reference_project}" \
+    && "${wandb_project}" == "pg-hgdn-ablations" \
+    && "${compare_reference}" == "h100k6_fixed2k_hybrid_r1_mlp3.25_seq2048" ]]; then
+    compare_reference_project="pg-hconv-ablations"
+fi
 
 case "${wandb_mode}" in
 online)
@@ -95,7 +102,8 @@ print_plan() {
     echo "fixed2k_val_loss_every=${fixed2k_val_loss_every}"
     echo "fixed2k_train_log_every=${fixed2k_train_log_every}"
     echo "compare_reference=${compare_reference}"
-    echo "compare_output_dir=${compare_output_dir}"
+    echo "compare_reference_entity=${compare_reference_entity}"
+    echo "compare_reference_project=${compare_reference_project:-${wandb_project}}"
     echo "archive_output=${archive_output}"
     echo "command_log=${command_log}"
     echo "batch:"
@@ -177,25 +185,6 @@ run_batch() {
     done
 }
 
-run_compare() {
-    echo
-    echo ">>> fixed2k compare"
-    hgdn_append_command \
-        "${command_log}" \
-        "${python_bin}" scripts/hgdn.py fixed2k-compare \
-        --contains "${run_prefix_base}_" \
-        --name "${compare_reference}" \
-        --reference "${compare_reference}" \
-        --output-dir "${compare_output_dir}"
-
-    hgdn_run_with_env \
-        "${python_bin}" scripts/hgdn.py fixed2k-compare \
-        --contains "${run_prefix_base}_" \
-        --name "${compare_reference}" \
-        --reference "${compare_reference}" \
-        --output-dir "${compare_output_dir}"
-}
-
 build_bundle() {
     echo
     echo ">>> bundle outputs"
@@ -203,14 +192,6 @@ build_bundle() {
     rm -rf "${bundle_stage_dir}"
     mkdir -p "${bundle_stage_dir}/configs" "${bundle_stage_dir}/logs"
     cp "${command_log}" "${bundle_stage_dir}/commands.sh"
-
-    if [[ -d "${compare_output_dir}" ]]; then
-        mkdir -p "${bundle_stage_dir}/profiles/fixed2k_compare"
-        cp -R "${compare_output_dir}" "${bundle_stage_dir}/profiles/fixed2k_compare/"
-    else
-        echo "Missing compare output dir: ${compare_output_dir}" >&2
-        exit 1
-    fi
 
     local config_path
     for config_path in "${configs[@]}"; do
@@ -233,7 +214,8 @@ build_bundle() {
         "${bundle_stage_dir}" \
         "${run_prefix_base}" \
         "${compare_reference}" \
-        "${compare_output_dir}" \
+        "${compare_reference_entity}" \
+        "${compare_reference_project:-${wandb_project}}" \
         "${archive_output}" \
         "${matched_logs}" \
         "${torch_logs}" \
@@ -253,26 +235,28 @@ import sys
 bundle_dir = Path(sys.argv[1])
 run_prefix_base = sys.argv[2]
 compare_reference = sys.argv[3]
-compare_output_dir = sys.argv[4]
-archive_output = sys.argv[5]
-matched_logs = bool(int(sys.argv[6]))
-torch_logs = sys.argv[7]
-torch_trace = sys.argv[8]
-command_log = sys.argv[9]
-fixed2k_iterations = int(sys.argv[10])
-fixed2k_train_batch_tokens = int(sys.argv[11])
-fixed2k_seq_len = int(sys.argv[12])
-fixed2k_val_loss_every = int(sys.argv[13])
-fixed2k_train_log_every = int(sys.argv[14])
-configs = sys.argv[15].split()
-run_prefixes = sys.argv[16:]
+compare_reference_entity = sys.argv[4]
+compare_reference_project = sys.argv[5]
+archive_output = sys.argv[6]
+matched_logs = bool(int(sys.argv[7]))
+torch_logs = sys.argv[8]
+torch_trace = sys.argv[9]
+command_log = sys.argv[10]
+fixed2k_iterations = int(sys.argv[11])
+fixed2k_train_batch_tokens = int(sys.argv[12])
+fixed2k_seq_len = int(sys.argv[13])
+fixed2k_val_loss_every = int(sys.argv[14])
+fixed2k_train_log_every = int(sys.argv[15])
+configs = sys.argv[16].split()
+run_prefixes = sys.argv[17:]
 
 manifest = {
     "run_prefix_base": run_prefix_base,
     "run_prefixes": run_prefixes,
     "configs": configs,
     "compare_reference": compare_reference,
-    "compare_output_dir": compare_output_dir,
+    "compare_reference_entity": compare_reference_entity,
+    "compare_reference_project": compare_reference_project,
     "archive_output": archive_output,
     "command_log": command_log,
     "matched_logs": matched_logs,
@@ -296,10 +280,10 @@ PY
     mkdir -p "$(dirname "${archive_output}")"
     7z a -t7z "${archive_output}" "${bundle_stage_dir}" >/dev/null
     echo "bundle_archive=${archive_output}"
+    echo "local_compare_hint=conda run -s --name pg python scripts/hgdn.py fixed2k-compare --project ${wandb_project} --reference-entity ${compare_reference_entity} --reference-project ${compare_reference_project:-${wandb_project}} --contains ${run_prefix_base}_ --name ${compare_reference} --reference ${compare_reference}"
 }
 
 print_plan
 prepare_cuda
 run_batch
-run_compare
 build_bundle
