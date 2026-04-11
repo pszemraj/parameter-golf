@@ -6,7 +6,7 @@ hgdn_setup_repo_root "${BASH_SOURCE[0]}"
 
 if [[ "$#" -ne 0 ]]; then
     echo "Run this script with no arguments." >&2
-    echo "It always executes the full current H100 HGDN resize batch and compare step." >&2
+    echo "It always executes the full current H100 HGDN resize batch." >&2
     exit 1
 fi
 
@@ -17,7 +17,7 @@ python_bin="${PYTHON_BIN:-python}"
 wandb_project="${WANDB_PROJECT:-pg-hgdn-ablations}"
 wandb_watch="${WANDB_WATCH:-gradients}"
 wandb_mode="${WANDB_MODE:-online}"
-run_prefix_base="${RUN_PREFIX_BASE:-h100retune5}"
+run_prefix_base="${RUN_PREFIX_BASE:-h100retune6}"
 compare_reference="${COMPARE_REFERENCE:-h100k6_fixed2k_hybrid_r1_mlp3.25_seq2048}"
 compare_reference_entity="${COMPARE_REFERENCE_ENTITY:-pszemraj}"
 compare_reference_project="${COMPARE_REFERENCE_PROJECT:-}"
@@ -60,6 +60,8 @@ default_prefixes=(
     "${run_prefix_base}_b"
     "${run_prefix_base}_c"
     "${run_prefix_base}_d"
+    "${run_prefix_base}_e"
+    "${run_prefix_base}_f"
 )
 
 if [[ -n "${RUN_PREFIXES:-}" ]]; then
@@ -69,17 +71,21 @@ else
 fi
 
 configs=(
+    "configs/hgdn/retune_deepen_15l_mlp2p375.toml"
+    "configs/hgdn/retune_deepen_15l_mlp2p4375.toml"
     "configs/hgdn/retune_deepen_15l_mlp2p5.toml"
-    "configs/hgdn/retune_deepen_15l_mlp2p625.toml"
-    "configs/hgdn/retune_deepen_15l_mlp2p875.toml"
-    "configs/hgdn/retune_deepen_15l_mlp3.toml"
+    "configs/hgdn/retune_trim_layers_14.toml"
+    "configs/hgdn/retune_trim_layers_14_mlp3p375.toml"
+    "configs/hgdn/retune_trim_layers_14_mlp3p5.toml"
 )
 
 labels=(
-    "15L low-width hedge"
-    "15L long-horizon local winner"
-    "15L post-fix local winner"
-    "15L higher-width hedge"
+    "15L undercut probe"
+    "15L low-mid probe"
+    "15L incumbent anchor"
+    "14L orthogonal rerun"
+    "14L higher-mlp rerun"
+    "14L upper-bound rerun"
 )
 
 if [[ "${#run_prefixes[@]}" -ne "${#configs[@]}" ]]; then
