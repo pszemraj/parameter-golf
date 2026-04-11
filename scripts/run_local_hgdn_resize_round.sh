@@ -21,7 +21,7 @@ wandb_mode="${WANDB_MODE:-online}"
 wandb_project="${WANDB_PROJECT:-pg-hgdn-ablations}"
 wandb_watch="${WANDB_WATCH:-none}"
 wandb_watch_log_freq="${WANDB_WATCH_LOG_FREQ:-25}"
-run_prefix_base="${RUN_PREFIX_BASE:-localretune3}"
+run_prefix_base="${RUN_PREFIX_BASE:-localretune4}"
 bundle_stage_dir="${BUNDLE_STAGE_DIR:-local-scratch/${run_prefix_base}_bundle}"
 archive_output="${ARCHIVE_OUTPUT:-local-scratch/${run_prefix_base}_bundle.7z}"
 command_log="${COMMAND_LOG:-local-scratch/${run_prefix_base}_commands.sh}"
@@ -31,7 +31,7 @@ torch_logs="${TORCH_LOGS:-}"
 torch_trace="${TORCH_TRACE:-}"
 
 ngpu="${NGPU:-1}"
-iterations="${ITERATIONS:-300}"
+iterations="${ITERATIONS:-500}"
 train_batch_tokens="${TRAIN_BATCH_TOKENS:-65536}"
 train_seq_len="${TRAIN_SEQ_LEN:-1024}"
 val_loss_every="${VAL_LOSS_EVERY:-100}"
@@ -56,8 +56,6 @@ default_prefixes=(
     "${run_prefix_base}_d"
     "${run_prefix_base}_e"
     "${run_prefix_base}_f"
-    "${run_prefix_base}_g"
-    "${run_prefix_base}_h"
 )
 
 if [[ -n "${RUN_PREFIXES:-}" ]]; then
@@ -67,25 +65,21 @@ else
 fi
 
 configs=(
-    "configs/hgdn/retune_current.toml"
-    "configs/hgdn/retune_balanced_14l_mlp3.toml"
-    "configs/hgdn/retune_trim_layers_14_mlp3p375.toml"
+    "configs/hgdn/retune_deepen_15l_mlp2p5.toml"
     "configs/hgdn/retune_deepen_15l_mlp2p625.toml"
-    "configs/hgdn/retune_deepen_15l_mlp2p75.toml"
+    "configs/hgdn/retune_deepen_15l_mlp2p667.toml"
     "configs/hgdn/retune_deepen_15l_mlp2p875.toml"
     "configs/hgdn/retune_deepen_15l_mlp3.toml"
-    "configs/hgdn/retune_deepen_15l_mlp3p125.toml"
+    "configs/hgdn/retune_depth16_mlp2p667.toml"
 )
 
 labels=(
-    "current 16L reference"
-    "fast 14L anchor"
-    "best 14L anchor"
-    "15L lower bracket"
-    "15L local winner rerun"
-    "15L upper bracket low"
-    "15L upper bracket mid"
-    "15L upper bracket high"
+    "15L low probe"
+    "15L prior long-run winner"
+    "15L low-mid probe"
+    "15L broad-screen winner"
+    "15L higher-width check"
+    "16L lean control"
 )
 
 if [[ "${#run_prefixes[@]}" -ne "${#configs[@]}" ]]; then
@@ -115,7 +109,7 @@ PY
 
 print_plan() {
     echo
-    echo ">>> Local HGDN resize round (300-step broad screen)"
+    echo ">>> Local HGDN resize round (500-step shortlist confirmation)"
     echo "python_bin=${python_bin}"
     echo "use_wandb=${use_wandb}"
     echo "wandb_mode=${wandb_mode}"
