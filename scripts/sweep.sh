@@ -5,7 +5,11 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/hgdn_shell_common.sh"
 hgdn_setup_repo_root "${BASH_SOURCE[0]}"
 
 NGPU="${NGPU:-1}"
-if (( 8 % NGPU != 0 )); then
+if (( NGPU <= 0 )); then
+    echo "NGPU must be positive: NGPU=$NGPU" >&2
+    exit 1
+fi
+if [[ -z "${GRAD_ACCUM_STEPS:-}" ]] && (( 8 % NGPU != 0 )); then
     echo "NGPU must evenly divide 8 so grad accumulation stays valid: NGPU=$NGPU" >&2
     exit 1
 fi
@@ -36,11 +40,34 @@ setup_perf_env() {
     fi
 }
 
+resolve_grad_accum_steps() {
+    if [[ -n "${GRAD_ACCUM_STEPS:-}" ]]; then
+        if (( GRAD_ACCUM_STEPS < 1 )); then
+            echo "GRAD_ACCUM_STEPS must be >= 1, got ${GRAD_ACCUM_STEPS}" >&2
+            exit 1
+        fi
+        echo "${GRAD_ACCUM_STEPS}"
+        return
+    fi
+    if (( 8 % NGPU != 0 )); then
+        echo "NGPU must evenly divide 8 when GRAD_ACCUM_STEPS is not set: NGPU=$NGPU" >&2
+        exit 1
+    fi
+    echo $((8 / NGPU))
+}
+
 print_launch_summary() {
     local label="$1"
-    local grad_accum_steps=$((8 / NGPU))
+    local grad_accum_steps
+    grad_accum_steps="$(resolve_grad_accum_steps)"
+    local batch_denom=$((NGPU * grad_accum_steps * TRAIN_SEQ_LEN))
+    if (( TRAIN_BATCH_TOKENS % batch_denom != 0 )); then
+        echo "TRAIN_BATCH_TOKENS must be divisible by NGPU * GRAD_ACCUM_STEPS * TRAIN_SEQ_LEN:" >&2
+        echo "  TRAIN_BATCH_TOKENS=$TRAIN_BATCH_TOKENS NGPU=$NGPU GRAD_ACCUM_STEPS=$grad_accum_steps TRAIN_SEQ_LEN=$TRAIN_SEQ_LEN" >&2
+        exit 1
+    fi
     local planned_train_tokens=$((TRAIN_BATCH_TOKENS * ITERATIONS))
-    local local_batch_size=$((TRAIN_BATCH_TOKENS / (NGPU * grad_accum_steps * TRAIN_SEQ_LEN)))
+    local local_batch_size=$((TRAIN_BATCH_TOKENS / batch_denom))
     local wallclock="${MAX_WALLCLOCK_SECONDS:-600.0}"
 
     echo "=== $label: $RUN_ID ==="

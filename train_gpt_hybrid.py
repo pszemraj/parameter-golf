@@ -795,11 +795,26 @@ def main() -> None:
     rank = int(os.environ.get("RANK", "0"))
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
-    if 8 % world_size != 0:
+    if world_size <= 0:
+        raise ValueError(f"WORLD_SIZE must be positive, got WORLD_SIZE={world_size}")
+    grad_accum_steps_override = int(os.environ.get("GRAD_ACCUM_STEPS", "0"))
+    if grad_accum_steps_override < 0:
         raise ValueError(
-            f"WORLD_SIZE must evenly divide 8, got WORLD_SIZE={world_size}"
+            f"GRAD_ACCUM_STEPS must be non-negative, got {grad_accum_steps_override}"
         )
-    grad_accum_steps = 8 // world_size
+    if grad_accum_steps_override > 0:
+        grad_accum_steps = grad_accum_steps_override
+    else:
+        if 8 % world_size != 0:
+            raise ValueError(
+                "WORLD_SIZE must evenly divide 8 when GRAD_ACCUM_STEPS is not "
+                f"explicitly set, got WORLD_SIZE={world_size}"
+            )
+        grad_accum_steps = 8 // world_size
+    if grad_accum_steps < 1:
+        raise ValueError(
+            f"Resolved GRAD_ACCUM_STEPS must be >= 1, got {grad_accum_steps}"
+        )
     grad_scale = 1.0 / grad_accum_steps
     batch_denom = world_size * grad_accum_steps * args.train_seq_len
     if args.train_batch_tokens % batch_denom != 0:

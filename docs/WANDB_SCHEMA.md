@@ -1,6 +1,6 @@
 # HGDN W&B Schema
 
-Last updated: 2026-04-10
+Last updated: 2026-04-11
 
 HGDN runs log W&B config, history, and summary fields under the schema below.
 The relevant trainer is [train_gpt_hybrid.py](../train_gpt_hybrid.py).
@@ -109,6 +109,10 @@ HGDN kernel and layout knobs:
 - `GDN_PACKED_QKV_SPLIT_COPY`
 - `WANDB_WATCH`
 - `WANDB_WATCH_LOG_FREQ`
+
+`GRAD_ACCUM_STEPS` defaults to the matched-contract value derived from
+`WORLD_SIZE`, but may be explicitly overridden for packing and batch-scale
+studies. Keep the logged key the same either way.
 
 ## History
 

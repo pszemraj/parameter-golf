@@ -78,26 +78,50 @@ configs=(
 )
 
 labels=(
-    "14L m3.25 local24"
-    "14L m3.25 local32"
-    "14L m3.25 local48"
-    "14L m3.25 local64"
-    "14L m3.5 local24"
-    "14L m3.5 local32"
-    "14L m3.5 local48"
-    "14L m3.5 local64"
+    "14L m3.25 half-global local32"
+    "14L m3.25 base-global local32"
+    "14L m3.25 double-global local32"
+    "14L m3.25 base-global local64"
+    "14L m3.5 half-global local32"
+    "14L m3.5 base-global local32"
+    "14L m3.5 double-global local32"
+    "14L m3.5 base-global local64"
 )
 
 batch_tokens=(
-    "393216"
+    "262144"
     "524288"
-    "786432"
     "1048576"
-    "393216"
     "524288"
-    "786432"
+    "262144"
+    "524288"
     "1048576"
+    "524288"
 )
+
+grad_accum_steps_matrix=(
+    "4"
+    "8"
+    "16"
+    "4"
+    "4"
+    "8"
+    "16"
+    "4"
+)
+
+if [[ -n "${GRAD_ACCUM_STEPS_OVERRIDE:-}" ]]; then
+    grad_accum_steps_matrix=(
+        "${GRAD_ACCUM_STEPS_OVERRIDE}"
+        "${GRAD_ACCUM_STEPS_OVERRIDE}"
+        "${GRAD_ACCUM_STEPS_OVERRIDE}"
+        "${GRAD_ACCUM_STEPS_OVERRIDE}"
+        "${GRAD_ACCUM_STEPS_OVERRIDE}"
+        "${GRAD_ACCUM_STEPS_OVERRIDE}"
+        "${GRAD_ACCUM_STEPS_OVERRIDE}"
+        "${GRAD_ACCUM_STEPS_OVERRIDE}"
+    )
+fi
 
 if [[ -n "${fixed2k_train_batch_tokens_override}" ]]; then
     batch_tokens=(
@@ -114,10 +138,19 @@ fi
 
 if [[ "${#run_prefixes[@]}" -ne "${#configs[@]}" \
     || "${#run_prefixes[@]}" -ne "${#labels[@]}" \
-    || "${#run_prefixes[@]}" -ne "${#batch_tokens[@]}" ]]; then
-    echo "RUN_PREFIXES, configs, labels, and batch_tokens must have the same count." >&2
+    || "${#run_prefixes[@]}" -ne "${#batch_tokens[@]}" \
+    || "${#run_prefixes[@]}" -ne "${#grad_accum_steps_matrix[@]}" ]]; then
+    echo "RUN_PREFIXES, configs, labels, batch_tokens, and grad_accum_steps_matrix must have the same count." >&2
     exit 1
 fi
+
+for ((i = 0; i < ${#batch_tokens[@]}; i++)); do
+    batch_denom=$((grad_accum_steps_matrix[$i] * fixed2k_seq_len))
+    if (( batch_tokens[$i] % batch_denom != 0 )); then
+        echo "Invalid batch contract at index ${i}: TRAIN_BATCH_TOKENS=${batch_tokens[$i]} must be divisible by GRAD_ACCUM_STEPS=${grad_accum_steps_matrix[$i]} * FIXED2K_SEQ_LEN=${fixed2k_seq_len}." >&2
+        exit 1
+    fi
+done
 
 print_plan() {
     echo
@@ -132,6 +165,7 @@ print_plan() {
     echo "run_hgdn_cuda_parity=${run_hgdn_cuda_parity}"
     echo "fixed2k_iterations=${fixed2k_iterations}"
     echo "fixed2k_train_batch_tokens_override=${fixed2k_train_batch_tokens_override:-<matrix defaults>}"
+    echo "grad_accum_steps_override=${GRAD_ACCUM_STEPS_OVERRIDE:-<matrix defaults>}"
     echo "fixed2k_seq_len=${fixed2k_seq_len}"
     echo "fixed2k_val_loss_every=${fixed2k_val_loss_every}"
     echo "fixed2k_train_log_every=${fixed2k_train_log_every}"
@@ -143,8 +177,8 @@ print_plan() {
     echo "batch:"
     local i
     for ((i = 0; i < ${#configs[@]}; i++)); do
-        local local_batch_size=$((batch_tokens[$i] / (8 * fixed2k_seq_len)))
-        echo "  - ${run_prefixes[$i]} :: ${labels[$i]} :: ${configs[$i]} :: train_batch_tokens=${batch_tokens[$i]} :: local_batch_size=${local_batch_size}"
+        local local_batch_size=$((batch_tokens[$i] / (grad_accum_steps_matrix[$i] * fixed2k_seq_len)))
+        echo "  - ${run_prefixes[$i]} :: ${labels[$i]} :: ${configs[$i]} :: train_batch_tokens=${batch_tokens[$i]} :: grad_accum_steps=${grad_accum_steps_matrix[$i]} :: local_batch_size=${local_batch_size}"
     done
     echo "next_stage=after this proxy pass, run one exact 8x matched-control go/no-go"
 }
@@ -196,6 +230,7 @@ run_batch() {
             "WANDB_MODE=${wandb_mode}" \
             "FIXED2K_ITERATIONS=${fixed2k_iterations}" \
             "TRAIN_BATCH_TOKENS=${batch_tokens[$i]}" \
+            "GRAD_ACCUM_STEPS=${grad_accum_steps_matrix[$i]}" \
             "FIXED2K_SEQ_LEN=${fixed2k_seq_len}" \
             "FIXED2K_VAL_LOSS_EVERY=${fixed2k_val_loss_every}" \
             "FIXED2K_TRAIN_LOG_EVERY=${fixed2k_train_log_every}" \
@@ -211,6 +246,7 @@ run_batch() {
             WANDB_MODE="${wandb_mode}" \
             FIXED2K_ITERATIONS="${fixed2k_iterations}" \
             TRAIN_BATCH_TOKENS="${batch_tokens[$i]}" \
+            GRAD_ACCUM_STEPS="${grad_accum_steps_matrix[$i]}" \
             FIXED2K_SEQ_LEN="${fixed2k_seq_len}" \
             FIXED2K_VAL_LOSS_EVERY="${fixed2k_val_loss_every}" \
             FIXED2K_TRAIN_LOG_EVERY="${fixed2k_train_log_every}" \
@@ -265,10 +301,12 @@ build_bundle() {
         "${configs[*]}" \
         "$(IFS='|'; echo "${labels[*]}")" \
         "${batch_tokens[*]}" \
+        "${grad_accum_steps_matrix[*]}" \
         "${run_prefixes[@]}" <<'PY'
-from pathlib import Path
 import json
+import os
 import sys
+from pathlib import Path
 
 bundle_dir = Path(sys.argv[1])
 run_prefix_base = sys.argv[2]
@@ -288,11 +326,12 @@ fixed2k_train_log_every = int(sys.argv[15])
 configs = sys.argv[16].split()
 labels = sys.argv[17].split("|") if "|" in sys.argv[17] else sys.argv[17].split()
 batch_tokens = [int(value) for value in sys.argv[18].split()]
-run_prefixes = sys.argv[19:]
+grad_accum_steps_matrix = [int(value) for value in sys.argv[19].split()]
+run_prefixes = sys.argv[20:]
 
 plan = []
-for prefix, config, label, train_batch_tokens in zip(
-    run_prefixes, configs, labels, batch_tokens, strict=True
+for prefix, config, label, train_batch_tokens, grad_accum_steps in zip(
+    run_prefixes, configs, labels, batch_tokens, grad_accum_steps_matrix, strict=True
 ):
     plan.append(
         {
@@ -300,7 +339,9 @@ for prefix, config, label, train_batch_tokens in zip(
             "config": config,
             "label": label,
             "train_batch_tokens": train_batch_tokens,
-            "local_batch_size": train_batch_tokens // (8 * fixed2k_seq_len),
+            "grad_accum_steps": grad_accum_steps,
+            "local_batch_size": train_batch_tokens
+            // (grad_accum_steps * fixed2k_seq_len),
         }
     )
 
@@ -328,6 +369,11 @@ manifest = {
         "fixed2k_seq_len": fixed2k_seq_len,
         "fixed2k_val_loss_every": fixed2k_val_loss_every,
         "fixed2k_train_log_every": fixed2k_train_log_every,
+        "grad_accum_steps_override": (
+            int(os.environ["GRAD_ACCUM_STEPS_OVERRIDE"])
+            if "GRAD_ACCUM_STEPS_OVERRIDE" in os.environ
+            else None
+        ),
     },
 }
 (bundle_dir / "bundle_manifest.json").write_text(

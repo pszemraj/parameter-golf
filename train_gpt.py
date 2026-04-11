@@ -949,11 +949,24 @@ def main() -> None:
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     if world_size <= 0:
         raise ValueError(f"WORLD_SIZE must be positive, got {world_size}")
-    if 8 % world_size != 0:
+    grad_accum_steps_override = int(os.environ.get("GRAD_ACCUM_STEPS", "0"))
+    if grad_accum_steps_override < 0:
         raise ValueError(
-            f"WORLD_SIZE={world_size} must divide 8 so grad_accum_steps stays integral"
+            f"GRAD_ACCUM_STEPS must be non-negative, got {grad_accum_steps_override}"
         )
-    grad_accum_steps = 8 // world_size
+    if grad_accum_steps_override > 0:
+        grad_accum_steps = grad_accum_steps_override
+    else:
+        if 8 % world_size != 0:
+            raise ValueError(
+                "WORLD_SIZE must divide 8 when GRAD_ACCUM_STEPS is not explicitly "
+                f"set, got WORLD_SIZE={world_size}"
+            )
+        grad_accum_steps = 8 // world_size
+    if grad_accum_steps < 1:
+        raise ValueError(
+            f"Resolved GRAD_ACCUM_STEPS must be >= 1, got {grad_accum_steps}"
+        )
     grad_scale = 1.0 / grad_accum_steps
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required")

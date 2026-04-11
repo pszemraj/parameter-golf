@@ -23,7 +23,7 @@ Branch: `exp/hgdn`
 - Use the local GPU for broad fixed-data architecture search when the candidate family fits.
 - Use 1xH100 for finalist ranking under the same fixed-token contract.
 - After fixed-token ranking, run a separate H100 wallclock-aware batch-scale / packing pass before the final architecture call.
-- Because the trainer sets `grad_accum_steps = 8 / world_size`, the 1xH100 proxy preserves the same per-GPU local-batch mapping for a given `TRAIN_BATCH_TOKENS`; the unresolved question after the proxy pass is still the exact 8x contract result.
+- Because the trainer defaults to `grad_accum_steps = 8 / world_size`, the 1xH100 proxy preserves the same per-GPU local-batch mapping for a given `TRAIN_BATCH_TOKENS` unless that knob is explicitly overridden; the unresolved question after the proxy pass is still the exact 8x contract result.
 - Treat low VRAM use during saturated fixed-token H100 runs as a signal to study batch-scale behavior later, not as evidence that the fixed-token winner should be replaced.
 - On the compiled HGDN path, default to changes that alter the generated path. Python-side view reshuffles and `.contiguous()` edits are not the main lever.
 - Enable compile diagnostics only when needed:
