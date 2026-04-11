@@ -33,14 +33,25 @@ Last updated: 2026-04-11
 - Use this pass to decide which finalist wins under the actual 10-minute contract.
 - Do not restart the fixed-token ranking just because a legal model leaves spare bytes or VRAM unused.
 
-## 2. Run the norm-placement screen
+## 2. Run one decisive exact 8x matched-control bridge
+
+- After the H100 batch-scale proxy pass picks the live finalist, run:
+  - one exact HGDN submission-style training/eval contract run
+  - one exact matched attention-only control run
+- Keep trainer contract, tokenizer, eval path, and artifact accounting aligned.
+- Do not add leaderboard garnish before this bridge.
+- Treat this as the architecture go/no-go:
+  - if HGDN wins clearly and stays legal, keep it as the main record path
+  - if HGDN loses or only ties while staying materially more painful, demote it from the main record path
+
+## 3. Run the norm-placement screen
 
 - Compare `NORM_STYLE=pre`, `post`, and `keel`.
 - Keep the architecture and training contract fixed.
 - Compare within HGDN first.
 - Add the attention-only baseline only after the HGDN-side direction is clear.
 
-## 3. Work the remaining non-seam HGDN hotspots
+## 4. Work the remaining non-seam HGDN hotspots
 
 - output / gate projection path
 - residual-shell glue on the compiled path
@@ -48,7 +59,7 @@ Last updated: 2026-04-11
 
 Do not reopen the current post-conv front-end seam for more ownership or packing tweaks unless the decomposition changes materially.
 
-## 4. Use compile/backend work only on finalists
+## 5. Use compile/backend work only on finalists
 
 - graph-break and recompile audit with `TORCH_LOGS`
 - `compiled_autograd`
@@ -56,7 +67,7 @@ Do not reopen the current post-conv front-end seam for more ownership or packing
 - dynamic-shape handling only where the logs justify it
 - Nsight or backend swaps only if the compiled H100 profile says the backend is the bottleneck
 
-## 5. Finish the cleanup backlog
+## 6. Finish the cleanup backlog
 
 - profiler/report toolchain consolidation
 - shared env-flag and launch-contract helpers

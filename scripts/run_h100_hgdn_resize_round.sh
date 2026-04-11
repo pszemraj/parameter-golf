@@ -6,7 +6,7 @@ hgdn_setup_repo_root "${BASH_SOURCE[0]}"
 
 if [[ "$#" -ne 0 ]]; then
     echo "Run this script with no arguments." >&2
-    echo "It always executes the full current H100 HGDN resize batch." >&2
+    echo "It always executes the full current H100 HGDN finalist batch-scale batch." >&2
     exit 1
 fi
 
@@ -17,8 +17,8 @@ python_bin="${PYTHON_BIN:-python}"
 wandb_project="${WANDB_PROJECT:-pg-hgdn-ablations}"
 wandb_watch="${WANDB_WATCH:-gradients}"
 wandb_mode="${WANDB_MODE:-online}"
-run_prefix_base="${RUN_PREFIX_BASE:-h100retune6}"
-compare_reference="${COMPARE_REFERENCE:-h100k6_fixed2k_hybrid_r1_mlp3.25_seq2048}"
+run_prefix_base="${RUN_PREFIX_BASE:-h100pack1}"
+compare_reference="${COMPARE_REFERENCE:-h100retune6_f_fixed2k_hybrid_r1_mlp3.5_seq2048}"
 compare_reference_entity="${COMPARE_REFERENCE_ENTITY:-pszemraj}"
 compare_reference_project="${COMPARE_REFERENCE_PROJECT:-}"
 bundle_stage_dir="${BUNDLE_STAGE_DIR:-local-scratch/${run_prefix_base}_bundle}"
@@ -29,18 +29,12 @@ torch_trace="${TORCH_TRACE:-}"
 build_hgdn_cuda="${BUILD_HGDN_CUDA:-1}"
 run_hgdn_cuda_parity="${RUN_HGDN_CUDA_PARITY:-1}"
 fixed2k_iterations="${FIXED2K_ITERATIONS:-1500}"
-fixed2k_train_batch_tokens="${TRAIN_BATCH_TOKENS:-524288}"
+fixed2k_train_batch_tokens_override="${TRAIN_BATCH_TOKENS:-}"
 fixed2k_seq_len="${FIXED2K_SEQ_LEN:-2048}"
 fixed2k_val_loss_every="${FIXED2K_VAL_LOSS_EVERY:-500}"
 fixed2k_train_log_every="${FIXED2K_TRAIN_LOG_EVERY:-200}"
 
 hgdn_ensure_python_module "${python_bin}" py7zr py7zr
-
-if [[ -z "${compare_reference_project}" \
-    && "${wandb_project}" == "pg-hgdn-ablations" \
-    && "${compare_reference}" == "h100k6_fixed2k_hybrid_r1_mlp3.25_seq2048" ]]; then
-    compare_reference_project="pg-hconv-ablations"
-fi
 
 case "${wandb_mode}" in
 online)
@@ -62,6 +56,8 @@ default_prefixes=(
     "${run_prefix_base}_d"
     "${run_prefix_base}_e"
     "${run_prefix_base}_f"
+    "${run_prefix_base}_g"
+    "${run_prefix_base}_h"
 )
 
 if [[ -n "${RUN_PREFIXES:-}" ]]; then
@@ -71,31 +67,61 @@ else
 fi
 
 configs=(
-    "configs/hgdn/retune_deepen_15l_mlp2p375.toml"
-    "configs/hgdn/retune_deepen_15l_mlp2p4375.toml"
-    "configs/hgdn/retune_deepen_15l_mlp2p5.toml"
     "configs/hgdn/retune_trim_layers_14.toml"
-    "configs/hgdn/retune_trim_layers_14_mlp3p375.toml"
+    "configs/hgdn/retune_trim_layers_14.toml"
+    "configs/hgdn/retune_trim_layers_14.toml"
+    "configs/hgdn/retune_trim_layers_14.toml"
+    "configs/hgdn/retune_trim_layers_14_mlp3p5.toml"
+    "configs/hgdn/retune_trim_layers_14_mlp3p5.toml"
+    "configs/hgdn/retune_trim_layers_14_mlp3p5.toml"
     "configs/hgdn/retune_trim_layers_14_mlp3p5.toml"
 )
 
 labels=(
-    "15L undercut probe"
-    "15L low-mid probe"
-    "15L incumbent anchor"
-    "14L orthogonal rerun"
-    "14L higher-mlp rerun"
-    "14L upper-bound rerun"
+    "14L m3.25 local24"
+    "14L m3.25 local32"
+    "14L m3.25 local48"
+    "14L m3.25 local64"
+    "14L m3.5 local24"
+    "14L m3.5 local32"
+    "14L m3.5 local48"
+    "14L m3.5 local64"
 )
 
-if [[ "${#run_prefixes[@]}" -ne "${#configs[@]}" ]]; then
-    echo "RUN_PREFIXES count (${#run_prefixes[@]}) must match config count (${#configs[@]})." >&2
+batch_tokens=(
+    "393216"
+    "524288"
+    "786432"
+    "1048576"
+    "393216"
+    "524288"
+    "786432"
+    "1048576"
+)
+
+if [[ -n "${fixed2k_train_batch_tokens_override}" ]]; then
+    batch_tokens=(
+        "${fixed2k_train_batch_tokens_override}"
+        "${fixed2k_train_batch_tokens_override}"
+        "${fixed2k_train_batch_tokens_override}"
+        "${fixed2k_train_batch_tokens_override}"
+        "${fixed2k_train_batch_tokens_override}"
+        "${fixed2k_train_batch_tokens_override}"
+        "${fixed2k_train_batch_tokens_override}"
+        "${fixed2k_train_batch_tokens_override}"
+    )
+fi
+
+if [[ "${#run_prefixes[@]}" -ne "${#configs[@]}" \
+    || "${#run_prefixes[@]}" -ne "${#labels[@]}" \
+    || "${#run_prefixes[@]}" -ne "${#batch_tokens[@]}" ]]; then
+    echo "RUN_PREFIXES, configs, labels, and batch_tokens must have the same count." >&2
     exit 1
 fi
 
 print_plan() {
     echo
-    echo ">>> H100 HGDN resize round (1500-step finalist screen)"
+    echo ">>> H100 HGDN finalist batch-scale round (1500-step fixed-token proxy)"
     echo "python_bin=${python_bin}"
     echo "wandb_project=${wandb_project}"
     echo "wandb_watch=${wandb_watch}"
@@ -105,7 +131,7 @@ print_plan() {
     echo "build_hgdn_cuda=${build_hgdn_cuda}"
     echo "run_hgdn_cuda_parity=${run_hgdn_cuda_parity}"
     echo "fixed2k_iterations=${fixed2k_iterations}"
-    echo "fixed2k_train_batch_tokens=${fixed2k_train_batch_tokens}"
+    echo "fixed2k_train_batch_tokens_override=${fixed2k_train_batch_tokens_override:-<matrix defaults>}"
     echo "fixed2k_seq_len=${fixed2k_seq_len}"
     echo "fixed2k_val_loss_every=${fixed2k_val_loss_every}"
     echo "fixed2k_train_log_every=${fixed2k_train_log_every}"
@@ -117,8 +143,10 @@ print_plan() {
     echo "batch:"
     local i
     for ((i = 0; i < ${#configs[@]}; i++)); do
-        echo "  - ${run_prefixes[$i]} :: ${labels[$i]} :: ${configs[$i]}"
+        local local_batch_size=$((batch_tokens[$i] / (8 * fixed2k_seq_len)))
+        echo "  - ${run_prefixes[$i]} :: ${labels[$i]} :: ${configs[$i]} :: train_batch_tokens=${batch_tokens[$i]} :: local_batch_size=${local_batch_size}"
     done
+    echo "next_stage=after this proxy pass, run one exact 8x matched-control go/no-go"
 }
 
 prepare_cuda() {
@@ -167,7 +195,7 @@ run_batch() {
             "WANDB_WATCH=${wandb_watch}" \
             "WANDB_MODE=${wandb_mode}" \
             "FIXED2K_ITERATIONS=${fixed2k_iterations}" \
-            "TRAIN_BATCH_TOKENS=${fixed2k_train_batch_tokens}" \
+            "TRAIN_BATCH_TOKENS=${batch_tokens[$i]}" \
             "FIXED2K_SEQ_LEN=${fixed2k_seq_len}" \
             "FIXED2K_VAL_LOSS_EVERY=${fixed2k_val_loss_every}" \
             "FIXED2K_TRAIN_LOG_EVERY=${fixed2k_train_log_every}" \
@@ -182,7 +210,7 @@ run_batch() {
             WANDB_WATCH="${wandb_watch}" \
             WANDB_MODE="${wandb_mode}" \
             FIXED2K_ITERATIONS="${fixed2k_iterations}" \
-            TRAIN_BATCH_TOKENS="${fixed2k_train_batch_tokens}" \
+            TRAIN_BATCH_TOKENS="${batch_tokens[$i]}" \
             FIXED2K_SEQ_LEN="${fixed2k_seq_len}" \
             FIXED2K_VAL_LOSS_EVERY="${fixed2k_val_loss_every}" \
             FIXED2K_TRAIN_LOG_EVERY="${fixed2k_train_log_every}" \
@@ -230,11 +258,13 @@ build_bundle() {
         "${torch_trace}" \
         "${command_log}" \
         "${fixed2k_iterations}" \
-        "${fixed2k_train_batch_tokens}" \
+        "${fixed2k_train_batch_tokens_override}" \
         "${fixed2k_seq_len}" \
         "${fixed2k_val_loss_every}" \
         "${fixed2k_train_log_every}" \
         "${configs[*]}" \
+        "$(IFS='|'; echo "${labels[*]}")" \
+        "${batch_tokens[*]}" \
         "${run_prefixes[@]}" <<'PY'
 from pathlib import Path
 import json
@@ -251,17 +281,35 @@ torch_logs = sys.argv[8]
 torch_trace = sys.argv[9]
 command_log = sys.argv[10]
 fixed2k_iterations = int(sys.argv[11])
-fixed2k_train_batch_tokens = int(sys.argv[12])
+fixed2k_train_batch_tokens_override = sys.argv[12]
 fixed2k_seq_len = int(sys.argv[13])
 fixed2k_val_loss_every = int(sys.argv[14])
 fixed2k_train_log_every = int(sys.argv[15])
 configs = sys.argv[16].split()
-run_prefixes = sys.argv[17:]
+labels = sys.argv[17].split("|") if "|" in sys.argv[17] else sys.argv[17].split()
+batch_tokens = [int(value) for value in sys.argv[18].split()]
+run_prefixes = sys.argv[19:]
+
+plan = []
+for prefix, config, label, train_batch_tokens in zip(
+    run_prefixes, configs, labels, batch_tokens, strict=True
+):
+    plan.append(
+        {
+            "run_prefix": prefix,
+            "config": config,
+            "label": label,
+            "train_batch_tokens": train_batch_tokens,
+            "local_batch_size": train_batch_tokens // (8 * fixed2k_seq_len),
+        }
+    )
 
 manifest = {
     "run_prefix_base": run_prefix_base,
     "run_prefixes": run_prefixes,
     "configs": configs,
+    "labels": labels,
+    "plan": plan,
     "compare_reference": compare_reference,
     "compare_reference_entity": compare_reference_entity,
     "compare_reference_project": compare_reference_project,
@@ -272,7 +320,11 @@ manifest = {
     "torch_trace": torch_trace or None,
     "contract": {
         "fixed2k_iterations": fixed2k_iterations,
-        "train_batch_tokens": fixed2k_train_batch_tokens,
+        "train_batch_tokens_override": (
+            int(fixed2k_train_batch_tokens_override)
+            if fixed2k_train_batch_tokens_override
+            else None
+        ),
         "fixed2k_seq_len": fixed2k_seq_len,
         "fixed2k_val_loss_every": fixed2k_val_loss_every,
         "fixed2k_train_log_every": fixed2k_train_log_every,

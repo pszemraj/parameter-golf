@@ -14,7 +14,7 @@ Branch: `exp/hgdn`
   - `GDN_CONTROL_PROJ_FP32=0`
   - `GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=1`
 - The current post-conv front-end seam is closed after `h100k20`.
-- The current architecture stage is fixed-token screening followed by a separate H100 wallclock-aware finalist pass on the top `2-3` candidates.
+- The current architecture stage is fixed-token screening, then an H100 batch-scale finalist pass on the top `2` candidates, then one exact 8x matched-control go/no-go run.
 - Real HGDN ablations go to `pg-hgdn-ablations`.
 - Local Python commands on this checkout use `conda run -s --name pg ...`.
 
@@ -23,6 +23,7 @@ Branch: `exp/hgdn`
 - Use the local GPU for broad fixed-data architecture search when the candidate family fits.
 - Use 1xH100 for finalist ranking under the same fixed-token contract.
 - After fixed-token ranking, run a separate H100 wallclock-aware batch-scale / packing pass before the final architecture call.
+- Because the trainer sets `grad_accum_steps = 8 / world_size`, the 1xH100 proxy preserves the same per-GPU local-batch mapping for a given `TRAIN_BATCH_TOKENS`; the unresolved question after the proxy pass is still the exact 8x contract result.
 - Treat low VRAM use during saturated fixed-token H100 runs as a signal to study batch-scale behavior later, not as evidence that the fixed-token winner should be replaced.
 - On the compiled HGDN path, default to changes that alter the generated path. Python-side view reshuffles and `.contiguous()` edits are not the main lever.
 - Enable compile diagnostics only when needed:
@@ -167,4 +168,4 @@ Local analysis helpers:
 
 - HGDN already shows a learning-per-step edge over the attention-only baseline on matched H100 quality checks.
 - The unresolved question is compute-optimal sizing and packing, not whether the branch should keep relitigating the closed front-end seam.
-- The next useful evidence is the H100 resize ranking plus the separate batch-scale / packing pass, not another Python-side layout experiment.
+- The next useful evidence is the H100 batch-scale / packing pass and then one exact 8x HGDN-vs-attention-only control run, not another Python-side layout experiment.
