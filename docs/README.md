@@ -14,20 +14,22 @@ Branch: `exp/hgdn`
   - `GDN_CONTROL_PROJ_FP32=0`
   - `GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=1`
 - The current post-conv front-end seam is closed after `h100k20`.
-- The current architecture stage is fixed-token screening, then an H100 batch-scale finalist pass, then one exact-mappable H100 packing refinement on the live bracket, then one exact 8x matched-control go/no-go run.
+- The current architecture stage is fixed-token screening, then an H100 batch-scale finalist pass, then one H100 follow-up pass on the live 14L winner versus the best 15L local finalists, then one exact 8x matched-control go/no-go run.
 - Real HGDN ablations go to `pg-hgdn-ablations`.
 - Local Python commands on this checkout use `conda run -s --name pg ...`.
 
 ## Active architecture bracket
 
-- Live exact-mappable finalists:
+- Live H100 reference:
   - `14L x 384d x mlp3.25`
-    - current exact-mappable leader: `h100pack1_c_fixed2k_hybrid_r1_mlp3.25_seq2048`
-  - `14L x 384d x mlp3.5`
-    - current exact-mappable companion: `h100pack1_g_fixed2k_hybrid_r1_mlp3.5_seq2048`
-- `15L x 384d` is out of the live bracket.
-- `double-global local32` is the current exact-mappable contract to beat.
-- The only unresolved packing question on the live bracket is whether `double-global local64` beats `double-global local32`.
+    - current H100 batch-scale leader: `h100pack2_b_fixed2k_hybrid_r1_mlp3.25_seq2048`
+    - contract: `TRAIN_BATCH_TOKENS=1048576`, `grad_accum_steps=8`, `local_batch_size=64`
+- The `14L x 384d x mlp3.5` branch is no longer the live 14L winner:
+  - `local64` was better than `local32`
+  - the best `mlp3.5` point still lost to `mlp3.25`
+  - the stronger `local64` point was over budget
+- `15L x 384d` is back in scope for one more H100 pass because the local `500`-step shortlist still favored `mlp2.625` to `mlp2.875`.
+- The current unresolved architecture question is no longer the 14L packing cross-term. It is whether the best `15L` finalist can beat `h100pack2_b` under the same H100 batch contract.
 - Exact metrics, reject rationale, and run history live in [PROFILING_LOG.md](PROFILING_LOG.md).
 
 ## Operating rules
@@ -35,7 +37,7 @@ Branch: `exp/hgdn`
 - Use the local GPU for broad fixed-token architecture search when the candidate family fits memory.
 - Use 1xH100 for finalist ranking under the same fixed-token contract.
 - After fixed-token ranking, run a separate H100 batch-scale / packing pass before the final architecture call.
-- If that pass exposes a missing exact-8x cross-term, run one narrow exact-mappable H100 refinement before paying for the full 8x bridge.
+- If a narrow H100 refinement resolves the remaining batch-scale question, pivot back to the strongest surviving architecture competitors instead of continuing to overfit the already-resolved seam.
 - Because the trainer defaults to `grad_accum_steps = 8 / world_size`, the 1xH100 proxy preserves the same per-GPU local-batch mapping for a given `TRAIN_BATCH_TOKENS` unless that knob is explicitly overridden. The unresolved question after the proxy pass is still the exact 8x contract result.
 - Fixed-token sweeps answer learning efficiency. The final architecture call still has to survive the H100 wallclock contract.
 - Low VRAM use during saturated fixed-token H100 runs is not a failure by itself. Treat it as a reason to study packing, not to discard the architecture.
@@ -61,6 +63,7 @@ Branch: `exp/hgdn`
 - H100 fixed-token finalist screen:
   - default to `1500` steps
   - keep `VAL_LOSS_EVERY=500`
+- H100 follow-up passes after the first finalist ranking should keep the same `1500`-step contract unless the question explicitly changes.
 - Only pay for `2000` H100 steps when the `1500`-step finalists are still crossing, the margin is tiny, or a final tie-break is needed.
 - Current evidence behind those defaults:
   - local `retune2`: ranking was already mostly stable by `300` and very stable by `500`

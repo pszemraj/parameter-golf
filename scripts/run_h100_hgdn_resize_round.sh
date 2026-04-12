@@ -17,8 +17,8 @@ python_bin="${PYTHON_BIN:-python}"
 wandb_project="${WANDB_PROJECT:-pg-hgdn-ablations}"
 wandb_watch="${WANDB_WATCH:-gradients}"
 wandb_mode="${WANDB_MODE:-online}"
-run_prefix_base="${RUN_PREFIX_BASE:-h100pack2}"
-compare_reference="${COMPARE_REFERENCE:-h100pack1_c_fixed2k_hybrid_r1_mlp3.25_seq2048}"
+run_prefix_base="${RUN_PREFIX_BASE:-h100pack3}"
+compare_reference="${COMPARE_REFERENCE:-h100pack2_b_fixed2k_hybrid_r1_mlp3.25_seq2048}"
 compare_reference_entity="${COMPARE_REFERENCE_ENTITY:-pszemraj}"
 compare_reference_project="${COMPARE_REFERENCE_PROJECT:-}"
 bundle_stage_dir="${BUNDLE_STAGE_DIR:-local-scratch/${run_prefix_base}_bundle}"
@@ -54,6 +54,7 @@ default_prefixes=(
     "${run_prefix_base}_b"
     "${run_prefix_base}_c"
     "${run_prefix_base}_d"
+    "${run_prefix_base}_e"
 )
 
 if [[ -n "${RUN_PREFIXES:-}" ]]; then
@@ -64,16 +65,18 @@ fi
 
 configs=(
     "configs/hgdn/retune_trim_layers_14.toml"
-    "configs/hgdn/retune_trim_layers_14.toml"
-    "configs/hgdn/retune_trim_layers_14_mlp3p5.toml"
-    "configs/hgdn/retune_trim_layers_14_mlp3p5.toml"
+    "configs/hgdn/retune_deepen_15l_mlp2p625.toml"
+    "configs/hgdn/retune_deepen_15l_mlp2p667.toml"
+    "configs/hgdn/retune_deepen_15l_mlp2p875.toml"
+    "configs/hgdn/retune_deepen_15l_mlp3.toml"
 )
 
 labels=(
-    "14L m3.25 double-global local32"
-    "14L m3.25 double-global local64"
-    "14L m3.5 double-global local32"
-    "14L m3.5 double-global local64"
+    "14L m3.25 live H100 ref"
+    "15L m2.625 local64 finalist"
+    "15L m2.667 local64 finalist"
+    "15L m2.875 local64 finalist"
+    "15L m3.0 local64 ceiling"
 )
 
 batch_tokens=(
@@ -81,12 +84,14 @@ batch_tokens=(
     "1048576"
     "1048576"
     "1048576"
+    "1048576"
 )
 
 grad_accum_steps_matrix=(
-    "16"
     "8"
-    "16"
+    "8"
+    "8"
+    "8"
     "8"
 )
 
@@ -96,11 +101,13 @@ if [[ -n "${GRAD_ACCUM_STEPS_OVERRIDE:-}" ]]; then
         "${GRAD_ACCUM_STEPS_OVERRIDE}"
         "${GRAD_ACCUM_STEPS_OVERRIDE}"
         "${GRAD_ACCUM_STEPS_OVERRIDE}"
+        "${GRAD_ACCUM_STEPS_OVERRIDE}"
     )
 fi
 
 if [[ -n "${fixed2k_train_batch_tokens_override}" ]]; then
     batch_tokens=(
+        "${fixed2k_train_batch_tokens_override}"
         "${fixed2k_train_batch_tokens_override}"
         "${fixed2k_train_batch_tokens_override}"
         "${fixed2k_train_batch_tokens_override}"
@@ -126,7 +133,7 @@ done
 
 print_plan() {
     echo
-    echo ">>> H100 HGDN exact-mappable packing refinement round (1500-step fixed-token proxy)"
+    echo ">>> H100 HGDN finalist follow-up round (1500-step fixed-token proxy)"
     echo "python_bin=${python_bin}"
     echo "wandb_project=${wandb_project}"
     echo "wandb_watch=${wandb_watch}"
@@ -152,7 +159,7 @@ print_plan() {
         local local_batch_size=$((batch_tokens[$i] / (grad_accum_steps_matrix[$i] * fixed2k_seq_len)))
         echo "  - ${run_prefixes[$i]} :: ${labels[$i]} :: ${configs[$i]} :: train_batch_tokens=${batch_tokens[$i]} :: grad_accum_steps=${grad_accum_steps_matrix[$i]} :: local_batch_size=${local_batch_size}"
     done
-    echo "next_stage=after this exact-mappable refinement, run one exact 8x matched-control go/no-go"
+    echo "next_stage=after this pass, narrow to one HGDN finalist and run one exact 8x matched-control go/no-go"
 }
 
 prepare_cuda() {

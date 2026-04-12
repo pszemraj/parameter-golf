@@ -1,9 +1,111 @@
 # Profiling Log
 
-Last updated: 2026-04-12 00:50 EDT
+Last updated: 2026-04-12 12:20 EDT
 
 Profiler-driven checkpoints that should survive beyond the raw artifacts under
 `profiles/`.
+
+## 2026-04-12 — H100 pack2 resolved the last 14-layer packing cross-term and moved the live H100 reference to `local64` (`h100pack2`)
+
+Artifacts:
+
+- raw bundle:
+  - `local-scratch/h100pack2_bundle.7z`
+
+Contract:
+
+- active HGDN kernel baseline:
+  - `winner_20260405_19`
+- historical H100 batch-scale reference entering the pass:
+  - `h100pack1_c_fixed2k_hybrid_r1_mlp3.25_seq2048`
+- pass purpose:
+  - resolve the missing exact-mappable cross-term on the live `14L x 384d`
+    bracket
+- shared batch contract:
+  - `TRAIN_BATCH_TOKENS=1048576`
+- factors:
+  - `mlp3.25`
+  - `mlp3.5`
+  - `local32`
+  - `local64`
+
+### Main finding
+
+The new live H100 batch-scale reference is:
+
+- `h100pack2_b_fixed2k_hybrid_r1_mlp3.25_seq2048`
+  - contract:
+    - `double-global local64`
+  - sampled eval at `1000`:
+    - `2.4457`
+  - eval at `1500`:
+    - `2.3721`
+  - final roundtrip:
+    - `2.3883`
+  - last step time:
+    - `1913.09 ms`
+  - artifact total:
+    - `15,271,360`
+  - headroom:
+    - `728,640`
+
+Read:
+
+- against the old `h100pack1_c` reference, this improved:
+  - sampled eval by `0.0041` bpb
+  - final roundtrip by `0.0075` bpb
+- this was not a pure architecture win over pack1:
+  - it came from resolving the batch-scale / packing choice on the same live
+    `14L x 384d x mlp3.25` family
+
+### What the pass actually taught
+
+`local64` beat `local32` on both live 14-layer families under the same
+`TRAIN_BATCH_TOKENS=1048576` contract:
+
+- `mlp3.25`
+  - `local32`:
+    - `h100pack2_a_fixed2k_hybrid_r1_mlp3.25_seq2048`
+    - eval `1500`: `2.3988`
+    - roundtrip `2.4142`
+    - step `2178.09 ms`
+  - `local64`:
+    - `h100pack2_b_fixed2k_hybrid_r1_mlp3.25_seq2048`
+    - eval `1500`: `2.3721`
+    - roundtrip `2.3883`
+    - step `1913.09 ms`
+- `mlp3.5`
+  - `local32`:
+    - `h100pack2_c_fixed2k_hybrid_r1_mlp3.5_seq2048`
+    - eval `1500`: `2.3834`
+    - roundtrip `2.3979`
+    - step `1989.53 ms`
+    - headroom `3,606`
+  - `local64`:
+    - `h100pack2_d_fixed2k_hybrid_r1_mlp3.5_seq2048`
+    - eval `1500`: `2.3793`
+    - roundtrip `2.3952`
+    - step `1851.14 ms`
+    - status `OVER_LIMIT`
+    - headroom `-8,240`
+
+So the old unresolved packing question is closed:
+
+- `local64` is the better mapping on the live 14-layer batch-scale contract
+- `mlp3.25` remains the best legal point inside that family
+- `mlp3.5` is no longer attractive as the live 14-layer winner:
+  - `local32` is legal but worse
+  - `local64` is slightly better than `local32` but disqualified
+
+### Decision
+
+- promote `h100pack2_b` to the live H100 reference
+- stop spending more H100 time on the resolved `14L` packing cross-term
+- pivot the next H100 pass back to architecture competition:
+  - keep `14L x 384d x mlp3.25` as the live H100 anchor
+  - test the strongest surviving `15L x 384d` local finalists under the same
+    `double-global local64` H100 contract
+- after that, pay for the exact 8x HGDN-vs-attention-only bridge
 
 ## 2026-04-12 — H100 pack1 changed the live 14-layer contract and exposed one last exact-mappable cross-term (`h100pack1`)
 
