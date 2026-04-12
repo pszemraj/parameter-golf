@@ -32,6 +32,9 @@ Branch: `exp/hgdn`
 - The current unresolved question is a cross-family batch-scale question, not a single-family packing question:
   - does the jump from `local64` to `local128` help the live `14L` and `15L` finalists similarly
   - or does one family gain materially more from the extra per-GPU batch
+- Scope guardrail:
+  - this follow-up is one bounded proxy ladder, not a reopened architecture sweep
+  - no new families, no new widths, and no third batch point unless the ladder comes back contradictory
 - Exact metrics, reject rationale, and run history live in [PROFILING_LOG.md](PROFILING_LOG.md).
 
 ## Operating rules

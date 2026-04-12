@@ -109,6 +109,11 @@ So the old unresolved packing question is closed:
     - `TRAIN_BATCH_TOKENS=2097152`
   - keep `GRAD_ACCUM_STEPS=8` fixed so the 1x mapping stays exact-mappable
     to the 8x contract
+- scope guardrail:
+  - this replaces the old narrow packing refinement
+  - it does not authorize another broad H100 search
+  - after this ladder, the next paid step is the exact 8x bridge unless the
+    ladder result is internally contradictory
 - after that, pay for the exact 8x HGDN-vs-attention-only bridge
 
 ## 2026-04-12 — H100 pack1 changed the live 14-layer contract and exposed one last exact-mappable cross-term (`h100pack1`)

@@ -13,6 +13,11 @@ Last updated: 2026-04-12
   - `15L x 384d x mlp2.625` at `TRAIN_BATCH_TOKENS=1048576` and `2097152`
   - `15L x 384d x mlp2.875` at `TRAIN_BATCH_TOKENS=1048576` and `2097152`
 - This pass answers whether larger per-GPU local batch changes the family ranking, not just whether the current 14L winner can use more memory.
+- Stop after this ladder unless the result is genuinely contradictory:
+  - no extra widths
+  - no extra depths
+  - no third batch point
+  - no second proxy ladder just because there is headroom
 - Use [`../scripts/run_h100_hgdn_resize_round.sh`](../scripts/run_h100_hgdn_resize_round.sh) for this batch.
 - The output of this pass is one HGDN bridge candidate, not another open-ended architecture expansion.
 

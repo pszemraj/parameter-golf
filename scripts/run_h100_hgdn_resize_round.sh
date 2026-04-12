@@ -140,7 +140,7 @@ done
 
 print_plan() {
     echo
-    echo ">>> H100 HGDN finalist follow-up round (1500-step fixed-token proxy)"
+    echo ">>> H100 HGDN bounded finalist follow-up round (1500-step fixed-token proxy)"
     echo "python_bin=${python_bin}"
     echo "wandb_project=${wandb_project}"
     echo "wandb_watch=${wandb_watch}"
@@ -166,6 +166,7 @@ print_plan() {
         local local_batch_size=$((batch_tokens[$i] / (grad_accum_steps_matrix[$i] * fixed2k_seq_len)))
         echo "  - ${run_prefixes[$i]} :: ${labels[$i]} :: ${configs[$i]} :: train_batch_tokens=${batch_tokens[$i]} :: grad_accum_steps=${grad_accum_steps_matrix[$i]} :: local_batch_size=${local_batch_size}"
     done
+    echo "scope_guardrail=this is the single remaining H100 proxy ladder before the exact 8x bridge unless the result is contradictory"
     echo "next_stage=after this pass, narrow to one HGDN finalist and run one exact 8x matched-control go/no-go"
 }
 
