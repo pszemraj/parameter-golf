@@ -101,10 +101,14 @@ So the old unresolved packing question is closed:
 
 - promote `h100pack2_b` to the live H100 reference
 - stop spending more H100 time on the resolved `14L` packing cross-term
-- pivot the next H100 pass back to architecture competition:
+- pivot the next H100 pass to a cross-family batch-scale ladder:
   - keep `14L x 384d x mlp3.25` as the live H100 anchor
-  - test the strongest surviving `15L x 384d` local finalists under the same
-    `double-global local64` H100 contract
+  - test both the live `14L` anchor and the strongest surviving `15L x 384d`
+    finalists at:
+    - `TRAIN_BATCH_TOKENS=1048576`
+    - `TRAIN_BATCH_TOKENS=2097152`
+  - keep `GRAD_ACCUM_STEPS=8` fixed so the 1x mapping stays exact-mappable
+    to the 8x contract
 - after that, pay for the exact 8x HGDN-vs-attention-only bridge
 
 ## 2026-04-12 — H100 pack1 changed the live 14-layer contract and exposed one last exact-mappable cross-term (`h100pack1`)

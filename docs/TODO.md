@@ -6,15 +6,13 @@ Last updated: 2026-04-12
 
 - Keep the active kernel baseline at [`winner_20260405_19.toml`](../configs/hgdn/winner_20260405_19.toml).
 - Keep `h100pack2_b_fixed2k_hybrid_r1_mlp3.25_seq2048` as the live H100 reference.
-- Hold the H100 batch contract fixed:
-  - `TRAIN_BATCH_TOKENS=1048576`
-  - `GRAD_ACCUM_STEPS=8`
-  - `local_batch_size=64`
-- Compare the live 14L winner against the strongest surviving `15L x 384d` local finalists:
-  - `retune_deepen_15l_mlp2p625`
-  - `retune_deepen_15l_mlp2p667`
-  - `retune_deepen_15l_mlp2p875`
-  - `retune_deepen_15l_mlp3`
+- Run a cross-family batch-scale ladder instead of probing only one finalist.
+- Keep `GRAD_ACCUM_STEPS=8` fixed so the 1xH100 proxy stays exact-mappable to the 8x contract.
+- Compare these points:
+  - `14L x 384d x mlp3.25` at `TRAIN_BATCH_TOKENS=1048576` and `2097152`
+  - `15L x 384d x mlp2.625` at `TRAIN_BATCH_TOKENS=1048576` and `2097152`
+  - `15L x 384d x mlp2.875` at `TRAIN_BATCH_TOKENS=1048576` and `2097152`
+- This pass answers whether larger per-GPU local batch changes the family ranking, not just whether the current 14L winner can use more memory.
 - Use [`../scripts/run_h100_hgdn_resize_round.sh`](../scripts/run_h100_hgdn_resize_round.sh) for this batch.
 - The output of this pass is one HGDN bridge candidate, not another open-ended architecture expansion.
 

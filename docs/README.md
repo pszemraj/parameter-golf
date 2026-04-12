@@ -14,7 +14,7 @@ Branch: `exp/hgdn`
   - `GDN_CONTROL_PROJ_FP32=0`
   - `GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=1`
 - The current post-conv front-end seam is closed after `h100k20`.
-- The current architecture stage is fixed-token screening, then an H100 batch-scale finalist pass, then one H100 follow-up pass on the live 14L winner versus the best 15L local finalists, then one exact 8x matched-control go/no-go run.
+- The current architecture stage is fixed-token screening, then an H100 batch-scale finalist pass, then one H100 cross-family batch-scale follow-up on the live 14L winner and the strongest 15L finalists, then one exact 8x matched-control go/no-go run.
 - Real HGDN ablations go to `pg-hgdn-ablations`.
 - Local Python commands on this checkout use `conda run -s --name pg ...`.
 
@@ -29,7 +29,9 @@ Branch: `exp/hgdn`
   - the best `mlp3.5` point still lost to `mlp3.25`
   - the stronger `local64` point was over budget
 - `15L x 384d` is back in scope for one more H100 pass because the local `500`-step shortlist still favored `mlp2.625` to `mlp2.875`.
-- The current unresolved architecture question is no longer the 14L packing cross-term. It is whether the best `15L` finalist can beat `h100pack2_b` under the same H100 batch contract.
+- The current unresolved question is a cross-family batch-scale question, not a single-family packing question:
+  - does the jump from `local64` to `local128` help the live `14L` and `15L` finalists similarly
+  - or does one family gain materially more from the extra per-GPU batch
 - Exact metrics, reject rationale, and run history live in [PROFILING_LOG.md](PROFILING_LOG.md).
 
 ## Operating rules

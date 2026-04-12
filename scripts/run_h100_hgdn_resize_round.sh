@@ -55,6 +55,7 @@ default_prefixes=(
     "${run_prefix_base}_c"
     "${run_prefix_base}_d"
     "${run_prefix_base}_e"
+    "${run_prefix_base}_f"
 )
 
 if [[ -n "${RUN_PREFIXES:-}" ]]; then
@@ -65,29 +66,33 @@ fi
 
 configs=(
     "configs/hgdn/retune_trim_layers_14.toml"
+    "configs/hgdn/retune_trim_layers_14.toml"
     "configs/hgdn/retune_deepen_15l_mlp2p625.toml"
-    "configs/hgdn/retune_deepen_15l_mlp2p667.toml"
+    "configs/hgdn/retune_deepen_15l_mlp2p625.toml"
     "configs/hgdn/retune_deepen_15l_mlp2p875.toml"
-    "configs/hgdn/retune_deepen_15l_mlp3.toml"
+    "configs/hgdn/retune_deepen_15l_mlp2p875.toml"
 )
 
 labels=(
     "14L m3.25 live H100 ref"
+    "14L m3.25 local128 probe"
     "15L m2.625 local64 finalist"
-    "15L m2.667 local64 finalist"
+    "15L m2.625 local128 probe"
     "15L m2.875 local64 finalist"
-    "15L m3.0 local64 ceiling"
+    "15L m2.875 local128 probe"
 )
 
 batch_tokens=(
     "1048576"
+    "2097152"
     "1048576"
+    "2097152"
     "1048576"
-    "1048576"
-    "1048576"
+    "2097152"
 )
 
 grad_accum_steps_matrix=(
+    "8"
     "8"
     "8"
     "8"
@@ -102,11 +107,13 @@ if [[ -n "${GRAD_ACCUM_STEPS_OVERRIDE:-}" ]]; then
         "${GRAD_ACCUM_STEPS_OVERRIDE}"
         "${GRAD_ACCUM_STEPS_OVERRIDE}"
         "${GRAD_ACCUM_STEPS_OVERRIDE}"
+        "${GRAD_ACCUM_STEPS_OVERRIDE}"
     )
 fi
 
 if [[ -n "${fixed2k_train_batch_tokens_override}" ]]; then
     batch_tokens=(
+        "${fixed2k_train_batch_tokens_override}"
         "${fixed2k_train_batch_tokens_override}"
         "${fixed2k_train_batch_tokens_override}"
         "${fixed2k_train_batch_tokens_override}"
