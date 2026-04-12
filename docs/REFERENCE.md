@@ -1,8 +1,6 @@
-# olmo3-style Hybrid GDN: a Reference
+# OLMo Hybrid 7B Reference
 
-> reference/notes for olmo-hybrid, primary inspiration for hgdn
-
-# OLMo Hybrid 7B - Technical Architecture Briefing
+OLMo Hybrid is the main external architectural reference for the HGDN branch.
 
 ## 1. What It Is
 

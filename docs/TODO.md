@@ -2,34 +2,17 @@
 
 Last updated: 2026-04-12
 
-## 1. Run one narrow H100 packing refinement on the live 14-layer bracket
+## 1. Finish the narrow H100 exact-mappable packing refinement
 
 - Keep the active kernel baseline at [`winner_20260405_19.toml`](../configs/hgdn/winner_20260405_19.toml).
-- Keep the fixed-token H100 reference anchored on `h100k6_fixed2k_hybrid_r1_mlp3.25_seq2048`.
-- `h100pack1` already answered the broad batch-scale question:
-  - exact-mappable leader:
-    - `h100pack1_c_fixed2k_hybrid_r1_mlp3.25_seq2048`
-    - `double-global local32`
-    - roundtrip `2.3958`
-  - exact-mappable companion:
-    - `h100pack1_g_fixed2k_hybrid_r1_mlp3.5_seq2048`
-    - `double-global local32`
-    - roundtrip `2.4010`
-  - 1x-only hint:
-    - `h100pack1_h_fixed2k_hybrid_r1_mlp3.5_seq2048`
-    - `base-global local64`
-    - roundtrip `2.4077`
-- The remaining missing cross-term is exact-mappable `double-global local64`.
-- Run only:
-  - `14L x 384d x mlp3.25` at `TRAIN_BATCH_TOKENS=1048576`
-    - `local32`
-    - `local64`
-  - `14L x 384d x mlp3.5` at `TRAIN_BATCH_TOKENS=1048576`
-    - `local32`
-    - `local64`
-- Use this pass to decide whether the bridge candidate stays:
-  - `double-global local32`
-  - or moves to `double-global local64`
+- Keep the live bracket narrowed to:
+  - `14L x 384d x mlp3.25`
+  - `14L x 384d x mlp3.5`
+- Run only the missing exact-mappable packing cross-term at `TRAIN_BATCH_TOKENS=1048576`:
+  - `local32`
+  - `local64`
+- Use [`../scripts/run_h100_hgdn_resize_round.sh`](../scripts/run_h100_hgdn_resize_round.sh) for this batch.
+- The output of this pass is a single bridge candidate, not another broad architecture screen.
 
 ## 2. Run one decisive exact 8x matched-control bridge
 
@@ -42,7 +25,7 @@ Last updated: 2026-04-12
   - if HGDN wins clearly and stays legal, keep it as the main record path
   - if HGDN loses or only ties while staying materially more painful, demote it from the main record path
 
-## 3. Run the norm-placement screen
+## 3. Run the norm-placement screen on the live bracket only
 
 - Compare `NORM_STYLE=pre`, `post`, and `keel`.
 - Keep the architecture and training contract fixed.

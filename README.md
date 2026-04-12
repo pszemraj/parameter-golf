@@ -162,7 +162,10 @@ By default, this command prints `train_loss` step logs during training and print
 
 ### Hybrid HGDN Workflow
 
-The hybrid Gated DeltaNet trainer lives at the repo root as `train_gpt_hybrid.py`, and the helper launch scripts live under `scripts/`.
+The hybrid Gated DeltaNet trainer lives at the repo root as `train_gpt_hybrid.py`.
+Configs live under `configs/hgdn/`, the structured launcher lives at
+`scripts/hgdn.py`, and the active branch notes live in
+[docs/README.md](docs/README.md).
 
 If you cloned fresh and do not yet have the tokenizer or dataset locally, download the published `sp1024` assets first:
 
@@ -170,25 +173,35 @@ If you cloned fresh and do not yet have the tokenizer or dataset locally, downlo
 python3 data/cached_challenge_fineweb.py --variant sp1024 --train-shards 1
 ```
 
-Once those files exist at `./data/datasets/fineweb10B_sp1024/` and `./data/tokenizers/fineweb_1024_bpe.model`, you can run the hybrid smoke and matched comparison helpers from the repo root:
+Once those files exist at `./data/datasets/fineweb10B_sp1024/` and
+`./data/tokenizers/fineweb_1024_bpe.model`, the current HGDN entrypoints are:
 
 ```bash
-scripts/sweep.sh quick
-scripts/sweep.sh single
-scripts/sweep.sh baseline
-scripts/sweep.sh depth
+python3 scripts/hgdn.py --help
+bash scripts/run_local_hgdn_resize_round.sh
+bash scripts/run_h100_hgdn_resize_round.sh
 ```
 
-These helpers accept `DATA_PATH` and `TOKENIZER_PATH` overrides if you want to point at a different local export, and they now emit their launch contract up front so matched comparisons are explicit.
+- `scripts/run_local_hgdn_resize_round.sh` runs the current local fixed-token architecture batch.
+- `scripts/run_h100_hgdn_resize_round.sh` runs the current 1xH100 finalist / packing batch.
+- Both scripts print the launch contract up front and bundle the relevant logs and configs afterward.
+- Real HGDN ablations should log to the W&B project `pg-hgdn-ablations`.
 
-Hybrid compile defaults now use `COMPILE_STRATEGY=model`. On the local 4070 throughput screens, plain top-level model compilation outperformed the more selective GDN-boundary strategy for the full HGDN preset. The experimental `COMPILE_STRATEGY=hybrid` path is still available if you want to re-check that tradeoff on a different GPU; it keeps each GDN module eager as an explicit compiler boundary, full-graph compiles pure attention blocks, full-graph compiles GDN-block MLPs, and then compiles the top-level model with `fullgraph=False`.
+For one-off 1xH100 perf and profile runs, use the structured launcher directly,
+for example:
 
-For throughput screens, use `PERF_TIMING=1` to emit a steady-state timing summary, `PERF_IGNORE_STEPS=N` to exclude the first measured steps after compile priming, `PERF_ISOLATE_COMPILE_CACHE=1` to give each run fresh Inductor/Triton cache directories, and `PERF_SKIP_FINAL_EVAL=1` to stop after the measured training window instead of paying for serialization and final roundtrip eval. These knobs are intended for perf studies, not normal quality runs.
+```bash
+python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k_example --offline
+python scripts/hgdn.py h100-profile hybrid --preset winner-20260405-19 --run-prefix h100k_profile --offline
+```
 
-For W&B-backed hybrid runs, per-step metrics stay under the shared `train/*` and `eval/*` namespaces, while one-shot roundtrip and artifact-compliance results are written to run summary fields such as `roundtrip_val_bpb_final`.
+For the current branch state, screening protocol, W&B schema, and active
+follow-up work, see:
 
-For dataset export, tokenizer export, and docs-cache rebuild instructions, see [data/README.md](data/README.md).
-For compile/perf follow-ups that are intentionally not enabled by default, see [docs/TODO.md](docs/TODO.md).
+- [docs/README.md](docs/README.md)
+- [docs/WANDB_SCHEMA.md](docs/WANDB_SCHEMA.md)
+- [docs/TODO.md](docs/TODO.md)
+- [data/README.md](data/README.md)
 
 Evaluation will be in the RunPod environment with all packages installed. `requirements.txt` is provided as a reference if you want to self-setup.
 

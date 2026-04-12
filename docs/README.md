@@ -18,117 +18,62 @@ Branch: `exp/hgdn`
 - Real HGDN ablations go to `pg-hgdn-ablations`.
 - Local Python commands on this checkout use `conda run -s --name pg ...`.
 
-## Working rules
+## Active architecture bracket
 
-- Use the local GPU for broad fixed-data architecture search when the candidate family fits.
+- Live exact-mappable finalists:
+  - `14L x 384d x mlp3.25`
+    - current exact-mappable leader: `h100pack1_c_fixed2k_hybrid_r1_mlp3.25_seq2048`
+  - `14L x 384d x mlp3.5`
+    - current exact-mappable companion: `h100pack1_g_fixed2k_hybrid_r1_mlp3.5_seq2048`
+- `15L x 384d` is out of the live bracket.
+- `double-global local32` is the current exact-mappable contract to beat.
+- The only unresolved packing question on the live bracket is whether `double-global local64` beats `double-global local32`.
+- Exact metrics, reject rationale, and run history live in [PROFILING_LOG.md](PROFILING_LOG.md).
+
+## Operating rules
+
+- Use the local GPU for broad fixed-token architecture search when the candidate family fits memory.
 - Use 1xH100 for finalist ranking under the same fixed-token contract.
-- After fixed-token ranking, run a separate H100 wallclock-aware batch-scale / packing pass before the final architecture call.
-- If that packing pass reveals a missing exact-8x cross-term, run one more narrow H100 refinement on exact-mappable contracts before paying for the full 8x bridge.
-- Because the trainer defaults to `grad_accum_steps = 8 / world_size`, the 1xH100 proxy preserves the same per-GPU local-batch mapping for a given `TRAIN_BATCH_TOKENS` unless that knob is explicitly overridden; the unresolved question after the proxy pass is still the exact 8x contract result.
-- Treat low VRAM use during saturated fixed-token H100 runs as a signal to study batch-scale behavior later, not as evidence that the fixed-token winner should be replaced.
+- After fixed-token ranking, run a separate H100 batch-scale / packing pass before the final architecture call.
+- If that pass exposes a missing exact-8x cross-term, run one narrow exact-mappable H100 refinement before paying for the full 8x bridge.
+- Because the trainer defaults to `grad_accum_steps = 8 / world_size`, the 1xH100 proxy preserves the same per-GPU local-batch mapping for a given `TRAIN_BATCH_TOKENS` unless that knob is explicitly overridden. The unresolved question after the proxy pass is still the exact 8x contract result.
+- Fixed-token sweeps answer learning efficiency. The final architecture call still has to survive the H100 wallclock contract.
+- Low VRAM use during saturated fixed-token H100 runs is not a failure by itself. Treat it as a reason to study packing, not to discard the architecture.
 - On the compiled HGDN path, default to changes that alter the generated path. Python-side view reshuffles and `.contiguous()` edits are not the main lever.
 - Enable compile diagnostics only when needed:
   - `TORCH_LOGS=recompiles,graph_breaks`
   - optional `TORCH_TRACE=/tmp/tracedir`
 
-## Checkpoint proxy protocol
+## Competition timing
+
+- The challenge has separate training-time and evaluation-time budgets.
+- In both `train_gpt.py` and `train_gpt_hybrid.py`, the training timer excludes warmup/compile priming, validation passes, and final serialization plus roundtrip eval.
+- Fixed-token sweeps are therefore a screening tool for learning efficiency, not the final leaderboard objective.
+
+## Screening checkpoints
 
 - Keep local and H100 screening as separate stages. They do not stabilize at the same step count.
 - Local broad architecture screen:
   - default to `300` steps
   - keep `VAL_LOSS_EVERY=100`
-  - use this to kill bad families cheaply
 - Local shortlist confirmation:
   - rerun the survivors for `500` steps
-  - use this only when the `300`-step top group is close
 - H100 fixed-token finalist screen:
   - default to `1500` steps
   - keep `VAL_LOSS_EVERY=500`
-  - use this as the main fixed-token ranking pass
 - Only pay for `2000` H100 steps when the `1500`-step finalists are still crossing, the margin is tiny, or a final tie-break is needed.
-- The current evidence behind those defaults:
+- Current evidence behind those defaults:
   - local `retune2`: ranking was already mostly stable by `300` and very stable by `500`
   - H100 `retune3`: `500` was misleading, `1000` was only a coarse filter, and `1500` was the first checkpoint that looked like the `2000` result
-- Do not use the `500`-step H100 screen to kill viable candidates. It was early enough to bury the eventual legal winner.
+- Do not use the `500`-step H100 screen to kill viable candidates.
 
-## Competition timing
+## Current boundaries
 
-- The challenge has two separate 10-minute budgets:
-  - training time inside the trainer
-  - evaluation time enforced externally
-- In both `train_gpt.py` and `train_gpt_hybrid.py`, the training timer excludes:
-  - compile/kernel warmup steps
-  - validation passes
-  - final serialization and roundtrip eval
-- Fixed-token sweeps are therefore a screening tool for learning efficiency, not the final leaderboard objective.
-- Final architecture selection must still answer the wallclock question on H100.
+- Treat norm placement as a learning-dynamics screen, not as kernel work. Compare `NORM_STYLE=pre|post|keel` inside the HGDN family first, then against the attention-only baseline via `GDN_RATIO=0`.
+- Use compile/backend work only on finalists.
+- Do not reopen the closed front-end seam for more ownership or packing tweaks unless the decomposition changes materially.
 
-## Current architecture read
-
-- Fixed-2k H100 reference:
-  - `h100k6_fixed2k_hybrid_r1_mlp3.25_seq2048`
-  - `16L x 384d x mlp3.25`
-  - over limit at `17,580,964` bytes
-- Current exact-mappable H100 proxy leader:
-  - `h100pack1_c_fixed2k_hybrid_r1_mlp3.25_seq2048`
-  - `14L x 384d x mlp3.25`
-  - contract:
-    - `TRAIN_BATCH_TOKENS=1048576`
-    - `GRAD_ACCUM_STEPS=16` on 1xH100
-    - proxy local batch `32`
-  - final roundtrip `2.3958`
-  - last-step time `1813.84 ms`
-  - artifact total `15,201,246`
-  - headroom `798,754`
-- Current exact-mappable companion:
-  - `h100pack1_g_fixed2k_hybrid_r1_mlp3.5_seq2048`
-  - `14L x 384d x mlp3.5`
-  - same `double-global local32` proxy contract
-  - final roundtrip `2.4010`
-  - last-step time `1832.70 ms`
-  - artifact total `15,710,777`
-  - headroom `289,223`
-- Important 1x-only packing hint:
-  - `h100pack1_h_fixed2k_hybrid_r1_mlp3.5_seq2048`
-  - `14L x 384d x mlp3.5`
-  - proxy `base-global local64`
-  - final roundtrip `2.4077`
-  - last-step time `847.59 ms`
-  - read:
-    - better than the old `h100retune6_f` reference
-    - but not a direct same-global 8x mapping, so it is a hint, not yet the bridge pick
-- The old `14L x 384d x mlp3.375` point was superseded:
-  - `h100retune6_e_fixed2k_hybrid_r1_mlp3.375_seq2048`
-  - slower and worse than both `mlp3.25` and `mlp3.5`
-- `h100retune6` killed the revived `15L x 384d` family again:
-  - `mlp2.375`: roundtrip `2.4594`, last step `970.81 ms`
-  - `mlp2.4375`: roundtrip `2.4663`, last step `979.52 ms`
-  - `mlp2.5`: roundtrip `2.4640`, last step `987.09 ms`
-  - read: slower and materially worse than the `14L x 384d` bracket
-- Historical absolute `step_ms` deltas to `h100k6` are still not the clean speed control:
-  - use the within-round H100 ordering for the fixed-token screen
-  - use the separate H100 batch-scale / packing pass for the wallclock decision
-- Live architecture call:
-  - keep only `14L x 384d x mlp3.25` and `14L x 384d x mlp3.5`
-  - treat `double-global local32` as the live exact-mappable contract to beat
-  - run one narrow H100 refinement at `TRAIN_BATCH_TOKENS=1048576` with:
-    - `local32`
-    - `local64`
-  - then take the winner into the exact 8x matched-control bridge
-
-Exact run history, scoreboards, and reject rationale live in [PROFILING_LOG.md](PROFILING_LOG.md).
-
-## Norm placement
-
-HGDN supports `NORM_STYLE=pre|post|keel`.
-
-- `pre`: current default
-- `post`: plain post-residual RMSNorm
-- `keel`: inner transform-branch norm plus post-residual norm, with `residual_alpha`
-
-Treat norm placement as a learning-dynamics screen, not as kernel work. Compare it inside the HGDN family first, then against the attention-only baseline via `GDN_RATIO=0`.
-
-## Launch helpers
+## Launch entrypoints
 
 Structured launcher:
 
@@ -149,16 +94,6 @@ Data / setup helpers:
 - [`../scripts/run_h100_single_gpu_hgdn_profile.sh`](../scripts/run_h100_single_gpu_hgdn_profile.sh)
 - [`../scripts/hgdn_cuda_preflight.py`](../scripts/hgdn_cuda_preflight.py)
 
-Local analysis helpers:
-
-- [`../scripts/profile_hgdn_local_hotpath.py`](../scripts/profile_hgdn_local_hotpath.py)
-- [`../scripts/analyze_hgdn_phase1.py`](../scripts/analyze_hgdn_phase1.py)
-- [`../scripts/compare_hgdn_phase1.py`](../scripts/compare_hgdn_phase1.py)
-- [`../scripts/compare_hgdn_fixed2k.py`](../scripts/compare_hgdn_fixed2k.py)
-- [`../scripts/export_wandb_hgdn_runs.py`](../scripts/export_wandb_hgdn_runs.py)
-- [`../scripts/hgdn_kernel_scoreboard.py`](../scripts/hgdn_kernel_scoreboard.py)
-- [`../scripts/screen_hgdn_arch_sizes.py`](../scripts/screen_hgdn_arch_sizes.py)
-
 ## Related docs
 
 - W&B schema and project rules: [WANDB_SCHEMA.md](WANDB_SCHEMA.md)
@@ -168,22 +103,3 @@ Local analysis helpers:
 - active next steps: [TODO.md](TODO.md)
 - cleanup targets: [REDUNDANCY_AUDIT.md](REDUNDANCY_AUDIT.md)
 - OLMo/Hybrid reference notes: [REFERENCE.md](REFERENCE.md)
-
-## Files worth touching
-
-- HGDN model stack:
-  - [`../model.py`](../model.py)
-  - [`../train_gpt_hybrid.py`](../train_gpt_hybrid.py)
-- Active winner config:
-  - [`../configs/hgdn/winner_20260405_19.toml`](../configs/hgdn/winner_20260405_19.toml)
-- Norm helper:
-  - [`../scripts/run_laptop_norm_compare.sh`](../scripts/run_laptop_norm_compare.sh)
-- CUDA extension entrypoints:
-  - [`../setup_hgdn_cuda.py`](../setup_hgdn_cuda.py)
-  - [`../scripts/hgdn_cuda_parity.py`](../scripts/hgdn_cuda_parity.py)
-
-## Practical read
-
-- HGDN already shows a learning-per-step edge over the attention-only baseline on matched H100 quality checks.
-- The unresolved question is compute-optimal sizing and packing, not whether the branch should keep relitigating the closed front-end seam.
-- The next useful evidence is the H100 batch-scale / packing pass and then one exact 8x HGDN-vs-attention-only control run, not another Python-side layout experiment.
