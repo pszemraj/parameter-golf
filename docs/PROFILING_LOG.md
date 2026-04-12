@@ -1,9 +1,107 @@
 # Profiling Log
 
-Last updated: 2026-04-11 16:10 EDT
+Last updated: 2026-04-12 00:50 EDT
 
 Profiler-driven checkpoints that should survive beyond the raw artifacts under
 `profiles/`.
+
+## 2026-04-12 — H100 pack1 changed the live 14-layer contract and exposed one last exact-mappable cross-term (`h100pack1`)
+
+Artifacts:
+
+- raw bundle:
+  - `local-scratch/h100pack1_bundle.7z`
+- W&B compare bundle:
+  - `profiles/fixed2k_compare/h100pack1_round`
+
+Contract:
+
+- active HGDN kernel baseline:
+  - `winner_20260405_19`
+- historical fixed-token leader entering the pass:
+  - `h100retune6_f_fixed2k_hybrid_r1_mlp3.5_seq2048`
+- live architecture bracket:
+  - `14L x 384d x mlp3.25`
+  - `14L x 384d x mlp3.5`
+- pack1 factors:
+  - `TRAIN_BATCH_TOKENS`:
+    - `262144`
+    - `524288`
+    - `1048576`
+  - proxy local batch:
+    - `32`
+    - `64`
+
+### Main finding
+
+The live exact-mappable proxy winner is now `14L x 384d x mlp3.25` at
+`double-global local32`:
+
+- `h100pack1_c_fixed2k_hybrid_r1_mlp3.25_seq2048`
+  - sampled eval:
+    - `2.4498`
+  - final roundtrip:
+    - `2.3958`
+  - last step time:
+    - `1813.84 ms`
+  - artifact total:
+    - `15,201,246`
+  - headroom:
+    - `798,754`
+
+Read:
+
+- this beat the old `h100retune6_f` roundtrip by `0.0266` bpb
+- it also beat the `mlp3.5` exact-mappable peer:
+  - `h100pack1_g_fixed2k_hybrid_r1_mlp3.5_seq2048`
+  - roundtrip `2.4010`
+
+So the fixed-step leader moved from `mlp3.5` to `mlp3.25` once the global batch
+was allowed to grow.
+
+### What the packing pass actually taught
+
+Among the exact-mappable `local32` points, larger global batch helped both live
+architectures:
+
+- `mlp3.25`
+  - `base-global local32`:
+    - `h100pack1_b_fixed2k_hybrid_r1_mlp3.25_seq2048`
+    - roundtrip `2.4375`
+  - `double-global local32`:
+    - `h100pack1_c_fixed2k_hybrid_r1_mlp3.25_seq2048`
+    - roundtrip `2.3958`
+- `mlp3.5`
+  - `base-global local32`:
+    - `h100pack1_f_fixed2k_hybrid_r1_mlp3.5_seq2048`
+    - roundtrip `2.4136`
+  - `double-global local32`:
+    - `h100pack1_g_fixed2k_hybrid_r1_mlp3.5_seq2048`
+    - roundtrip `2.4010`
+
+The `local64` probes improved both architectures at `base-global`, but those
+specific 1xH100 points do not map directly to the same 8x global batch
+contract:
+
+- `h100pack1_d_fixed2k_hybrid_r1_mlp3.25_seq2048`
+  - `base-global local64`
+  - roundtrip `2.4337`
+  - faster than `h100pack1_b`
+- `h100pack1_h_fixed2k_hybrid_r1_mlp3.5_seq2048`
+  - `base-global local64`
+  - roundtrip `2.4077`
+  - faster than `h100pack1_f`
+
+So `local64` is a real hint, but it is not yet the exact 8x bridge choice.
+
+### Decision
+
+- keep only the `14L x 384d` live bracket
+- treat `double-global local32` as the current exact-mappable contract to beat
+- run one narrow H100 refinement on the missing exact-mappable cross-term:
+  - `double-global local32`
+  - `double-global local64`
+- after that, run the exact 8x HGDN-vs-attention-only bridge
 
 ## 2026-04-11 — H100 fixed-token retune6 kept the 14-layer family live and killed the revived 15-layer bracket again (`h100retune6`)
 

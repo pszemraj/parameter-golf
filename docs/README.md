@@ -1,6 +1,6 @@
 # HGDN Branch Status
 
-Last updated: 2026-04-11
+Last updated: 2026-04-12
 
 Branch: `exp/hgdn`
 
@@ -14,7 +14,7 @@ Branch: `exp/hgdn`
   - `GDN_CONTROL_PROJ_FP32=0`
   - `GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=1`
 - The current post-conv front-end seam is closed after `h100k20`.
-- The current architecture stage is fixed-token screening, then an H100 batch-scale finalist pass on the top `2` candidates, then one exact 8x matched-control go/no-go run.
+- The current architecture stage is fixed-token screening, then an H100 batch-scale finalist pass, then one exact-mappable H100 packing refinement on the live bracket, then one exact 8x matched-control go/no-go run.
 - Real HGDN ablations go to `pg-hgdn-ablations`.
 - Local Python commands on this checkout use `conda run -s --name pg ...`.
 
@@ -23,6 +23,7 @@ Branch: `exp/hgdn`
 - Use the local GPU for broad fixed-data architecture search when the candidate family fits.
 - Use 1xH100 for finalist ranking under the same fixed-token contract.
 - After fixed-token ranking, run a separate H100 wallclock-aware batch-scale / packing pass before the final architecture call.
+- If that packing pass reveals a missing exact-8x cross-term, run one more narrow H100 refinement on exact-mappable contracts before paying for the full 8x bridge.
 - Because the trainer defaults to `grad_accum_steps = 8 / world_size`, the 1xH100 proxy preserves the same per-GPU local-batch mapping for a given `TRAIN_BATCH_TOKENS` unless that knob is explicitly overridden; the unresolved question after the proxy pass is still the exact 8x contract result.
 - Treat low VRAM use during saturated fixed-token H100 runs as a signal to study batch-scale behavior later, not as evidence that the fixed-token winner should be replaced.
 - On the compiled HGDN path, default to changes that alter the generated path. Python-side view reshuffles and `.contiguous()` edits are not the main lever.
@@ -68,20 +69,34 @@ Branch: `exp/hgdn`
   - `h100k6_fixed2k_hybrid_r1_mlp3.25_seq2048`
   - `16L x 384d x mlp3.25`
   - over limit at `17,580,964` bytes
-- Current fixed-token H100 leader:
-  - `h100retune6_f_fixed2k_hybrid_r1_mlp3.5_seq2048`
-  - `14L x 384d x mlp3.5`
-  - final roundtrip `2.4224`
-  - last-step time `905.68 ms`
-  - artifact total `15,878,878`
-  - headroom `121,122`
-- Current speed-and-headroom companion:
-  - `h100retune6_d_fixed2k_hybrid_r1_mlp3.25_seq2048`
+- Current exact-mappable H100 proxy leader:
+  - `h100pack1_c_fixed2k_hybrid_r1_mlp3.25_seq2048`
   - `14L x 384d x mlp3.25`
-  - final roundtrip `2.4245`
-  - last-step time `898.55 ms`
-  - artifact total `15,052,320`
-  - headroom `947,680`
+  - contract:
+    - `TRAIN_BATCH_TOKENS=1048576`
+    - `GRAD_ACCUM_STEPS=16` on 1xH100
+    - proxy local batch `32`
+  - final roundtrip `2.3958`
+  - last-step time `1813.84 ms`
+  - artifact total `15,201,246`
+  - headroom `798,754`
+- Current exact-mappable companion:
+  - `h100pack1_g_fixed2k_hybrid_r1_mlp3.5_seq2048`
+  - `14L x 384d x mlp3.5`
+  - same `double-global local32` proxy contract
+  - final roundtrip `2.4010`
+  - last-step time `1832.70 ms`
+  - artifact total `15,710,777`
+  - headroom `289,223`
+- Important 1x-only packing hint:
+  - `h100pack1_h_fixed2k_hybrid_r1_mlp3.5_seq2048`
+  - `14L x 384d x mlp3.5`
+  - proxy `base-global local64`
+  - final roundtrip `2.4077`
+  - last-step time `847.59 ms`
+  - read:
+    - better than the old `h100retune6_f` reference
+    - but not a direct same-global 8x mapping, so it is a hint, not yet the bridge pick
 - The old `14L x 384d x mlp3.375` point was superseded:
   - `h100retune6_e_fixed2k_hybrid_r1_mlp3.375_seq2048`
   - slower and worse than both `mlp3.25` and `mlp3.5`
@@ -94,9 +109,12 @@ Branch: `exp/hgdn`
   - use the within-round H100 ordering for the fixed-token screen
   - use the separate H100 batch-scale / packing pass for the wallclock decision
 - Live architecture call:
-  - carry only `14L x 384d x mlp3.25` and `14L x 384d x mlp3.5` into the next H100 finalist pass
-  - treat `mlp3.5` as the quality lead and `mlp3.25` as the efficiency hedge
-  - stop spending fixed-token H100 runs on the `15L x 384d` bracket
+  - keep only `14L x 384d x mlp3.25` and `14L x 384d x mlp3.5`
+  - treat `double-global local32` as the live exact-mappable contract to beat
+  - run one narrow H100 refinement at `TRAIN_BATCH_TOKENS=1048576` with:
+    - `local32`
+    - `local64`
+  - then take the winner into the exact 8x matched-control bridge
 
 Exact run history, scoreboards, and reject rationale live in [PROFILING_LOG.md](PROFILING_LOG.md).
 

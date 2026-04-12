@@ -1,41 +1,39 @@
 # HGDN Next Steps
 
-Last updated: 2026-04-11
+Last updated: 2026-04-12
 
-## 1. Run the H100 batch-scale finalist pass on the live 14-layer bracket
+## 1. Run one narrow H100 packing refinement on the live 14-layer bracket
 
 - Keep the active kernel baseline at [`winner_20260405_19.toml`](../configs/hgdn/winner_20260405_19.toml).
 - Keep the fixed-token H100 reference anchored on `h100k6_fixed2k_hybrid_r1_mlp3.25_seq2048`.
-- Current fixed-token H100 finalists:
-  - `h100retune6_f_fixed2k_hybrid_r1_mlp3.5_seq2048`
-    - `14L x 384d x mlp3.5`
-    - roundtrip `2.4224`
-    - last step `905.68 ms`
-    - headroom `121,122`
-  - `h100retune6_d_fixed2k_hybrid_r1_mlp3.25_seq2048`
-    - `14L x 384d x mlp3.25`
-    - roundtrip `2.4245`
-    - last step `898.55 ms`
-    - headroom `947,680`
-- `h100retune6` rejected:
-  - the `15L x 384d` bracket at `mlp2.375-2.5`
-  - the intermediate `14L x 384d x mlp3.375` point
-- Start the wallclock-aware pass with:
-  - `14L x 384d x mlp3.5`
-  - `14L x 384d x mlp3.25`
-- Vary:
-  - `TRAIN_BATCH_TOKENS`
-  - `GRAD_ACCUM_STEPS`
-  - resulting `LOCAL_BATCH_SIZE`
-- Separate:
-  - microbatch / kernel-efficiency effects
-  - effective-batch optimizer dynamics
-- Use this pass to decide which finalist wins under the actual 10-minute contract.
-- Do not restart the fixed-token ranking just because a legal model leaves spare bytes or VRAM unused.
+- `h100pack1` already answered the broad batch-scale question:
+  - exact-mappable leader:
+    - `h100pack1_c_fixed2k_hybrid_r1_mlp3.25_seq2048`
+    - `double-global local32`
+    - roundtrip `2.3958`
+  - exact-mappable companion:
+    - `h100pack1_g_fixed2k_hybrid_r1_mlp3.5_seq2048`
+    - `double-global local32`
+    - roundtrip `2.4010`
+  - 1x-only hint:
+    - `h100pack1_h_fixed2k_hybrid_r1_mlp3.5_seq2048`
+    - `base-global local64`
+    - roundtrip `2.4077`
+- The remaining missing cross-term is exact-mappable `double-global local64`.
+- Run only:
+  - `14L x 384d x mlp3.25` at `TRAIN_BATCH_TOKENS=1048576`
+    - `local32`
+    - `local64`
+  - `14L x 384d x mlp3.5` at `TRAIN_BATCH_TOKENS=1048576`
+    - `local32`
+    - `local64`
+- Use this pass to decide whether the bridge candidate stays:
+  - `double-global local32`
+  - or moves to `double-global local64`
 
 ## 2. Run one decisive exact 8x matched-control bridge
 
-- After the H100 batch-scale proxy pass picks the live finalist, run:
+- After the exact-mappable H100 refinement picks the live finalist, run:
   - one exact HGDN submission-style training/eval contract run
   - one exact matched attention-only control run
 - Keep trainer contract, tokenizer, eval path, and artifact accounting aligned.
