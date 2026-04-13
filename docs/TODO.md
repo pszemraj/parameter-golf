@@ -38,12 +38,14 @@ Last updated: 2026-04-13
   - `MAX_WALLCLOCK_SECONDS=600`
 - Use [`../scripts/run_h100_hgdn_naive_contract_round.sh`](../scripts/run_h100_hgdn_naive_contract_round.sh).
 - This batch should contain:
+  - the exact repo naive baseline from `train_gpt.py`
   - the live HGDN finalist
   - one baseline-like attention-only control inside the hybrid trainer
-- Compare both against the recorded naive-baseline reference:
+- Compare all three against the recorded naive-baseline reference:
   - stop-step eval `1.2172`
   - final roundtrip `1.22436570`
-- If both runs remain nowhere near that scale, stop pretending the current
+- If the exact repo naive baseline is still near `1.22x` but the hybrid-trainer
+  control and HGDN are nowhere near that scale, stop pretending the current
   HGDN training stack is ready for finalist garnish and shift work toward the
   trainer/optimization path instead.
 

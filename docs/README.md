@@ -64,6 +64,10 @@ Branch: `exp/hgdn`
 - Before paying for more HGDN-only finalist polish, run one absolute
   competitiveness check on the official naive-baseline contract. The bridge
   answered the within-branch choice, not the absolute-score question.
+- That check should be three-way:
+  - the exact repo naive baseline from `train_gpt.py`
+  - the hybrid-trainer attention-only control
+  - the live HGDN finalist
 - Fixed-token sweeps answer learning efficiency. The final architecture call still has to survive the H100 wallclock contract.
 - Low VRAM use during saturated fixed-token H100 runs is not a failure by itself. Treat it as a reason to study packing, not to discard the architecture.
 - On the compiled HGDN path, default to changes that alter the generated path. Python-side view reshuffles and `.contiguous()` edits are not the main lever.

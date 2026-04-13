@@ -6,7 +6,7 @@ hgdn_setup_repo_root "${BASH_SOURCE[0]}"
 
 if [[ "$#" -ne 0 ]]; then
     echo "Run this script with no arguments." >&2
-    echo "It always executes the bounded naive-baseline-contract HGDN sanity batch." >&2
+    echo "It always executes the bounded naive-baseline-contract three-way sanity batch." >&2
     exit 1
 fi
 
@@ -46,6 +46,7 @@ compile_strategy="${COMPILE_STRATEGY:-model}"
 
 hgdn_config="${HGDN_CONFIG:-configs/hgdn/retune_trim_layers_14.toml}"
 hgdn_kernel_config="${HGDN_KERNEL_CONFIG:-configs/hgdn/winner_20260405_19.toml}"
+gpt_naive_run_id="${GPT_NAIVE_RUN_ID:-${run_prefix_base}_gpt_naive_baseline_seq${train_seq_len}}"
 hgdn_run_id="${HGDN_RUN_ID:-${run_prefix_base}_hybrid_naive_contract_seq${train_seq_len}}"
 attn_run_id="${ATTN_RUN_ID:-${run_prefix_base}_depth_naive_contract_seq${train_seq_len}}"
 
@@ -124,12 +125,13 @@ print_plan() {
     echo "max_wallclock_seconds=${max_wallclock_seconds}"
     echo "hgdn_config=${hgdn_config}"
     echo "hgdn_kernel_config=${hgdn_kernel_config}"
+    echo "gpt_naive_run_id=${gpt_naive_run_id}"
     echo "hgdn_run_id=${hgdn_run_id}"
     echo "attention_run_id=${attn_run_id}"
     echo "naive_reference_name=${naive_reference_name}"
     echo "naive_reference_roundtrip_bpb=${naive_reference_roundtrip_bpb}"
     echo "naive_reference_stop_bpb=${naive_reference_stop_bpb}"
-    echo "goal=measure whether the live HGDN finalist and a baseline-like attention-only control can approach the recorded naive-baseline scale under the official naive-baseline contract"
+    echo "goal=measure whether the exact repo naive baseline, the hybrid-trainer attention-only control, and the live HGDN finalist can all be compared on the official naive-baseline contract"
 }
 
 prepare_cuda() {
@@ -168,6 +170,51 @@ run_round() {
     fi
 
     load_config_env "${hgdn_kernel_config}" "${hgdn_config}"
+
+    echo
+    echo ">>> exact repo naive baseline"
+    hgdn_append_command \
+        "${command_log}" \
+        "OMP_NUM_THREADS=${omp_num_threads}" \
+        "MKL_NUM_THREADS=${mkl_num_threads}" \
+        "OPENBLAS_NUM_THREADS=${openblas_num_threads}" \
+        "NUMEXPR_NUM_THREADS=${numexpr_num_threads}" \
+        "${diagnostic_env[@]}" \
+        "RUN_ID=${gpt_naive_run_id}" \
+        "ITERATIONS=${iterations}" \
+        "MAX_WALLCLOCK_SECONDS=${max_wallclock_seconds}" \
+        "TRAIN_BATCH_TOKENS=${train_batch_tokens}" \
+        "TRAIN_SEQ_LEN=${train_seq_len}" \
+        "VAL_LOSS_EVERY=${val_loss_every}" \
+        "TRAIN_LOG_EVERY=${train_log_every}" \
+        "VAL_BATCH_SIZE=${val_batch_size}" \
+        "NUM_LAYERS=9" \
+        "MODEL_DIM=512" \
+        "NUM_HEADS=8" \
+        "NUM_KV_HEADS=4" \
+        "MLP_MULT=2" \
+        torchrun --standalone --nproc_per_node="${ngpu}" train_gpt.py
+
+    hgdn_run_with_env \
+        "OMP_NUM_THREADS=${omp_num_threads}" \
+        "MKL_NUM_THREADS=${mkl_num_threads}" \
+        "OPENBLAS_NUM_THREADS=${openblas_num_threads}" \
+        "NUMEXPR_NUM_THREADS=${numexpr_num_threads}" \
+        "${diagnostic_env[@]}" \
+        "RUN_ID=${gpt_naive_run_id}" \
+        "ITERATIONS=${iterations}" \
+        "MAX_WALLCLOCK_SECONDS=${max_wallclock_seconds}" \
+        "TRAIN_BATCH_TOKENS=${train_batch_tokens}" \
+        "TRAIN_SEQ_LEN=${train_seq_len}" \
+        "VAL_LOSS_EVERY=${val_loss_every}" \
+        "TRAIN_LOG_EVERY=${train_log_every}" \
+        "VAL_BATCH_SIZE=${val_batch_size}" \
+        "NUM_LAYERS=9" \
+        "MODEL_DIM=512" \
+        "NUM_HEADS=8" \
+        "NUM_KV_HEADS=4" \
+        "MLP_MULT=2" \
+        torchrun --standalone --nproc_per_node="${ngpu}" train_gpt.py
 
     echo
     echo ">>> naive-contract HGDN finalist"
@@ -301,7 +348,7 @@ build_bundle() {
 
     local matched_logs=0
     local run_id
-    for run_id in "${hgdn_run_id}" "${attn_run_id}"; do
+    for run_id in "${gpt_naive_run_id}" "${hgdn_run_id}" "${attn_run_id}"; do
         local log_path="logs/${run_id}.txt"
         if [[ -f "${log_path}" ]]; then
             cp "${log_path}" "${bundle_stage_dir}/logs/"
@@ -333,6 +380,7 @@ build_bundle() {
         "${max_wallclock_seconds}" \
         "${compile}" \
         "${compile_strategy}" \
+        "${gpt_naive_run_id}" \
         "${hgdn_config}" \
         "${hgdn_kernel_config}" \
         "${hgdn_run_id}" \
@@ -367,13 +415,14 @@ val_batch_size = int(sys.argv[20])
 max_wallclock_seconds = float(sys.argv[21])
 compile_enabled = bool(int(sys.argv[22]))
 compile_strategy = sys.argv[23]
-hgdn_config = sys.argv[24]
-hgdn_kernel_config = sys.argv[25]
-hgdn_run_id = sys.argv[26]
-attn_run_id = sys.argv[27]
-naive_reference_name = sys.argv[28]
-naive_reference_roundtrip_bpb = float(sys.argv[29])
-naive_reference_stop_bpb = float(sys.argv[30])
+gpt_naive_run_id = sys.argv[24]
+hgdn_config = sys.argv[25]
+hgdn_kernel_config = sys.argv[26]
+hgdn_run_id = sys.argv[27]
+attn_run_id = sys.argv[28]
+naive_reference_name = sys.argv[29]
+naive_reference_roundtrip_bpb = float(sys.argv[30])
+naive_reference_stop_bpb = float(sys.argv[31])
 
 manifest = {
     "run_prefix_base": run_prefix_base,
@@ -407,7 +456,19 @@ manifest = {
     },
     "runs": [
         {
+            "label": "exact repo naive baseline on naive-baseline contract",
+            "trainer": "train_gpt.py",
+            "mode": "direct",
+            "run_id": gpt_naive_run_id,
+            "num_layers": 9,
+            "model_dim": 512,
+            "num_heads": 8,
+            "num_kv_heads": 4,
+            "mlp_mult": 2,
+        },
+        {
             "label": "HGDN finalist on naive-baseline contract",
+            "trainer": "train_gpt_hybrid.py",
             "mode": "single",
             "run_id": hgdn_run_id,
             "config": hgdn_config,
@@ -415,6 +476,7 @@ manifest = {
         },
         {
             "label": "attention-only control on naive-baseline contract",
+            "trainer": "train_gpt_hybrid.py",
             "mode": "depth",
             "run_id": attn_run_id,
             "num_layers": 9,
