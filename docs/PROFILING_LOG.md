@@ -1,9 +1,124 @@
 # Profiling Log
 
-Last updated: 2026-04-12 22:45 EDT
+Last updated: 2026-04-13 13:35 EDT
 
 Profiler-driven checkpoints that should survive beyond the raw artifacts under
 `profiles/`.
+
+## 2026-04-13 — Exact 8x bridge kept HGDN as the main record-path family (`h100bridge1`)
+
+Artifacts:
+
+- raw bundles:
+  - `local-scratch/h100bridge1_bundle.7z`
+  - `local-scratch/h100bridge_smoke_bundle.7z`
+
+Contract:
+
+- active HGDN kernel baseline:
+  - `winner_20260405_19`
+- live H100 proxy reference entering the pass:
+  - `h100pack3_b_fixed2k_hybrid_r1_mlp3.25_seq2048`
+- pass purpose:
+  - answer the main architecture keep/kill question under the real
+    submission-style contract
+- exact matched-control contract:
+  - `8xH100`
+  - `TRAIN_BATCH_TOKENS=2097152`
+  - `TRAIN_SEQ_LEN=2048`
+  - `COMPILE=1`
+  - `COMPILE_STRATEGY=model`
+  - `MAX_WALLCLOCK_SECONDS=600`
+  - `VAL_LOSS_EVERY=1000`
+  - `VAL_BATCH_SIZE=524288`
+  - thread env:
+    - `OMP_NUM_THREADS=1`
+    - `MKL_NUM_THREADS=1`
+    - `OPENBLAS_NUM_THREADS=1`
+    - `NUMEXPR_NUM_THREADS=1`
+
+### Main finding
+
+HGDN won the exact bridge cleanly and stayed legal:
+
+- HGDN finalist:
+  - run:
+    - `h100bridge1_exact_hybrid_r1_mlp3.25_seq2048`
+  - blocks:
+    - `7G+7A`
+  - params:
+    - `22,168,872`
+  - wallclock stop:
+    - step `1564`
+  - stop-step eval:
+    - `2.3949`
+  - final roundtrip:
+    - `2.4206`
+  - artifact total:
+    - `15,165,348`
+  - headroom:
+    - `834,652`
+  - artifact status:
+    - `UNDER_LIMIT`
+
+- attention-only baseline:
+  - run:
+    - `h100bridge1_exact_depth_mlp4.0_seq2048`
+  - blocks:
+    - `0G+16A`
+  - params:
+    - `26,373,248`
+  - wallclock stop:
+    - step `1858`
+  - stop-step eval:
+    - `2.5638`
+  - final roundtrip:
+    - `2.6320`
+  - artifact total:
+    - `17,922,740`
+  - headroom:
+    - `-1,922,740`
+  - artifact status:
+    - `OVER_LIMIT`
+
+### What the bridge actually answered
+
+This was not a narrow tie that needs reinterpretation:
+
+- HGDN gave up throughput:
+  - HGDN average step time:
+    - `383.69 ms`
+  - attention-only baseline average step time:
+    - `322.98 ms`
+  - HGDN therefore trained fewer steps in the same `600` seconds:
+    - `1564` vs `1858`
+- even after paying that throughput tax, HGDN still won strongly on quality:
+  - stop-step eval delta:
+    - `2.5638 - 2.3949 = 0.1689` bpb in favor of HGDN
+  - final roundtrip delta:
+    - `2.6320 - 2.4206 = 0.2115` bpb in favor of HGDN
+- the attention-only baseline was also not submission-legal on artifact size
+  under the same contract
+
+So the unresolved question from the proxy ladder is now closed:
+
+- the live `14L x 384d x mlp3.25` HGDN family does survive the exact
+  submission-style bridge
+- the branch should stop behaving as if the attention-only baseline is still an
+  equally live architecture choice
+
+### Decision
+
+- keep `winner_20260405_19` as the active HGDN kernel baseline
+- keep `h100pack3_b_fixed2k_hybrid_r1_mlp3.25_seq2048` as the live H100 proxy
+  reference
+- promote `h100bridge1_exact_hybrid_r1_mlp3.25_seq2048` to the live exact
+  bridge reference
+- keep HGDN as the main record-path family
+- do not reopen broad H100 architecture search or another cross-family ladder
+  unless a later exact run contradicts this result
+- move paid work to bounded HGDN-only confirmation and finalist improvement
+  passes
 
 ## 2026-04-12 — H100 pack3 closed the proxy ladder and kept `14L x 384d x mlp3.25` in front (`h100pack3`)
 

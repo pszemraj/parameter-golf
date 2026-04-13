@@ -1,37 +1,43 @@
 # HGDN Next Steps
 
-Last updated: 2026-04-12
+Last updated: 2026-04-13
 
-## 1. Run one decisive exact 8x matched-control bridge
+## 1. Keep the exact 8x bridge result as the architecture gate
 
 - Keep the active kernel baseline at [`winner_20260405_19.toml`](../configs/hgdn/winner_20260405_19.toml).
-- Keep `h100pack3_b_fixed2k_hybrid_r1_mlp3.25_seq2048` as the live H100 proxy reference.
+- Keep `h100pack3_b_fixed2k_hybrid_r1_mlp3.25_seq2048` as the live H100 proxy reference that fed the exact bridge.
 - The bounded H100 proxy ladder is done:
   - `local128` improved all three tested families
   - the live `14L x 384d x mlp3.25` anchor stayed in front
   - the two `15L x 384d` finalists did not survive the H100 proxy stage
-- Run:
-  - one exact HGDN submission-style training/eval contract run
-  - one exact matched attention-only baseline run
-- Keep trainer contract, tokenizer, eval path, and artifact accounting aligned.
-- Do not add leaderboard garnish before this bridge.
-- Use [`../scripts/run_h100_hgdn_bridge_round.sh`](../scripts/run_h100_hgdn_bridge_round.sh) for this batch.
-- Treat this as the architecture go/no-go:
-  - if HGDN wins clearly and stays legal, keep it as the main record path
-  - if HGDN loses or only ties while staying materially more painful, demote it from the main record path
+- Exact `8xH100` matched-control result:
+  - HGDN finalist:
+    - run: `h100bridge1_exact_hybrid_r1_mlp3.25_seq2048`
+    - stop-step eval: `2.3949` bpb at step `1564`
+    - final roundtrip: `2.4206`
+    - artifact: `UNDER_LIMIT`, headroom `834,652`
+  - attention-only baseline:
+    - run: `h100bridge1_exact_depth_mlp4.0_seq2048`
+    - stop-step eval: `2.5638` bpb at step `1858`
+    - final roundtrip: `2.6320`
+    - artifact: `OVER_LIMIT`, headroom `-1,922,740`
+- Keep HGDN as the main record-path architecture.
+- Do not reopen broad cross-family architecture comparison unless a later exact run contradicts this result.
 
-## 2. If the bridge wins, rerun for confidence only as needed
+## 2. Rerun for confidence only as needed
 
 - Do not reopen H100 proxy architecture search by default.
-- Only pay for more proxy work if the exact 8x bridge comes back contradictory or too noisy to call.
-- If HGDN wins the bridge and the margin is modest, pay for the minimum extra confirmation needed.
+- The exact bridge margin is large enough that the next paid runs should be confirmation or HGDN-only improvement work, not another cross-family ladder.
+- If more exact runs are paid for, keep them tightly bounded:
+  - one additional exact HGDN confirmation seed if needed
+  - only rerun the attention-only baseline again if a regression check genuinely requires it
 
-## 3. Run the norm-placement screen on the live bracket only
+## 3. Run HGDN-only finalist work on the live bracket
 
 - Compare `NORM_STYLE=pre`, `post`, and `keel`.
 - Keep the architecture and training contract fixed.
 - Compare within HGDN first.
-- Add the attention-only baseline only after the HGDN-side direction is clear.
+- Prefer changes that preserve or improve artifact headroom because the current exact HGDN result is only `834,652` bytes under the cap.
 
 ## 4. Work the remaining non-seam HGDN hotspots
 
