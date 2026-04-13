@@ -28,6 +28,10 @@ torch_logs="${TORCH_LOGS:-}"
 torch_trace="${TORCH_TRACE:-}"
 build_hgdn_cuda="${BUILD_HGDN_CUDA:-1}"
 run_hgdn_cuda_parity="${RUN_HGDN_CUDA_PARITY:-1}"
+omp_num_threads="${OMP_NUM_THREADS:-1}"
+mkl_num_threads="${MKL_NUM_THREADS:-1}"
+openblas_num_threads="${OPENBLAS_NUM_THREADS:-1}"
+numexpr_num_threads="${NUMEXPR_NUM_THREADS:-1}"
 
 ngpu="${NGPU:-8}"
 iterations="${ITERATIONS:-20000}"
@@ -99,6 +103,10 @@ print_plan() {
     echo "wandb_watch_log_freq=${wandb_watch_log_freq}"
     echo "TORCH_LOGS=${torch_logs:-<unset>}"
     echo "TORCH_TRACE=${torch_trace:-<unset>}"
+    echo "OMP_NUM_THREADS=${omp_num_threads}"
+    echo "MKL_NUM_THREADS=${mkl_num_threads}"
+    echo "OPENBLAS_NUM_THREADS=${openblas_num_threads}"
+    echo "NUMEXPR_NUM_THREADS=${numexpr_num_threads}"
     echo "build_hgdn_cuda=${build_hgdn_cuda}"
     echo "run_hgdn_cuda_parity=${run_hgdn_cuda_parity}"
     echo "ngpu=${ngpu}"
@@ -162,6 +170,10 @@ run_bridge() {
     echo ">>> exact 8x bridge: HGDN finalist"
     hgdn_append_command \
         "${command_log}" \
+        "OMP_NUM_THREADS=${omp_num_threads}" \
+        "MKL_NUM_THREADS=${mkl_num_threads}" \
+        "OPENBLAS_NUM_THREADS=${openblas_num_threads}" \
+        "NUMEXPR_NUM_THREADS=${numexpr_num_threads}" \
         "NGPU=${ngpu}" \
         "USE_WANDB=${use_wandb}" \
         "WANDB_MODE=${wandb_mode}" \
@@ -185,6 +197,10 @@ run_bridge() {
     hgdn_run_sweep \
         "exact 8x bridge: HGDN finalist" \
         single \
+        "OMP_NUM_THREADS=${omp_num_threads}" \
+        "MKL_NUM_THREADS=${mkl_num_threads}" \
+        "OPENBLAS_NUM_THREADS=${openblas_num_threads}" \
+        "NUMEXPR_NUM_THREADS=${numexpr_num_threads}" \
         "NGPU=${ngpu}" \
         "USE_WANDB=${use_wandb}" \
         "WANDB_MODE=${wandb_mode}" \
@@ -208,6 +224,10 @@ run_bridge() {
     echo ">>> exact 8x bridge: attention-only baseline"
     hgdn_append_command \
         "${command_log}" \
+        "OMP_NUM_THREADS=${omp_num_threads}" \
+        "MKL_NUM_THREADS=${mkl_num_threads}" \
+        "OPENBLAS_NUM_THREADS=${openblas_num_threads}" \
+        "NUMEXPR_NUM_THREADS=${numexpr_num_threads}" \
         "NGPU=${ngpu}" \
         "USE_WANDB=${use_wandb}" \
         "WANDB_MODE=${wandb_mode}" \
@@ -231,6 +251,10 @@ run_bridge() {
     hgdn_run_sweep \
         "exact 8x bridge: attention-only baseline" \
         depth \
+        "OMP_NUM_THREADS=${omp_num_threads}" \
+        "MKL_NUM_THREADS=${mkl_num_threads}" \
+        "OPENBLAS_NUM_THREADS=${openblas_num_threads}" \
+        "NUMEXPR_NUM_THREADS=${numexpr_num_threads}" \
         "NGPU=${ngpu}" \
         "USE_WANDB=${use_wandb}" \
         "WANDB_MODE=${wandb_mode}" \
@@ -282,6 +306,10 @@ build_bundle() {
         "${command_log}" \
         "${torch_logs}" \
         "${torch_trace}" \
+        "${omp_num_threads}" \
+        "${mkl_num_threads}" \
+        "${openblas_num_threads}" \
+        "${numexpr_num_threads}" \
         "${ngpu}" \
         "${iterations}" \
         "${train_batch_tokens}" \
@@ -310,21 +338,25 @@ matched_logs = bool(int(sys.argv[6]))
 command_log = sys.argv[7]
 torch_logs = sys.argv[8]
 torch_trace = sys.argv[9]
-ngpu = int(sys.argv[10])
-iterations = int(sys.argv[11])
-train_batch_tokens = int(sys.argv[12])
-train_seq_len = int(sys.argv[13])
-val_loss_every = int(sys.argv[14])
-train_log_every = int(sys.argv[15])
-val_batch_size = int(sys.argv[16])
-max_wallclock_seconds = float(sys.argv[17])
-compile_enabled = bool(int(sys.argv[18]))
-compile_strategy = sys.argv[19]
-depth_mlp_mult = float(sys.argv[20])
-hgdn_config = sys.argv[21]
-hgdn_kernel_config = sys.argv[22]
-hgdn_run_id = sys.argv[23]
-attn_run_id = sys.argv[24]
+omp_num_threads = int(sys.argv[10])
+mkl_num_threads = int(sys.argv[11])
+openblas_num_threads = int(sys.argv[12])
+numexpr_num_threads = int(sys.argv[13])
+ngpu = int(sys.argv[14])
+iterations = int(sys.argv[15])
+train_batch_tokens = int(sys.argv[16])
+train_seq_len = int(sys.argv[17])
+val_loss_every = int(sys.argv[18])
+train_log_every = int(sys.argv[19])
+val_batch_size = int(sys.argv[20])
+max_wallclock_seconds = float(sys.argv[21])
+compile_enabled = bool(int(sys.argv[22]))
+compile_strategy = sys.argv[23]
+depth_mlp_mult = float(sys.argv[24])
+hgdn_config = sys.argv[25]
+hgdn_kernel_config = sys.argv[26]
+hgdn_run_id = sys.argv[27]
+attn_run_id = sys.argv[28]
 
 manifest = {
     "run_prefix_base": run_prefix_base,
@@ -346,6 +378,10 @@ manifest = {
         "compile_strategy": compile_strategy,
         "torch_logs": torch_logs or None,
         "torch_trace": torch_trace or None,
+        "omp_num_threads": omp_num_threads,
+        "mkl_num_threads": mkl_num_threads,
+        "openblas_num_threads": openblas_num_threads,
+        "numexpr_num_threads": numexpr_num_threads,
     },
     "runs": [
         {
