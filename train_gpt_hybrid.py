@@ -694,8 +694,12 @@ def load_validation_tokens(files: list[Path], seq_len: int) -> Tensor:
     :param int seq_len: Sequence length used for eval reshaping.
     :return Tensor: Concatenated validation tokens.
     """
+    if not files:
+        raise FileNotFoundError("No validation shards provided")
     tokens = torch.cat([load_data_shard(f) for f in files]).contiguous()
     usable = ((tokens.numel() - 1) // seq_len) * seq_len
+    if usable <= 0:
+        raise ValueError(f"Validation split is too short for TRAIN_SEQ_LEN={seq_len}")
     return tokens[: usable + 1]
 
 
@@ -726,6 +730,12 @@ def eval_val(
     :return tuple[float, float]: Validation loss and bits-per-byte.
     """
     local_batch_tokens = args.val_batch_size // (world_size * grad_accum_steps)
+    if local_batch_tokens < args.train_seq_len:
+        raise ValueError(
+            "VAL_BATCH_SIZE must provide at least one sequence per rank; "
+            f"got VAL_BATCH_SIZE={args.val_batch_size}, WORLD_SIZE={world_size}, "
+            f"GRAD_ACCUM_STEPS={grad_accum_steps}, TRAIN_SEQ_LEN={args.train_seq_len}"
+        )
     local_batch_seqs = local_batch_tokens // args.train_seq_len
     total_seqs = (val_tokens.numel() - 1) // args.train_seq_len
     seq_start = (total_seqs * rank) // world_size
