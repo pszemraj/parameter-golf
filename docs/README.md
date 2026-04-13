@@ -14,7 +14,7 @@ Branch: `exp/hgdn`
   - `GDN_CONTROL_PROJ_FP32=0`
   - `GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=1`
 - The current post-conv front-end seam is closed after `h100k20`.
-- The current architecture stage is fixed-token screening, then an H100 batch-scale finalist pass, then one H100 cross-family batch-scale follow-up on the live 14L winner and the strongest 15L finalists, then one exact 8x matched-control go/no-go run.
+- The current architecture stage is fixed-token screening, then an H100 batch-scale finalist pass, then one bounded H100 cross-family batch-scale follow-up, then one exact 8x matched-control go/no-go run.
 - Real HGDN ablations go to `pg-hgdn-ablations`.
 - Local Python commands on this checkout use `conda run -s --name pg ...`.
 
@@ -22,19 +22,22 @@ Branch: `exp/hgdn`
 
 - Live H100 reference:
   - `14L x 384d x mlp3.25`
-    - current H100 batch-scale leader: `h100pack2_b_fixed2k_hybrid_r1_mlp3.25_seq2048`
-    - contract: `TRAIN_BATCH_TOKENS=1048576`, `grad_accum_steps=8`, `local_batch_size=64`
+    - current H100 proxy leader: `h100pack3_b_fixed2k_hybrid_r1_mlp3.25_seq2048`
+    - contract: `TRAIN_BATCH_TOKENS=2097152`, `grad_accum_steps=8`, `local_batch_size=128`
 - The `14L x 384d x mlp3.5` branch is no longer the live 14L winner:
   - `local64` was better than `local32`
   - the best `mlp3.5` point still lost to `mlp3.25`
   - the stronger `local64` point was over budget
-- `15L x 384d` is back in scope for one more H100 pass because the local `500`-step shortlist still favored `mlp2.625` to `mlp2.875`.
-- The current unresolved question is a cross-family batch-scale question, not a single-family packing question:
-  - does the jump from `local64` to `local128` help the live `14L` and `15L` finalists similarly
-  - or does one family gain materially more from the extra per-GPU batch
+- `15L x 384d` is no longer the live bracket leader:
+  - both `mlp2.625` and `mlp2.875` improved at `local128`
+  - neither family caught the `14L x 384d x mlp3.25` anchor on H100
+- The current unresolved question is no longer which HGDN family survives the proxy ladder.
+- The next unresolved question is the exact 8x contract result:
+  - does the live `14L x 384d x mlp3.25` proxy winner hold up against the attention-only baseline under the real submission-style run
 - Scope guardrail:
-  - this follow-up is one bounded proxy ladder, not a reopened architecture sweep
-  - no new families, no new widths, and no third batch point unless the ladder comes back contradictory
+  - the bounded proxy ladder is complete
+  - do not reopen broad H100 architecture search without fresh contradictory evidence
+  - the next paid step is the exact 8x matched-control bridge
 - Exact metrics, reject rationale, and run history live in [PROFILING_LOG.md](PROFILING_LOG.md).
 
 ## Operating rules
@@ -42,8 +45,10 @@ Branch: `exp/hgdn`
 - Use the local GPU for broad fixed-token architecture search when the candidate family fits memory.
 - Use 1xH100 for finalist ranking under the same fixed-token contract.
 - After fixed-token ranking, run a separate H100 batch-scale / packing pass before the final architecture call.
-- If a narrow H100 refinement resolves the remaining batch-scale question, pivot back to the strongest surviving architecture competitors instead of continuing to overfit the already-resolved seam.
-- Because the trainer defaults to `grad_accum_steps = 8 / world_size`, the 1xH100 proxy preserves the same per-GPU local-batch mapping for a given `TRAIN_BATCH_TOKENS` unless that knob is explicitly overridden. The unresolved question after the proxy pass is still the exact 8x contract result.
+- The bounded H100 follow-up answered the batch-scale question cleanly:
+  - the jump from `local64` to `local128` helped all three tested families
+  - the `14L x 384d x mlp3.25` family stayed in front
+- Because the trainer defaults to `grad_accum_steps = 8 / world_size`, the 1xH100 proxy preserves the same per-GPU local-batch mapping for a given `TRAIN_BATCH_TOKENS` unless that knob is explicitly overridden. The remaining architecture question is now the exact 8x contract result.
 - Fixed-token sweeps answer learning efficiency. The final architecture call still has to survive the H100 wallclock contract.
 - Low VRAM use during saturated fixed-token H100 runs is not a failure by itself. Treat it as a reason to study packing, not to discard the architecture.
 - On the compiled HGDN path, default to changes that alter the generated path. Python-side view reshuffles and `.contiguous()` edits are not the main lever.

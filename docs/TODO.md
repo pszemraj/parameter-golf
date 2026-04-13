@@ -2,35 +2,28 @@
 
 Last updated: 2026-04-12
 
-## 1. Run the next H100 finalist follow-up batch
+## 1. Run one decisive exact 8x matched-control bridge
 
 - Keep the active kernel baseline at [`winner_20260405_19.toml`](../configs/hgdn/winner_20260405_19.toml).
-- Keep `h100pack2_b_fixed2k_hybrid_r1_mlp3.25_seq2048` as the live H100 reference.
-- Run a cross-family batch-scale ladder instead of probing only one finalist.
-- Keep `GRAD_ACCUM_STEPS=8` fixed so the 1xH100 proxy stays exact-mappable to the 8x contract.
-- Compare these points:
-  - `14L x 384d x mlp3.25` at `TRAIN_BATCH_TOKENS=1048576` and `2097152`
-  - `15L x 384d x mlp2.625` at `TRAIN_BATCH_TOKENS=1048576` and `2097152`
-  - `15L x 384d x mlp2.875` at `TRAIN_BATCH_TOKENS=1048576` and `2097152`
-- This pass answers whether larger per-GPU local batch changes the family ranking, not just whether the current 14L winner can use more memory.
-- Stop after this ladder unless the result is genuinely contradictory:
-  - no extra widths
-  - no extra depths
-  - no third batch point
-  - no second proxy ladder just because there is headroom
-- Use [`../scripts/run_h100_hgdn_resize_round.sh`](../scripts/run_h100_hgdn_resize_round.sh) for this batch.
-- The output of this pass is one HGDN bridge candidate, not another open-ended architecture expansion.
-
-## 2. Run one decisive exact 8x matched-control bridge
-
-- After the H100 follow-up picks the live finalist, run:
+- Keep `h100pack3_b_fixed2k_hybrid_r1_mlp3.25_seq2048` as the live H100 proxy reference.
+- The bounded H100 proxy ladder is done:
+  - `local128` improved all three tested families
+  - the live `14L x 384d x mlp3.25` anchor stayed in front
+  - the two `15L x 384d` finalists did not survive the H100 proxy stage
+- Run:
   - one exact HGDN submission-style training/eval contract run
-  - one exact matched attention-only control run
+  - one exact matched attention-only baseline run
 - Keep trainer contract, tokenizer, eval path, and artifact accounting aligned.
 - Do not add leaderboard garnish before this bridge.
 - Treat this as the architecture go/no-go:
   - if HGDN wins clearly and stays legal, keep it as the main record path
   - if HGDN loses or only ties while staying materially more painful, demote it from the main record path
+
+## 2. If the bridge wins, rerun for confidence only as needed
+
+- Do not reopen H100 proxy architecture search by default.
+- Only pay for more proxy work if the exact 8x bridge comes back contradictory or too noisy to call.
+- If HGDN wins the bridge and the margin is modest, pay for the minimum extra confirmation needed.
 
 ## 3. Run the norm-placement screen on the live bracket only
 

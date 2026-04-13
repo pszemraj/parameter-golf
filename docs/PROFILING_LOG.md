@@ -1,9 +1,119 @@
 # Profiling Log
 
-Last updated: 2026-04-12 12:20 EDT
+Last updated: 2026-04-12 22:45 EDT
 
 Profiler-driven checkpoints that should survive beyond the raw artifacts under
 `profiles/`.
+
+## 2026-04-12 — H100 pack3 closed the proxy ladder and kept `14L x 384d x mlp3.25` in front (`h100pack3`)
+
+Artifacts:
+
+- raw bundle:
+  - `local-scratch/h100pack3_bundle.7z`
+- W&B compare bundle:
+  - `/tmp/h100pack3_compare`
+
+Contract:
+
+- active HGDN kernel baseline:
+  - `winner_20260405_19`
+- live H100 reference entering the pass:
+  - `h100pack2_b_fixed2k_hybrid_r1_mlp3.25_seq2048`
+- pass purpose:
+  - resolve the last bounded cross-family proxy question before the exact 8x
+    bridge
+- shared screen contract:
+  - `1500` steps
+  - `GRAD_ACCUM_STEPS=8`
+  - families:
+    - `14L x 384d x mlp3.25`
+    - `15L x 384d x mlp2.625`
+    - `15L x 384d x mlp2.875`
+  - per-GPU local batch points:
+    - `local64` via `TRAIN_BATCH_TOKENS=1048576`
+    - `local128` via `TRAIN_BATCH_TOKENS=2097152`
+
+### Main finding
+
+The live H100 proxy winner is now:
+
+- `h100pack3_b_fixed2k_hybrid_r1_mlp3.25_seq2048`
+  - contract:
+    - `local128`
+  - eval `500`:
+    - `2.5711`
+  - eval `1000`:
+    - `2.4301`
+  - eval `1500`:
+    - `2.3587`
+  - final roundtrip:
+    - `2.3820`
+  - last step time:
+    - `3497.98 ms`
+  - artifact total:
+    - `15,022,873`
+  - headroom:
+    - `977,127`
+
+Read:
+
+- against the old `h100pack2_b` reference, this improved:
+  - eval `1500` by `0.0134` bpb
+  - final roundtrip by `0.0063` bpb
+- the proxy winner is still the same family:
+  - `14L x 384d x mlp3.25`
+
+### What the pass actually taught
+
+The jump from `local64` to `local128` helped every tested family:
+
+- `14L x 384d x mlp3.25`
+  - `local64`:
+    - `h100pack3_a_fixed2k_hybrid_r1_mlp3.25_seq2048`
+    - eval `1500`: `2.3886`
+    - roundtrip `2.4029`
+  - `local128`:
+    - `h100pack3_b_fixed2k_hybrid_r1_mlp3.25_seq2048`
+    - eval `1500`: `2.3587`
+    - roundtrip `2.3820`
+- `15L x 384d x mlp2.625`
+  - `local64`:
+    - `h100pack3_c_fixed2k_hybrid_r1_mlp2.625_seq2048`
+    - eval `1500`: `2.4337`
+    - roundtrip `2.4561`
+  - `local128`:
+    - `h100pack3_d_fixed2k_hybrid_r1_mlp2.625_seq2048`
+    - eval `1500`: `2.4201`
+    - roundtrip `2.4506`
+- `15L x 384d x mlp2.875`
+  - `local64`:
+    - `h100pack3_e_fixed2k_hybrid_r1_mlp2.875_seq2048`
+    - eval `1500`: `2.4289`
+    - roundtrip `2.4508`
+  - `local128`:
+    - `h100pack3_f_fixed2k_hybrid_r1_mlp2.875_seq2048`
+    - eval `1500`: `2.4167`
+    - roundtrip `2.4448`
+
+So the proxy-ladder answer is clean:
+
+- larger per-GPU batch helped across the board
+- the local shortlist did not transfer as an H100 winner
+- both `15L` finalists remained materially worse than the live `14L` anchor
+- this was not a case where the panel only looked worse because of the larger
+  batch point
+  - the within-family `local128` comparisons improved
+  - the weaker lines were weaker because the family was weaker on H100
+
+### Decision
+
+- promote `h100pack3_b` to the live H100 proxy reference
+- close the bounded H100 proxy ladder
+- do not reopen broad H100 architecture search unless the exact 8x bridge
+  comes back contradictory
+- the next paid architecture step is the exact 8x HGDN-vs-attention-only
+  bridge
 
 ## 2026-04-12 — H100 pack2 resolved the last 14-layer packing cross-term and moved the live H100 reference to `local64` (`h100pack2`)
 
