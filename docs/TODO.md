@@ -24,7 +24,30 @@ Last updated: 2026-04-13
 - Keep HGDN as the main record-path architecture.
 - Do not reopen broad cross-family architecture comparison unless a later exact run contradicts this result.
 
-## 2. Rerun for confidence only as needed
+## 2. Run one absolute-competitiveness check on the naive-baseline contract
+
+- The exact bridge answered the within-branch keep/kill question.
+- It did **not** answer whether the current HGDN stack is remotely competitive
+  with the repo's published naive baseline at `1.2244`.
+- Run one bounded `8xH100` sanity batch under the official naive-baseline
+  contract:
+  - `TRAIN_SEQ_LEN=1024`
+  - `TRAIN_BATCH_TOKENS=524288`
+  - `VAL_LOSS_EVERY=200`
+  - `TRAIN_LOG_EVERY=50`
+  - `MAX_WALLCLOCK_SECONDS=600`
+- Use [`../scripts/run_h100_hgdn_naive_contract_round.sh`](../scripts/run_h100_hgdn_naive_contract_round.sh).
+- This batch should contain:
+  - the live HGDN finalist
+  - one baseline-like attention-only control inside the hybrid trainer
+- Compare both against the recorded naive-baseline reference:
+  - stop-step eval `1.2172`
+  - final roundtrip `1.22436570`
+- If both runs remain nowhere near that scale, stop pretending the current
+  HGDN training stack is ready for finalist garnish and shift work toward the
+  trainer/optimization path instead.
+
+## 3. Rerun for confidence only as needed
 
 - Do not reopen H100 proxy architecture search by default.
 - The exact bridge margin is large enough that the next paid runs should be confirmation or HGDN-only improvement work, not another cross-family ladder.
@@ -32,14 +55,14 @@ Last updated: 2026-04-13
   - one additional exact HGDN confirmation seed if needed
   - only rerun the attention-only baseline again if a regression check genuinely requires it
 
-## 3. Run HGDN-only finalist work on the live bracket
+## 4. Run HGDN-only finalist work on the live bracket
 
 - Compare `NORM_STYLE=pre`, `post`, and `keel`.
 - Keep the architecture and training contract fixed.
 - Compare within HGDN first.
 - Prefer changes that preserve or improve artifact headroom because the current exact HGDN result is only `834,652` bytes under the cap.
 
-## 4. Work the remaining non-seam HGDN hotspots
+## 5. Work the remaining non-seam HGDN hotspots
 
 - output / gate projection path
 - residual-shell glue on the compiled path
@@ -47,7 +70,7 @@ Last updated: 2026-04-13
 
 Do not reopen the current post-conv front-end seam for more ownership or packing tweaks unless the decomposition changes materially.
 
-## 5. Use compile/backend work only on finalists
+## 6. Use compile/backend work only on finalists
 
 - graph-break and recompile audit with `TORCH_LOGS`
 - `compiled_autograd`
@@ -55,7 +78,7 @@ Do not reopen the current post-conv front-end seam for more ownership or packing
 - dynamic-shape handling only where the logs justify it
 - Nsight or backend swaps only if the compiled H100 profile says the backend is the bottleneck
 
-## 6. Finish the cleanup backlog
+## 7. Finish the cleanup backlog
 
 - profiler/report toolchain consolidation
 - shared env-flag and launch-contract helpers

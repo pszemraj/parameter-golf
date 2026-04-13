@@ -40,6 +40,9 @@ Branch: `exp/hgdn`
 - The cross-family architecture question is now resolved for this branch:
   - the live `14L x 384d x mlp3.25` HGDN finalist beat the matched attention-only baseline on the exact `8xH100` contract
   - the matched attention-only baseline also failed the artifact cap on the same contract
+- The next question is more basic and more important than another finalist micro-ablations pass:
+  - can the current HGDN stack get into the same order of magnitude as the
+    repo's published naive baseline when trained under that baseline contract
 - Scope guardrail:
   - the bounded proxy ladder is complete
   - the exact 8x matched-control bridge is complete
@@ -58,6 +61,9 @@ Branch: `exp/hgdn`
 - The exact bridge changed the branch decision:
   - HGDN is the live record-path family
   - further architecture work should now be HGDN-only unless a later exact run says otherwise
+- Before paying for more HGDN-only finalist polish, run one absolute
+  competitiveness check on the official naive-baseline contract. The bridge
+  answered the within-branch choice, not the absolute-score question.
 - Fixed-token sweeps answer learning efficiency. The final architecture call still has to survive the H100 wallclock contract.
 - Low VRAM use during saturated fixed-token H100 runs is not a failure by itself. Treat it as a reason to study packing, not to discard the architecture.
 - On the compiled HGDN path, default to changes that alter the generated path. Python-side view reshuffles and `.contiguous()` edits are not the main lever.
@@ -107,6 +113,7 @@ Single-entry batch helpers:
 - [`../scripts/run_local_hgdn_resize_round.sh`](../scripts/run_local_hgdn_resize_round.sh)
 - [`../scripts/run_h100_hgdn_resize_round.sh`](../scripts/run_h100_hgdn_resize_round.sh)
 - [`../scripts/run_h100_hgdn_bridge_round.sh`](../scripts/run_h100_hgdn_bridge_round.sh)
+- [`../scripts/run_h100_hgdn_naive_contract_round.sh`](../scripts/run_h100_hgdn_naive_contract_round.sh)
 
 Data / setup helpers:
 
