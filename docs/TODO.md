@@ -15,6 +15,7 @@ Last updated: 2026-04-12
   - one exact matched attention-only baseline run
 - Keep trainer contract, tokenizer, eval path, and artifact accounting aligned.
 - Do not add leaderboard garnish before this bridge.
+- Use [`../scripts/run_h100_hgdn_bridge_round.sh`](../scripts/run_h100_hgdn_bridge_round.sh) for this batch.
 - Treat this as the architecture go/no-go:
   - if HGDN wins clearly and stays legal, keep it as the main record path
   - if HGDN loses or only ties while staying materially more painful, demote it from the main record path
