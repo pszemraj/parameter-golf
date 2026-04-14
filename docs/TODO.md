@@ -83,11 +83,11 @@ Last updated: 2026-04-13
   - Muon Newton-Schulz helpers now prewarm on the live matrix-shape family, so
     the optimizer-side shape-family recompile no longer lands in the real
     training path
+  - rotary caches now prewarm before compile, so the lazy attention cache fill
+    no longer triggers a training-side recompile
 - Remaining:
   - decide whether the train/eval `grad_mode` split should be prewarmed,
     isolated, or simply treated as a one-time eval-side dual-graph cost
-  - keep the rotary-cache recompile as accepted one-shot behavior unless it
-    starts repeating after warmup
   - resolve the remaining `torch.library.opcheck(... test_aot_dispatch_dynamic)`
     failure for the owned recurrence op, or document why trainer-path smoke is
     the acceptance gate

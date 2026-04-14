@@ -485,6 +485,38 @@ def prewarm_muon_backend_shapes(params: list[Tensor], *, backend_steps: int) -> 
     return count
 
 
+def prewarm_rotary_caches(
+    module: nn.Module, *, seq_len: int, dtype: torch.dtype
+) -> int:
+    """Populate attention rotary caches before model compilation.
+
+    This avoids the lazy `_cos/_sin` cache mutation from landing inside the
+    compiled training forward the first time attention runs.
+
+    :param nn.Module module: Module tree containing attention rotary modules.
+    :param int seq_len: Sequence length to materialize.
+    :param torch.dtype dtype: Target cache dtype.
+    :return int: Number of rotary modules prewarmed.
+    """
+    try:
+        device = next(module.parameters()).device
+    except StopIteration:
+        return 0
+    count = 0
+    for submodule in module.modules():
+        rotary = getattr(submodule, "rotary", None)
+        if rotary is None or not callable(rotary):
+            continue
+        head_dim = getattr(submodule, "head_dim", None)
+        if head_dim is None:
+            continue
+        rotary(seq_len, device, dtype)
+        count += 1
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+    return count
+
+
 class Muon(torch.optim.Optimizer):
     """Minimal Muon optimizer used for matrix-shaped parameters."""
 
@@ -1089,6 +1121,13 @@ def main() -> None:
     restore_low_dim_params_to_fp32(
         base_model, gdn_control_proj_fp32=args.gdn_control_proj_fp32
     )
+    rotary_prewarm_count = 0
+    if args.compile:
+        rotary_prewarm_count = prewarm_rotary_caches(
+            base_model,
+            seq_len=args.train_seq_len,
+            dtype=torch.bfloat16,
+        )
     compiled_model, compile_stats = prepare_hybrid_compile(
         base_model, enabled=args.compile, strategy=args.compile_strategy
     )
@@ -1265,8 +1304,12 @@ def main() -> None:
         if distributed:
             model.require_backward_grad_sync = True
         train_loader = DistributedTokenLoader(train_files, rank, world_size, device)
-    if muon_prewarm_count > 0:
-        log0(f"compile_prewarm: muon_shapes:{muon_prewarm_count}")
+    if muon_prewarm_count > 0 or rotary_prewarm_count > 0:
+        log0(
+            "compile_prewarm:"
+            f" muon_shapes:{muon_prewarm_count}"
+            f" rotary_modules:{rotary_prewarm_count}"
+        )
     if device.type == "cuda":
         torch.cuda.synchronize()
         gc.collect()
