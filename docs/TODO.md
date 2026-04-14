@@ -71,11 +71,27 @@ Last updated: 2026-04-13
 - Compare within HGDN first.
 - Prefer changes that preserve or improve artifact headroom because the current exact HGDN result is only `834,652` bytes under the cap.
 
-## 5. Work the remaining non-seam HGDN hotspots
+## 5. Finish the recurrence-side compile cleanup
 
-- output / gate projection path
-- residual-shell glue on the compiled path
-- recurrence-adjacent work only if compiled H100 profiles move recurrence back to the top tier
+- Done:
+  - the HGDN recurrence now runs behind an owned
+    `hgdn_fla_v1::chunk_gated_delta_rule` boundary that bypasses the upstream
+    FLA backend-registry lock/context-manager path
+  - the full trainer smoke no longer shows HGDN graph breaks in the block loop
+  - the custom-op fake contract now keeps `grad_g` as `float32`, which avoids
+    the Inductor buffer-planning failure seen in the first owned-boundary pass
+- Remaining:
+  - eliminate or explicitly accept the optimizer-side
+    `_zeropower_via_newtonschulz5_wide` recompiles
+  - decide whether the train/eval `grad_mode` split should be prewarmed,
+    isolated, or simply treated as a one-time dual-graph cost
+  - keep the rotary-cache recompile as accepted one-shot behavior unless it
+    starts repeating after warmup
+  - resolve the remaining `torch.library.opcheck(... test_aot_dispatch_dynamic)`
+    failure for the owned recurrence op, or document why trainer-path smoke is
+    the acceptance gate
+- Only move back to recurrence-adjacent kernel work if compiled H100 profiles
+  put recurrence back in the top hotspot tier after this cleanup.
 
 Do not reopen the current post-conv front-end seam for more ownership or packing tweaks unless the decomposition changes materially.
 

@@ -14,6 +14,11 @@ from torch import Tensor
 from torch.nn import functional as F
 from torch.nn import grad as nn_grad
 
+from .fla_owned import (
+    HAS_OWNED_FLA_GATED_DELTA_RULE,
+    run_chunk_gated_delta_rule_owned,
+    run_chunk_gated_delta_rule_owned_backward,
+)
 from .reference import (
     packed_qkv_frontend_backward_reference,
     packed_qkv_frontend_reference_with_ctx,
@@ -26,16 +31,9 @@ from .reference import (
     rmsnorm_silu_gate_reference,
 )
 
-try:
-    from fla.ops.gated_delta_rule import (
-        chunk_gated_delta_rule as _fla_chunk_gated_delta_rule,
-    )
-except ImportError:
-    _fla_chunk_gated_delta_rule = None
-
 _EXTENSION_NAME = "hgdn_cuda_ext"
 _WARNED_KEYS: set[str] = set()
-HAS_FLA_GATED_DELTA_RULE = _fla_chunk_gated_delta_rule is not None
+HAS_FLA_GATED_DELTA_RULE = HAS_OWNED_FLA_GATED_DELTA_RULE
 
 
 def _warn_once(key: str, message: str) -> None:
@@ -178,34 +176,32 @@ def _run_fla_chunk_gated_delta_rule(
     g: Tensor,
     beta: Tensor,
 ) -> Tensor:
-    """Run the upstream FLA gated-delta recurrence and return only the output.
+    """Run the owned HGDN gated-delta recurrence and return only the output.
 
-    This keeps the recurrence behind one compile-visible operator boundary so
-    Dynamo does not step into FLA backend dispatch internals.
+    This keeps the recurrence behind one compile-visible operator boundary while
+    bypassing upstream FLA Python dispatch and backend-registry locks.
 
     :param Tensor q: Query tensor shaped ``(batch, seq, heads, head_k)``.
     :param Tensor k: Key tensor shaped ``(batch, seq, heads, head_k)``.
     :param Tensor v: Value tensor shaped ``(batch, seq, heads, head_v)``.
     :param Tensor g: Log-space gate tensor shaped ``(batch, seq, heads)``.
     :param Tensor beta: Beta tensor shaped ``(batch, seq, heads)``.
-    :raises RuntimeError: If FLA is unavailable.
+    :raises RuntimeError: If the owned recurrence stack is unavailable.
     :return Tensor: Recurrence output shaped like ``v``.
     """
-    if _fla_chunk_gated_delta_rule is None:
+    if not HAS_FLA_GATED_DELTA_RULE:
         raise RuntimeError(
-            "FLA chunk_gated_delta_rule is unavailable; the compile-visible "
+            "Owned HGDN chunk_gated_delta_rule is unavailable; the compile-visible "
             "HGDN recurrence op cannot run."
         )
-    out, _final_state = _fla_chunk_gated_delta_rule(
+    return run_chunk_gated_delta_rule_owned(
         q,
         k,
         v,
         g,
         beta,
         scale=1.0,
-        output_final_state=False,
     )
-    return out
 
 
 def _run_fla_chunk_gated_delta_rule_backward(
@@ -216,7 +212,7 @@ def _run_fla_chunk_gated_delta_rule_backward(
     g: Tensor,
     beta: Tensor,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
-    """Run recurrence backward eagerly behind an opaque custom-op boundary.
+    """Run the owned HGDN recurrence backward behind the custom-op boundary.
 
     :param Tensor grad_output: Gradient for the recurrence output.
     :param Tensor q: Query tensor.
@@ -226,20 +222,15 @@ def _run_fla_chunk_gated_delta_rule_backward(
     :param Tensor beta: Beta tensor.
     :return tuple[Tensor, Tensor, Tensor, Tensor, Tensor]: Gradients for ``q, k, v, g, beta``.
     """
-    with torch.enable_grad():
-        q_req = q.detach().requires_grad_(True)
-        k_req = k.detach().requires_grad_(True)
-        v_req = v.detach().requires_grad_(True)
-        g_req = g.detach().requires_grad_(True)
-        beta_req = beta.detach().requires_grad_(True)
-        out = _run_fla_chunk_gated_delta_rule(q_req, k_req, v_req, g_req, beta_req)
-    grad_q, grad_k, grad_v, grad_g, grad_beta = torch.autograd.grad(
-        out,
-        (q_req, k_req, v_req, g_req, beta_req),
-        grad_outputs=grad_output,
-        allow_unused=False,
+    return run_chunk_gated_delta_rule_owned_backward(
+        grad_output,
+        q,
+        k,
+        v,
+        g,
+        beta,
+        scale=1.0,
     )
-    return grad_q, grad_k, grad_v, grad_g, grad_beta
 
 
 @torch.library.impl("hgdn_fla_v1::chunk_gated_delta_rule", "CPU")
@@ -1090,7 +1081,7 @@ def _fla_chunk_gated_delta_rule_backward_fake(
         q.new_empty(q.shape),
         k.new_empty(k.shape),
         v.new_empty(v.shape),
-        g.new_empty(g.shape),
+        g.new_empty(g.shape, dtype=torch.float32),
         beta.new_empty(beta.shape),
     )
 

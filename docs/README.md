@@ -14,6 +14,8 @@ Branch: `exp/hgdn`
   - `GDN_CONTROL_PROJ_FP32=0`
   - `GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=1`
 - The current post-conv front-end seam is closed after `h100k20`.
+- The HGDN recurrence now runs through an owned compile-visible boundary that
+  bypasses the upstream FLA backend-registry lock path.
 - The exact `8xH100` matched-control bridge is now complete.
 - Real HGDN ablations go to `pg-hgdn-ablations`.
 - Local Python commands on this checkout use `conda run -s --name pg ...`.
@@ -113,6 +115,28 @@ Branch: `exp/hgdn`
 - Use compile/backend work only on finalists.
 - Do not reopen the closed front-end seam for more ownership or packing tweaks unless the decomposition changes materially.
 - Do not keep paying for matched attention-only baseline reruns now that the exact bridge has already answered the keep/kill question.
+
+## Current compile state
+
+- The hot HGDN recurrence no longer graph-breaks the compiled block loop on the
+  upstream FLA `lock` context-manager path.
+- The owned recurrence boundary lives behind
+  `hgdn_fla_v1::chunk_gated_delta_rule` and is backed by
+  [`../hgdn_cuda/fla_owned.py`](../hgdn_cuda/fla_owned.py).
+- The custom-op backward contract needed one important fix:
+  - `grad_g` must stay `float32` in the fake/meta registration
+  - advertising it as `bfloat16` poisoned Inductor buffer planning in the full
+    backward graph
+- Small compiled trainer smoke now completes HGDN warmup plus the first real
+  backward/optimizer step without HGDN graph breaks.
+- Remaining compile churn is narrower and outside the closed front-end seam:
+  - one-time rotary-cache recompile when `self._cos` flips from `None`
+  - train/eval `grad_mode` recompile when the same forward is reused across
+    training and evaluation
+  - optimizer-side `_zeropower_via_newtonschulz5_wide` specialization
+- Keep auditing with `TORCH_LOGS=recompiles,graph_breaks`, but do not treat the
+  recurrence seam as the live blocker anymore unless new H100 evidence says
+  otherwise.
 
 ## Launch entrypoints
 

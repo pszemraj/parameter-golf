@@ -7,6 +7,8 @@ import torch
 import torch.nn.functional as F
 
 from hgdn_cuda import (
+    HAS_FLA_GATED_DELTA_RULE,
+    fla_chunk_gated_delta_rule_compile_visible,
     packed_qkv_conv_reference,
     packed_qkv_frontend_reference,
     packed_qkv_split_l2norm_reference,
@@ -236,6 +238,77 @@ def test_recurrence():
     assert o.shape == (B, T, H, Dv) and s.shape == (B, H, Dk, Dv)
     assert not torch.isnan(o).any()
     print("  ✓ recurrence OK")
+
+
+def test_owned_fla_recurrence_matches_upstream():
+    """Check that the owned compile-visible recurrence matches upstream FLA on CUDA."""
+
+    if not torch.cuda.is_available():
+        print("  ↷ skipping owned FLA recurrence parity (CUDA unavailable)")
+        return
+    if not HAS_FLA_GATED_DELTA_RULE:
+        print("  ↷ skipping owned FLA recurrence parity (FLA unavailable)")
+        return
+
+    try:
+        from fla.ops.gated_delta_rule import chunk_gated_delta_rule as upstream_chunk
+    except ImportError:
+        print("  ↷ skipping owned FLA recurrence parity (upstream FLA import failed)")
+        return
+
+    device = torch.device("cuda")
+    B, T, H, Dk, Dv = 2, 128, 4, 8, 16
+    torch.manual_seed(42)
+
+    q_base = F.normalize(
+        torch.randn(B, T, H, Dk, device=device, dtype=torch.bfloat16), p=2, dim=-1
+    )
+    k_base = F.normalize(
+        torch.randn(B, T, H, Dk, device=device, dtype=torch.bfloat16), p=2, dim=-1
+    )
+    v_base = torch.randn(B, T, H, Dv, device=device, dtype=torch.bfloat16)
+    g_base = F.logsigmoid(torch.randn(B, T, H, device=device, dtype=torch.bfloat16))
+    beta_base = torch.sigmoid(torch.randn(B, T, H, device=device, dtype=torch.bfloat16))
+
+    q_ref = q_base.detach().clone().requires_grad_(True)
+    k_ref = k_base.detach().clone().requires_grad_(True)
+    v_ref = v_base.detach().clone().requires_grad_(True)
+    g_ref = g_base.detach().clone().requires_grad_(True)
+    beta_ref = beta_base.detach().clone().requires_grad_(True)
+
+    q_own = q_base.detach().clone().requires_grad_(True)
+    k_own = k_base.detach().clone().requires_grad_(True)
+    v_own = v_base.detach().clone().requires_grad_(True)
+    g_own = g_base.detach().clone().requires_grad_(True)
+    beta_own = beta_base.detach().clone().requires_grad_(True)
+
+    out_ref, _ = upstream_chunk(
+        q_ref,
+        k_ref,
+        v_ref,
+        g_ref,
+        beta_ref,
+        scale=1.0,
+        output_final_state=False,
+    )
+    out_own = fla_chunk_gated_delta_rule_compile_visible(
+        q_own,
+        k_own,
+        v_own,
+        g_own,
+        beta_own,
+    )
+    torch.testing.assert_close(out_own, out_ref, atol=2e-2, rtol=2e-2)
+
+    grad = torch.randn_like(out_ref)
+    out_ref.backward(grad, retain_graph=True)
+    out_own.backward(grad)
+    torch.testing.assert_close(q_own.grad, q_ref.grad, atol=2e-2, rtol=2e-2)
+    torch.testing.assert_close(k_own.grad, k_ref.grad, atol=2e-2, rtol=2e-2)
+    torch.testing.assert_close(v_own.grad, v_ref.grad, atol=2e-2, rtol=2e-2)
+    torch.testing.assert_close(g_own.grad, g_ref.grad, atol=2e-2, rtol=2e-2)
+    torch.testing.assert_close(beta_own.grad, beta_ref.grad, atol=2e-2, rtol=2e-2)
+    print("  ✓ owned FLA recurrence matches upstream")
 
 
 def test_gdn_split_projections():
@@ -1572,6 +1645,7 @@ if __name__ == "__main__":
     print("=" * 60)
     tests = [
         ("Recurrence", test_recurrence),
+        ("Owned FLA recurrence parity", test_owned_fla_recurrence_matches_upstream),
         ("Split projections", test_gdn_split_projections),
         ("Recurrence input dtypes", test_gdn_recurrence_input_dtypes),
         ("Muon routing", test_muon_routing),

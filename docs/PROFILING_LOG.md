@@ -736,6 +736,59 @@ The H100 and local HGDN shell helpers now honor plain `MLP_MULT` as the hybrid
 fallback when `HYBRID_MLP_MULT` is unset. This restores the intended contract
 for the `retune_*` TOML configs.
 
+## 2026-04-13 — Owned recurrence boundary removes the upstream FLA graph break
+
+Contract:
+
+- code-only compile audit on the live HGDN winner stack
+- no new H100 sweep was needed for this checkpoint
+
+### Main finding
+
+The HGDN recurrence no longer graph-breaks the compiled block loop on the
+upstream FLA backend-registry `lock` path.
+
+The recurrence now runs through an owned compile-visible boundary in
+[`../hgdn_cuda/fla_owned.py`](../hgdn_cuda/fla_owned.py), exposed as
+`hgdn_fla_v1::chunk_gated_delta_rule`.
+
+### What changed
+
+- bypass upstream FLA Python dispatch and backend-registry locks for the HGDN
+  recurrence hot path
+- keep using the upstream Triton kernels underneath that owned boundary
+- fix the custom-op backward fake contract so `grad_g` stays `float32`
+  - advertising it as `bfloat16` was enough to break Inductor buffer planning
+    in the full trainer backward graph
+
+### Smoke result
+
+Small compiled trainer smoke now reaches HGDN warmup plus the first real
+backward/optimizer step without HGDN graph breaks.
+
+Observed recompiles after the boundary fix:
+
+- one-time rotary-cache recompile when `self._cos` flips from `None`
+- optimizer-side `_zeropower_via_newtonschulz5_wide` specialization
+- train/eval `grad_mode` split
+
+These are real, but they are outside the closed post-conv front-end seam and
+outside the original FLA lock/context-manager failure.
+
+### Residual risk
+
+`torch.library.opcheck(..., test_aot_dispatch_dynamic)` still reports a mismatch
+for the owned recurrence op, so trainer-path smoke remains the practical
+acceptance gate until that is resolved.
+
+### Decision
+
+- keep the post-conv front-end seam closed
+- keep the owned recurrence boundary
+- focus the next compile pass on post-warmup recompiles only if they survive
+  trainer-path smoke or show up again on H100
+- do not spend more H100 time on old front-end ownership variants
+
 ## 2026-04-08 — Compile-visible split/norm also closes the current front-end seam (`h100k20`)
 
 Bundle:
