@@ -43,6 +43,7 @@ val_batch_size="${VAL_BATCH_SIZE:-524288}"
 max_wallclock_seconds="${MAX_WALLCLOCK_SECONDS:-600}"
 compile="${COMPILE:-1}"
 compile_strategy="${COMPILE_STRATEGY:-model}"
+weight_decay="${WEIGHT_DECAY:-0}"
 
 hgdn_config="${HGDN_CONFIG:-configs/hgdn/retune_trim_layers_14.toml}"
 hgdn_kernel_config="${HGDN_KERNEL_CONFIG:-configs/hgdn/winner_20260405_19.toml}"
@@ -122,6 +123,7 @@ print_plan() {
     echo "val_batch_size=${val_batch_size}"
     echo "compile=${compile}"
     echo "compile_strategy=${compile_strategy}"
+    echo "weight_decay=${weight_decay}"
     echo "max_wallclock_seconds=${max_wallclock_seconds}"
     echo "hgdn_config=${hgdn_config}"
     echo "hgdn_kernel_config=${hgdn_kernel_config}"
@@ -233,6 +235,7 @@ run_round() {
         "${diagnostic_env[@]}" \
         "COMPILE=${compile}" \
         "COMPILE_STRATEGY=${compile_strategy}" \
+        "WEIGHT_DECAY=${weight_decay}" \
         "RUN_ID=${hgdn_run_id}" \
         "ITERATIONS=${iterations}" \
         "MAX_WALLCLOCK_SECONDS=${max_wallclock_seconds}" \
@@ -260,6 +263,7 @@ run_round() {
         "${diagnostic_env[@]}" \
         "COMPILE=${compile}" \
         "COMPILE_STRATEGY=${compile_strategy}" \
+        "WEIGHT_DECAY=${weight_decay}" \
         "RUN_ID=${hgdn_run_id}" \
         "ITERATIONS=${iterations}" \
         "MAX_WALLCLOCK_SECONDS=${max_wallclock_seconds}" \
@@ -287,6 +291,7 @@ run_round() {
         "${diagnostic_env[@]}" \
         "COMPILE=${compile}" \
         "COMPILE_STRATEGY=${compile_strategy}" \
+        "WEIGHT_DECAY=${weight_decay}" \
         "RUN_ID=${attn_run_id}" \
         "ITERATIONS=${iterations}" \
         "MAX_WALLCLOCK_SECONDS=${max_wallclock_seconds}" \
@@ -319,6 +324,7 @@ run_round() {
         "${diagnostic_env[@]}" \
         "COMPILE=${compile}" \
         "COMPILE_STRATEGY=${compile_strategy}" \
+        "WEIGHT_DECAY=${weight_decay}" \
         "RUN_ID=${attn_run_id}" \
         "ITERATIONS=${iterations}" \
         "MAX_WALLCLOCK_SECONDS=${max_wallclock_seconds}" \
@@ -380,6 +386,7 @@ build_bundle() {
         "${max_wallclock_seconds}" \
         "${compile}" \
         "${compile_strategy}" \
+        "${weight_decay}" \
         "${gpt_naive_run_id}" \
         "${hgdn_config}" \
         "${hgdn_kernel_config}" \
@@ -415,14 +422,15 @@ val_batch_size = int(sys.argv[20])
 max_wallclock_seconds = float(sys.argv[21])
 compile_enabled = bool(int(sys.argv[22]))
 compile_strategy = sys.argv[23]
-gpt_naive_run_id = sys.argv[24]
-hgdn_config = sys.argv[25]
-hgdn_kernel_config = sys.argv[26]
-hgdn_run_id = sys.argv[27]
-attn_run_id = sys.argv[28]
-naive_reference_name = sys.argv[29]
-naive_reference_roundtrip_bpb = float(sys.argv[30])
-naive_reference_stop_bpb = float(sys.argv[31])
+weight_decay = float(sys.argv[24])
+gpt_naive_run_id = sys.argv[25]
+hgdn_config = sys.argv[26]
+hgdn_kernel_config = sys.argv[27]
+hgdn_run_id = sys.argv[28]
+attn_run_id = sys.argv[29]
+naive_reference_name = sys.argv[30]
+naive_reference_roundtrip_bpb = float(sys.argv[31])
+naive_reference_stop_bpb = float(sys.argv[32])
 
 manifest = {
     "run_prefix_base": run_prefix_base,
@@ -442,6 +450,7 @@ manifest = {
         "max_wallclock_seconds": max_wallclock_seconds,
         "compile": compile_enabled,
         "compile_strategy": compile_strategy,
+        "weight_decay": weight_decay,
         "torch_logs": torch_logs or None,
         "torch_trace": torch_trace or None,
         "omp_num_threads": omp_num_threads,

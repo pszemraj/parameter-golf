@@ -68,6 +68,9 @@ Branch: `exp/hgdn`
   - the exact repo naive baseline from `train_gpt.py`
   - the hybrid-trainer attention-only control
   - the live HGDN finalist
+- For that check, pin the hybrid-trainer runs to `WEIGHT_DECAY=0`.
+  - The baseline trainer does not apply optimizer weight decay.
+  - The hybrid default `WEIGHT_DECAY=0.04` silently changes the contract and is strong enough to collapse both hybrid runs mid-training.
 - Fixed-token sweeps answer learning efficiency. The final architecture call still has to survive the H100 wallclock contract.
 - Low VRAM use during saturated fixed-token H100 runs is not a failure by itself. Treat it as a reason to study packing, not to discard the architecture.
 - On the compiled HGDN path, default to changes that alter the generated path. Python-side view reshuffles and `.contiguous()` edits are not the main lever.
