@@ -127,13 +127,15 @@ Branch: `exp/hgdn`
   - `grad_g` must stay `float32` in the fake/meta registration
   - advertising it as `bfloat16` poisoned Inductor buffer planning in the full
     backward graph
+- Muon Newton-Schulz helpers now prewarm on the live matrix-shape family before
+  the training clock starts, so the optimizer-side shape-family compiles do not
+  first appear mid-run.
 - Small compiled trainer smoke now completes HGDN warmup plus the first real
   backward/optimizer step without HGDN graph breaks.
 - Remaining compile churn is narrower and outside the closed front-end seam:
   - one-time rotary-cache recompile when `self._cos` flips from `None`
-  - train/eval `grad_mode` recompile when the same forward is reused across
+  - one eval-time `grad_mode` recompile when the same forward is reused across
     training and evaluation
-  - optimizer-side `_zeropower_via_newtonschulz5_wide` specialization
 - Keep auditing with `TORCH_LOGS=recompiles,graph_breaks`, but do not treat the
   recurrence seam as the live blocker anymore unless new H100 evidence says
   otherwise.

@@ -80,11 +80,12 @@ Last updated: 2026-04-13
   - the full trainer smoke no longer shows HGDN graph breaks in the block loop
   - the custom-op fake contract now keeps `grad_g` as `float32`, which avoids
     the Inductor buffer-planning failure seen in the first owned-boundary pass
+  - Muon Newton-Schulz helpers now prewarm on the live matrix-shape family, so
+    the optimizer-side shape-family recompile no longer lands in the real
+    training path
 - Remaining:
-  - eliminate or explicitly accept the optimizer-side
-    `_zeropower_via_newtonschulz5_wide` recompiles
   - decide whether the train/eval `grad_mode` split should be prewarmed,
-    isolated, or simply treated as a one-time dual-graph cost
+    isolated, or simply treated as a one-time eval-side dual-graph cost
   - keep the rotary-cache recompile as accepted one-shot behavior unless it
     starts repeating after warmup
   - resolve the remaining `torch.library.opcheck(... test_aot_dispatch_dynamic)`

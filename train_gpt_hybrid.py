@@ -450,6 +450,41 @@ def zeropower_via_newtonschulz5(
     return _zeropower_via_newtonschulz5_wide(X, steps=steps)
 
 
+def prewarm_muon_backend_shapes(params: list[Tensor], *, backend_steps: int) -> int:
+    """Precompile Muon Newton-Schulz helpers on the live matrix-shape family.
+
+    This keeps shape-family compilation out of the real training loop by running
+    one representative call per unique 2D parameter shape before the training
+    timer starts.
+
+    :param list[Tensor] params: Matrix parameters assigned to Muon.
+    :param int backend_steps: Newton-Schulz iteration count.
+    :return int: Number of unique matrix shapes prewarmed.
+    """
+    shape_to_param: dict[tuple[int, int], Tensor] = {}
+    for param in params:
+        if param.ndim == 2:
+            shape_to_param.setdefault((int(param.shape[0]), int(param.shape[1])), param)
+    ordered = sorted(
+        shape_to_param.items(),
+        key=lambda item: (
+            item[0][0] == item[0][1],
+            item[0][0] > item[0][1],
+            item[0][0],
+            item[0][1],
+        ),
+    )
+    count = 0
+    with torch.no_grad():
+        for shape, param in ordered:
+            sample = torch.randn(shape, device=param.device, dtype=param.dtype)
+            _ = zeropower_via_newtonschulz5(sample, steps=backend_steps)
+            count += 1
+    if params and params[0].is_cuda:
+        torch.cuda.synchronize()
+    return count
+
+
 class Muon(torch.optim.Optimizer):
     """Minimal Muon optimizer used for matrix-shaped parameters."""
 
@@ -1161,6 +1196,13 @@ def main() -> None:
         )
         optimizers.insert(1, optimizer_head)
 
+    muon_prewarm_count = 0
+    if args.compile and device.type == "cuda":
+        muon_prewarm_count = prewarm_muon_backend_shapes(
+            matrix_params,
+            backend_steps=args.muon_backend_steps,
+        )
+
     # ── Data loader & warmup ──────────────────────────────────────────
     train_loader = DistributedTokenLoader(train_files, rank, world_size, device)
     max_wallclock_ms = (
@@ -1223,6 +1265,8 @@ def main() -> None:
         if distributed:
             model.require_backward_grad_sync = True
         train_loader = DistributedTokenLoader(train_files, rank, world_size, device)
+    if muon_prewarm_count > 0:
+        log0(f"compile_prewarm: muon_shapes:{muon_prewarm_count}")
     if device.type == "cuda":
         torch.cuda.synchronize()
         gc.collect()
