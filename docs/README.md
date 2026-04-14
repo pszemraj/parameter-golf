@@ -68,6 +68,11 @@ Branch: `exp/hgdn`
   - the exact repo naive baseline from `train_gpt.py`
   - the hybrid-trainer attention-only control
   - the live HGDN finalist
+- The exact repo naive baseline is the calibration anchor for this check.
+  - Do not treat the hybrid-trainer attention-only control as a substitute for
+    the published baseline.
+  - Keep the attention-only control only because it isolates the architecture
+    delta inside the hybrid trainer/runtime stack.
 - For that check, pin the hybrid-trainer runs to `WEIGHT_DECAY=0`.
   - The baseline trainer does not apply optimizer weight decay.
   - The hybrid default `WEIGHT_DECAY=0.04` silently changes the contract and is strong enough to collapse both hybrid runs mid-training.
