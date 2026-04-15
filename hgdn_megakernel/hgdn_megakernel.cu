@@ -20,6 +20,7 @@
 #include <c10/cuda/CUDAException.h>
 #include <c10/util/BFloat16.h>
 #include <cooperative_groups.h>
+#include <mma.h>
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 
@@ -39,15 +40,13 @@ constexpr int MAX_H = 16;
 constexpr int MAX_DK = 64;
 constexpr int MAX_DV = 64;
 constexpr int MAX_K = 8;
-constexpr int THREADS = 256;
+constexpr int THREADS = 128;
+constexpr int WARP_SIZE = 32;
+constexpr int WARPS_PER_BLOCK = THREADS / WARP_SIZE;
 constexpr int GEMM_TILE = 16;
 constexpr int REC_V_TILE = 8;
 constexpr int REC_CHUNK_T = 8;
 constexpr float EPS = 1.0e-6f;
-
-static_assert(
-    THREADS == GEMM_TILE * GEMM_TILE,
-    "THREADS must match GEMM_TILE*GEMM_TILE for tiled GEMM phases");
 
 struct DeviceReport {
   int major;
@@ -219,6 +218,25 @@ __device__ __forceinline__ int ceil_div_int(int a, int b) {
   return (a + b - 1) / b;
 }
 
+template <typename StoreFn>
+__device__ void phase_gemm_warp_scalar(
+    int m0,
+    int n0,
+    int M,
+    int N,
+    int lane,
+    StoreFn&& store_value) {
+  for (int idx = lane; idx < GEMM_TILE * GEMM_TILE; idx += WARP_SIZE) {
+    int r = idx / GEMM_TILE;
+    int c = idx % GEMM_TILE;
+    int m = m0 + r;
+    int n = n0 + c;
+    if (m < M && n < N) {
+      store_value(m, n);
+    }
+  }
+}
+
 __device__ void phase_gemm_abt_store_bf16(
     const bf16* A,
     const bf16* B,
@@ -227,45 +245,78 @@ __device__ void phase_gemm_abt_store_bf16(
     int K,
     int N,
     float* shmem) {
-  float* tile_a = shmem;
-  float* tile_b = shmem + GEMM_TILE * GEMM_TILE;
-  int tid = threadIdx.x;
-  int local_row = tid / GEMM_TILE;
-  int local_col = tid % GEMM_TILE;
+  int warp_id = threadIdx.x / WARP_SIZE;
+  int lane = threadIdx.x % WARP_SIZE;
+  int global_warp = blockIdx.x * WARPS_PER_BLOCK + warp_id;
+  int warp_stride = gridDim.x * WARPS_PER_BLOCK;
   int tiles_n = ceil_div_int(N, GEMM_TILE);
   int total_tiles = ceil_div_int(M, GEMM_TILE) * tiles_n;
+  float* warp_tile = shmem + warp_id * GEMM_TILE * GEMM_TILE;
 
-  for (int tile = blockIdx.x; tile < total_tiles; tile += gridDim.x) {
+  for (int tile = global_warp; tile < total_tiles; tile += warp_stride) {
     int tile_m = tile / tiles_n;
     int tile_n = tile % tiles_n;
-    int m = tile_m * GEMM_TILE + local_row;
-    int n = tile_n * GEMM_TILE + local_col;
-    float acc = 0.0f;
+    int m0 = tile_m * GEMM_TILE;
+    int n0 = tile_n * GEMM_TILE;
+    bool full_tile = (m0 + GEMM_TILE <= M) && (n0 + GEMM_TILE <= N) &&
+                     (K % GEMM_TILE == 0);
 
-    for (int k0 = 0; k0 < K; k0 += GEMM_TILE) {
-      int a_k = k0 + local_col;
-      int b_k = k0 + local_col;
-      int b_row = tile_n * GEMM_TILE + local_row;
-      tile_a[local_row * GEMM_TILE + local_col] =
-          (m < M && a_k < K) ? b2f(A[static_cast<int64_t>(m) * K + a_k]) : 0.0f;
-      tile_b[local_row * GEMM_TILE + local_col] =
-          (b_row < N && b_k < K)
-              ? b2f(B[static_cast<int64_t>(b_row) * K + b_k])
-              : 0.0f;
-      __syncthreads();
-
-      #pragma unroll
-      for (int kk = 0; kk < GEMM_TILE; ++kk) {
-        acc += tile_a[local_row * GEMM_TILE + kk] *
-               tile_b[local_col * GEMM_TILE + kk];
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+    if (full_tile) {
+      nvcuda::wmma::fragment<
+          nvcuda::wmma::matrix_a,
+          GEMM_TILE,
+          GEMM_TILE,
+          GEMM_TILE,
+          bf16,
+          nvcuda::wmma::row_major>
+          a_frag;
+      nvcuda::wmma::fragment<
+          nvcuda::wmma::matrix_b,
+          GEMM_TILE,
+          GEMM_TILE,
+          GEMM_TILE,
+          bf16,
+          nvcuda::wmma::col_major>
+          b_frag;
+      nvcuda::wmma::fragment<
+          nvcuda::wmma::accumulator,
+          GEMM_TILE,
+          GEMM_TILE,
+          GEMM_TILE,
+          float>
+          acc_frag;
+      nvcuda::wmma::fill_fragment(acc_frag, 0.0f);
+      for (int k0 = 0; k0 < K; k0 += GEMM_TILE) {
+        const bf16* a_ptr = A + static_cast<int64_t>(m0) * K + k0;
+        const bf16* b_ptr = B + static_cast<int64_t>(n0) * K + k0;
+        nvcuda::wmma::load_matrix_sync(a_frag, a_ptr, K);
+        nvcuda::wmma::load_matrix_sync(b_frag, b_ptr, K);
+        nvcuda::wmma::mma_sync(acc_frag, a_frag, b_frag, acc_frag);
       }
-      __syncthreads();
+      nvcuda::wmma::store_matrix_sync(
+          warp_tile, acc_frag, GEMM_TILE, nvcuda::wmma::mem_row_major);
+      __syncwarp();
+      for (int idx = lane; idx < GEMM_TILE * GEMM_TILE; idx += WARP_SIZE) {
+        int r = idx / GEMM_TILE;
+        int c = idx % GEMM_TILE;
+        Out[static_cast<int64_t>(m0 + r) * N + (n0 + c)] = f2b(warp_tile[idx]);
+      }
+      __syncwarp();
+      continue;
     }
+#endif
 
-    if (m < M && n < N) {
-      Out[static_cast<int64_t>(m) * N + n] = f2b(acc);
-    }
-    __syncthreads();
+    phase_gemm_warp_scalar(
+        m0, n0, M, N, lane, [&](int m, int n) {
+          float acc = 0.0f;
+          int64_t a_base = static_cast<int64_t>(m) * K;
+          int64_t b_base = static_cast<int64_t>(n) * K;
+          for (int k = 0; k < K; ++k) {
+            acc += b2f(A[a_base + k]) * b2f(B[b_base + k]);
+          }
+          Out[static_cast<int64_t>(m) * N + n] = f2b(acc);
+        });
   }
 }
 
@@ -277,44 +328,77 @@ __device__ void phase_gemm_ab_store_bf16(
     int K,
     int N,
     float* shmem) {
-  float* tile_a = shmem;
-  float* tile_b = shmem + GEMM_TILE * GEMM_TILE;
-  int tid = threadIdx.x;
-  int local_row = tid / GEMM_TILE;
-  int local_col = tid % GEMM_TILE;
+  int warp_id = threadIdx.x / WARP_SIZE;
+  int lane = threadIdx.x % WARP_SIZE;
+  int global_warp = blockIdx.x * WARPS_PER_BLOCK + warp_id;
+  int warp_stride = gridDim.x * WARPS_PER_BLOCK;
   int tiles_n = ceil_div_int(N, GEMM_TILE);
   int total_tiles = ceil_div_int(M, GEMM_TILE) * tiles_n;
+  float* warp_tile = shmem + warp_id * GEMM_TILE * GEMM_TILE;
 
-  for (int tile = blockIdx.x; tile < total_tiles; tile += gridDim.x) {
+  for (int tile = global_warp; tile < total_tiles; tile += warp_stride) {
     int tile_m = tile / tiles_n;
     int tile_n = tile % tiles_n;
-    int m = tile_m * GEMM_TILE + local_row;
-    int n = tile_n * GEMM_TILE + local_col;
-    float acc = 0.0f;
+    int m0 = tile_m * GEMM_TILE;
+    int n0 = tile_n * GEMM_TILE;
+    bool full_tile = (m0 + GEMM_TILE <= M) && (n0 + GEMM_TILE <= N) &&
+                     (K % GEMM_TILE == 0);
 
-    for (int k0 = 0; k0 < K; k0 += GEMM_TILE) {
-      int a_k = k0 + local_col;
-      int b_k = k0 + local_row;
-      tile_a[local_row * GEMM_TILE + local_col] =
-          (m < M && a_k < K) ? b2f(A[static_cast<int64_t>(m) * K + a_k]) : 0.0f;
-      tile_b[local_row * GEMM_TILE + local_col] =
-          (b_k < K && n < N)
-              ? b2f(B[static_cast<int64_t>(b_k) * N + n])
-              : 0.0f;
-      __syncthreads();
-
-      #pragma unroll
-      for (int kk = 0; kk < GEMM_TILE; ++kk) {
-        acc += tile_a[local_row * GEMM_TILE + kk] *
-               tile_b[kk * GEMM_TILE + local_col];
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+    if (full_tile) {
+      nvcuda::wmma::fragment<
+          nvcuda::wmma::matrix_a,
+          GEMM_TILE,
+          GEMM_TILE,
+          GEMM_TILE,
+          bf16,
+          nvcuda::wmma::row_major>
+          a_frag;
+      nvcuda::wmma::fragment<
+          nvcuda::wmma::matrix_b,
+          GEMM_TILE,
+          GEMM_TILE,
+          GEMM_TILE,
+          bf16,
+          nvcuda::wmma::row_major>
+          b_frag;
+      nvcuda::wmma::fragment<
+          nvcuda::wmma::accumulator,
+          GEMM_TILE,
+          GEMM_TILE,
+          GEMM_TILE,
+          float>
+          acc_frag;
+      nvcuda::wmma::fill_fragment(acc_frag, 0.0f);
+      for (int k0 = 0; k0 < K; k0 += GEMM_TILE) {
+        const bf16* a_ptr = A + static_cast<int64_t>(m0) * K + k0;
+        const bf16* b_ptr = B + static_cast<int64_t>(k0) * N + n0;
+        nvcuda::wmma::load_matrix_sync(a_frag, a_ptr, K);
+        nvcuda::wmma::load_matrix_sync(b_frag, b_ptr, N);
+        nvcuda::wmma::mma_sync(acc_frag, a_frag, b_frag, acc_frag);
       }
-      __syncthreads();
+      nvcuda::wmma::store_matrix_sync(
+          warp_tile, acc_frag, GEMM_TILE, nvcuda::wmma::mem_row_major);
+      __syncwarp();
+      for (int idx = lane; idx < GEMM_TILE * GEMM_TILE; idx += WARP_SIZE) {
+        int r = idx / GEMM_TILE;
+        int c = idx % GEMM_TILE;
+        Out[static_cast<int64_t>(m0 + r) * N + (n0 + c)] = f2b(warp_tile[idx]);
+      }
+      __syncwarp();
+      continue;
     }
+#endif
 
-    if (m < M && n < N) {
-      Out[static_cast<int64_t>(m) * N + n] = f2b(acc);
-    }
-    __syncthreads();
+    phase_gemm_warp_scalar(
+        m0, n0, M, N, lane, [&](int m, int n) {
+          float acc = 0.0f;
+          int64_t a_base = static_cast<int64_t>(m) * K;
+          for (int k = 0; k < K; ++k) {
+            acc += b2f(A[a_base + k]) * b2f(B[static_cast<int64_t>(k) * N + n]);
+          }
+          Out[static_cast<int64_t>(m) * N + n] = f2b(acc);
+        });
   }
 }
 
@@ -327,47 +411,80 @@ __device__ void phase_gemm_ab_accum_f32(
     int N,
     float* shmem,
     bool zero_init) {
-  float* tile_a = shmem;
-  float* tile_b = shmem + GEMM_TILE * GEMM_TILE;
-  int tid = threadIdx.x;
-  int local_row = tid / GEMM_TILE;
-  int local_col = tid % GEMM_TILE;
+  (void)shmem;
+  int warp_id = threadIdx.x / WARP_SIZE;
+  int lane = threadIdx.x % WARP_SIZE;
+  int global_warp = blockIdx.x * WARPS_PER_BLOCK + warp_id;
+  int warp_stride = gridDim.x * WARPS_PER_BLOCK;
   int tiles_n = ceil_div_int(N, GEMM_TILE);
   int total_tiles = ceil_div_int(M, GEMM_TILE) * tiles_n;
-
-  for (int tile = blockIdx.x; tile < total_tiles; tile += gridDim.x) {
+  for (int tile = global_warp; tile < total_tiles; tile += warp_stride) {
     int tile_m = tile / tiles_n;
     int tile_n = tile % tiles_n;
-    int m = tile_m * GEMM_TILE + local_row;
-    int n = tile_n * GEMM_TILE + local_col;
-    float acc = 0.0f;
-    if (!zero_init && m < M && n < N) {
-      acc = Out[static_cast<int64_t>(m) * N + n];
-    }
+    int m0 = tile_m * GEMM_TILE;
+    int n0 = tile_n * GEMM_TILE;
+    bool full_tile = (m0 + GEMM_TILE <= M) && (n0 + GEMM_TILE <= N) &&
+                     (K % GEMM_TILE == 0);
 
-    for (int k0 = 0; k0 < K; k0 += GEMM_TILE) {
-      int a_k = k0 + local_col;
-      int b_k = k0 + local_row;
-      tile_a[local_row * GEMM_TILE + local_col] =
-          (m < M && a_k < K) ? b2f(A[static_cast<int64_t>(m) * K + a_k]) : 0.0f;
-      tile_b[local_row * GEMM_TILE + local_col] =
-          (b_k < K && n < N)
-              ? b2f(B[static_cast<int64_t>(b_k) * N + n])
-              : 0.0f;
-      __syncthreads();
-
-      #pragma unroll
-      for (int kk = 0; kk < GEMM_TILE; ++kk) {
-        acc += tile_a[local_row * GEMM_TILE + kk] *
-               tile_b[kk * GEMM_TILE + local_col];
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+    if (full_tile) {
+      nvcuda::wmma::fragment<
+          nvcuda::wmma::matrix_a,
+          GEMM_TILE,
+          GEMM_TILE,
+          GEMM_TILE,
+          bf16,
+          nvcuda::wmma::row_major>
+          a_frag;
+      nvcuda::wmma::fragment<
+          nvcuda::wmma::matrix_b,
+          GEMM_TILE,
+          GEMM_TILE,
+          GEMM_TILE,
+          bf16,
+          nvcuda::wmma::row_major>
+          b_frag;
+      nvcuda::wmma::fragment<
+          nvcuda::wmma::accumulator,
+          GEMM_TILE,
+          GEMM_TILE,
+          GEMM_TILE,
+          float>
+          acc_frag;
+      if (zero_init) {
+        nvcuda::wmma::fill_fragment(acc_frag, 0.0f);
+      } else {
+        nvcuda::wmma::load_matrix_sync(
+            acc_frag,
+            Out + static_cast<int64_t>(m0) * N + n0,
+            N,
+            nvcuda::wmma::mem_row_major);
       }
-      __syncthreads();
+      for (int k0 = 0; k0 < K; k0 += GEMM_TILE) {
+        const bf16* a_ptr = A + static_cast<int64_t>(m0) * K + k0;
+        const bf16* b_ptr = B + static_cast<int64_t>(k0) * N + n0;
+        nvcuda::wmma::load_matrix_sync(a_frag, a_ptr, K);
+        nvcuda::wmma::load_matrix_sync(b_frag, b_ptr, N);
+        nvcuda::wmma::mma_sync(acc_frag, a_frag, b_frag, acc_frag);
+      }
+      nvcuda::wmma::store_matrix_sync(
+          Out + static_cast<int64_t>(m0) * N + n0,
+          acc_frag,
+          N,
+          nvcuda::wmma::mem_row_major);
+      continue;
     }
+#endif
 
-    if (m < M && n < N) {
-      Out[static_cast<int64_t>(m) * N + n] = acc;
-    }
-    __syncthreads();
+    phase_gemm_warp_scalar(
+        m0, n0, M, N, lane, [&](int m, int n) {
+          float acc = zero_init ? 0.0f : Out[static_cast<int64_t>(m) * N + n];
+          int64_t a_base = static_cast<int64_t>(m) * K;
+          for (int k = 0; k < K; ++k) {
+            acc += b2f(A[a_base + k]) * b2f(B[static_cast<int64_t>(k) * N + n]);
+          }
+          Out[static_cast<int64_t>(m) * N + n] = acc;
+        });
   }
 }
 
@@ -379,46 +496,77 @@ __device__ void phase_gemm_aT_b_store_bf16(
     int R,
     int C,
     float* shmem) {
-  float* tile_a = shmem;
-  float* tile_b = shmem + GEMM_TILE * GEMM_TILE;
-  int tid = threadIdx.x;
-  int local_row = tid / GEMM_TILE;
-  int local_col = tid % GEMM_TILE;
+  int warp_id = threadIdx.x / WARP_SIZE;
+  int lane = threadIdx.x % WARP_SIZE;
+  int global_warp = blockIdx.x * WARPS_PER_BLOCK + warp_id;
+  int warp_stride = gridDim.x * WARPS_PER_BLOCK;
   int tiles_c = ceil_div_int(C, GEMM_TILE);
   int total_tiles = ceil_div_int(R, GEMM_TILE) * tiles_c;
+  float* warp_tile = shmem + warp_id * GEMM_TILE * GEMM_TILE;
 
-  for (int tile = blockIdx.x; tile < total_tiles; tile += gridDim.x) {
+  for (int tile = global_warp; tile < total_tiles; tile += warp_stride) {
     int tile_r = tile / tiles_c;
     int tile_c = tile % tiles_c;
-    int r = tile_r * GEMM_TILE + local_row;
-    int c = tile_c * GEMM_TILE + local_col;
-    float acc = 0.0f;
+    int r0 = tile_r * GEMM_TILE;
+    int c0 = tile_c * GEMM_TILE;
+    bool full_tile = (r0 + GEMM_TILE <= R) && (c0 + GEMM_TILE <= C) &&
+                     (M % GEMM_TILE == 0);
 
-    for (int m0 = 0; m0 < M; m0 += GEMM_TILE) {
-      int m_a = m0 + local_col;
-      int m_b = m0 + local_row;
-      tile_a[local_row * GEMM_TILE + local_col] =
-          (r < R && m_a < M)
-              ? b2f(A[static_cast<int64_t>(m_a) * R + r])
-              : 0.0f;
-      tile_b[local_row * GEMM_TILE + local_col] =
-          (m_b < M && c < C)
-              ? b2f(B[static_cast<int64_t>(m_b) * C + c])
-              : 0.0f;
-      __syncthreads();
-
-      #pragma unroll
-      for (int kk = 0; kk < GEMM_TILE; ++kk) {
-        acc += tile_a[local_row * GEMM_TILE + kk] *
-               tile_b[kk * GEMM_TILE + local_col];
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+    if (full_tile) {
+      nvcuda::wmma::fragment<
+          nvcuda::wmma::matrix_a,
+          GEMM_TILE,
+          GEMM_TILE,
+          GEMM_TILE,
+          bf16,
+          nvcuda::wmma::col_major>
+          a_frag;
+      nvcuda::wmma::fragment<
+          nvcuda::wmma::matrix_b,
+          GEMM_TILE,
+          GEMM_TILE,
+          GEMM_TILE,
+          bf16,
+          nvcuda::wmma::row_major>
+          b_frag;
+      nvcuda::wmma::fragment<
+          nvcuda::wmma::accumulator,
+          GEMM_TILE,
+          GEMM_TILE,
+          GEMM_TILE,
+          float>
+          acc_frag;
+      nvcuda::wmma::fill_fragment(acc_frag, 0.0f);
+      for (int m0 = 0; m0 < M; m0 += GEMM_TILE) {
+        const bf16* a_ptr = A + static_cast<int64_t>(m0) * R + r0;
+        const bf16* b_ptr = B + static_cast<int64_t>(m0) * C + c0;
+        nvcuda::wmma::load_matrix_sync(a_frag, a_ptr, R);
+        nvcuda::wmma::load_matrix_sync(b_frag, b_ptr, C);
+        nvcuda::wmma::mma_sync(acc_frag, a_frag, b_frag, acc_frag);
       }
-      __syncthreads();
+      nvcuda::wmma::store_matrix_sync(
+          warp_tile, acc_frag, GEMM_TILE, nvcuda::wmma::mem_row_major);
+      __syncwarp();
+      for (int idx = lane; idx < GEMM_TILE * GEMM_TILE; idx += WARP_SIZE) {
+        int r = idx / GEMM_TILE;
+        int c = idx % GEMM_TILE;
+        Out[static_cast<int64_t>(r0 + r) * C + (c0 + c)] = f2b(warp_tile[idx]);
+      }
+      __syncwarp();
+      continue;
     }
+#endif
 
-    if (r < R && c < C) {
-      Out[static_cast<int64_t>(r) * C + c] = f2b(acc);
-    }
-    __syncthreads();
+    phase_gemm_warp_scalar(
+        r0, c0, R, C, lane, [&](int r, int c) {
+          float acc = 0.0f;
+          for (int m = 0; m < M; ++m) {
+            acc += b2f(A[static_cast<int64_t>(m) * R + r]) *
+                   b2f(B[static_cast<int64_t>(m) * C + c]);
+          }
+          Out[static_cast<int64_t>(r) * C + c] = f2b(acc);
+        });
   }
 }
 
@@ -1266,7 +1414,9 @@ size_t shared_bytes(int Dk, int Dv) {
           (REC_CHUNK_T + 3) * Dk * dv_tile + 3 * Dk + 4 * dv_tile +
           2 * THREADS + REC_CHUNK_T * (2 * Dk + 2 * dv_tile + 2)) *
       sizeof(float);
-  size_t gemm = static_cast<size_t>(2 * GEMM_TILE * GEMM_TILE) * sizeof(float);
+  size_t gemm =
+      static_cast<size_t>(WARPS_PER_BLOCK * GEMM_TILE * GEMM_TILE) *
+      sizeof(float);
   return recurrence > gemm ? recurrence : gemm;
 }
 

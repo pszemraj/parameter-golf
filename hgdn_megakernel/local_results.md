@@ -19,8 +19,11 @@
 - The older `hgdn_cuda` sidecar family remains in-tree only for historical
   reference and old result inspection.
 - Current candidate here is the chunk-checkpointed megakernel:
+  - `THREADS = 128`
   - `REC_V_TILE = 8`
   - `REC_CHUNK_T = 8`
+  - bf16 WMMA tensor-core path for full dense tiles on `sm_80+`
+  - warp-local scalar fallback for dense edge tiles
   - forward saves only recurrence chunk-start checkpoints
   - backward replays each chunk inside the same cooperative kernel
   - forward launch count remains `1`
@@ -141,13 +144,13 @@ These timings are for the local `sm_89` device only.
 
 ### `B=1, T=8`
 
-- forward: `0.21811 ms`
-- forward + backward: `0.47514 ms`
+- forward: `0.80691 ms`
+- forward + backward: `1.20627 ms`
 
 ### `B=1, T=32`
 
-- forward: `0.31232 ms`
-- forward + backward: `0.80384 ms`
+- forward: `0.25293 ms`
+- forward + backward: `0.66355 ms`
 
 ## 4070 speed comparison vs current packed HGDN CUDA path
 
@@ -165,62 +168,63 @@ Comparison setup:
 ### `B=1, T=128`
 
 - current path:
-  - forward `1.30888 ms`
-  - forward + backward `3.48632 ms`
+  - forward `1.18047 ms`
+  - forward + backward `3.17204 ms`
 - megakernel:
-  - forward `0.92267 ms`
-  - forward + backward `2.57566 ms`
+  - forward `0.54773 ms`
+  - forward + backward `1.76025 ms`
 - relative:
-  - forward speedup `1.419x`
-  - forward + backward speedup `1.354x`
+  - forward speedup `2.155x`
+  - forward + backward speedup `1.802x`
 
 ### `B=1, T=512`
 
 - current path:
-  - forward `1.11427 ms`
-  - forward + backward `2.89393 ms`
+  - forward `1.23888 ms`
+  - forward + backward `3.14762 ms`
 - megakernel:
-  - forward `2.28029 ms`
-  - forward + backward `7.22790 ms`
+  - forward `1.31921 ms`
+  - forward + backward `4.81146 ms`
 - relative:
-  - forward speedup `0.489x`
-  - forward + backward speedup `0.400x`
+  - forward speedup `0.939x`
+  - forward + backward speedup `0.654x`
 
 ### `B=1, T=1024`
 
 - current path:
-  - forward `1.12496 ms`
-  - forward + backward `3.05008 ms`
+  - forward `1.11729 ms`
+  - forward + backward `2.94275 ms`
 - megakernel:
-  - forward `3.75383 ms`
-  - forward + backward `12.48880 ms`
+  - forward `2.20609 ms`
+  - forward + backward `8.65826 ms`
 - relative:
-  - forward speedup `0.300x`
-  - forward + backward speedup `0.244x`
+  - forward speedup `0.506x`
+  - forward + backward speedup `0.340x`
 
 ### `B=2, T=512`
 
 - current path:
-  - forward `1.48678 ms`
-  - forward + backward `3.62754 ms`
+  - forward `1.06188 ms`
+  - forward + backward `2.85931 ms`
 - megakernel:
-  - forward `2.86030 ms`
-  - forward + backward `8.76684 ms`
+  - forward `1.34434 ms`
+  - forward + backward `5.16017 ms`
 - relative:
-  - forward speedup `0.520x`
-  - forward + backward speedup `0.414x`
+  - forward speedup `0.790x`
+  - forward + backward speedup `0.554x`
 
 Local conclusion:
 
 - parity is good
 - launch structure is good
-- the checkpointed kernel is now a local win at `B=1,T=128`
-- the checkpointed backward path is still too slow at `T=512+` on the RTX 4070
-- the chunk-checkpoint change cut saved forward state hard, but it did not yet
-  turn the long-sequence local timing curve into a win
-- the next meaningful speed step is no longer "more save-vs-recompute work"
-  inside the same scalar dense phases; it is tensor-core dense work inside the
-  megakernel or an equally serious recurrent-core optimization
+- the portable tensor-core dense path is real and materially improved the local
+  speed curve
+- the current megakernel is a strong local win at `B=1,T=128`
+- forward at `B=1,T=512` is now close to parity with the live packed path
+- backward is still the clear long-sequence bottleneck
+- the next meaningful speed step is recurrence-core work:
+  fewer global atomics, better backward accumulation structure, or a more
+  aggressive Hopper-specific recurrence implementation
 
 ## Readiness call
 
@@ -237,7 +241,8 @@ Rationale:
 Current status is **not** “ready for H100 timing testing” because:
 
 - local `sm_89` timing is not a proxy for H100
-- dense projections are still tiled shared-memory GEMMs, not tensor-core kernels
-- the recurrent core still loses to the live packed path at `T=512+` on the local 4070
-- the chunk-checkpointed backward path reduced memory sharply, but it did not
-  close the long-sequence throughput gap by itself
+- the current tensor-core path is WMMA-based and portable, not yet Hopper-tuned
+- the recurrent core still loses to the live packed path at `T=512+` on the
+  local 4070
+- backward recurrence/replay and its global accumulation traffic are still too
+  expensive
