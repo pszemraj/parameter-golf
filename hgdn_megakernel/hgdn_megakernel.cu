@@ -42,6 +42,7 @@ constexpr int MAX_K = 8;
 constexpr int THREADS = 256;
 constexpr int GEMM_TILE = 16;
 constexpr int REC_V_TILE = 8;
+constexpr int REC_CHUNK_T = 8;
 constexpr float EPS = 1.0e-6f;
 
 static_assert(
@@ -174,17 +175,19 @@ __device__ __forceinline__ int64_t idx4(
   return ((static_cast<int64_t>(b) * T + t) * H + h) * D + d;
 }
 
-__device__ __forceinline__ int64_t state_idx(
+__device__ __forceinline__ int64_t checkpoint_idx(
     int b,
-    int t,
+    int chunk,
     int h,
     int i,
     int j,
-    int T,
+    int NChunks,
     int H,
     int Dk,
     int Dv) {
-  return ((((static_cast<int64_t>(b) * T + t) * H + h) * Dk + i) * Dv + j);
+  return ((((static_cast<int64_t>(b) * NChunks + chunk) * H + h) * Dk + i) *
+          Dv +
+          j);
 }
 
 __device__ __forceinline__ int cq(int h, int d, int Dk) { return h * Dk + d; }
@@ -451,9 +454,15 @@ struct SharedState {
   float* tmp_dv0;
   float* tmp_dv1;
   float* tmp_dk0;
-  float* tmp_dk1;
   float* reduce0;
   float* reduce1;
+  float* chunk_states;
+  float* q_hist;
+  float* k_hist;
+  float* v_hist;
+  float* dv0_hist;
+  float* alpha_hist;
+  float* beta_hist;
 };
 
 __device__ SharedState shared_ptrs(float* base, int Dk, int Dv) {
@@ -479,11 +488,23 @@ __device__ SharedState shared_ptrs(float* base, int Dk, int Dv) {
   offset += Dv;
   s.tmp_dk0 = base + offset;
   offset += Dk;
-  s.tmp_dk1 = base + offset;
-  offset += Dk;
   s.reduce0 = base + offset;
   offset += THREADS;
   s.reduce1 = base + offset;
+  offset += THREADS;
+  s.chunk_states = base + offset;
+  offset += REC_CHUNK_T * Dk * Dv;
+  s.q_hist = base + offset;
+  offset += REC_CHUNK_T * Dk;
+  s.k_hist = base + offset;
+  offset += REC_CHUNK_T * Dk;
+  s.v_hist = base + offset;
+  offset += REC_CHUNK_T * Dv;
+  s.dv0_hist = base + offset;
+  offset += REC_CHUNK_T * Dv;
+  s.alpha_hist = base + offset;
+  offset += REC_CHUNK_T;
+  s.beta_hist = base + offset;
   return s;
 }
 
@@ -513,7 +534,7 @@ __global__ void hgdn_forward_bf16_kernel(
     bf16* __restrict__ o_raw,
     bf16* __restrict__ o_norm,
     bf16* __restrict__ z,
-    float* __restrict__ state_prev,
+    float* __restrict__ state_ckpt,
     int B,
     int T,
     int D,
@@ -521,6 +542,7 @@ __global__ void hgdn_forward_bf16_kernel(
     int Dk,
     int Dv,
     int K,
+    int n_chunks,
     int allow_neg_eigval) {
   cg::grid_group grid = cg::this_grid();
   extern __shared__ float shmem[];
@@ -643,11 +665,15 @@ __global__ void hgdn_forward_bf16_kernel(
       }
       __syncthreads();
 
-      for (int idx = threadIdx.x; idx < state_elems; idx += blockDim.x) {
-        int i = idx / dv_local;
-        int j = idx - i * dv_local;
-        state_prev[state_idx(b, t, h, i, v_base + j, T, H, Dk, Dv)] =
-            shared.S0[idx];
+      if ((t % REC_CHUNK_T) == 0) {
+        int chunk = t / REC_CHUNK_T;
+        for (int idx = threadIdx.x; idx < state_elems; idx += blockDim.x) {
+          int i = idx / dv_local;
+          int j = idx - i * dv_local;
+          state_ckpt[checkpoint_idx(
+              b, chunk, h, i, v_base + j, n_chunks, H, Dk, Dv)] =
+              shared.S0[idx];
+        }
       }
       for (int j = threadIdx.x; j < dv_local; j += blockDim.x) {
         float acc = 0.0f;
@@ -746,7 +772,7 @@ __global__ void hgdn_backward_bf16_kernel(
     const bf16* __restrict__ o_raw,
     const bf16* __restrict__ o_norm,
     const bf16* __restrict__ z,
-    const float* __restrict__ state_prev,
+    const float* __restrict__ state_ckpt,
     float* __restrict__ grad_q_norm_accum,
     float* __restrict__ grad_k_norm_accum,
     float* __restrict__ grad_g_log_accum,
@@ -780,6 +806,7 @@ __global__ void hgdn_backward_bf16_kernel(
     int Dk,
     int Dv,
     int K,
+    int n_chunks,
     int allow_neg_eigval) {
   cg::grid_group grid = cg::this_grid();
   extern __shared__ float shmem[];
@@ -871,139 +898,200 @@ __global__ void hgdn_backward_bf16_kernel(
     }
     __syncthreads();
 
-    for (int t = T - 1; t >= 0; --t) {
-      for (int i = threadIdx.x; i < Dk; i += blockDim.x) {
-        shared.q[i] = b2f(q_norm[idx4(b, t, h, i, T, H, Dk)]);
-        shared.k[i] = b2f(k_norm[idx4(b, t, h, i, T, H, Dk)]);
-      }
-      for (int j = threadIdx.x; j < dv_local; j += blockDim.x) {
-        shared.v[j] = b2f(v_post[idx4(b, t, h, v_base + j, T, H, Dv)]);
-        shared.go[j] = b2f(grad_o_raw[idx4(b, t, h, v_base + j, T, H, Dv)]);
-      }
+    for (int chunk = n_chunks - 1; chunk >= 0; --chunk) {
+      int chunk_start = chunk * REC_CHUNK_T;
+      int chunk_end = min(T, chunk_start + REC_CHUNK_T);
+      int chunk_len = chunk_end - chunk_start;
+
       for (int idx = threadIdx.x; idx < state_elems; idx += blockDim.x) {
         int i = idx / dv_local;
         int j = idx - i * dv_local;
-        shared.S0[idx] =
-            state_prev[state_idx(b, t, h, i, v_base + j, T, H, Dk, Dv)];
+        shared.S0[idx] = state_ckpt[checkpoint_idx(
+            b, chunk, h, i, v_base + j, n_chunks, H, Dk, Dv)];
       }
       __syncthreads();
 
-      for (int j = threadIdx.x; j < dv_local; j += blockDim.x) {
-        float acc = 0.0f;
-        for (int i = 0; i < Dk; ++i) {
-          acc += shared.k[i] * shared.S0[i * dv_local + j];
+      for (int local_t = 0; local_t < chunk_len; ++local_t) {
+        int t = chunk_start + local_t;
+        for (int i = threadIdx.x; i < Dk; i += blockDim.x) {
+          float q_value = b2f(q_norm[idx4(b, t, h, i, T, H, Dk)]);
+          float k_value = b2f(k_norm[idx4(b, t, h, i, T, H, Dk)]);
+          shared.q[i] = q_value;
+          shared.k[i] = k_value;
+          shared.q_hist[local_t * Dk + i] = q_value;
+          shared.k_hist[local_t * Dk + i] = k_value;
         }
-        shared.tmp_dv0[j] = acc;
-      }
-      __syncthreads();
-
-      float alpha = expf(b2f(g_log[idx3(b, t, h, T, H)]));
-      float beta_value = b2f(beta[idx3(b, t, h, T, H)]);
-      for (int idx = threadIdx.x; idx < state_elems; idx += blockDim.x) {
-        int i = idx / dv_local;
-        int j = idx - i * dv_local;
-        shared.S1[idx] = alpha *
-                             (shared.S0[idx] -
-                              beta_value * shared.k[i] * shared.tmp_dv0[j]) +
-                         shared.k[i] * shared.v[j];
-      }
-      __syncthreads();
-
-      for (int i = threadIdx.x; i < Dk; i += blockDim.x) {
-        float acc = 0.0f;
-        for (int j = 0; j < dv_local; ++j) {
-          acc += shared.S1[i * dv_local + j] * shared.go[j];
+        for (int j = threadIdx.x; j < dv_local; j += blockDim.x) {
+          float v_value = b2f(v_post[idx4(b, t, h, v_base + j, T, H, Dv)]);
+          shared.v[j] = v_value;
+          shared.v_hist[local_t * dv_local + j] = v_value;
         }
-        atomicAdd(
-            &grad_q_norm_accum[idx4(b, t, h, i, T, H, Dk)],
-            acc);
-      }
-      for (int idx = threadIdx.x; idx < state_elems; idx += blockDim.x) {
-        int i = idx / dv_local;
-        int j = idx - i * dv_local;
-        shared.adj[idx] += shared.q[i] * shared.go[j];
-      }
-      __syncthreads();
+        __syncthreads();
 
-      for (int j = threadIdx.x; j < dv_local; j += blockDim.x) {
-        float acc = 0.0f;
-        for (int i = 0; i < Dk; ++i) {
-          acc += shared.k[i] * (alpha * shared.adj[i * dv_local + j]);
+        for (int idx = threadIdx.x; idx < state_elems; idx += blockDim.x) {
+          shared.chunk_states[local_t * state_elems + idx] = shared.S0[idx];
         }
-        shared.tmp_dv1[j] = acc;
-      }
-      __syncthreads();
+        for (int j = threadIdx.x; j < dv_local; j += blockDim.x) {
+          float acc = 0.0f;
+          for (int i = 0; i < Dk; ++i) {
+            acc += shared.k[i] * shared.S0[i * dv_local + j];
+          }
+          shared.tmp_dv0[j] = acc;
+          shared.dv0_hist[local_t * dv_local + j] = acc;
+        }
+        __syncthreads();
 
-      for (int j = threadIdx.x; j < dv_local; j += blockDim.x) {
-        float acc = 0.0f;
-        for (int i = 0; i < Dk; ++i) {
-          acc += shared.adj[i * dv_local + j] * shared.k[i];
+        float alpha = expf(b2f(g_log[idx3(b, t, h, T, H)]));
+        float beta_value = b2f(beta[idx3(b, t, h, T, H)]);
+        if (threadIdx.x == 0) {
+          shared.alpha_hist[local_t] = alpha;
+          shared.beta_hist[local_t] = beta_value;
         }
-        grad_v_post[idx4(b, t, h, v_base + j, T, H, Dv)] = f2b(acc);
-      }
-      for (int i = threadIdx.x; i < Dk; i += blockDim.x) {
-        float acc = 0.0f;
-        for (int j = 0; j < dv_local; ++j) {
-          acc += shared.adj[i * dv_local + j] * shared.v[j];
+        for (int idx = threadIdx.x; idx < state_elems; idx += blockDim.x) {
+          int i = idx / dv_local;
+          int j = idx - i * dv_local;
+          shared.S1[idx] = alpha *
+                               (shared.S0[idx] -
+                                beta_value * shared.k[i] * shared.tmp_dv0[j]) +
+                           shared.k[i] * shared.v[j];
         }
-        shared.tmp_dk0[i] = acc;
-      }
-
-      float local_da = 0.0f;
-      float local_db = 0.0f;
-      for (int idx = threadIdx.x; idx < state_elems; idx += blockDim.x) {
-        int i = idx / dv_local;
-        int j = idx - i * dv_local;
-        float Aij =
-            shared.S0[idx] - beta_value * shared.k[i] * shared.tmp_dv0[j];
-        local_da += shared.adj[idx] * Aij;
-        local_db +=
-            (alpha * shared.adj[idx]) * (-shared.k[i] * shared.tmp_dv0[j]);
-      }
-      shared.reduce0[threadIdx.x] = local_da;
-      shared.reduce1[threadIdx.x] = local_db;
-      __syncthreads();
-      for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-        if (threadIdx.x < stride) {
-          shared.reduce0[threadIdx.x] += shared.reduce0[threadIdx.x + stride];
-          shared.reduce1[threadIdx.x] += shared.reduce1[threadIdx.x + stride];
+        __syncthreads();
+        for (int idx = threadIdx.x; idx < state_elems; idx += blockDim.x) {
+          shared.S0[idx] = shared.S1[idx];
         }
         __syncthreads();
       }
-      if (threadIdx.x == 0) {
-        atomicAdd(
-            &grad_g_log_accum[idx3(b, t, h, T, H)],
-            shared.reduce0[0] * alpha);
-        atomicAdd(
-            &grad_beta_accum[idx3(b, t, h, T, H)],
-            shared.reduce1[0]);
-      }
 
-      for (int i = threadIdx.x; i < Dk; i += blockDim.x) {
-        float term0 = shared.tmp_dk0[i];
-        float term1 = 0.0f;
-        float term2 = 0.0f;
-        for (int j = 0; j < dv_local; ++j) {
-          term1 += (alpha * shared.adj[i * dv_local + j]) * shared.tmp_dv0[j];
-          term2 += shared.S0[i * dv_local + j] * shared.tmp_dv1[j];
+      for (int local_t = chunk_len - 1; local_t >= 0; --local_t) {
+        int t = chunk_start + local_t;
+        for (int i = threadIdx.x; i < Dk; i += blockDim.x) {
+          shared.q[i] = shared.q_hist[local_t * Dk + i];
+          shared.k[i] = shared.k_hist[local_t * Dk + i];
         }
-        atomicAdd(
-            &grad_k_norm_accum[idx4(b, t, h, i, T, H, Dk)],
-            term0 - beta_value * (term1 + term2));
-      }
-      __syncthreads();
+        for (int j = threadIdx.x; j < dv_local; j += blockDim.x) {
+          shared.v[j] = shared.v_hist[local_t * dv_local + j];
+          shared.go[j] = b2f(grad_o_raw[idx4(b, t, h, v_base + j, T, H, Dv)]);
+        }
+        for (int idx = threadIdx.x; idx < state_elems; idx += blockDim.x) {
+          shared.S0[idx] = shared.chunk_states[local_t * state_elems + idx];
+        }
+        __syncthreads();
 
-      for (int idx = threadIdx.x; idx < state_elems; idx += blockDim.x) {
-        int i = idx / dv_local;
-        int j = idx - i * dv_local;
-        shared.S1[idx] =
-            alpha * shared.adj[idx] - beta_value * shared.k[i] * shared.tmp_dv1[j];
+        for (int j = threadIdx.x; j < dv_local; j += blockDim.x) {
+          shared.tmp_dv0[j] = shared.dv0_hist[local_t * dv_local + j];
+        }
+        __syncthreads();
+
+        float alpha = shared.alpha_hist[local_t];
+        float beta_value = shared.beta_hist[local_t];
+        for (int idx = threadIdx.x; idx < state_elems; idx += blockDim.x) {
+          int i = idx / dv_local;
+          int j = idx - i * dv_local;
+          shared.S1[idx] = alpha *
+                               (shared.S0[idx] -
+                                beta_value * shared.k[i] * shared.tmp_dv0[j]) +
+                           shared.k[i] * shared.v[j];
+        }
+        __syncthreads();
+
+        for (int i = threadIdx.x; i < Dk; i += blockDim.x) {
+          float acc = 0.0f;
+          for (int j = 0; j < dv_local; ++j) {
+            acc += shared.S1[i * dv_local + j] * shared.go[j];
+          }
+          atomicAdd(
+              &grad_q_norm_accum[idx4(b, t, h, i, T, H, Dk)],
+              acc);
+        }
+        __syncthreads();
+
+        for (int idx = threadIdx.x; idx < state_elems; idx += blockDim.x) {
+          int i = idx / dv_local;
+          int j = idx - i * dv_local;
+          shared.adj[idx] += shared.q[i] * shared.go[j];
+        }
+        __syncthreads();
+
+        for (int j = threadIdx.x; j < dv_local; j += blockDim.x) {
+          float acc = 0.0f;
+          for (int i = 0; i < Dk; ++i) {
+            acc += shared.k[i] * (alpha * shared.adj[i * dv_local + j]);
+          }
+          shared.tmp_dv1[j] = acc;
+        }
+        __syncthreads();
+
+        for (int j = threadIdx.x; j < dv_local; j += blockDim.x) {
+          float acc = 0.0f;
+          for (int i = 0; i < Dk; ++i) {
+            acc += shared.adj[i * dv_local + j] * shared.k[i];
+          }
+          grad_v_post[idx4(b, t, h, v_base + j, T, H, Dv)] = f2b(acc);
+        }
+        for (int i = threadIdx.x; i < Dk; i += blockDim.x) {
+          float acc = 0.0f;
+          for (int j = 0; j < dv_local; ++j) {
+            acc += shared.adj[i * dv_local + j] * shared.v[j];
+          }
+          shared.tmp_dk0[i] = acc;
+        }
+
+        float local_da = 0.0f;
+        float local_db = 0.0f;
+        for (int idx = threadIdx.x; idx < state_elems; idx += blockDim.x) {
+          int i = idx / dv_local;
+          int j = idx - i * dv_local;
+          float Aij =
+              shared.S0[idx] - beta_value * shared.k[i] * shared.tmp_dv0[j];
+          local_da += shared.adj[idx] * Aij;
+          local_db +=
+              (alpha * shared.adj[idx]) * (-shared.k[i] * shared.tmp_dv0[j]);
+        }
+        shared.reduce0[threadIdx.x] = local_da;
+        shared.reduce1[threadIdx.x] = local_db;
+        __syncthreads();
+        for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+          if (threadIdx.x < stride) {
+            shared.reduce0[threadIdx.x] += shared.reduce0[threadIdx.x + stride];
+            shared.reduce1[threadIdx.x] += shared.reduce1[threadIdx.x + stride];
+          }
+          __syncthreads();
+        }
+        if (threadIdx.x == 0) {
+          atomicAdd(
+              &grad_g_log_accum[idx3(b, t, h, T, H)],
+              shared.reduce0[0] * alpha);
+          atomicAdd(
+              &grad_beta_accum[idx3(b, t, h, T, H)],
+              shared.reduce1[0]);
+        }
+
+        for (int i = threadIdx.x; i < Dk; i += blockDim.x) {
+          float term0 = shared.tmp_dk0[i];
+          float term1 = 0.0f;
+          float term2 = 0.0f;
+          for (int j = 0; j < dv_local; ++j) {
+            term1 += (alpha * shared.adj[i * dv_local + j]) * shared.tmp_dv0[j];
+            term2 += shared.S0[i * dv_local + j] * shared.tmp_dv1[j];
+          }
+          atomicAdd(
+              &grad_k_norm_accum[idx4(b, t, h, i, T, H, Dk)],
+              term0 - beta_value * (term1 + term2));
+        }
+        __syncthreads();
+
+        for (int idx = threadIdx.x; idx < state_elems; idx += blockDim.x) {
+          int i = idx / dv_local;
+          int j = idx - i * dv_local;
+          shared.S1[idx] = alpha * shared.adj[idx] -
+                           beta_value * shared.k[i] * shared.tmp_dv1[j];
+        }
+        __syncthreads();
+        for (int idx = threadIdx.x; idx < state_elems; idx += blockDim.x) {
+          shared.adj[idx] = shared.S1[idx];
+        }
+        __syncthreads();
       }
-      __syncthreads();
-      for (int idx = threadIdx.x; idx < state_elems; idx += blockDim.x) {
-        shared.adj[idx] = shared.S1[idx];
-      }
-      __syncthreads();
     }
   }
   grid.sync();
@@ -1175,7 +1263,8 @@ size_t shared_bytes(int Dk, int Dv) {
   int dv_tile = Dv < REC_V_TILE ? Dv : REC_V_TILE;
   size_t recurrence =
       static_cast<size_t>(
-          3 * Dk * dv_tile + 4 * Dk + 4 * dv_tile + 2 * THREADS) *
+          (REC_CHUNK_T + 3) * Dk * dv_tile + 3 * Dk + 4 * dv_tile +
+          2 * THREADS + REC_CHUNK_T * (2 * Dk + 2 * dv_tile + 2)) *
       sizeof(float);
   size_t gemm = static_cast<size_t>(2 * GEMM_TILE * GEMM_TILE) * sizeof(float);
   return recurrence > gemm ? recurrence : gemm;
@@ -1266,6 +1355,7 @@ std::vector<torch::Tensor> forward(
   int64_t D = x.size(2);
   int64_t P = H * Dv;
   int64_t C = H * (2 * Dk + Dv);
+  int64_t NChunks = (T + REC_CHUNK_T - 1) / REC_CHUNK_T;
   auto bf16_options = x.options();
   auto f32_options = x.options().dtype(torch::kFloat32);
 
@@ -1285,7 +1375,7 @@ std::vector<torch::Tensor> forward(
   auto o_raw = torch::empty({B, T, H, Dv}, bf16_options);
   auto o_norm = torch::empty({B, T, H, Dv}, bf16_options);
   auto z = torch::empty({B, T, P}, bf16_options);
-  auto state_prev = torch::empty({B, T, H, Dk, Dv}, f32_options);
+  auto state_ckpt = torch::empty({B, NChunks, H, Dk, Dv}, f32_options);
 
   int iB = static_cast<int>(B);
   int iT = static_cast<int>(T);
@@ -1294,6 +1384,7 @@ std::vector<torch::Tensor> forward(
   int iDk = static_cast<int>(Dk);
   int iDv = static_cast<int>(Dv);
   int iK = static_cast<int>(K);
+  int iNChunks = static_cast<int>(NChunks);
   int iAllow = allow_neg_eigval ? 1 : 0;
   size_t shmem_bytes = shared_bytes(iDk, iDv);
   C10_CUDA_CHECK(cudaFuncSetAttribute(
@@ -1327,7 +1418,7 @@ std::vector<torch::Tensor> forward(
   bf16* o_raw_ptr = bptr(o_raw);
   bf16* o_norm_ptr = bptr(o_norm);
   bf16* z_ptr = bptr(z);
-  float* state_prev_ptr = state_prev.data_ptr<float>();
+  float* state_ckpt_ptr = state_ckpt.data_ptr<float>();
 
   void* args[] = {
       &x_ptr,
@@ -1355,7 +1446,7 @@ std::vector<torch::Tensor> forward(
       &o_raw_ptr,
       &o_norm_ptr,
       &z_ptr,
-      &state_prev_ptr,
+      &state_ckpt_ptr,
       &iB,
       &iT,
       &iD,
@@ -1363,6 +1454,7 @@ std::vector<torch::Tensor> forward(
       &iDk,
       &iDv,
       &iK,
+      &iNChunks,
       &iAllow,
   };
   C10_CUDA_CHECK(cudaLaunchCooperativeKernel(
@@ -1376,7 +1468,7 @@ std::vector<torch::Tensor> forward(
   return {
       y,         qkv,      pre,      q_norm,   k_norm,   v_post,
       inv_q,     inv_k,    g_pre,    beta_pre, g_log,    beta,
-      g_out,     o_raw,    o_norm,   z,        state_prev,
+      g_out,     o_raw,    o_norm,   z,        state_ckpt,
   };
 }
 
@@ -1406,7 +1498,7 @@ std::vector<torch::Tensor> backward(
     torch::Tensor o_raw,
     torch::Tensor o_norm,
     torch::Tensor z,
-    torch::Tensor state_prev,
+    torch::Tensor state_ckpt,
     int64_t H,
     int64_t Dk,
     int64_t Dv,
@@ -1423,6 +1515,7 @@ std::vector<torch::Tensor> backward(
   int64_t D = x.size(2);
   int64_t P = H * Dv;
   int64_t C = H * (2 * Dk + Dv);
+  int64_t NChunks = (T + REC_CHUNK_T - 1) / REC_CHUNK_T;
   auto bf16_options = x.options();
   auto f32_options = x.options().dtype(torch::kFloat32);
 
@@ -1461,6 +1554,7 @@ std::vector<torch::Tensor> backward(
   int iDk = static_cast<int>(Dk);
   int iDv = static_cast<int>(Dv);
   int iK = static_cast<int>(K);
+  int iNChunks = static_cast<int>(NChunks);
   int iAllow = allow_neg_eigval ? 1 : 0;
   size_t shmem_bytes = shared_bytes(iDk, iDv);
   C10_CUDA_CHECK(cudaFuncSetAttribute(
@@ -1494,7 +1588,7 @@ std::vector<torch::Tensor> backward(
   const bf16* o_raw_ptr = cbptr(o_raw);
   const bf16* o_norm_ptr = cbptr(o_norm);
   const bf16* z_ptr = cbptr(z);
-  const float* state_prev_ptr = state_prev.data_ptr<float>();
+  const float* state_ckpt_ptr = state_ckpt.data_ptr<float>();
 
   float* grad_q_norm_accum_ptr = grad_q_norm_accum.data_ptr<float>();
   float* grad_k_norm_accum_ptr = grad_k_norm_accum.data_ptr<float>();
@@ -1530,7 +1624,7 @@ std::vector<torch::Tensor> backward(
       &q_norm_ptr,       &k_norm_ptr,      &v_post_ptr,       &inv_q_ptr,
       &inv_k_ptr,        &g_pre_ptr,       &beta_pre_ptr,     &g_log_ptr,
       &beta_ptr,         &g_out_ptr,       &o_raw_ptr,          &o_norm_ptr,
-      &z_ptr,            &state_prev_ptr,  &grad_q_norm_accum_ptr,
+      &z_ptr,            &state_ckpt_ptr,  &grad_q_norm_accum_ptr,
       &grad_k_norm_accum_ptr,              &grad_g_log_accum_ptr,
       &grad_beta_accum_ptr,                &grad_x_accum_ptr,
       &grad_x_ptr,       &grad_w_qkv_ptr,  &grad_w_a_ptr,       &grad_w_b_ptr,
@@ -1540,7 +1634,8 @@ std::vector<torch::Tensor> backward(
       &grad_v_post_ptr,  &grad_g_log_ptr,  &grad_beta_ptr,    &grad_pre_ptr,
       &grad_qkv_ptr,     &grad_g_pre_ptr,  &grad_beta_pre_ptr,
       &iB,               &iT,              &iD,               &iH,
-      &iDk,              &iDv,             &iK,               &iAllow,
+      &iDk,              &iDv,             &iK,               &iNChunks,
+      &iAllow,
   };
   C10_CUDA_CHECK(cudaLaunchCooperativeKernel(
       reinterpret_cast<void*>(hgdn_backward_bf16_kernel),

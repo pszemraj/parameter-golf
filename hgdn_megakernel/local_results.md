@@ -18,6 +18,13 @@
   end-to-end megakernel path.
 - The older `hgdn_cuda` sidecar family remains in-tree only for historical
   reference and old result inspection.
+- Current candidate here is the chunk-checkpointed megakernel:
+  - `REC_V_TILE = 8`
+  - `REC_CHUNK_T = 8`
+  - forward saves only recurrence chunk-start checkpoints
+  - backward replays each chunk inside the same cooperative kernel
+  - forward launch count remains `1`
+  - backward launch count remains `1`
 
 ## Device report
 
@@ -134,13 +141,13 @@ These timings are for the local `sm_89` device only.
 
 ### `B=1, T=8`
 
-- forward: `0.22016 ms`
-- forward + backward: `0.46899 ms`
+- forward: `0.21811 ms`
+- forward + backward: `0.47514 ms`
 
 ### `B=1, T=32`
 
-- forward: `0.32973 ms`
-- forward + backward: `0.78234 ms`
+- forward: `0.31232 ms`
+- forward + backward: `0.80384 ms`
 
 ## 4070 speed comparison vs current packed HGDN CUDA path
 
@@ -158,59 +165,62 @@ Comparison setup:
 ### `B=1, T=128`
 
 - current path:
-  - forward `1.08324 ms`
-  - forward + backward `3.17501 ms`
+  - forward `1.30888 ms`
+  - forward + backward `3.48632 ms`
 - megakernel:
-  - forward `0.87475 ms`
-  - forward + backward `2.37983 ms`
+  - forward `0.92267 ms`
+  - forward + backward `2.57566 ms`
 - relative:
-  - forward speedup `1.238x`
-  - forward + backward speedup `1.334x`
+  - forward speedup `1.419x`
+  - forward + backward speedup `1.354x`
 
 ### `B=1, T=512`
 
 - current path:
-  - forward `1.10100 ms`
-  - forward + backward `3.26595 ms`
+  - forward `1.11427 ms`
+  - forward + backward `2.89393 ms`
 - megakernel:
-  - forward `2.01820 ms`
-  - forward + backward `6.10652 ms`
+  - forward `2.28029 ms`
+  - forward + backward `7.22790 ms`
 - relative:
-  - forward speedup `0.546x`
-  - forward + backward speedup `0.535x`
+  - forward speedup `0.489x`
+  - forward + backward speedup `0.400x`
 
 ### `B=1, T=1024`
 
 - current path:
-  - forward `1.13060 ms`
-  - forward + backward `3.21398 ms`
+  - forward `1.12496 ms`
+  - forward + backward `3.05008 ms`
 - megakernel:
-  - forward `3.86749 ms`
-  - forward + backward `12.09114 ms`
+  - forward `3.75383 ms`
+  - forward + backward `12.48880 ms`
 - relative:
-  - forward speedup `0.292x`
-  - forward + backward speedup `0.266x`
+  - forward speedup `0.300x`
+  - forward + backward speedup `0.244x`
 
 ### `B=2, T=512`
 
 - current path:
-  - forward `1.07300 ms`
-  - forward + backward `3.22816 ms`
+  - forward `1.48678 ms`
+  - forward + backward `3.62754 ms`
 - megakernel:
-  - forward `2.89986 ms`
-  - forward + backward `8.62208 ms`
+  - forward `2.86030 ms`
+  - forward + backward `8.76684 ms`
 - relative:
-  - forward speedup `0.370x`
-  - forward + backward speedup `0.374x`
+  - forward speedup `0.520x`
+  - forward + backward speedup `0.414x`
 
 Local conclusion:
 
 - parity is good
 - launch structure is good
-- local speed improved substantially versus the first scalar-loop draft
-- the kernel is already a local win at `B=1,T=128`
-- the kernel is still too slow at `T=512+` on the RTX 4070
-- this is now a real fused candidate, but not yet a local throughput winner
+- the checkpointed kernel is now a local win at `B=1,T=128`
+- the checkpointed backward path is still too slow at `T=512+` on the RTX 4070
+- the chunk-checkpoint change cut saved forward state hard, but it did not yet
+  turn the long-sequence local timing curve into a win
+- the next meaningful speed step is no longer "more save-vs-recompute work"
+  inside the same scalar dense phases; it is tensor-core dense work inside the
+  megakernel or an equally serious recurrent-core optimization
 
 ## Readiness call
 
@@ -227,6 +237,7 @@ Rationale:
 Current status is **not** “ready for H100 timing testing” because:
 
 - local `sm_89` timing is not a proxy for H100
-- the kernel is still the save-heavy version
-- dense projections are tiled shared-memory GEMMs now, but they are still not tensor-core kernels
+- dense projections are still tiled shared-memory GEMMs, not tensor-core kernels
 - the recurrent core still loses to the live packed path at `T=512+` on the local 4070
+- the chunk-checkpointed backward path reduced memory sharply, but it did not
+  close the long-sequence throughput gap by itself

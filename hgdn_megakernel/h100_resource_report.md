@@ -15,30 +15,52 @@ This report targets the live winner-style HGDN contract:
 - packed depthwise causal qkv conv
 - dense cross-head `W_out`
 
-## Save-heavy parity version
+## Current checkpointed candidate
 
-The first repo-backed candidate intentionally saves a large forward context so backward parity stays simple.
+The current repo-backed candidate is no longer the save-heavy version.
 
-| Saved tensor | Shape | Dtype | Approx bytes |
+- `REC_V_TILE = 8`
+- `REC_CHUNK_T = 8`
+- forward saves only recurrence chunk-start checkpoints
+- backward replays each chunk inside the same cooperative kernel
+- launch contract is still exactly one forward kernel and one backward kernel
+
+The main activation-state change is:
+
+| Tensor strategy | Shape | Dtype | Bytes |
 | --- | --- | --- | ---: |
-| `qkv` | `(B, T, H * (2 * Dk + Dv)) = (32, 2048, 1152)` | bf16 | 150,994,944 |
-| `pre` | `(32, 2048, 1152)` | bf16 | 150,994,944 |
-| `q_norm` | `(32, 2048, 8, 48)` | bf16 | 50,331,648 |
-| `k_norm` | `(32, 2048, 8, 48)` | bf16 | 50,331,648 |
-| `v_post` | `(32, 2048, 8, 48)` | bf16 | 50,331,648 |
-| `inv_q` | `(32, 2048, 8)` | fp32 | 2,097,152 |
-| `inv_k` | `(32, 2048, 8)` | fp32 | 2,097,152 |
-| `g_pre` | `(32, 2048, 8)` | bf16 | 1,048,576 |
-| `beta_pre` | `(32, 2048, 8)` | bf16 | 1,048,576 |
-| `g_log` | `(32, 2048, 8)` | bf16 | 1,048,576 |
-| `beta` | `(32, 2048, 8)` | bf16 | 1,048,576 |
-| `g_out` | `(32, 2048, 384)` | bf16 | 50,331,648 |
-| `o_raw` | `(32, 2048, 8, 48)` | bf16 | 50,331,648 |
-| `o_norm` | `(32, 2048, 8, 48)` | bf16 | 50,331,648 |
-| `z` | `(32, 2048, 384)` | bf16 | 50,331,648 |
-| `state_prev` | `(32, 2048, 8, 48, 48)` | fp32 | 4,831,838,208 |
+| old `state_prev` | `(32, 2048, 8, 48, 48)` | fp32 | 4,831,838,208 |
+| new `state_ckpt` | `(32, 256, 8, 48, 48)` | fp32 | 603,979,776 |
 
-Total saved forward state is about **5.45 GiB per GDN block**.
+That cuts the recurrence-state save from **4.50 GiB** to **576 MiB** per GDN
+block.
+
+Total saved forward state in the current checkpointed version is about
+**1.18 GiB per GDN block** instead of about **5.12 GiB**.
+
+## Save-vs-recompute decisions
+
+| Saved tensor | Shape | Dtype | Bytes | If not saved | Decision |
+| --- | --- | --- | ---: | --- | --- |
+| `qkv` | `(32, 2048, 1152)` | bf16 | 150,994,944 | rerun packed `W_qkv` dense phase, about `57.98 GF` | keep saved |
+| `pre` | `(32, 2048, 1152)` | bf16 | 150,994,944 | rerun packed causal conv and pre-SiLU staging, about `0.60 GF` plus extra conv bookkeeping | keep saved |
+| `q_norm` | `(32, 2048, 8, 48)` | bf16 | 50,331,648 | recompute q conv, SiLU, and L2 norm path | keep saved |
+| `k_norm` | `(32, 2048, 8, 48)` | bf16 | 50,331,648 | recompute k conv, SiLU, and L2 norm path | keep saved |
+| `v_post` | `(32, 2048, 8, 48)` | bf16 | 50,331,648 | recompute v conv and SiLU path | keep saved |
+| `inv_q` | `(32, 2048, 8)` | fp32 | 2,097,152 | cheap recompute from q preactivations | keep for parity simplicity |
+| `inv_k` | `(32, 2048, 8)` | fp32 | 2,097,152 | cheap recompute from k preactivations | keep for parity simplicity |
+| `g_pre` | `(32, 2048, 8)` | bf16 | 1,048,576 | rerun `w_a` projection, about `0.40 GF` | keep for now |
+| `beta_pre` | `(32, 2048, 8)` | bf16 | 1,048,576 | rerun `w_b` projection, about `0.40 GF` | keep for now |
+| `g_log` | `(32, 2048, 8)` | bf16 | 1,048,576 | recompute from `g_pre`, `A_log`, and `dt_bias` | keep for now |
+| `beta` | `(32, 2048, 8)` | bf16 | 1,048,576 | recompute from `beta_pre` | keep for now |
+| `g_out` | `(32, 2048, 384)` | bf16 | 50,331,648 | rerun dense `w_g`, dominates the control-path dense work | keep saved |
+| `o_raw` | `(32, 2048, 8, 48)` | bf16 | 50,331,648 | rerun recurrence readout, part of about `12.08 GF` recurrence work | keep saved |
+| `o_norm` | `(32, 2048, 8, 48)` | bf16 | 50,331,648 | recompute RMSNorm from `o_raw` | future drop candidate |
+| `z` | `(32, 2048, 384)` | bf16 | 50,331,648 | recompute from `o_norm` and `g_out` | future drop candidate |
+| `state_ckpt` | `(32, 256, 8, 48, 48)` | fp32 | 603,979,776 | replay recurrence inside backward, adds about one extra forward-style recurrence pass, about `12.08 GF` | keep saved |
+
+The only implemented save-vs-recompute change so far is the replacement of full
+per-token `state_prev` with chunk checkpoints plus within-chunk replay.
 
 ## Shared-memory map
 
@@ -47,7 +69,8 @@ The current cooperative kernel uses:
 - tiled shared-memory GEMM staging for dense projections:
   - two `16 x 16` fp32 tiles
 - one CTA-local recurrence tile per `(batch, head, value_tile)` stream
-  - `REC_V_TILE = 8` on the current local candidate
+  - `REC_V_TILE = 8`
+  - `REC_CHUNK_T = 8`
 
 - `S0`: `Dk * REC_V_TILE = 384` fp32 values
 - `S1`: `384` fp32 values
@@ -59,14 +82,24 @@ The current cooperative kernel uses:
 - `tmp_dv0`: `8` fp32 values
 - `tmp_dv1`: `8` fp32 values
 - `tmp_dk0`: `48` fp32 values
-- `tmp_dk1`: `48` fp32 values
 - two `THREADS=256` reduction buffers for CTA-local reductions
+- recurrence-state history for one chunk:
+  - `REC_CHUNK_T * Dk * REC_V_TILE = 8 * 48 * 8 = 3072` fp32 values
+- replay caches for one chunk:
+  - `q_hist`: `8 * 48 = 384` fp32 values
+  - `k_hist`: `384` fp32 values
+  - `v_hist`: `8 * 8 = 64` fp32 values
+  - `dv0_hist`: `64` fp32 values
+  - `alpha_hist`: `8` fp32 values
+  - `beta_hist`: `8` fp32 values
 
-Recurrence-tile shared memory for `Dk=48`, `REC_V_TILE=8` is:
+Recurrence-tile shared memory for `Dk=48`, `REC_V_TILE=8`, `REC_CHUNK_T=8` is:
 
-- `3 * 384 + 4 * 48 + 4 * 8 + 2 * 256 = 1888` fp32 values
-- `1888 * 4 = 7,552` bytes
-- about **7.38 KiB per CTA**
+- `3 * 384 + 3 * 48 + 4 * 8 + 2 * 256 + 8 * 384 + 8 * (2 * 48 + 2 * 8 + 2)`
+  fp32 values
+- `5824` fp32 values
+- `5824 * 4 = 23,296` bytes
+- about **22.75 KiB per CTA**
 
 GEMM staging shared memory is smaller:
 
@@ -79,14 +112,17 @@ So the recurrence tile still sets the dynamic shared-memory request.
 
 The repo-backed launch wrapper uses `cudaOccupancyMaxActiveBlocksPerMultiprocessor` instead of a hard-coded block count.
 
-With `THREADS=256` and about `7.38 KiB` dynamic shared memory per CTA:
+With `THREADS=256` and about `22.75 KiB` dynamic shared memory per CTA:
 
-- shared memory alone allows multiple CTAs per SM on H100 SXM
+- shared memory alone still allows multiple CTAs per SM on H100 SXM
 - the real limiter is expected to be register pressure from:
   - the explicit backward math
   - the tiled GEMM accumulators
-  - the recurrence temporaries
-- practical cooperative occupancy should be materially better than the first scalar-loop draft, but this is still not a high-occupancy kernel
+  - the replay caches and recurrence temporaries
+- the checkpointed version trades some occupancy away to remove the giant
+  backward `state_prev` reread
+- practical cooperative occupancy is still acceptable, but this is not a
+  high-occupancy kernel
 
 Recurrence parallelism is now structurally capped at `B * H * ceil(Dv / REC_V_TILE)` CTAs.
 At the candidate shape that is:
@@ -111,16 +147,20 @@ Approximate forward work at the candidate shape:
 
 Total forward work is about **110 GF per block**.
 
-Backward is analytic and explicit in the same kernel and should land in the rough range of **2.5x to 3.5x forward work** for this save-heavy implementation.
+Backward is analytic and explicit in the same kernel and should land in the
+rough range of **2.5x to 3.5x forward work** even after checkpointing, because
+the saved-state reduction is partly offset by the added replay pass.
 
 HBM traffic is dominated by:
 
 - dense reads of `x`, `w_qkv`, `w_g`, and `w_out`
-- large saved-state reads in backward, especially `state_prev`
+- saved activation traffic other than recurrence state
+- checkpoint reads plus replay staging instead of full `state_prev` rereads
 
 The current version is therefore expected to be:
 
 - materially better than the first scalar-loop draft
+- materially less memory-heavy than the save-heavy parity version
 - still memory-traffic heavy
 - still not tensor-core efficient
 
@@ -137,8 +177,8 @@ This candidate is **not** a credible final H100 throughput kernel yet.
 The blunt bottlenecks are:
 
 1. Dense `W_qkv`, `W_g`, `W_out`, and the major backward matmuls are tiled shared-memory GEMMs, but they are still not tensor-core kernels.
-2. The backward path still stores and rereads a huge `state_prev` tensor.
-3. The recurrence is now value-tiled, but the core algorithm is still sequential within each tile and remains the scaling limiter at longer sequence lengths.
+2. The recurrence-state save is much smaller now, but backward still pays for a replay pass inside the kernel.
+3. The recurrence is value-tiled, but the core algorithm is still sequential within each tile and remains the scaling limiter at longer sequence lengths.
 
 If H100 parity is clean, the next speed branch should be one of:
 

@@ -255,7 +255,7 @@ class HGDNMegakernelFunction(torch.autograd.Function):
             o_raw,
             o_norm,
             z,
-            state_prev,
+            state_ckpt,
         ) = ctx.saved_tensors
         n_heads, head_k_dim, head_v_dim, conv_size, allow_neg_eigval = ctx.meta
         ext = _load_extension()
@@ -287,7 +287,7 @@ class HGDNMegakernelFunction(torch.autograd.Function):
             o_raw,
             o_norm,
             z,
-            state_prev,
+            state_ckpt,
             int(n_heads),
             int(head_k_dim),
             int(head_v_dim),
