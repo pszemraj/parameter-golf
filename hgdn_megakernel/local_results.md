@@ -28,6 +28,8 @@
   - backward replays each chunk inside the same cooperative kernel
   - warp-shuffle-backed CTA reductions replace the old full-block tree
     reductions in q/k norm, output RMSNorm, and backward scalar reductions
+  - winner-shape `Dv=8` recurrence dot products now use all block warps instead
+    of only the first `8` threads for the per-column dot loops
   - forward launch count remains `1`
   - backward launch count remains `1`
 
@@ -146,13 +148,13 @@ These timings are for the local `sm_89` device only.
 
 ### `B=1, T=8`
 
-- forward: `0.78131 ms`
-- forward + backward: `1.17862 ms`
+- forward: `0.77824 ms`
+- forward + backward: `1.15610 ms`
 
 ### `B=1, T=32`
 
-- forward: `0.27955 ms`
-- forward + backward: `0.65536 ms`
+- forward: `0.22630 ms`
+- forward + backward: `0.57344 ms`
 
 ## 4070 speed comparison vs current packed HGDN CUDA path
 
@@ -170,62 +172,62 @@ Comparison setup:
 ### `B=1, T=128`
 
 - current path:
-  - forward `0.88205 ms`
-  - forward + backward `2.86856 ms`
+  - forward `0.86070 ms`
+  - forward + backward `2.92380 ms`
 - megakernel:
-  - forward `0.46963 ms`
-  - forward + backward `1.67334 ms`
+  - forward `0.41234 ms`
+  - forward + backward `1.50627 ms`
 - relative:
-  - forward speedup `1.878x`
-  - forward + backward speedup `1.714x`
+  - forward speedup `2.087x`
+  - forward + backward speedup `1.941x`
 
 ### `B=1, T=512`
 
 - current path:
-  - forward `0.92052 ms`
-  - forward + backward `3.14583 ms`
+  - forward `0.92316 ms`
+  - forward + backward `3.00278 ms`
 - megakernel:
-  - forward `1.50341 ms`
-  - forward + backward `4.20698 ms`
+  - forward `1.28648 ms`
+  - forward + backward `3.75992 ms`
 - relative:
-  - forward speedup `0.612x`
-  - forward + backward speedup `0.748x`
+  - forward speedup `0.718x`
+  - forward + backward speedup `0.799x`
 
 ### `B=1, T=1024`
 
 - current path:
-  - forward `0.85161 ms`
-  - forward + backward `3.18556 ms`
+  - forward `0.88504 ms`
+  - forward + backward `3.04747 ms`
 - megakernel:
-  - forward `2.01953 ms`
-  - forward + backward `8.41846 ms`
+  - forward `1.71976 ms`
+  - forward + backward `7.57396 ms`
 - relative:
-  - forward speedup `0.422x`
-  - forward + backward speedup `0.378x`
+  - forward speedup `0.515x`
+  - forward + backward speedup `0.402x`
 
 ### `B=1, T=2048`
 
 - current path:
-  - forward `0.89764 ms`
-  - forward + backward `2.94656 ms`
+  - forward `0.90665 ms`
+  - forward + backward `3.87973 ms`
 - megakernel:
-  - forward `4.00794 ms`
-  - forward + backward `17.31799 ms`
+  - forward `3.42681 ms`
+  - forward + backward `15.70959 ms`
 - relative:
-  - forward speedup `0.224x`
-  - forward + backward speedup `0.170x`
+  - forward speedup `0.265x`
+  - forward + backward speedup `0.247x`
 
 ### `B=2, T=512`
 
 - current path:
-  - forward `0.87286 ms`
-  - forward + backward `3.06202 ms`
+  - forward `1.18011 ms`
+  - forward + backward `3.07046 ms`
 - megakernel:
-  - forward `1.17706 ms`
-  - forward + backward `4.95916 ms`
+  - forward `1.02956 ms`
+  - forward + backward `4.53132 ms`
 - relative:
-  - forward speedup `0.742x`
-  - forward + backward speedup `0.617x`
+  - forward speedup `1.146x`
+  - forward + backward speedup `0.678x`
 
 Local conclusion:
 
@@ -233,11 +235,14 @@ Local conclusion:
 - launch structure is good
 - the portable tensor-core dense path is real and materially improved the local
   speed curve
+- the new `Dv=8` block-dot fastpath improved both forward and backward on the
+  winner-style tiles
 - the current megakernel is a strong local win at `B=1,T=128`
+- forward is now also a local win at `B=2,T=512`
 - the warp-shuffle reduction cleanup shaved small-shape overhead but did not
   change the long-sequence story
-- forward still loses to the live packed path once the sequence reaches
-  `T=512+`
+- forward still loses to the live packed path for `B=1` once the sequence
+  reaches `T=512+`, but the gap is smaller than the prior checkpoint
 - backward is still the clear long-sequence bottleneck
 - the next meaningful speed step is recurrence-core work:
   fewer global atomics without crushing occupancy, tensor-core-friendly

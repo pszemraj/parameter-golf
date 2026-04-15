@@ -25,6 +25,8 @@ The current repo-backed candidate is no longer the save-heavy version.
 - bf16 WMMA tensor-core path for full dense tiles on `sm_80+`
 - forward saves only recurrence chunk-start checkpoints
 - backward replays each chunk inside the same cooperative kernel
+- winner-shape `Dv=8` recurrence dot products use all block warps for the
+  column-dot loops instead of leaving most of the CTA idle
 - launch contract is still exactly one forward kernel and one backward kernel
 
 The main activation-state change is:
@@ -73,6 +75,8 @@ The latest reduction-side cleanup is:
 - warp-shuffle-backed CTA reductions for q/k norm, output RMSNorm, and the
   backward scalar gate accumulations
 - one dead CTA reduction buffer removed from the backward shared-memory layout
+- `Dv=8` recurrence column-dot helpers now use warp-partitioned block
+  cooperation for `tmp_dv0`, `o_raw`, `tmp_dv1`, and `grad_v_post`
 
 ## Shared-memory map
 
