@@ -30,6 +30,10 @@
     reductions in q/k norm, output RMSNorm, and backward scalar reductions
   - winner-shape `Dv=8` recurrence dot products now use all block warps instead
     of only the first `8` threads for the per-column dot loops
+  - backward no longer keeps per-token `chunk_states` or `dv0_hist` in shared
+    memory
+  - backward reconstructs each token's in-chunk recurrence state from the chunk
+    checkpoint during the reverse sweep
   - forward launch count remains `1`
   - backward launch count remains `1`
 
@@ -148,13 +152,13 @@ These timings are for the local `sm_89` device only.
 
 ### `B=1, T=8`
 
-- forward: `0.77824 ms`
-- forward + backward: `1.15610 ms`
+- forward: `0.79258 ms`
+- forward + backward: `1.20525 ms`
 
 ### `B=1, T=32`
 
-- forward: `0.22630 ms`
-- forward + backward: `0.57344 ms`
+- forward: `0.21402 ms`
+- forward + backward: `0.69325 ms`
 
 ## 4070 speed comparison vs current packed HGDN CUDA path
 
@@ -172,81 +176,86 @@ Comparison setup:
 ### `B=1, T=128`
 
 - current path:
-  - forward `0.86070 ms`
-  - forward + backward `2.92380 ms`
+  - forward `0.86925 ms`
+  - forward + backward `2.83228 ms`
 - megakernel:
-  - forward `0.41234 ms`
-  - forward + backward `1.50627 ms`
+  - forward `0.41193 ms`
+  - forward + backward `2.06364 ms`
 - relative:
-  - forward speedup `2.087x`
-  - forward + backward speedup `1.941x`
+  - forward speedup `2.110x`
+  - forward + backward speedup `1.372x`
 
 ### `B=1, T=512`
 
 - current path:
-  - forward `0.92316 ms`
-  - forward + backward `3.00278 ms`
+  - forward `0.87076 ms`
+  - forward + backward `3.86432 ms`
 - megakernel:
-  - forward `1.28648 ms`
-  - forward + backward `3.75992 ms`
+  - forward `1.23343 ms`
+  - forward + backward `5.29029 ms`
 - relative:
-  - forward speedup `0.718x`
-  - forward + backward speedup `0.799x`
+  - forward speedup `0.706x`
+  - forward + backward speedup `0.730x`
 
 ### `B=1, T=1024`
 
 - current path:
-  - forward `0.88504 ms`
-  - forward + backward `3.04747 ms`
+  - forward `0.85423 ms`
+  - forward + backward `3.04876 ms`
 - megakernel:
-  - forward `1.71976 ms`
-  - forward + backward `7.57396 ms`
+  - forward `1.72012 ms`
+  - forward + backward `10.56481 ms`
 - relative:
-  - forward speedup `0.515x`
-  - forward + backward speedup `0.402x`
+  - forward speedup `0.497x`
+  - forward + backward speedup `0.289x`
 
 ### `B=1, T=2048`
 
 - current path:
-  - forward `0.90665 ms`
-  - forward + backward `3.87973 ms`
+  - forward `0.92774 ms`
+  - forward + backward `3.82874 ms`
 - megakernel:
-  - forward `3.42681 ms`
-  - forward + backward `15.70959 ms`
+  - forward `3.42753 ms`
+  - forward + backward `21.49407 ms`
 - relative:
-  - forward speedup `0.265x`
-  - forward + backward speedup `0.247x`
+  - forward speedup `0.271x`
+  - forward + backward speedup `0.178x`
 
 ### `B=2, T=512`
 
 - current path:
-  - forward `1.18011 ms`
-  - forward + backward `3.07046 ms`
+  - forward `0.85545 ms`
+  - forward + backward `2.92895 ms`
 - megakernel:
-  - forward `1.02956 ms`
-  - forward + backward `4.53132 ms`
+  - forward `1.02694 ms`
+  - forward + backward `6.01738 ms`
 - relative:
-  - forward speedup `1.146x`
-  - forward + backward speedup `0.678x`
+  - forward speedup `0.833x`
+  - forward + backward speedup `0.487x`
 
 Local conclusion:
 
 - parity is good
 - launch structure is good
-- the portable tensor-core dense path is real and materially improved the local
-  speed curve
-- the new `Dv=8` block-dot fastpath improved both forward and backward on the
-  winner-style tiles
-- the current megakernel is a strong local win at `B=1,T=128`
-- forward is now also a local win at `B=2,T=512`
-- the warp-shuffle reduction cleanup shaved small-shape overhead but did not
-  change the long-sequence story
-- forward still loses to the live packed path for `B=1` once the sequence
-  reaches `T=512+`, but the gap is smaller than the prior checkpoint
-- backward is still the clear long-sequence bottleneck
-- the next meaningful speed step is recurrence-core work:
-  fewer global atomics without crushing occupancy, tensor-core-friendly
-  recurrence restructuring, or a more aggressive Hopper-specific implementation
+- the backward shared-memory shrink is a real local improvement
+- removing shared `chunk_states` and `dv0_hist` cut the candidate's dynamic
+  backward recurrence tile from about `21.25 KiB` to about `9.00 KiB`
+- that shared-memory drop also materially improved the forward timing even
+  though the forward math did not change
+- relative to the previous clean checkpoint, the current candidate improved by:
+  - about `2.04x` at `B=1,T=512` for forward + backward
+  - about `1.87x` at `B=1,T=1024` for forward + backward
+  - about `1.61x` at `B=1,T=2048` for forward + backward
+  - about `1.93x` at `B=2,T=512` for forward + backward
+- the current megakernel is still a clear local win at `B=1,T=128`
+- the current megakernel is still behind the packed HGDN path for `T=512+`,
+  but the gap is now materially smaller than the previous checkpoint
+- larger local batch points are still not competitive:
+  - `B=4,T=512`: baseline `3.39333 ms`, megakernel `14.28992 ms`
+  - `B=8,T=512`: baseline `3.97802 ms`, megakernel `19.89581 ms`
+- the next meaningful speed step is still backward-focused:
+  fewer global accumulations, better dense phases, or a more aggressive
+  Hopper-specific implementation
 
 ## Readiness call
 

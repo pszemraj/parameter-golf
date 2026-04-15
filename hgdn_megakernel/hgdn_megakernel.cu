@@ -699,11 +699,9 @@ struct BackwardSharedState {
   float* tmp_dv1;
   float* tmp_dk0;
   float* reduce0;
-  float* chunk_states;
   float* q_hist;
   float* k_hist;
   float* v_hist;
-  float* dv0_hist;
   float* alpha_hist;
   float* beta_hist;
 };
@@ -723,8 +721,8 @@ __host__ __device__ __forceinline__ size_t backward_recurrence_bytes(
     int Dv) {
   int dv_tile = Dv < REC_V_TILE ? Dv : REC_V_TILE;
   return static_cast<size_t>(
-             (REC_CHUNK_T + 3) * Dk * dv_tile + 3 * Dk + 4 * dv_tile +
-             THREADS + REC_CHUNK_T * (2 * Dk + 2 * dv_tile + 2)) *
+             3 * Dk * dv_tile + 3 * Dk + 4 * dv_tile + THREADS +
+             REC_CHUNK_T * (2 * Dk + dv_tile + 2)) *
          sizeof(float);
 }
 
@@ -775,15 +773,11 @@ __device__ BackwardSharedState backward_shared_ptrs(
   offset += Dk;
   s.reduce0 = base + offset;
   offset += THREADS;
-  s.chunk_states = base + offset;
-  offset += REC_CHUNK_T * Dk * Dv;
   s.q_hist = base + offset;
   offset += REC_CHUNK_T * Dk;
   s.k_hist = base + offset;
   offset += REC_CHUNK_T * Dk;
   s.v_hist = base + offset;
-  offset += REC_CHUNK_T * Dv;
-  s.dv0_hist = base + offset;
   offset += REC_CHUNK_T * Dv;
   s.alpha_hist = base + offset;
   offset += REC_CHUNK_T;
@@ -1205,9 +1199,6 @@ __global__ void hgdn_backward_bf16_kernel(
         }
         __syncthreads();
 
-        for (int idx = threadIdx.x; idx < state_elems; idx += blockDim.x) {
-          shared.chunk_states[local_t * state_elems + idx] = shared.S0[idx];
-        }
         if (dv_local == REC_V_TILE) {
           block_dot_cols_8(
               shared.S0,
@@ -1216,9 +1207,6 @@ __global__ void hgdn_backward_bf16_kernel(
               Dk,
               dv_local,
               shared.reduce0);
-          for (int j = threadIdx.x; j < dv_local; j += blockDim.x) {
-            shared.dv0_hist[local_t * dv_local + j] = shared.tmp_dv0[j];
-          }
         } else {
           for (int j = threadIdx.x; j < dv_local; j += blockDim.x) {
             float acc = 0.0f;
@@ -1226,7 +1214,6 @@ __global__ void hgdn_backward_bf16_kernel(
               acc += shared.k[i] * shared.S0[i * dv_local + j];
             }
             shared.tmp_dv0[j] = acc;
-            shared.dv0_hist[local_t * dv_local + j] = acc;
           }
         }
         __syncthreads();
@@ -1254,6 +1241,59 @@ __global__ void hgdn_backward_bf16_kernel(
 
       for (int local_t = chunk_len - 1; local_t >= 0; --local_t) {
         int t = chunk_start + local_t;
+        for (int idx = threadIdx.x; idx < state_elems; idx += blockDim.x) {
+          int i = idx / dv_local;
+          int j = idx - i * dv_local;
+          shared.S0[idx] = state_ckpt[checkpoint_idx(
+              b, chunk, h, i, v_base + j, n_chunks, H, Dk, Dv)];
+        }
+        __syncthreads();
+
+        for (int replay_t = 0; replay_t < local_t; ++replay_t) {
+          for (int i = threadIdx.x; i < Dk; i += blockDim.x) {
+            shared.k[i] = shared.k_hist[replay_t * Dk + i];
+          }
+          for (int j = threadIdx.x; j < dv_local; j += blockDim.x) {
+            shared.v[j] = shared.v_hist[replay_t * dv_local + j];
+          }
+          __syncthreads();
+
+          if (dv_local == REC_V_TILE) {
+            block_dot_cols_8(
+                shared.S0,
+                shared.k,
+                shared.tmp_dv0,
+                Dk,
+                dv_local,
+                shared.reduce0);
+          } else {
+            for (int j = threadIdx.x; j < dv_local; j += blockDim.x) {
+              float acc = 0.0f;
+              for (int i = 0; i < Dk; ++i) {
+                acc += shared.k[i] * shared.S0[i * dv_local + j];
+              }
+              shared.tmp_dv0[j] = acc;
+            }
+          }
+          __syncthreads();
+
+          float replay_alpha = shared.alpha_hist[replay_t];
+          float replay_beta = shared.beta_hist[replay_t];
+          for (int idx = threadIdx.x; idx < state_elems; idx += blockDim.x) {
+            int i = idx / dv_local;
+            int j = idx - i * dv_local;
+            shared.S1[idx] = replay_alpha *
+                                 (shared.S0[idx] -
+                                  replay_beta * shared.k[i] * shared.tmp_dv0[j]) +
+                             shared.k[i] * shared.v[j];
+          }
+          __syncthreads();
+          for (int idx = threadIdx.x; idx < state_elems; idx += blockDim.x) {
+            shared.S0[idx] = shared.S1[idx];
+          }
+          __syncthreads();
+        }
+
         for (int i = threadIdx.x; i < Dk; i += blockDim.x) {
           shared.q[i] = shared.q_hist[local_t * Dk + i];
           shared.k[i] = shared.k_hist[local_t * Dk + i];
@@ -1262,13 +1302,24 @@ __global__ void hgdn_backward_bf16_kernel(
           shared.v[j] = shared.v_hist[local_t * dv_local + j];
           shared.go[j] = b2f(grad_o_raw[idx4(b, t, h, v_base + j, T, H, Dv)]);
         }
-        for (int idx = threadIdx.x; idx < state_elems; idx += blockDim.x) {
-          shared.S0[idx] = shared.chunk_states[local_t * state_elems + idx];
-        }
         __syncthreads();
 
-        for (int j = threadIdx.x; j < dv_local; j += blockDim.x) {
-          shared.tmp_dv0[j] = shared.dv0_hist[local_t * dv_local + j];
+        if (dv_local == REC_V_TILE) {
+          block_dot_cols_8(
+              shared.S0,
+              shared.k,
+              shared.tmp_dv0,
+              Dk,
+              dv_local,
+              shared.reduce0);
+        } else {
+          for (int j = threadIdx.x; j < dv_local; j += blockDim.x) {
+            float acc = 0.0f;
+            for (int i = 0; i < Dk; ++i) {
+              acc += shared.k[i] * shared.S0[i * dv_local + j];
+            }
+            shared.tmp_dv0[j] = acc;
+          }
         }
         __syncthreads();
 

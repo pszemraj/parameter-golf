@@ -25,6 +25,8 @@ The current repo-backed candidate is no longer the save-heavy version.
 - bf16 WMMA tensor-core path for full dense tiles on `sm_80+`
 - forward saves only recurrence chunk-start checkpoints
 - backward replays each chunk inside the same cooperative kernel
+- backward reconstructs each token-local in-chunk recurrence state from the
+  chunk checkpoint instead of storing a full shared-memory `chunk_states` table
 - winner-shape `Dv=8` recurrence dot products use all block warps for the
   column-dot loops instead of leaving most of the CTA idle
 - launch contract is still exactly one forward kernel and one backward kernel
@@ -63,8 +65,12 @@ Total saved forward state in the current checkpointed version is about
 | `z` | `(32, 2048, 384)` | bf16 | 50,331,648 | recompute from `o_norm` and `g_out` | future drop candidate |
 | `state_ckpt` | `(32, 256, 8, 48, 48)` | fp32 | 603,979,776 | replay recurrence inside backward, adds about one extra forward-style recurrence pass, about `12.08 GF` | keep saved |
 
-The only implemented save-vs-recompute change so far is the replacement of full
-per-token `state_prev` with chunk checkpoints plus within-chunk replay.
+The implemented save-vs-recompute changes so far are:
+
+- replacement of full per-token `state_prev` with chunk checkpoints plus
+  within-chunk replay
+- removal of backward shared-memory `chunk_states` and `dv0_hist`, replaced by
+  token-local replay from the chunk checkpoint during the reverse sweep
 
 The only implemented dense-phase speed change so far is the replacement of the
 old scalar `16 x 16` shared-memory dot-product tiles with a portable bf16 WMMA
@@ -101,23 +107,20 @@ The current cooperative kernel uses:
 - `tmp_dv1`: `8` fp32 values
 - `tmp_dk0`: `48` fp32 values
 - one `THREADS=128` scratch buffer for CTA-local reductions
-- recurrence-state history for one chunk:
-  - `REC_CHUNK_T * Dk * REC_V_TILE = 8 * 48 * 8 = 3072` fp32 values
 - replay caches for one chunk:
   - `q_hist`: `8 * 48 = 384` fp32 values
   - `k_hist`: `384` fp32 values
   - `v_hist`: `8 * 8 = 64` fp32 values
-  - `dv0_hist`: `64` fp32 values
   - `alpha_hist`: `8` fp32 values
   - `beta_hist`: `8` fp32 values
 
 Recurrence-tile shared memory for `Dk=48`, `REC_V_TILE=8`, `REC_CHUNK_T=8` is:
 
-- `3 * 384 + 3 * 48 + 4 * 8 + 128 + 8 * 384 + 8 * (2 * 48 + 2 * 8 + 2)`
+- `3 * 384 + 3 * 48 + 4 * 8 + 128 + 8 * (2 * 48 + 8 + 2)`
   fp32 values
-- `5440` fp32 values
-- `5440 * 4 = 21,760` bytes
-- about **21.25 KiB per CTA**
+- `2304` fp32 values
+- `2304 * 4 = 9,216` bytes
+- about **9.00 KiB per CTA**
 
 Dense-phase WMMA scratch is smaller:
 
@@ -130,17 +133,19 @@ So the recurrence tile still sets the dynamic shared-memory request.
 
 The repo-backed launch wrapper uses `cudaOccupancyMaxActiveBlocksPerMultiprocessor` instead of a hard-coded block count.
 
-With `THREADS=128` and about `21.25 KiB` dynamic shared memory per CTA:
+With `THREADS=128` and about `9.00 KiB` dynamic shared memory per CTA:
 
-- shared memory alone still allows multiple CTAs per SM on H100 SXM
-- the real limiter is expected to be register pressure from:
+- shared memory is no longer the first obvious occupancy limiter
+- on a `100 KiB`-class SM, the shared-memory ceiling rises from about `4` CTAs
+  per SM to about `11` CTAs per SM
+- on H100 SXM, shared memory should not be the gating factor at all for this
+  checkpoint
+- the real limiter is now more likely register pressure from:
   - the explicit backward math
+  - the replayed in-chunk prefix reconstruction
   - the WMMA accumulator fragments in the dense phases
-  - the replay caches and recurrence temporaries
-- the checkpointed version trades some occupancy away to remove the giant
-  backward `state_prev` reread
-- practical cooperative occupancy is still acceptable, but this is not a
-  high-occupancy kernel
+- this is a cleaner occupancy trade than the previous save-heavy shared-memory
+  layout, even though it adds extra recurrence arithmetic
 
 Recurrence parallelism is now structurally capped at `B * H * ceil(Dv / REC_V_TILE)` CTAs.
 At the candidate shape that is:
@@ -196,7 +201,9 @@ This candidate is **not** a credible final H100 throughput kernel yet.
 The blunt bottlenecks are:
 
 1. Dense `W_qkv`, `W_g`, `W_out`, and the major backward matmuls are now portable WMMA tensor-core kernels for full tiles, but they are not yet Hopper-specific kernels.
-2. The recurrence-state save is much smaller now, but backward still pays for a replay pass inside the kernel.
+2. The recurrence-state save is much smaller now, and the backward kernel no
+   longer carries the old shared-memory chunk-state table, but backward still
+   pays for replay arithmetic inside the kernel.
 3. The recurrence is value-tiled, but the core algorithm is still sequential within each tile and remains the scaling limiter at longer sequence lengths.
 4. Backward global accumulation for `grad_q_norm_accum` and `grad_k_norm_accum` is still an obvious cost center.
 
