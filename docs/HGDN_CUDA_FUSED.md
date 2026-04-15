@@ -74,6 +74,12 @@ If the extension is unavailable, the model falls back to the PyTorch reference p
 
 ## Current status
 
+- Branch decision as of 2026-04-15: the old sidecar-kernel family is retired
+  for new HGDN kernel work on this branch.
+- Keep this extension tree only as historical reference and for reading old
+  profiling / parity results.
+- Do not spend new kernel-implementation time here unless the user explicitly
+  overrides that branch rule.
 - The extension builds and parity checks pass on supported CUDA machines.
 - The extension is not part of the active H100 winner path.
 - The full fused front-end variants lost on H100 (`h100k18`, `h100k19`).

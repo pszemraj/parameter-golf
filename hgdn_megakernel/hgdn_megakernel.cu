@@ -1,0 +1,1572 @@
+// HGDN block megakernel candidate.
+//
+// This is the first repo-backed, architecture-faithful parity kernel:
+// - packed dense W_qkv
+// - packed depthwise causal qkv conv + SiLU
+// - q/k L2 normalization
+// - fp32 gate math
+// - fp32 gated-delta recurrence state
+// - fp32 output RMSNorm
+// - SiLU output gate
+// - dense cross-head W_out
+//
+// Local `sm_89` or `sm_120` runs are correctness-only. H100 inference from
+// those timings is explicitly invalid.
+
+#include <torch/extension.h>
+
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAException.h>
+#include <c10/util/BFloat16.h>
+#include <cooperative_groups.h>
+#include <cuda_bf16.h>
+#include <cuda_runtime.h>
+
+#include <cmath>
+#include <cstdint>
+#include <sstream>
+#include <string>
+#include <vector>
+
+namespace cg = cooperative_groups;
+
+namespace {
+using bf16 = __nv_bfloat16;
+
+constexpr int MAX_D = 512;
+constexpr int MAX_H = 16;
+constexpr int MAX_DK = 64;
+constexpr int MAX_DV = 64;
+constexpr int MAX_K = 8;
+constexpr int THREADS = 256;
+constexpr int GEMM_TILE = 16;
+constexpr int REC_V_TILE = 8;
+constexpr float EPS = 1.0e-6f;
+
+static_assert(
+    THREADS == GEMM_TILE * GEMM_TILE,
+    "THREADS must match GEMM_TILE*GEMM_TILE for tiled GEMM phases");
+
+struct DeviceReport {
+  int major;
+  int minor;
+  int multiProcessorCount;
+  int l2CacheSize;
+  int regsPerMultiprocessor;
+  int warpSize;
+  int maxThreadsPerMultiProcessor;
+  int cooperativeLaunch;
+  size_t sharedMemPerMultiprocessor;
+  size_t sharedMemPerBlockOptin;
+  std::string name;
+};
+
+DeviceReport report() {
+  int device = -1;
+  C10_CUDA_CHECK(cudaGetDevice(&device));
+  cudaDeviceProp props{};
+  C10_CUDA_CHECK(cudaGetDeviceProperties(&props, device));
+  return {
+      props.major,
+      props.minor,
+      props.multiProcessorCount,
+      props.l2CacheSize,
+      props.regsPerMultiprocessor,
+      props.warpSize,
+      props.maxThreadsPerMultiProcessor,
+      props.cooperativeLaunch,
+      props.sharedMemPerMultiprocessor,
+      props.sharedMemPerBlockOptin,
+      props.name,
+  };
+}
+
+std::string device_report_string() {
+  DeviceReport r = report();
+  std::ostringstream out;
+  out << "GPU_NAME=" << r.name << "\n";
+  out << "major=" << r.major << "\n";
+  out << "minor=" << r.minor << "\n";
+  out << "multiProcessorCount=" << r.multiProcessorCount << "\n";
+  out << "l2CacheSize=" << r.l2CacheSize << "\n";
+  out << "sharedMemPerMultiprocessor=" << r.sharedMemPerMultiprocessor << "\n";
+  out << "sharedMemPerBlockOptin=" << r.sharedMemPerBlockOptin << "\n";
+  out << "regsPerMultiprocessor=" << r.regsPerMultiprocessor << "\n";
+  out << "warpSize=" << r.warpSize << "\n";
+  out << "maxThreadsPerMultiProcessor=" << r.maxThreadsPerMultiProcessor << "\n";
+  out << "cooperativeLaunch=" << r.cooperativeLaunch << "\n";
+  out << "scope="
+      << ((r.major == 8 && r.minor == 9) || (r.major == 12 && r.minor == 0)
+              ? "correctness_only_non_h100"
+              : (r.major == 9 ? "target_h100_class" : "non_h100_unknown"))
+      << "\n";
+  return out.str();
+}
+
+void validate_runtime_device() {
+  DeviceReport r = report();
+  TORCH_CHECK(
+      r.cooperativeLaunch,
+      "HGDN megakernel requires cooperative launch support on the active CUDA device.");
+  TORCH_CHECK(
+      r.sharedMemPerBlockOptin >= 48 * 1024,
+      "HGDN megakernel requires enough opt-in shared memory for the parity kernel.");
+}
+
+inline void chk_bf16(const torch::Tensor& t, const char* name) {
+  TORCH_CHECK(t.is_cuda(), name, " must be a CUDA tensor");
+  TORCH_CHECK(t.is_contiguous(), name, " must be contiguous");
+  TORCH_CHECK(t.scalar_type() == torch::kBFloat16, name, " must be bfloat16");
+}
+
+inline void chk_f32(const torch::Tensor& t, const char* name) {
+  TORCH_CHECK(t.is_cuda(), name, " must be a CUDA tensor");
+  TORCH_CHECK(t.is_contiguous(), name, " must be contiguous");
+  TORCH_CHECK(t.scalar_type() == torch::kFloat32, name, " must be float32");
+}
+
+inline bf16* bptr(torch::Tensor& t) {
+  return reinterpret_cast<bf16*>(t.data_ptr<c10::BFloat16>());
+}
+
+inline const bf16* cbptr(const torch::Tensor& t) {
+  return reinterpret_cast<const bf16*>(t.data_ptr<c10::BFloat16>());
+}
+
+__device__ __forceinline__ float b2f(bf16 x) { return __bfloat162float(x); }
+__device__ __forceinline__ bf16 f2b(float x) { return __float2bfloat16_rn(x); }
+__device__ __forceinline__ float sig(float x) {
+  return 1.0f / (1.0f + expf(-x));
+}
+__device__ __forceinline__ float softplus(float x) {
+  if (x > 20.0f) {
+    return x;
+  }
+  if (x < -20.0f) {
+    return expf(x);
+  }
+  return log1pf(expf(x));
+}
+__device__ __forceinline__ float silu(float x) { return x * sig(x); }
+__device__ __forceinline__ float dsilu(float x) {
+  float s = sig(x);
+  return s * (1.0f + x * (1.0f - s));
+}
+
+__device__ __forceinline__ int64_t idx3(
+    int b,
+    int t,
+    int c,
+    int T,
+    int C) {
+  return (static_cast<int64_t>(b) * T + t) * C + c;
+}
+
+__device__ __forceinline__ int64_t idx4(
+    int b,
+    int t,
+    int h,
+    int d,
+    int T,
+    int H,
+    int D) {
+  return ((static_cast<int64_t>(b) * T + t) * H + h) * D + d;
+}
+
+__device__ __forceinline__ int64_t state_idx(
+    int b,
+    int t,
+    int h,
+    int i,
+    int j,
+    int T,
+    int H,
+    int Dk,
+    int Dv) {
+  return ((((static_cast<int64_t>(b) * T + t) * H + h) * Dk + i) * Dv + j);
+}
+
+__device__ __forceinline__ int cq(int h, int d, int Dk) { return h * Dk + d; }
+__device__ __forceinline__ int ck(int h, int d, int H, int Dk) {
+  return H * Dk + h * Dk + d;
+}
+__device__ __forceinline__ int cv(int h, int d, int H, int Dk, int Dv) {
+  return 2 * H * Dk + h * Dv + d;
+}
+
+__device__ float dot_row(
+    const bf16* x,
+    const bf16* w,
+    int row,
+    int b,
+    int t,
+    int D,
+    int T) {
+  float acc = 0.0f;
+  int64_t x_base = idx3(b, t, 0, T, D);
+  int64_t w_base = static_cast<int64_t>(row) * D;
+  for (int d = 0; d < D; ++d) {
+    acc += b2f(x[x_base + d]) * b2f(w[w_base + d]);
+  }
+  return acc;
+}
+
+__device__ __forceinline__ int ceil_div_int(int a, int b) {
+  return (a + b - 1) / b;
+}
+
+__device__ void phase_gemm_abt_store_bf16(
+    const bf16* A,
+    const bf16* B,
+    bf16* Out,
+    int M,
+    int K,
+    int N,
+    float* shmem) {
+  float* tile_a = shmem;
+  float* tile_b = shmem + GEMM_TILE * GEMM_TILE;
+  int tid = threadIdx.x;
+  int local_row = tid / GEMM_TILE;
+  int local_col = tid % GEMM_TILE;
+  int tiles_n = ceil_div_int(N, GEMM_TILE);
+  int total_tiles = ceil_div_int(M, GEMM_TILE) * tiles_n;
+
+  for (int tile = blockIdx.x; tile < total_tiles; tile += gridDim.x) {
+    int tile_m = tile / tiles_n;
+    int tile_n = tile % tiles_n;
+    int m = tile_m * GEMM_TILE + local_row;
+    int n = tile_n * GEMM_TILE + local_col;
+    float acc = 0.0f;
+
+    for (int k0 = 0; k0 < K; k0 += GEMM_TILE) {
+      int a_k = k0 + local_col;
+      int b_k = k0 + local_col;
+      int b_row = tile_n * GEMM_TILE + local_row;
+      tile_a[local_row * GEMM_TILE + local_col] =
+          (m < M && a_k < K) ? b2f(A[static_cast<int64_t>(m) * K + a_k]) : 0.0f;
+      tile_b[local_row * GEMM_TILE + local_col] =
+          (b_row < N && b_k < K)
+              ? b2f(B[static_cast<int64_t>(b_row) * K + b_k])
+              : 0.0f;
+      __syncthreads();
+
+      #pragma unroll
+      for (int kk = 0; kk < GEMM_TILE; ++kk) {
+        acc += tile_a[local_row * GEMM_TILE + kk] *
+               tile_b[local_col * GEMM_TILE + kk];
+      }
+      __syncthreads();
+    }
+
+    if (m < M && n < N) {
+      Out[static_cast<int64_t>(m) * N + n] = f2b(acc);
+    }
+    __syncthreads();
+  }
+}
+
+__device__ void phase_gemm_ab_store_bf16(
+    const bf16* A,
+    const bf16* B,
+    bf16* Out,
+    int M,
+    int K,
+    int N,
+    float* shmem) {
+  float* tile_a = shmem;
+  float* tile_b = shmem + GEMM_TILE * GEMM_TILE;
+  int tid = threadIdx.x;
+  int local_row = tid / GEMM_TILE;
+  int local_col = tid % GEMM_TILE;
+  int tiles_n = ceil_div_int(N, GEMM_TILE);
+  int total_tiles = ceil_div_int(M, GEMM_TILE) * tiles_n;
+
+  for (int tile = blockIdx.x; tile < total_tiles; tile += gridDim.x) {
+    int tile_m = tile / tiles_n;
+    int tile_n = tile % tiles_n;
+    int m = tile_m * GEMM_TILE + local_row;
+    int n = tile_n * GEMM_TILE + local_col;
+    float acc = 0.0f;
+
+    for (int k0 = 0; k0 < K; k0 += GEMM_TILE) {
+      int a_k = k0 + local_col;
+      int b_k = k0 + local_row;
+      tile_a[local_row * GEMM_TILE + local_col] =
+          (m < M && a_k < K) ? b2f(A[static_cast<int64_t>(m) * K + a_k]) : 0.0f;
+      tile_b[local_row * GEMM_TILE + local_col] =
+          (b_k < K && n < N)
+              ? b2f(B[static_cast<int64_t>(b_k) * N + n])
+              : 0.0f;
+      __syncthreads();
+
+      #pragma unroll
+      for (int kk = 0; kk < GEMM_TILE; ++kk) {
+        acc += tile_a[local_row * GEMM_TILE + kk] *
+               tile_b[kk * GEMM_TILE + local_col];
+      }
+      __syncthreads();
+    }
+
+    if (m < M && n < N) {
+      Out[static_cast<int64_t>(m) * N + n] = f2b(acc);
+    }
+    __syncthreads();
+  }
+}
+
+__device__ void phase_gemm_ab_accum_f32(
+    const bf16* A,
+    const bf16* B,
+    float* Out,
+    int M,
+    int K,
+    int N,
+    float* shmem,
+    bool zero_init) {
+  float* tile_a = shmem;
+  float* tile_b = shmem + GEMM_TILE * GEMM_TILE;
+  int tid = threadIdx.x;
+  int local_row = tid / GEMM_TILE;
+  int local_col = tid % GEMM_TILE;
+  int tiles_n = ceil_div_int(N, GEMM_TILE);
+  int total_tiles = ceil_div_int(M, GEMM_TILE) * tiles_n;
+
+  for (int tile = blockIdx.x; tile < total_tiles; tile += gridDim.x) {
+    int tile_m = tile / tiles_n;
+    int tile_n = tile % tiles_n;
+    int m = tile_m * GEMM_TILE + local_row;
+    int n = tile_n * GEMM_TILE + local_col;
+    float acc = 0.0f;
+    if (!zero_init && m < M && n < N) {
+      acc = Out[static_cast<int64_t>(m) * N + n];
+    }
+
+    for (int k0 = 0; k0 < K; k0 += GEMM_TILE) {
+      int a_k = k0 + local_col;
+      int b_k = k0 + local_row;
+      tile_a[local_row * GEMM_TILE + local_col] =
+          (m < M && a_k < K) ? b2f(A[static_cast<int64_t>(m) * K + a_k]) : 0.0f;
+      tile_b[local_row * GEMM_TILE + local_col] =
+          (b_k < K && n < N)
+              ? b2f(B[static_cast<int64_t>(b_k) * N + n])
+              : 0.0f;
+      __syncthreads();
+
+      #pragma unroll
+      for (int kk = 0; kk < GEMM_TILE; ++kk) {
+        acc += tile_a[local_row * GEMM_TILE + kk] *
+               tile_b[kk * GEMM_TILE + local_col];
+      }
+      __syncthreads();
+    }
+
+    if (m < M && n < N) {
+      Out[static_cast<int64_t>(m) * N + n] = acc;
+    }
+    __syncthreads();
+  }
+}
+
+__device__ void phase_gemm_aT_b_store_bf16(
+    const bf16* A,
+    const bf16* B,
+    bf16* Out,
+    int M,
+    int R,
+    int C,
+    float* shmem) {
+  float* tile_a = shmem;
+  float* tile_b = shmem + GEMM_TILE * GEMM_TILE;
+  int tid = threadIdx.x;
+  int local_row = tid / GEMM_TILE;
+  int local_col = tid % GEMM_TILE;
+  int tiles_c = ceil_div_int(C, GEMM_TILE);
+  int total_tiles = ceil_div_int(R, GEMM_TILE) * tiles_c;
+
+  for (int tile = blockIdx.x; tile < total_tiles; tile += gridDim.x) {
+    int tile_r = tile / tiles_c;
+    int tile_c = tile % tiles_c;
+    int r = tile_r * GEMM_TILE + local_row;
+    int c = tile_c * GEMM_TILE + local_col;
+    float acc = 0.0f;
+
+    for (int m0 = 0; m0 < M; m0 += GEMM_TILE) {
+      int m_a = m0 + local_col;
+      int m_b = m0 + local_row;
+      tile_a[local_row * GEMM_TILE + local_col] =
+          (r < R && m_a < M)
+              ? b2f(A[static_cast<int64_t>(m_a) * R + r])
+              : 0.0f;
+      tile_b[local_row * GEMM_TILE + local_col] =
+          (m_b < M && c < C)
+              ? b2f(B[static_cast<int64_t>(m_b) * C + c])
+              : 0.0f;
+      __syncthreads();
+
+      #pragma unroll
+      for (int kk = 0; kk < GEMM_TILE; ++kk) {
+        acc += tile_a[local_row * GEMM_TILE + kk] *
+               tile_b[kk * GEMM_TILE + local_col];
+      }
+      __syncthreads();
+    }
+
+    if (r < R && c < C) {
+      Out[static_cast<int64_t>(r) * C + c] = f2b(acc);
+    }
+    __syncthreads();
+  }
+}
+
+__device__ float conv_at(
+    const bf16* packed,
+    const bf16* weight,
+    int b,
+    int t,
+    int c,
+    int T,
+    int C,
+    int K) {
+  float acc = 0.0f;
+  int start = t - (K - 1);
+  int64_t w_base = static_cast<int64_t>(c) * K;
+  for (int tap = 0; tap < K; ++tap) {
+    int tau = start + tap;
+    if (tau >= 0 && tau < T) {
+      acc += b2f(packed[idx3(b, tau, c, T, C)]) * b2f(weight[w_base + tap]);
+    }
+  }
+  return acc;
+}
+
+struct SharedState {
+  float* S0;
+  float* S1;
+  float* adj;
+  float* q;
+  float* k;
+  float* v;
+  float* go;
+  float* tmp_dv0;
+  float* tmp_dv1;
+  float* tmp_dk0;
+  float* tmp_dk1;
+  float* reduce0;
+  float* reduce1;
+};
+
+__device__ SharedState shared_ptrs(float* base, int Dk, int Dv) {
+  SharedState s{};
+  int offset = 0;
+  s.S0 = base + offset;
+  offset += Dk * Dv;
+  s.S1 = base + offset;
+  offset += Dk * Dv;
+  s.adj = base + offset;
+  offset += Dk * Dv;
+  s.q = base + offset;
+  offset += Dk;
+  s.k = base + offset;
+  offset += Dk;
+  s.v = base + offset;
+  offset += Dv;
+  s.go = base + offset;
+  offset += Dv;
+  s.tmp_dv0 = base + offset;
+  offset += Dv;
+  s.tmp_dv1 = base + offset;
+  offset += Dv;
+  s.tmp_dk0 = base + offset;
+  offset += Dk;
+  s.tmp_dk1 = base + offset;
+  offset += Dk;
+  s.reduce0 = base + offset;
+  offset += THREADS;
+  s.reduce1 = base + offset;
+  return s;
+}
+
+__global__ void hgdn_forward_bf16_kernel(
+    const bf16* __restrict__ x,
+    const bf16* __restrict__ w_qkv,
+    const bf16* __restrict__ w_a,
+    const bf16* __restrict__ w_b,
+    const bf16* __restrict__ w_g,
+    const bf16* __restrict__ w_out,
+    const bf16* __restrict__ conv_w,
+    const float* __restrict__ A_log,
+    const float* __restrict__ dt_bias,
+    bf16* __restrict__ y,
+    bf16* __restrict__ qkv,
+    bf16* __restrict__ pre,
+    bf16* __restrict__ q_norm,
+    bf16* __restrict__ k_norm,
+    bf16* __restrict__ v_post,
+    float* __restrict__ inv_q,
+    float* __restrict__ inv_k,
+    bf16* __restrict__ g_pre,
+    bf16* __restrict__ beta_pre,
+    bf16* __restrict__ g_log,
+    bf16* __restrict__ beta,
+    bf16* __restrict__ g_out,
+    bf16* __restrict__ o_raw,
+    bf16* __restrict__ o_norm,
+    bf16* __restrict__ z,
+    float* __restrict__ state_prev,
+    int B,
+    int T,
+    int D,
+    int H,
+    int Dk,
+    int Dv,
+    int K,
+    int allow_neg_eigval) {
+  cg::grid_group grid = cg::this_grid();
+  extern __shared__ float shmem[];
+
+  int Cq = H * Dk;
+  int P = H * Dv;
+  int C = 2 * Cq + P;
+  int64_t BT = static_cast<int64_t>(B) * T;
+  int64_t linear_tid = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  int64_t linear_stride = static_cast<int64_t>(blockDim.x) * gridDim.x;
+
+  phase_gemm_abt_store_bf16(x, w_qkv, qkv, static_cast<int>(BT), D, C, shmem);
+  grid.sync();
+
+  for (int64_t idx = linear_tid; idx < BT * H; idx += linear_stride) {
+    int h = idx % H;
+    int64_t bt = idx / H;
+    int t = bt % T;
+    int b = bt / T;
+    g_pre[idx] = f2b(dot_row(x, w_a, h, b, t, D, T));
+    beta_pre[idx] = f2b(dot_row(x, w_b, h, b, t, D, T));
+  }
+  phase_gemm_abt_store_bf16(x, w_g, g_out, static_cast<int>(BT), D, P, shmem);
+  grid.sync();
+
+  for (int64_t job = blockIdx.x; job < BT * H; job += gridDim.x) {
+    int h = job % H;
+    int64_t bt = job / H;
+    int t = bt % T;
+    int b = bt / T;
+
+    float sq = 0.0f;
+    float sk = 0.0f;
+    for (int d = threadIdx.x; d < Dk; d += blockDim.x) {
+      int q_channel = cq(h, d, Dk);
+      int k_channel = ck(h, d, H, Dk);
+      float q_preact = conv_at(qkv, conv_w, b, t, q_channel, T, C, K);
+      float k_preact = conv_at(qkv, conv_w, b, t, k_channel, T, C, K);
+      pre[idx3(b, t, q_channel, T, C)] = f2b(q_preact);
+      pre[idx3(b, t, k_channel, T, C)] = f2b(k_preact);
+      float q_activated = silu(q_preact);
+      float k_activated = silu(k_preact);
+      sq += q_activated * q_activated;
+      sk += k_activated * k_activated;
+    }
+    shmem[threadIdx.x] = sq;
+    shmem[THREADS + threadIdx.x] = sk;
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+      if (threadIdx.x < stride) {
+        shmem[threadIdx.x] += shmem[threadIdx.x + stride];
+        shmem[THREADS + threadIdx.x] +=
+            shmem[THREADS + threadIdx.x + stride];
+      }
+      __syncthreads();
+    }
+    float inv_q_norm =
+        (sqrtf(shmem[0]) > EPS ? 1.0f / sqrtf(shmem[0]) : 1.0f / EPS);
+    float inv_k_norm =
+        (sqrtf(shmem[THREADS]) > EPS ? 1.0f / sqrtf(shmem[THREADS])
+                                    : 1.0f / EPS);
+    if (threadIdx.x == 0) {
+      inv_q[idx3(b, t, h, T, H)] = inv_q_norm;
+      inv_k[idx3(b, t, h, T, H)] = inv_k_norm;
+    }
+    for (int d = threadIdx.x; d < Dk; d += blockDim.x) {
+      int q_channel = cq(h, d, Dk);
+      int k_channel = ck(h, d, H, Dk);
+      q_norm[idx4(b, t, h, d, T, H, Dk)] =
+          f2b(silu(b2f(pre[idx3(b, t, q_channel, T, C)])) * inv_q_norm);
+      k_norm[idx4(b, t, h, d, T, H, Dk)] =
+          f2b(silu(b2f(pre[idx3(b, t, k_channel, T, C)])) * inv_k_norm);
+    }
+    for (int d = threadIdx.x; d < Dv; d += blockDim.x) {
+      int v_channel = cv(h, d, H, Dk, Dv);
+      float v_preact = conv_at(qkv, conv_w, b, t, v_channel, T, C, K);
+      pre[idx3(b, t, v_channel, T, C)] = f2b(v_preact);
+      v_post[idx4(b, t, h, d, T, H, Dv)] = f2b(silu(v_preact));
+    }
+    __syncthreads();
+  }
+  grid.sync();
+
+  for (int64_t idx = linear_tid; idx < BT * H; idx += linear_stride) {
+    int h = idx % H;
+    float exp_A = expf(A_log[h]);
+    float g_value = -exp_A * softplus(b2f(g_pre[idx]) + dt_bias[h]);
+    float beta_value = sig(b2f(beta_pre[idx]));
+    if (allow_neg_eigval) {
+      beta_value *= 2.0f;
+    }
+    g_log[idx] = f2b(g_value);
+    beta[idx] = f2b(beta_value);
+  }
+  grid.sync();
+
+  int v_tiles = ceil_div_int(Dv, REC_V_TILE);
+  for (int job = blockIdx.x; job < B * H * v_tiles; job += gridDim.x) {
+    int tile = job % v_tiles;
+    int head_job = job / v_tiles;
+    int b = head_job / H;
+    int h = head_job % H;
+    int v_base = tile * REC_V_TILE;
+    int dv_local = min(REC_V_TILE, Dv - v_base);
+    SharedState shared = shared_ptrs(shmem, Dk, dv_local);
+    int state_elems = Dk * dv_local;
+
+    for (int idx = threadIdx.x; idx < state_elems; idx += blockDim.x) {
+      shared.S0[idx] = 0.0f;
+    }
+    __syncthreads();
+
+    for (int t = 0; t < T; ++t) {
+      for (int i = threadIdx.x; i < Dk; i += blockDim.x) {
+        shared.q[i] = b2f(q_norm[idx4(b, t, h, i, T, H, Dk)]);
+        shared.k[i] = b2f(k_norm[idx4(b, t, h, i, T, H, Dk)]);
+      }
+      for (int j = threadIdx.x; j < dv_local; j += blockDim.x) {
+        shared.v[j] = b2f(v_post[idx4(b, t, h, v_base + j, T, H, Dv)]);
+      }
+      __syncthreads();
+
+      for (int idx = threadIdx.x; idx < state_elems; idx += blockDim.x) {
+        int i = idx / dv_local;
+        int j = idx - i * dv_local;
+        state_prev[state_idx(b, t, h, i, v_base + j, T, H, Dk, Dv)] =
+            shared.S0[idx];
+      }
+      for (int j = threadIdx.x; j < dv_local; j += blockDim.x) {
+        float acc = 0.0f;
+        for (int i = 0; i < Dk; ++i) {
+          acc += shared.k[i] * shared.S0[i * dv_local + j];
+        }
+        shared.tmp_dv0[j] = acc;
+      }
+      __syncthreads();
+
+      float alpha = expf(b2f(g_log[idx3(b, t, h, T, H)]));
+      float beta_value = b2f(beta[idx3(b, t, h, T, H)]);
+      for (int idx = threadIdx.x; idx < state_elems; idx += blockDim.x) {
+        int i = idx / dv_local;
+        int j = idx - i * dv_local;
+        shared.S1[idx] = alpha *
+                             (shared.S0[idx] -
+                              beta_value * shared.k[i] * shared.tmp_dv0[j]) +
+                         shared.k[i] * shared.v[j];
+      }
+      __syncthreads();
+      for (int j = threadIdx.x; j < dv_local; j += blockDim.x) {
+        float acc = 0.0f;
+        for (int i = 0; i < Dk; ++i) {
+          acc += shared.S1[i * dv_local + j] * shared.q[i];
+        }
+        o_raw[idx4(b, t, h, v_base + j, T, H, Dv)] = f2b(acc);
+      }
+      __syncthreads();
+      for (int idx = threadIdx.x; idx < state_elems; idx += blockDim.x) {
+        shared.S0[idx] = shared.S1[idx];
+      }
+      __syncthreads();
+    }
+  }
+  grid.sync();
+
+  for (int64_t job = blockIdx.x; job < BT * H; job += gridDim.x) {
+    int h = job % H;
+    int64_t bt = job / H;
+    int t = bt % T;
+    int b = bt / T;
+
+    float sum_sq = 0.0f;
+    for (int j = threadIdx.x; j < Dv; j += blockDim.x) {
+      float o_value = b2f(o_raw[idx4(b, t, h, j, T, H, Dv)]);
+      sum_sq += o_value * o_value;
+    }
+    shmem[threadIdx.x] = sum_sq;
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+      if (threadIdx.x < stride) {
+        shmem[threadIdx.x] += shmem[threadIdx.x + stride];
+      }
+      __syncthreads();
+    }
+
+    float inv_rms = rsqrtf(shmem[0] / static_cast<float>(Dv) + EPS);
+    for (int j = threadIdx.x; j < Dv; j += blockDim.x) {
+      int p = h * Dv + j;
+      float o_value = b2f(o_raw[idx4(b, t, h, j, T, H, Dv)]) * inv_rms;
+      float gate_value = silu(b2f(g_out[idx3(b, t, p, T, P)]));
+      o_norm[idx4(b, t, h, j, T, H, Dv)] = f2b(o_value);
+      z[idx3(b, t, p, T, P)] = f2b(o_value * gate_value);
+    }
+    __syncthreads();
+  }
+  grid.sync();
+
+  phase_gemm_abt_store_bf16(z, w_out, y, static_cast<int>(BT), P, D, shmem);
+}
+
+__global__ void hgdn_backward_bf16_kernel(
+    const bf16* __restrict__ grad_y,
+    const bf16* __restrict__ x,
+    const bf16* __restrict__ w_qkv,
+    const bf16* __restrict__ w_a,
+    const bf16* __restrict__ w_b,
+    const bf16* __restrict__ w_g,
+    const bf16* __restrict__ w_out,
+    const bf16* __restrict__ conv_w,
+    const float* __restrict__ A_log,
+    const float* __restrict__ dt_bias,
+    const bf16* __restrict__ qkv,
+    const bf16* __restrict__ pre,
+    const bf16* __restrict__ q_norm,
+    const bf16* __restrict__ k_norm,
+    const bf16* __restrict__ v_post,
+    const float* __restrict__ inv_q,
+    const float* __restrict__ inv_k,
+    const bf16* __restrict__ g_pre,
+    const bf16* __restrict__ beta_pre,
+    const bf16* __restrict__ g_log,
+    const bf16* __restrict__ beta,
+    const bf16* __restrict__ g_out,
+    const bf16* __restrict__ o_raw,
+    const bf16* __restrict__ o_norm,
+    const bf16* __restrict__ z,
+    const float* __restrict__ state_prev,
+    float* __restrict__ grad_q_norm_accum,
+    float* __restrict__ grad_k_norm_accum,
+    float* __restrict__ grad_g_log_accum,
+    float* __restrict__ grad_beta_accum,
+    float* __restrict__ grad_x_accum,
+    bf16* __restrict__ grad_x,
+    bf16* __restrict__ grad_w_qkv,
+    bf16* __restrict__ grad_w_a,
+    bf16* __restrict__ grad_w_b,
+    bf16* __restrict__ grad_w_g,
+    bf16* __restrict__ grad_w_out,
+    bf16* __restrict__ grad_conv_w,
+    float* __restrict__ grad_A_log,
+    float* __restrict__ grad_dt_bias,
+    bf16* __restrict__ grad_z,
+    bf16* __restrict__ grad_o_raw,
+    bf16* __restrict__ grad_g_out,
+    bf16* __restrict__ grad_q_norm,
+    bf16* __restrict__ grad_k_norm,
+    bf16* __restrict__ grad_v_post,
+    float* __restrict__ grad_g_log,
+    float* __restrict__ grad_beta,
+    bf16* __restrict__ grad_pre,
+    bf16* __restrict__ grad_qkv,
+    bf16* __restrict__ grad_g_pre,
+    bf16* __restrict__ grad_beta_pre,
+    int B,
+    int T,
+    int D,
+    int H,
+    int Dk,
+    int Dv,
+    int K,
+    int allow_neg_eigval) {
+  cg::grid_group grid = cg::this_grid();
+  extern __shared__ float shmem[];
+
+  int Cq = H * Dk;
+  int P = H * Dv;
+  int C = 2 * Cq + P;
+  int64_t BT = static_cast<int64_t>(B) * T;
+  int64_t linear_tid = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  int64_t linear_stride = static_cast<int64_t>(blockDim.x) * gridDim.x;
+
+  for (int64_t idx = linear_tid; idx < BT * D; idx += linear_stride) {
+    grad_x_accum[idx] = 0.0f;
+  }
+  for (int64_t idx = linear_tid; idx < BT * H * Dk; idx += linear_stride) {
+    grad_q_norm_accum[idx] = 0.0f;
+    grad_k_norm_accum[idx] = 0.0f;
+  }
+  for (int64_t idx = linear_tid; idx < BT * H; idx += linear_stride) {
+    grad_g_log_accum[idx] = 0.0f;
+    grad_beta_accum[idx] = 0.0f;
+  }
+  grid.sync();
+
+  phase_gemm_ab_store_bf16(grad_y, w_out, grad_z, static_cast<int>(BT), D, P, shmem);
+  grid.sync();
+  phase_gemm_aT_b_store_bf16(
+      grad_y, z, grad_w_out, static_cast<int>(BT), D, P, shmem);
+  grid.sync();
+
+  for (int64_t job = blockIdx.x; job < BT * H; job += gridDim.x) {
+    int h = job % H;
+    int64_t bt = job / H;
+    int t = bt % T;
+    int b = bt / T;
+
+    float sum_sq = 0.0f;
+    float dot_go = 0.0f;
+    for (int j = threadIdx.x; j < Dv; j += blockDim.x) {
+      int p = h * Dv + j;
+      float o_value = b2f(o_raw[idx4(b, t, h, j, T, H, Dv)]);
+      float on_value = b2f(o_norm[idx4(b, t, h, j, T, H, Dv)]);
+      float gate_value = b2f(g_out[idx3(b, t, p, T, P)]);
+      float dz_value = b2f(grad_z[idx3(b, t, p, T, P)]);
+      float grad_norm = dz_value * silu(gate_value);
+      grad_g_out[idx3(b, t, p, T, P)] =
+          f2b(dz_value * on_value * dsilu(gate_value));
+      sum_sq += o_value * o_value;
+      dot_go += grad_norm * o_value;
+      grad_o_raw[idx4(b, t, h, j, T, H, Dv)] = f2b(grad_norm);
+    }
+    shmem[threadIdx.x] = sum_sq;
+    shmem[THREADS + threadIdx.x] = dot_go;
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+      if (threadIdx.x < stride) {
+        shmem[threadIdx.x] += shmem[threadIdx.x + stride];
+        shmem[THREADS + threadIdx.x] +=
+            shmem[THREADS + threadIdx.x + stride];
+      }
+      __syncthreads();
+    }
+    float inv_rms = rsqrtf(shmem[0] / static_cast<float>(Dv) + EPS);
+    float coeff =
+        inv_rms * inv_rms * inv_rms * shmem[THREADS] / static_cast<float>(Dv);
+    for (int j = threadIdx.x; j < Dv; j += blockDim.x) {
+      float o_value = b2f(o_raw[idx4(b, t, h, j, T, H, Dv)]);
+      float grad_norm = b2f(grad_o_raw[idx4(b, t, h, j, T, H, Dv)]);
+      grad_o_raw[idx4(b, t, h, j, T, H, Dv)] =
+          f2b(inv_rms * grad_norm - coeff * o_value);
+    }
+    __syncthreads();
+  }
+  grid.sync();
+
+  int v_tiles = ceil_div_int(Dv, REC_V_TILE);
+  for (int job = blockIdx.x; job < B * H * v_tiles; job += gridDim.x) {
+    int tile = job % v_tiles;
+    int head_job = job / v_tiles;
+    int b = head_job / H;
+    int h = head_job % H;
+    int v_base = tile * REC_V_TILE;
+    int dv_local = min(REC_V_TILE, Dv - v_base);
+    SharedState shared = shared_ptrs(shmem, Dk, dv_local);
+    int state_elems = Dk * dv_local;
+
+    for (int idx = threadIdx.x; idx < state_elems; idx += blockDim.x) {
+      shared.adj[idx] = 0.0f;
+    }
+    __syncthreads();
+
+    for (int t = T - 1; t >= 0; --t) {
+      for (int i = threadIdx.x; i < Dk; i += blockDim.x) {
+        shared.q[i] = b2f(q_norm[idx4(b, t, h, i, T, H, Dk)]);
+        shared.k[i] = b2f(k_norm[idx4(b, t, h, i, T, H, Dk)]);
+      }
+      for (int j = threadIdx.x; j < dv_local; j += blockDim.x) {
+        shared.v[j] = b2f(v_post[idx4(b, t, h, v_base + j, T, H, Dv)]);
+        shared.go[j] = b2f(grad_o_raw[idx4(b, t, h, v_base + j, T, H, Dv)]);
+      }
+      for (int idx = threadIdx.x; idx < state_elems; idx += blockDim.x) {
+        int i = idx / dv_local;
+        int j = idx - i * dv_local;
+        shared.S0[idx] =
+            state_prev[state_idx(b, t, h, i, v_base + j, T, H, Dk, Dv)];
+      }
+      __syncthreads();
+
+      for (int j = threadIdx.x; j < dv_local; j += blockDim.x) {
+        float acc = 0.0f;
+        for (int i = 0; i < Dk; ++i) {
+          acc += shared.k[i] * shared.S0[i * dv_local + j];
+        }
+        shared.tmp_dv0[j] = acc;
+      }
+      __syncthreads();
+
+      float alpha = expf(b2f(g_log[idx3(b, t, h, T, H)]));
+      float beta_value = b2f(beta[idx3(b, t, h, T, H)]);
+      for (int idx = threadIdx.x; idx < state_elems; idx += blockDim.x) {
+        int i = idx / dv_local;
+        int j = idx - i * dv_local;
+        shared.S1[idx] = alpha *
+                             (shared.S0[idx] -
+                              beta_value * shared.k[i] * shared.tmp_dv0[j]) +
+                         shared.k[i] * shared.v[j];
+      }
+      __syncthreads();
+
+      for (int i = threadIdx.x; i < Dk; i += blockDim.x) {
+        float acc = 0.0f;
+        for (int j = 0; j < dv_local; ++j) {
+          acc += shared.S1[i * dv_local + j] * shared.go[j];
+        }
+        atomicAdd(
+            &grad_q_norm_accum[idx4(b, t, h, i, T, H, Dk)],
+            acc);
+      }
+      for (int idx = threadIdx.x; idx < state_elems; idx += blockDim.x) {
+        int i = idx / dv_local;
+        int j = idx - i * dv_local;
+        shared.adj[idx] += shared.q[i] * shared.go[j];
+      }
+      __syncthreads();
+
+      for (int j = threadIdx.x; j < dv_local; j += blockDim.x) {
+        float acc = 0.0f;
+        for (int i = 0; i < Dk; ++i) {
+          acc += shared.k[i] * (alpha * shared.adj[i * dv_local + j]);
+        }
+        shared.tmp_dv1[j] = acc;
+      }
+      __syncthreads();
+
+      for (int j = threadIdx.x; j < dv_local; j += blockDim.x) {
+        float acc = 0.0f;
+        for (int i = 0; i < Dk; ++i) {
+          acc += shared.adj[i * dv_local + j] * shared.k[i];
+        }
+        grad_v_post[idx4(b, t, h, v_base + j, T, H, Dv)] = f2b(acc);
+      }
+      for (int i = threadIdx.x; i < Dk; i += blockDim.x) {
+        float acc = 0.0f;
+        for (int j = 0; j < dv_local; ++j) {
+          acc += shared.adj[i * dv_local + j] * shared.v[j];
+        }
+        shared.tmp_dk0[i] = acc;
+      }
+
+      float local_da = 0.0f;
+      float local_db = 0.0f;
+      for (int idx = threadIdx.x; idx < state_elems; idx += blockDim.x) {
+        int i = idx / dv_local;
+        int j = idx - i * dv_local;
+        float Aij =
+            shared.S0[idx] - beta_value * shared.k[i] * shared.tmp_dv0[j];
+        local_da += shared.adj[idx] * Aij;
+        local_db +=
+            (alpha * shared.adj[idx]) * (-shared.k[i] * shared.tmp_dv0[j]);
+      }
+      shared.reduce0[threadIdx.x] = local_da;
+      shared.reduce1[threadIdx.x] = local_db;
+      __syncthreads();
+      for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) {
+          shared.reduce0[threadIdx.x] += shared.reduce0[threadIdx.x + stride];
+          shared.reduce1[threadIdx.x] += shared.reduce1[threadIdx.x + stride];
+        }
+        __syncthreads();
+      }
+      if (threadIdx.x == 0) {
+        atomicAdd(
+            &grad_g_log_accum[idx3(b, t, h, T, H)],
+            shared.reduce0[0] * alpha);
+        atomicAdd(
+            &grad_beta_accum[idx3(b, t, h, T, H)],
+            shared.reduce1[0]);
+      }
+
+      for (int i = threadIdx.x; i < Dk; i += blockDim.x) {
+        float term0 = shared.tmp_dk0[i];
+        float term1 = 0.0f;
+        float term2 = 0.0f;
+        for (int j = 0; j < dv_local; ++j) {
+          term1 += (alpha * shared.adj[i * dv_local + j]) * shared.tmp_dv0[j];
+          term2 += shared.S0[i * dv_local + j] * shared.tmp_dv1[j];
+        }
+        atomicAdd(
+            &grad_k_norm_accum[idx4(b, t, h, i, T, H, Dk)],
+            term0 - beta_value * (term1 + term2));
+      }
+      __syncthreads();
+
+      for (int idx = threadIdx.x; idx < state_elems; idx += blockDim.x) {
+        int i = idx / dv_local;
+        int j = idx - i * dv_local;
+        shared.S1[idx] =
+            alpha * shared.adj[idx] - beta_value * shared.k[i] * shared.tmp_dv1[j];
+      }
+      __syncthreads();
+      for (int idx = threadIdx.x; idx < state_elems; idx += blockDim.x) {
+        shared.adj[idx] = shared.S1[idx];
+      }
+      __syncthreads();
+    }
+  }
+  grid.sync();
+
+  for (int64_t idx = linear_tid; idx < BT * H * Dk; idx += linear_stride) {
+    grad_q_norm[idx] = f2b(grad_q_norm_accum[idx]);
+    grad_k_norm[idx] = f2b(grad_k_norm_accum[idx]);
+  }
+  for (int64_t idx = linear_tid; idx < BT * H; idx += linear_stride) {
+    grad_g_log[idx] = grad_g_log_accum[idx];
+    grad_beta[idx] = grad_beta_accum[idx];
+  }
+  grid.sync();
+
+  for (int64_t job = blockIdx.x; job < BT * H; job += gridDim.x) {
+    int h = job % H;
+    int64_t bt = job / H;
+    int t = bt % T;
+    int b = bt / T;
+
+    float dot_q = 0.0f;
+    float dot_k = 0.0f;
+    for (int i = threadIdx.x; i < Dk; i += blockDim.x) {
+      float dq = b2f(grad_q_norm[idx4(b, t, h, i, T, H, Dk)]);
+      float dk = b2f(grad_k_norm[idx4(b, t, h, i, T, H, Dk)]);
+      float q_value = b2f(q_norm[idx4(b, t, h, i, T, H, Dk)]);
+      float k_value = b2f(k_norm[idx4(b, t, h, i, T, H, Dk)]);
+      dot_q += dq * q_value;
+      dot_k += dk * k_value;
+    }
+    shmem[threadIdx.x] = dot_q;
+    shmem[THREADS + threadIdx.x] = dot_k;
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+      if (threadIdx.x < stride) {
+        shmem[threadIdx.x] += shmem[threadIdx.x + stride];
+        shmem[THREADS + threadIdx.x] +=
+            shmem[THREADS + threadIdx.x + stride];
+      }
+      __syncthreads();
+    }
+
+    float inv_q_norm = inv_q[idx3(b, t, h, T, H)];
+    float inv_k_norm = inv_k[idx3(b, t, h, T, H)];
+    for (int i = threadIdx.x; i < Dk; i += blockDim.x) {
+      int q_channel = cq(h, i, Dk);
+      int k_channel = ck(h, i, H, Dk);
+      float dq = b2f(grad_q_norm[idx4(b, t, h, i, T, H, Dk)]);
+      float dk = b2f(grad_k_norm[idx4(b, t, h, i, T, H, Dk)]);
+      float q_value = b2f(q_norm[idx4(b, t, h, i, T, H, Dk)]);
+      float k_value = b2f(k_norm[idx4(b, t, h, i, T, H, Dk)]);
+      float q_preact = b2f(pre[idx3(b, t, q_channel, T, C)]);
+      float k_preact = b2f(pre[idx3(b, t, k_channel, T, C)]);
+      grad_pre[idx3(b, t, q_channel, T, C)] =
+          f2b((dq - q_value * shmem[0]) * inv_q_norm * dsilu(q_preact));
+      grad_pre[idx3(b, t, k_channel, T, C)] =
+          f2b((dk - k_value * shmem[THREADS]) * inv_k_norm * dsilu(k_preact));
+    }
+    for (int j = threadIdx.x; j < Dv; j += blockDim.x) {
+      int v_channel = cv(h, j, H, Dk, Dv);
+      float v_preact = b2f(pre[idx3(b, t, v_channel, T, C)]);
+      float grad_value = b2f(grad_v_post[idx4(b, t, h, j, T, H, Dv)]);
+      grad_pre[idx3(b, t, v_channel, T, C)] =
+          f2b(grad_value * dsilu(v_preact));
+    }
+    __syncthreads();
+  }
+  grid.sync();
+
+  for (int64_t idx = linear_tid; idx < BT * C; idx += linear_stride) {
+    int c = idx % C;
+    int64_t bt = idx / C;
+    int tau = bt % T;
+    int b = bt / T;
+    float acc = 0.0f;
+    for (int tap = 0; tap < K; ++tap) {
+      int t = tau + (K - 1) - tap;
+      if (t >= 0 && t < T) {
+        acc += b2f(grad_pre[idx3(b, t, c, T, C)]) *
+               b2f(conv_w[static_cast<int64_t>(c) * K + tap]);
+      }
+    }
+    grad_qkv[idx] = f2b(acc);
+  }
+  for (int64_t idx = linear_tid; idx < static_cast<int64_t>(C) * K;
+       idx += linear_stride) {
+    int tap = idx % K;
+    int c = idx / K;
+    float acc = 0.0f;
+    for (int b = 0; b < B; ++b) {
+      for (int t = 0; t < T; ++t) {
+        int tau = t - (K - 1) + tap;
+        if (tau >= 0 && tau < T) {
+          acc += b2f(grad_pre[idx3(b, t, c, T, C)]) *
+                 b2f(qkv[idx3(b, tau, c, T, C)]);
+        }
+      }
+    }
+    grad_conv_w[idx] = f2b(acc);
+  }
+  grid.sync();
+
+  for (int64_t idx = linear_tid; idx < BT * H; idx += linear_stride) {
+    int h = idx % H;
+    float exp_A = expf(A_log[h]);
+    float z_value = b2f(g_pre[idx]) + dt_bias[h];
+    grad_g_pre[idx] = f2b(grad_g_log[idx] * (-exp_A * sig(z_value)));
+    float s = sig(b2f(beta_pre[idx]));
+    float scale = allow_neg_eigval ? 2.0f : 1.0f;
+    grad_beta_pre[idx] = f2b(grad_beta[idx] * scale * s * (1.0f - s));
+  }
+  for (int64_t h = linear_tid; h < H; h += linear_stride) {
+    float acc_A = 0.0f;
+    float acc_dt = 0.0f;
+    float exp_A = expf(A_log[h]);
+    for (int64_t bt = 0; bt < BT; ++bt) {
+      int64_t idx = bt * H + h;
+      float z_value = b2f(g_pre[idx]) + dt_bias[h];
+      float g_value = -exp_A * softplus(z_value);
+      acc_A += grad_g_log[idx] * g_value;
+      acc_dt += grad_g_log[idx] * (-exp_A * sig(z_value));
+    }
+    grad_A_log[h] = acc_A;
+    grad_dt_bias[h] = acc_dt;
+  }
+  grid.sync();
+
+  phase_gemm_ab_accum_f32(
+      grad_qkv, w_qkv, grad_x_accum, static_cast<int>(BT), C, D, shmem, true);
+  grid.sync();
+  phase_gemm_aT_b_store_bf16(
+      grad_qkv, x, grad_w_qkv, static_cast<int>(BT), C, D, shmem);
+  grid.sync();
+  for (int64_t idx = linear_tid; idx < static_cast<int64_t>(H) * D;
+       idx += linear_stride) {
+    int d = idx % D;
+    int h = idx / D;
+    float acc_a = 0.0f;
+    float acc_b = 0.0f;
+    for (int64_t bt = 0; bt < BT; ++bt) {
+      acc_a += b2f(grad_g_pre[bt * H + h]) * b2f(x[bt * D + d]);
+      acc_b += b2f(grad_beta_pre[bt * H + h]) * b2f(x[bt * D + d]);
+    }
+    grad_w_a[idx] = f2b(acc_a);
+    grad_w_b[idx] = f2b(acc_b);
+  }
+  grid.sync();
+  phase_gemm_ab_accum_f32(
+      grad_g_out, w_g, grad_x_accum, static_cast<int>(BT), P, D, shmem, false);
+  grid.sync();
+  phase_gemm_aT_b_store_bf16(
+      grad_g_out, x, grad_w_g, static_cast<int>(BT), P, D, shmem);
+  grid.sync();
+  for (int64_t idx = linear_tid; idx < BT * D; idx += linear_stride) {
+    int d = idx % D;
+    int64_t bt = idx / D;
+    float acc = grad_x_accum[idx];
+    for (int h = 0; h < H; ++h) {
+      acc += b2f(grad_g_pre[bt * H + h]) *
+             b2f(w_a[static_cast<int64_t>(h) * D + d]);
+      acc += b2f(grad_beta_pre[bt * H + h]) *
+             b2f(w_b[static_cast<int64_t>(h) * D + d]);
+    }
+    grad_x[idx] = f2b(acc);
+  }
+}
+
+size_t shared_bytes(int Dk, int Dv) {
+  int dv_tile = Dv < REC_V_TILE ? Dv : REC_V_TILE;
+  size_t recurrence =
+      static_cast<size_t>(
+          3 * Dk * dv_tile + 4 * Dk + 4 * dv_tile + 2 * THREADS) *
+      sizeof(float);
+  size_t gemm = static_cast<size_t>(2 * GEMM_TILE * GEMM_TILE) * sizeof(float);
+  return recurrence > gemm ? recurrence : gemm;
+}
+
+template <typename KernelFn>
+int cooperative_grid_blocks(KernelFn kernel, size_t shmem_bytes) {
+  DeviceReport r = report();
+  int blocks_per_sm = 0;
+  C10_CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+      &blocks_per_sm, kernel, THREADS, shmem_bytes));
+  TORCH_CHECK(
+      blocks_per_sm > 0,
+      "cudaOccupancyMaxActiveBlocksPerMultiprocessor returned zero active blocks");
+  return blocks_per_sm * r.multiProcessorCount;
+}
+
+void validate_inputs(
+    const torch::Tensor& x,
+    const torch::Tensor& w_qkv,
+    const torch::Tensor& w_a,
+    const torch::Tensor& w_b,
+    const torch::Tensor& w_g,
+    const torch::Tensor& w_out,
+    const torch::Tensor& conv_w,
+    const torch::Tensor& A_log,
+    const torch::Tensor& dt_bias,
+    int64_t H,
+    int64_t Dk,
+    int64_t Dv,
+    int64_t K) {
+  chk_bf16(x, "x");
+  chk_bf16(w_qkv, "w_qkv");
+  chk_bf16(w_a, "w_a");
+  chk_bf16(w_b, "w_b");
+  chk_bf16(w_g, "w_g");
+  chk_bf16(w_out, "w_out");
+  chk_bf16(conv_w, "conv_w");
+  chk_f32(A_log, "A_log");
+  chk_f32(dt_bias, "dt_bias");
+  TORCH_CHECK(x.dim() == 3, "x must have shape (B, T, D)");
+  int64_t D = x.size(2);
+  int64_t C = H * (2 * Dk + Dv);
+  int64_t P = H * Dv;
+  TORCH_CHECK(
+      D > 0 && D <= MAX_D && H > 0 && H <= MAX_H && Dk > 0 && Dk <= MAX_DK &&
+          Dv > 0 && Dv <= MAX_DV && K > 0 && K <= MAX_K,
+      "unsupported HGDN megakernel shape");
+  TORCH_CHECK(
+      w_qkv.sizes() == torch::IntArrayRef({C, D}),
+      "w_qkv shape mismatch");
+  TORCH_CHECK(
+      w_a.sizes() == torch::IntArrayRef({H, D}), "w_a shape mismatch");
+  TORCH_CHECK(
+      w_b.sizes() == torch::IntArrayRef({H, D}), "w_b shape mismatch");
+  TORCH_CHECK(
+      w_g.sizes() == torch::IntArrayRef({P, D}), "w_g shape mismatch");
+  TORCH_CHECK(
+      w_out.sizes() == torch::IntArrayRef({D, P}), "w_out shape mismatch");
+  TORCH_CHECK(
+      conv_w.sizes() == torch::IntArrayRef({C, K}), "conv_w shape mismatch");
+  TORCH_CHECK(A_log.numel() == H, "A_log shape mismatch");
+  TORCH_CHECK(dt_bias.numel() == H, "dt_bias shape mismatch");
+}
+
+std::vector<torch::Tensor> forward(
+    torch::Tensor x,
+    torch::Tensor w_qkv,
+    torch::Tensor w_a,
+    torch::Tensor w_b,
+    torch::Tensor w_g,
+    torch::Tensor w_out,
+    torch::Tensor conv_w,
+    torch::Tensor A_log,
+    torch::Tensor dt_bias,
+    int64_t H,
+    int64_t Dk,
+    int64_t Dv,
+    int64_t K,
+    bool allow_neg_eigval) {
+  c10::cuda::CUDAGuard guard(x.device());
+  validate_runtime_device();
+  validate_inputs(
+      x, w_qkv, w_a, w_b, w_g, w_out, conv_w, A_log, dt_bias, H, Dk, Dv, K);
+
+  int64_t B = x.size(0);
+  int64_t T = x.size(1);
+  int64_t D = x.size(2);
+  int64_t P = H * Dv;
+  int64_t C = H * (2 * Dk + Dv);
+  auto bf16_options = x.options();
+  auto f32_options = x.options().dtype(torch::kFloat32);
+
+  auto y = torch::empty({B, T, D}, bf16_options);
+  auto qkv = torch::empty({B, T, C}, bf16_options);
+  auto pre = torch::empty({B, T, C}, bf16_options);
+  auto q_norm = torch::empty({B, T, H, Dk}, bf16_options);
+  auto k_norm = torch::empty({B, T, H, Dk}, bf16_options);
+  auto v_post = torch::empty({B, T, H, Dv}, bf16_options);
+  auto inv_q = torch::empty({B, T, H}, f32_options);
+  auto inv_k = torch::empty({B, T, H}, f32_options);
+  auto g_pre = torch::empty({B, T, H}, bf16_options);
+  auto beta_pre = torch::empty({B, T, H}, bf16_options);
+  auto g_log = torch::empty({B, T, H}, bf16_options);
+  auto beta = torch::empty({B, T, H}, bf16_options);
+  auto g_out = torch::empty({B, T, P}, bf16_options);
+  auto o_raw = torch::empty({B, T, H, Dv}, bf16_options);
+  auto o_norm = torch::empty({B, T, H, Dv}, bf16_options);
+  auto z = torch::empty({B, T, P}, bf16_options);
+  auto state_prev = torch::empty({B, T, H, Dk, Dv}, f32_options);
+
+  int iB = static_cast<int>(B);
+  int iT = static_cast<int>(T);
+  int iD = static_cast<int>(D);
+  int iH = static_cast<int>(H);
+  int iDk = static_cast<int>(Dk);
+  int iDv = static_cast<int>(Dv);
+  int iK = static_cast<int>(K);
+  int iAllow = allow_neg_eigval ? 1 : 0;
+  size_t shmem_bytes = shared_bytes(iDk, iDv);
+  C10_CUDA_CHECK(cudaFuncSetAttribute(
+      hgdn_forward_bf16_kernel,
+      cudaFuncAttributeMaxDynamicSharedMemorySize,
+      static_cast<int>(shmem_bytes)));
+  int blocks = cooperative_grid_blocks(hgdn_forward_bf16_kernel, shmem_bytes);
+
+  const bf16* x_ptr = cbptr(x);
+  const bf16* w_qkv_ptr = cbptr(w_qkv);
+  const bf16* w_a_ptr = cbptr(w_a);
+  const bf16* w_b_ptr = cbptr(w_b);
+  const bf16* w_g_ptr = cbptr(w_g);
+  const bf16* w_out_ptr = cbptr(w_out);
+  const bf16* conv_w_ptr = cbptr(conv_w);
+  const float* A_log_ptr = A_log.data_ptr<float>();
+  const float* dt_bias_ptr = dt_bias.data_ptr<float>();
+  bf16* y_ptr = bptr(y);
+  bf16* qkv_ptr = bptr(qkv);
+  bf16* pre_ptr = bptr(pre);
+  bf16* q_norm_ptr = bptr(q_norm);
+  bf16* k_norm_ptr = bptr(k_norm);
+  bf16* v_post_ptr = bptr(v_post);
+  float* inv_q_ptr = inv_q.data_ptr<float>();
+  float* inv_k_ptr = inv_k.data_ptr<float>();
+  bf16* g_pre_ptr = bptr(g_pre);
+  bf16* beta_pre_ptr = bptr(beta_pre);
+  bf16* g_log_ptr = bptr(g_log);
+  bf16* beta_ptr = bptr(beta);
+  bf16* g_out_ptr = bptr(g_out);
+  bf16* o_raw_ptr = bptr(o_raw);
+  bf16* o_norm_ptr = bptr(o_norm);
+  bf16* z_ptr = bptr(z);
+  float* state_prev_ptr = state_prev.data_ptr<float>();
+
+  void* args[] = {
+      &x_ptr,
+      &w_qkv_ptr,
+      &w_a_ptr,
+      &w_b_ptr,
+      &w_g_ptr,
+      &w_out_ptr,
+      &conv_w_ptr,
+      &A_log_ptr,
+      &dt_bias_ptr,
+      &y_ptr,
+      &qkv_ptr,
+      &pre_ptr,
+      &q_norm_ptr,
+      &k_norm_ptr,
+      &v_post_ptr,
+      &inv_q_ptr,
+      &inv_k_ptr,
+      &g_pre_ptr,
+      &beta_pre_ptr,
+      &g_log_ptr,
+      &beta_ptr,
+      &g_out_ptr,
+      &o_raw_ptr,
+      &o_norm_ptr,
+      &z_ptr,
+      &state_prev_ptr,
+      &iB,
+      &iT,
+      &iD,
+      &iH,
+      &iDk,
+      &iDv,
+      &iK,
+      &iAllow,
+  };
+  C10_CUDA_CHECK(cudaLaunchCooperativeKernel(
+      reinterpret_cast<void*>(hgdn_forward_bf16_kernel),
+      dim3(blocks),
+      dim3(THREADS),
+      args,
+      shmem_bytes,
+      at::cuda::getCurrentCUDAStream().stream()));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {
+      y,         qkv,      pre,      q_norm,   k_norm,   v_post,
+      inv_q,     inv_k,    g_pre,    beta_pre, g_log,    beta,
+      g_out,     o_raw,    o_norm,   z,        state_prev,
+  };
+}
+
+std::vector<torch::Tensor> backward(
+    torch::Tensor grad_y,
+    torch::Tensor x,
+    torch::Tensor w_qkv,
+    torch::Tensor w_a,
+    torch::Tensor w_b,
+    torch::Tensor w_g,
+    torch::Tensor w_out,
+    torch::Tensor conv_w,
+    torch::Tensor A_log,
+    torch::Tensor dt_bias,
+    torch::Tensor qkv,
+    torch::Tensor pre,
+    torch::Tensor q_norm,
+    torch::Tensor k_norm,
+    torch::Tensor v_post,
+    torch::Tensor inv_q,
+    torch::Tensor inv_k,
+    torch::Tensor g_pre,
+    torch::Tensor beta_pre,
+    torch::Tensor g_log,
+    torch::Tensor beta,
+    torch::Tensor g_out,
+    torch::Tensor o_raw,
+    torch::Tensor o_norm,
+    torch::Tensor z,
+    torch::Tensor state_prev,
+    int64_t H,
+    int64_t Dk,
+    int64_t Dv,
+    int64_t K,
+    bool allow_neg_eigval) {
+  c10::cuda::CUDAGuard guard(x.device());
+  validate_runtime_device();
+  validate_inputs(
+      x, w_qkv, w_a, w_b, w_g, w_out, conv_w, A_log, dt_bias, H, Dk, Dv, K);
+  chk_bf16(grad_y, "grad_y");
+
+  int64_t B = x.size(0);
+  int64_t T = x.size(1);
+  int64_t D = x.size(2);
+  int64_t P = H * Dv;
+  int64_t C = H * (2 * Dk + Dv);
+  auto bf16_options = x.options();
+  auto f32_options = x.options().dtype(torch::kFloat32);
+
+  auto grad_x = torch::empty_like(x);
+  auto grad_x_accum = torch::empty({B, T, D}, f32_options);
+  auto grad_w_qkv = torch::empty_like(w_qkv);
+  auto grad_w_a = torch::empty_like(w_a);
+  auto grad_w_b = torch::empty_like(w_b);
+  auto grad_w_g = torch::empty_like(w_g);
+  auto grad_w_out = torch::empty_like(w_out);
+  auto grad_conv_w = torch::empty_like(conv_w);
+  auto grad_A_log = torch::empty_like(A_log);
+  auto grad_dt_bias = torch::empty_like(dt_bias);
+
+  auto grad_z = torch::empty({B, T, P}, bf16_options);
+  auto grad_o_raw = torch::empty({B, T, H, Dv}, bf16_options);
+  auto grad_g_out = torch::empty({B, T, P}, bf16_options);
+  auto grad_q_norm_accum = torch::empty({B, T, H, Dk}, f32_options);
+  auto grad_k_norm_accum = torch::empty({B, T, H, Dk}, f32_options);
+  auto grad_g_log_accum = torch::empty({B, T, H}, f32_options);
+  auto grad_beta_accum = torch::empty({B, T, H}, f32_options);
+  auto grad_q_norm = torch::empty({B, T, H, Dk}, bf16_options);
+  auto grad_k_norm = torch::empty({B, T, H, Dk}, bf16_options);
+  auto grad_v_post = torch::empty({B, T, H, Dv}, bf16_options);
+  auto grad_g_log = torch::empty({B, T, H}, f32_options);
+  auto grad_beta = torch::empty({B, T, H}, f32_options);
+  auto grad_pre = torch::empty({B, T, C}, bf16_options);
+  auto grad_qkv = torch::empty({B, T, C}, bf16_options);
+  auto grad_g_pre = torch::empty({B, T, H}, bf16_options);
+  auto grad_beta_pre = torch::empty({B, T, H}, bf16_options);
+
+  int iB = static_cast<int>(B);
+  int iT = static_cast<int>(T);
+  int iD = static_cast<int>(D);
+  int iH = static_cast<int>(H);
+  int iDk = static_cast<int>(Dk);
+  int iDv = static_cast<int>(Dv);
+  int iK = static_cast<int>(K);
+  int iAllow = allow_neg_eigval ? 1 : 0;
+  size_t shmem_bytes = shared_bytes(iDk, iDv);
+  C10_CUDA_CHECK(cudaFuncSetAttribute(
+      hgdn_backward_bf16_kernel,
+      cudaFuncAttributeMaxDynamicSharedMemorySize,
+      static_cast<int>(shmem_bytes)));
+  int blocks = cooperative_grid_blocks(hgdn_backward_bf16_kernel, shmem_bytes);
+
+  const bf16* grad_y_ptr = cbptr(grad_y);
+  const bf16* x_ptr = cbptr(x);
+  const bf16* w_qkv_ptr = cbptr(w_qkv);
+  const bf16* w_a_ptr = cbptr(w_a);
+  const bf16* w_b_ptr = cbptr(w_b);
+  const bf16* w_g_ptr = cbptr(w_g);
+  const bf16* w_out_ptr = cbptr(w_out);
+  const bf16* conv_w_ptr = cbptr(conv_w);
+  const float* A_log_ptr = A_log.data_ptr<float>();
+  const float* dt_bias_ptr = dt_bias.data_ptr<float>();
+  const bf16* qkv_ptr = cbptr(qkv);
+  const bf16* pre_ptr = cbptr(pre);
+  const bf16* q_norm_ptr = cbptr(q_norm);
+  const bf16* k_norm_ptr = cbptr(k_norm);
+  const bf16* v_post_ptr = cbptr(v_post);
+  const float* inv_q_ptr = inv_q.data_ptr<float>();
+  const float* inv_k_ptr = inv_k.data_ptr<float>();
+  const bf16* g_pre_ptr = cbptr(g_pre);
+  const bf16* beta_pre_ptr = cbptr(beta_pre);
+  const bf16* g_log_ptr = cbptr(g_log);
+  const bf16* beta_ptr = cbptr(beta);
+  const bf16* g_out_ptr = cbptr(g_out);
+  const bf16* o_raw_ptr = cbptr(o_raw);
+  const bf16* o_norm_ptr = cbptr(o_norm);
+  const bf16* z_ptr = cbptr(z);
+  const float* state_prev_ptr = state_prev.data_ptr<float>();
+
+  float* grad_q_norm_accum_ptr = grad_q_norm_accum.data_ptr<float>();
+  float* grad_k_norm_accum_ptr = grad_k_norm_accum.data_ptr<float>();
+  float* grad_g_log_accum_ptr = grad_g_log_accum.data_ptr<float>();
+  float* grad_beta_accum_ptr = grad_beta_accum.data_ptr<float>();
+  float* grad_x_accum_ptr = grad_x_accum.data_ptr<float>();
+  bf16* grad_x_ptr = bptr(grad_x);
+  bf16* grad_w_qkv_ptr = bptr(grad_w_qkv);
+  bf16* grad_w_a_ptr = bptr(grad_w_a);
+  bf16* grad_w_b_ptr = bptr(grad_w_b);
+  bf16* grad_w_g_ptr = bptr(grad_w_g);
+  bf16* grad_w_out_ptr = bptr(grad_w_out);
+  bf16* grad_conv_w_ptr = bptr(grad_conv_w);
+  float* grad_A_log_ptr = grad_A_log.data_ptr<float>();
+  float* grad_dt_bias_ptr = grad_dt_bias.data_ptr<float>();
+  bf16* grad_z_ptr = bptr(grad_z);
+  bf16* grad_o_raw_ptr = bptr(grad_o_raw);
+  bf16* grad_g_out_ptr = bptr(grad_g_out);
+  bf16* grad_q_norm_ptr = bptr(grad_q_norm);
+  bf16* grad_k_norm_ptr = bptr(grad_k_norm);
+  bf16* grad_v_post_ptr = bptr(grad_v_post);
+  float* grad_g_log_ptr = grad_g_log.data_ptr<float>();
+  float* grad_beta_ptr = grad_beta.data_ptr<float>();
+  bf16* grad_pre_ptr = bptr(grad_pre);
+  bf16* grad_qkv_ptr = bptr(grad_qkv);
+  bf16* grad_g_pre_ptr = bptr(grad_g_pre);
+  bf16* grad_beta_pre_ptr = bptr(grad_beta_pre);
+
+  void* args[] = {
+      &grad_y_ptr,       &x_ptr,           &w_qkv_ptr,        &w_a_ptr,
+      &w_b_ptr,          &w_g_ptr,         &w_out_ptr,        &conv_w_ptr,
+      &A_log_ptr,        &dt_bias_ptr,     &qkv_ptr,          &pre_ptr,
+      &q_norm_ptr,       &k_norm_ptr,      &v_post_ptr,       &inv_q_ptr,
+      &inv_k_ptr,        &g_pre_ptr,       &beta_pre_ptr,     &g_log_ptr,
+      &beta_ptr,         &g_out_ptr,       &o_raw_ptr,          &o_norm_ptr,
+      &z_ptr,            &state_prev_ptr,  &grad_q_norm_accum_ptr,
+      &grad_k_norm_accum_ptr,              &grad_g_log_accum_ptr,
+      &grad_beta_accum_ptr,                &grad_x_accum_ptr,
+      &grad_x_ptr,       &grad_w_qkv_ptr,  &grad_w_a_ptr,       &grad_w_b_ptr,
+      &grad_w_g_ptr,     &grad_w_out_ptr,
+      &grad_conv_w_ptr,  &grad_A_log_ptr,  &grad_dt_bias_ptr, &grad_z_ptr,
+      &grad_o_raw_ptr,   &grad_g_out_ptr,  &grad_q_norm_ptr,  &grad_k_norm_ptr,
+      &grad_v_post_ptr,  &grad_g_log_ptr,  &grad_beta_ptr,    &grad_pre_ptr,
+      &grad_qkv_ptr,     &grad_g_pre_ptr,  &grad_beta_pre_ptr,
+      &iB,               &iT,              &iD,               &iH,
+      &iDk,              &iDv,             &iK,               &iAllow,
+  };
+  C10_CUDA_CHECK(cudaLaunchCooperativeKernel(
+      reinterpret_cast<void*>(hgdn_backward_bf16_kernel),
+      dim3(blocks),
+      dim3(THREADS),
+      args,
+      shmem_bytes,
+      at::cuda::getCurrentCUDAStream().stream()));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {
+      grad_x,
+      grad_w_qkv,
+      grad_w_a,
+      grad_w_b,
+      grad_w_g,
+      grad_w_out,
+      grad_conv_w,
+      grad_A_log,
+      grad_dt_bias,
+  };
+}
+
+}  // namespace
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("device_report", &device_report_string);
+  m.def("forward", &forward);
+  m.def("backward", &backward);
+}

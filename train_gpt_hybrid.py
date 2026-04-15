@@ -204,6 +204,7 @@ class Hyperparameters:
     gdn_use_cuda_fused_output = bool(
         int(os.environ.get("GDN_USE_CUDA_FUSED_OUTPUT", "0"))
     )
+    gdn_use_cuda_megakernel = bool(int(os.environ.get("GDN_USE_CUDA_MEGAKERNEL", "0")))
     gdn_use_cuda_split_norm = bool(int(os.environ.get("GDN_USE_CUDA_SPLIT_NORM", "0")))
     gdn_use_cuda_split_norm_lib = bool(
         int(os.environ.get("GDN_USE_CUDA_SPLIT_NORM_LIB", "0"))
@@ -341,6 +342,7 @@ def build_wandb_config(
         "GDN_USE_CUDA_FUSED_FRONTEND": args.gdn_use_cuda_fused_frontend,
         "GDN_USE_CUDA_FUSED_FRONTEND_LIB": args.gdn_use_cuda_fused_frontend_lib,
         "GDN_USE_CUDA_FUSED_OUTPUT": args.gdn_use_cuda_fused_output,
+        "GDN_USE_CUDA_MEGAKERNEL": args.gdn_use_cuda_megakernel,
         "GDN_USE_CUDA_SPLIT_NORM": args.gdn_use_cuda_split_norm,
         "GDN_USE_CUDA_SPLIT_NORM_LIB": args.gdn_use_cuda_split_norm_lib,
         "GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD": args.gdn_use_packed_qkv_conv_custom_backward,
@@ -1001,6 +1003,7 @@ def main() -> None:
         f"cuda_fused_frontend={int(args.gdn_use_cuda_fused_frontend)} "
         f"cuda_fused_frontend_lib={int(args.gdn_use_cuda_fused_frontend_lib)} "
         f"cuda_fused_output={int(args.gdn_use_cuda_fused_output)} "
+        f"cuda_megakernel={int(args.gdn_use_cuda_megakernel)} "
         f"cuda_split_norm={int(args.gdn_use_cuda_split_norm)} "
         f"cuda_split_norm_lib={int(args.gdn_use_cuda_split_norm_lib)}",
         console=False,
@@ -1098,6 +1101,7 @@ def main() -> None:
             gdn_use_cuda_fused_frontend=args.gdn_use_cuda_fused_frontend,
             gdn_use_cuda_fused_frontend_lib=args.gdn_use_cuda_fused_frontend_lib,
             gdn_use_cuda_fused_output=args.gdn_use_cuda_fused_output,
+            gdn_use_cuda_megakernel=args.gdn_use_cuda_megakernel,
             gdn_use_cuda_split_norm=args.gdn_use_cuda_split_norm,
             gdn_use_cuda_split_norm_lib=args.gdn_use_cuda_split_norm_lib,
             gdn_use_packed_qkv_conv_custom_backward=args.gdn_use_packed_qkv_conv_custom_backward,

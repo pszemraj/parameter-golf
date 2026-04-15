@@ -35,6 +35,10 @@ from hgdn_cuda import (
     packed_qkv_frontend_compile_visible,
     packed_qkv_split_l2norm_compile_visible,
 )
+from hgdn_megakernel import (
+    extension_loaded as megakernel_extension_loaded,
+    run_from_gated_delta_net,
+)
 
 _HAS_FLA = HAS_FLA_GATED_DELTA_RULE
 
@@ -716,6 +720,7 @@ class GatedDeltaNet(nn.Module):
         use_cuda_fused_frontend: bool = False,
         use_cuda_fused_frontend_lib: bool = False,
         use_cuda_fused_output: bool = False,
+        use_cuda_megakernel: bool = False,
         use_cuda_split_norm: bool = False,
         use_cuda_split_norm_lib: bool = False,
         use_packed_qkv_conv_custom_backward: bool = False,
@@ -749,6 +754,7 @@ class GatedDeltaNet(nn.Module):
         :param bool use_cuda_fused_frontend: Whether to route the packed qkv post-projection conv+q/k norm front-end through the optional CUDA extension, defaults to False.
         :param bool use_cuda_fused_frontend_lib: Whether to route the packed qkv post-projection conv+q/k norm front-end through a compile-visible `torch.library` op, defaults to False.
         :param bool use_cuda_fused_output: Whether to route the output RMSNorm*SiLU(gate) path through the optional CUDA extension, defaults to False.
+        :param bool use_cuda_megakernel: Whether to route the full packed HGDN block through the optional CUDA megakernel, defaults to False.
         :param bool use_cuda_split_norm: Whether to route packed post-conv q/k split+L2 normalization through the optional CUDA extension, defaults to False.
         :param bool use_cuda_split_norm_lib: Whether to route packed post-conv q/k split+L2 normalization through a compile-visible `torch.library` op, defaults to False.
         :param bool use_packed_qkv_conv_custom_backward: Whether to route the packed depthwise qkv conv through an exact-length custom autograd path, defaults to False.
@@ -774,6 +780,7 @@ class GatedDeltaNet(nn.Module):
         self.use_cuda_fused_frontend = use_cuda_fused_frontend
         self.use_cuda_fused_frontend_lib = use_cuda_fused_frontend_lib
         self.use_cuda_fused_output = use_cuda_fused_output
+        self.use_cuda_megakernel = use_cuda_megakernel
         self.use_cuda_split_norm = use_cuda_split_norm
         self.use_cuda_split_norm_lib = use_cuda_split_norm_lib
         self.use_packed_qkv_conv = use_packed_qkv_conv
@@ -1125,6 +1132,33 @@ class GatedDeltaNet(nn.Module):
             )
         if self.use_cuda_fused_output and not self.output_norm_fp32:
             raise ValueError("use_cuda_fused_output requires output_norm_fp32=True")
+        if self.use_cuda_megakernel and not (
+            self.use_packed_qkv_proj and self.use_packed_qkv_conv
+        ):
+            raise ValueError(
+                "use_cuda_megakernel requires use_packed_qkv_proj and use_packed_qkv_conv"
+            )
+        if self.use_cuda_megakernel and not self.gates_fp32:
+            raise ValueError("use_cuda_megakernel requires gates_fp32=True")
+        if self.use_cuda_megakernel and not self.output_norm_fp32:
+            raise ValueError("use_cuda_megakernel requires output_norm_fp32=True")
+        if self.use_cuda_megakernel and (
+            self.use_cuda_frontend_nct
+            or self.use_cuda_packed_conv
+            or self.use_cuda_packed_conv_aten_backward
+            or self.use_cuda_packed_conv_aten_weight_backward
+            or self.use_cuda_fused_frontend
+            or self.use_cuda_fused_frontend_lib
+            or self.use_cuda_fused_output
+            or self.use_cuda_split_norm
+            or self.use_cuda_split_norm_lib
+            or self.use_packed_qkv_conv_custom_backward
+            or self.use_packed_qkv_single_contig
+            or self.use_packed_qkv_split_copy
+        ):
+            raise ValueError(
+                "use_cuda_megakernel is incompatible with the existing HGDN sidecar CUDA paths"
+            )
 
         # Feature-map projections → Muon
         if self.use_packed_qkv_proj:
@@ -1520,6 +1554,13 @@ class GatedDeltaNet(nn.Module):
         B, T, _ = x.shape
         H, Dv = self.n_heads, self.head_v_dim
         with profile_range("gdn.forward"):
+            if (
+                self.use_cuda_megakernel
+                and x.is_cuda
+                and x.dtype == torch.bfloat16
+                and megakernel_extension_loaded()
+            ):
+                return run_from_gated_delta_net(self, x)
             audit_call_index = begin_gdn_boundary_audit()
             q, k, v, g, beta = self._project_recurrence_inputs(
                 x, audit_call_index=audit_call_index
@@ -1773,6 +1814,7 @@ class GDNBlock(nn.Module):
         use_cuda_fused_frontend: bool = False,
         use_cuda_fused_frontend_lib: bool = False,
         use_cuda_fused_output: bool = False,
+        use_cuda_megakernel: bool = False,
         use_cuda_split_norm: bool = False,
         use_cuda_split_norm_lib: bool = False,
         use_packed_qkv_conv_custom_backward: bool = False,
@@ -1810,6 +1852,7 @@ class GDNBlock(nn.Module):
         :param bool use_cuda_fused_frontend: Whether to route the packed qkv post-projection conv+q/k norm front-end through the optional CUDA extension, defaults to False.
         :param bool use_cuda_fused_frontend_lib: Whether to route the packed qkv post-projection conv+q/k norm front-end through a compile-visible `torch.library` op, defaults to False.
         :param bool use_cuda_fused_output: Whether to route the output RMSNorm*SiLU(gate) path through the optional CUDA extension, defaults to False.
+        :param bool use_cuda_megakernel: Whether to route the full packed HGDN block through the optional CUDA megakernel, defaults to False.
         :param bool use_cuda_split_norm: Whether to route packed post-conv q/k split+L2 normalization through the optional CUDA extension, defaults to False.
         :param bool use_cuda_split_norm_lib: Whether to route packed post-conv q/k split+L2 normalization through a compile-visible `torch.library` op, defaults to False.
         :param bool use_packed_qkv_conv_custom_backward: Whether to route the packed depthwise qkv conv through an exact-length custom autograd path, defaults to False.
@@ -1851,6 +1894,7 @@ class GDNBlock(nn.Module):
             use_cuda_fused_frontend=use_cuda_fused_frontend,
             use_cuda_fused_frontend_lib=use_cuda_fused_frontend_lib,
             use_cuda_fused_output=use_cuda_fused_output,
+            use_cuda_megakernel=use_cuda_megakernel,
             use_cuda_split_norm=use_cuda_split_norm,
             use_cuda_split_norm_lib=use_cuda_split_norm_lib,
             use_packed_qkv_conv_custom_backward=use_packed_qkv_conv_custom_backward,
@@ -2013,6 +2057,7 @@ class HybridGPT(nn.Module):
         gdn_use_cuda_fused_frontend: bool = False,
         gdn_use_cuda_fused_frontend_lib: bool = False,
         gdn_use_cuda_fused_output: bool = False,
+        gdn_use_cuda_megakernel: bool = False,
         gdn_use_cuda_split_norm: bool = False,
         gdn_use_cuda_split_norm_lib: bool = False,
         gdn_use_packed_qkv_conv_custom_backward: bool = False,
@@ -2060,6 +2105,7 @@ class HybridGPT(nn.Module):
         :param bool gdn_use_cuda_fused_frontend: Whether to route packed qkv post-projection conv+q/k norm front-ends through the optional CUDA extension, defaults to False.
         :param bool gdn_use_cuda_fused_frontend_lib: Whether to route packed qkv post-projection conv+q/k norm front-ends through a compile-visible `torch.library` op, defaults to False.
         :param bool gdn_use_cuda_fused_output: Whether to route the GDN output RMSNorm*SiLU(gate) path through the optional CUDA extension, defaults to False.
+        :param bool gdn_use_cuda_megakernel: Whether to route packed HGDN blocks through the optional CUDA megakernel, defaults to False.
         :param bool gdn_use_cuda_split_norm: Whether to route packed post-conv q/k split+L2 normalization through the optional CUDA extension, defaults to False.
         :param bool gdn_use_cuda_split_norm_lib: Whether to route packed post-conv q/k split+L2 normalization through a compile-visible `torch.library` op, defaults to False.
         :param bool gdn_use_packed_qkv_conv_custom_backward: Whether to route the packed depthwise qkv conv through an exact-length custom autograd path, defaults to False.
@@ -2135,6 +2181,7 @@ class HybridGPT(nn.Module):
                         gdn_use_cuda_fused_frontend,
                         gdn_use_cuda_fused_frontend_lib,
                         gdn_use_cuda_fused_output,
+                        gdn_use_cuda_megakernel,
                         gdn_use_cuda_split_norm,
                         gdn_use_cuda_split_norm_lib,
                         gdn_use_packed_qkv_conv_custom_backward,
