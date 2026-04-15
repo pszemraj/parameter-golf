@@ -68,6 +68,12 @@ The only implemented dense-phase speed change so far is the replacement of the
 old scalar `16 x 16` shared-memory dot-product tiles with a portable bf16 WMMA
 path on `sm_80+`, while keeping scalar edge fallback for non-full tiles.
 
+The latest reduction-side cleanup is:
+
+- warp-shuffle-backed CTA reductions for q/k norm, output RMSNorm, and the
+  backward scalar gate accumulations
+- one dead CTA reduction buffer removed from the backward shared-memory layout
+
 ## Shared-memory map
 
 The current cooperative kernel uses:
@@ -90,7 +96,7 @@ The current cooperative kernel uses:
 - `tmp_dv0`: `8` fp32 values
 - `tmp_dv1`: `8` fp32 values
 - `tmp_dk0`: `48` fp32 values
-- two `THREADS=128` reduction buffers for CTA-local reductions
+- one `THREADS=128` scratch buffer for CTA-local reductions
 - recurrence-state history for one chunk:
   - `REC_CHUNK_T * Dk * REC_V_TILE = 8 * 48 * 8 = 3072` fp32 values
 - replay caches for one chunk:
@@ -103,11 +109,11 @@ The current cooperative kernel uses:
 
 Recurrence-tile shared memory for `Dk=48`, `REC_V_TILE=8`, `REC_CHUNK_T=8` is:
 
-- `3 * 384 + 3 * 48 + 4 * 8 + 2 * 128 + 8 * 384 + 8 * (2 * 48 + 2 * 8 + 2)`
+- `3 * 384 + 3 * 48 + 4 * 8 + 128 + 8 * 384 + 8 * (2 * 48 + 2 * 8 + 2)`
   fp32 values
-- `5568` fp32 values
-- `5568 * 4 = 22,272` bytes
-- about **21.75 KiB per CTA**
+- `5440` fp32 values
+- `5440 * 4 = 21,760` bytes
+- about **21.25 KiB per CTA**
 
 Dense-phase WMMA scratch is smaller:
 
@@ -120,7 +126,7 @@ So the recurrence tile still sets the dynamic shared-memory request.
 
 The repo-backed launch wrapper uses `cudaOccupancyMaxActiveBlocksPerMultiprocessor` instead of a hard-coded block count.
 
-With `THREADS=128` and about `21.75 KiB` dynamic shared memory per CTA:
+With `THREADS=128` and about `21.25 KiB` dynamic shared memory per CTA:
 
 - shared memory alone still allows multiple CTAs per SM on H100 SXM
 - the real limiter is expected to be register pressure from:

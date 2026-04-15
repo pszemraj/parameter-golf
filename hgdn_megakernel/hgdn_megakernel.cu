@@ -154,6 +154,59 @@ __device__ __forceinline__ float dsilu(float x) {
   return s * (1.0f + x * (1.0f - s));
 }
 
+__device__ __forceinline__ float warp_sum(float x) {
+  unsigned mask = 0xffffffffu;
+  for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
+    x += __shfl_down_sync(mask, x, offset);
+  }
+  return x;
+}
+
+__device__ __forceinline__ float block_sum(float x, float* scratch) {
+  int lane = threadIdx.x % WARP_SIZE;
+  int warp_id = threadIdx.x / WARP_SIZE;
+  x = warp_sum(x);
+  if (lane == 0) {
+    scratch[warp_id] = x;
+  }
+  __syncthreads();
+  if (warp_id == 0) {
+    float total = lane < WARPS_PER_BLOCK ? scratch[lane] : 0.0f;
+    total = warp_sum(total);
+    if (lane == 0) {
+      scratch[0] = total;
+    }
+  }
+  __syncthreads();
+  return scratch[0];
+}
+
+__device__ __forceinline__ void block_sum2(float& x, float& y, float* scratch) {
+  int lane = threadIdx.x % WARP_SIZE;
+  int warp_id = threadIdx.x / WARP_SIZE;
+  x = warp_sum(x);
+  y = warp_sum(y);
+  if (lane == 0) {
+    scratch[warp_id] = x;
+    scratch[WARPS_PER_BLOCK + warp_id] = y;
+  }
+  __syncthreads();
+  if (warp_id == 0) {
+    float total_x = lane < WARPS_PER_BLOCK ? scratch[lane] : 0.0f;
+    float total_y =
+        lane < WARPS_PER_BLOCK ? scratch[WARPS_PER_BLOCK + lane] : 0.0f;
+    total_x = warp_sum(total_x);
+    total_y = warp_sum(total_y);
+    if (lane == 0) {
+      scratch[0] = total_x;
+      scratch[1] = total_y;
+    }
+  }
+  __syncthreads();
+  x = scratch[0];
+  y = scratch[1];
+}
+
 __device__ __forceinline__ int64_t idx3(
     int b,
     int t,
@@ -591,7 +644,16 @@ __device__ float conv_at(
   return acc;
 }
 
-struct SharedState {
+struct ForwardSharedState {
+  float* S0;
+  float* S1;
+  float* q;
+  float* k;
+  float* v;
+  float* tmp_dv0;
+};
+
+struct BackwardSharedState {
   float* S0;
   float* S1;
   float* adj;
@@ -603,7 +665,6 @@ struct SharedState {
   float* tmp_dv1;
   float* tmp_dk0;
   float* reduce0;
-  float* reduce1;
   float* chunk_states;
   float* q_hist;
   float* k_hist;
@@ -613,8 +674,46 @@ struct SharedState {
   float* beta_hist;
 };
 
-__device__ SharedState shared_ptrs(float* base, int Dk, int Dv) {
-  SharedState s{};
+__host__ __device__ __forceinline__ size_t forward_recurrence_bytes(
+    int Dk,
+    int Dv) {
+  int dv_tile = Dv < REC_V_TILE ? Dv : REC_V_TILE;
+  return static_cast<size_t>(2 * Dk * dv_tile + 2 * Dk + 2 * dv_tile) *
+         sizeof(float);
+}
+
+__host__ __device__ __forceinline__ size_t backward_recurrence_bytes(
+    int Dk,
+    int Dv) {
+  int dv_tile = Dv < REC_V_TILE ? Dv : REC_V_TILE;
+  return static_cast<size_t>(
+             (REC_CHUNK_T + 3) * Dk * dv_tile + 3 * Dk + 4 * dv_tile +
+             THREADS + REC_CHUNK_T * (2 * Dk + 2 * dv_tile + 2)) *
+         sizeof(float);
+}
+
+__device__ ForwardSharedState forward_shared_ptrs(float* base, int Dk, int Dv) {
+  ForwardSharedState s{};
+  int offset = 0;
+  s.S0 = base + offset;
+  offset += Dk * Dv;
+  s.S1 = base + offset;
+  offset += Dk * Dv;
+  s.q = base + offset;
+  offset += Dk;
+  s.k = base + offset;
+  offset += Dk;
+  s.v = base + offset;
+  offset += Dv;
+  s.tmp_dv0 = base + offset;
+  return s;
+}
+
+__device__ BackwardSharedState backward_shared_ptrs(
+    float* base,
+    int Dk,
+    int Dv) {
+  BackwardSharedState s{};
   int offset = 0;
   s.S0 = base + offset;
   offset += Dk * Dv;
@@ -637,8 +736,6 @@ __device__ SharedState shared_ptrs(float* base, int Dk, int Dv) {
   s.tmp_dk0 = base + offset;
   offset += Dk;
   s.reduce0 = base + offset;
-  offset += THREADS;
-  s.reduce1 = base + offset;
   offset += THREADS;
   s.chunk_states = base + offset;
   offset += REC_CHUNK_T * Dk * Dv;
@@ -736,22 +833,11 @@ __global__ void hgdn_forward_bf16_kernel(
       sq += q_activated * q_activated;
       sk += k_activated * k_activated;
     }
-    shmem[threadIdx.x] = sq;
-    shmem[THREADS + threadIdx.x] = sk;
-    __syncthreads();
-    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-      if (threadIdx.x < stride) {
-        shmem[threadIdx.x] += shmem[threadIdx.x + stride];
-        shmem[THREADS + threadIdx.x] +=
-            shmem[THREADS + threadIdx.x + stride];
-      }
-      __syncthreads();
-    }
+    block_sum2(sq, sk, shmem);
     float inv_q_norm =
-        (sqrtf(shmem[0]) > EPS ? 1.0f / sqrtf(shmem[0]) : 1.0f / EPS);
+        (sqrtf(sq) > EPS ? 1.0f / sqrtf(sq) : 1.0f / EPS);
     float inv_k_norm =
-        (sqrtf(shmem[THREADS]) > EPS ? 1.0f / sqrtf(shmem[THREADS])
-                                    : 1.0f / EPS);
+        (sqrtf(sk) > EPS ? 1.0f / sqrtf(sk) : 1.0f / EPS);
     if (threadIdx.x == 0) {
       inv_q[idx3(b, t, h, T, H)] = inv_q_norm;
       inv_k[idx3(b, t, h, T, H)] = inv_k_norm;
@@ -795,7 +881,7 @@ __global__ void hgdn_forward_bf16_kernel(
     int h = head_job % H;
     int v_base = tile * REC_V_TILE;
     int dv_local = min(REC_V_TILE, Dv - v_base);
-    SharedState shared = shared_ptrs(shmem, Dk, dv_local);
+    ForwardSharedState shared = forward_shared_ptrs(shmem, Dk, dv_local);
     int state_elems = Dk * dv_local;
 
     for (int idx = threadIdx.x; idx < state_elems; idx += blockDim.x) {
@@ -870,16 +956,8 @@ __global__ void hgdn_forward_bf16_kernel(
       float o_value = b2f(o_raw[idx4(b, t, h, j, T, H, Dv)]);
       sum_sq += o_value * o_value;
     }
-    shmem[threadIdx.x] = sum_sq;
-    __syncthreads();
-    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-      if (threadIdx.x < stride) {
-        shmem[threadIdx.x] += shmem[threadIdx.x + stride];
-      }
-      __syncthreads();
-    }
-
-    float inv_rms = rsqrtf(shmem[0] / static_cast<float>(Dv) + EPS);
+    sum_sq = block_sum(sum_sq, shmem);
+    float inv_rms = rsqrtf(sum_sq / static_cast<float>(Dv) + EPS);
     for (int j = threadIdx.x; j < Dv; j += blockDim.x) {
       int p = h * Dv + j;
       float o_value = b2f(o_raw[idx4(b, t, h, j, T, H, Dv)]) * inv_rms;
@@ -1006,20 +1084,10 @@ __global__ void hgdn_backward_bf16_kernel(
       dot_go += grad_norm * o_value;
       grad_o_raw[idx4(b, t, h, j, T, H, Dv)] = f2b(grad_norm);
     }
-    shmem[threadIdx.x] = sum_sq;
-    shmem[THREADS + threadIdx.x] = dot_go;
-    __syncthreads();
-    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-      if (threadIdx.x < stride) {
-        shmem[threadIdx.x] += shmem[threadIdx.x + stride];
-        shmem[THREADS + threadIdx.x] +=
-            shmem[THREADS + threadIdx.x + stride];
-      }
-      __syncthreads();
-    }
-    float inv_rms = rsqrtf(shmem[0] / static_cast<float>(Dv) + EPS);
+    block_sum2(sum_sq, dot_go, shmem);
+    float inv_rms = rsqrtf(sum_sq / static_cast<float>(Dv) + EPS);
     float coeff =
-        inv_rms * inv_rms * inv_rms * shmem[THREADS] / static_cast<float>(Dv);
+        inv_rms * inv_rms * inv_rms * dot_go / static_cast<float>(Dv);
     for (int j = threadIdx.x; j < Dv; j += blockDim.x) {
       float o_value = b2f(o_raw[idx4(b, t, h, j, T, H, Dv)]);
       float grad_norm = b2f(grad_o_raw[idx4(b, t, h, j, T, H, Dv)]);
@@ -1038,7 +1106,7 @@ __global__ void hgdn_backward_bf16_kernel(
     int h = head_job % H;
     int v_base = tile * REC_V_TILE;
     int dv_local = min(REC_V_TILE, Dv - v_base);
-    SharedState shared = shared_ptrs(shmem, Dk, dv_local);
+    BackwardSharedState shared = backward_shared_ptrs(shmem, Dk, dv_local);
     int state_elems = Dk * dv_local;
 
     for (int idx = threadIdx.x; idx < state_elems; idx += blockDim.x) {
@@ -1147,9 +1215,7 @@ __global__ void hgdn_backward_bf16_kernel(
           for (int j = 0; j < dv_local; ++j) {
             acc += shared.S1[i * dv_local + j] * shared.go[j];
           }
-          atomicAdd(
-              &grad_q_norm_accum[idx4(b, t, h, i, T, H, Dk)],
-              acc);
+          atomicAdd(&grad_q_norm_accum[idx4(b, t, h, i, T, H, Dk)], acc);
         }
         __syncthreads();
 
@@ -1195,23 +1261,14 @@ __global__ void hgdn_backward_bf16_kernel(
           local_db +=
               (alpha * shared.adj[idx]) * (-shared.k[i] * shared.tmp_dv0[j]);
         }
-        shared.reduce0[threadIdx.x] = local_da;
-        shared.reduce1[threadIdx.x] = local_db;
-        __syncthreads();
-        for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-          if (threadIdx.x < stride) {
-            shared.reduce0[threadIdx.x] += shared.reduce0[threadIdx.x + stride];
-            shared.reduce1[threadIdx.x] += shared.reduce1[threadIdx.x + stride];
-          }
-          __syncthreads();
-        }
+        block_sum2(local_da, local_db, shared.reduce0);
         if (threadIdx.x == 0) {
           atomicAdd(
               &grad_g_log_accum[idx3(b, t, h, T, H)],
-              shared.reduce0[0] * alpha);
+              local_da * alpha);
           atomicAdd(
               &grad_beta_accum[idx3(b, t, h, T, H)],
-              shared.reduce1[0]);
+              local_db);
         }
 
         for (int i = threadIdx.x; i < Dk; i += blockDim.x) {
@@ -1270,17 +1327,7 @@ __global__ void hgdn_backward_bf16_kernel(
       dot_q += dq * q_value;
       dot_k += dk * k_value;
     }
-    shmem[threadIdx.x] = dot_q;
-    shmem[THREADS + threadIdx.x] = dot_k;
-    __syncthreads();
-    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-      if (threadIdx.x < stride) {
-        shmem[threadIdx.x] += shmem[threadIdx.x + stride];
-        shmem[THREADS + threadIdx.x] +=
-            shmem[THREADS + threadIdx.x + stride];
-      }
-      __syncthreads();
-    }
+    block_sum2(dot_q, dot_k, shmem);
 
     float inv_q_norm = inv_q[idx3(b, t, h, T, H)];
     float inv_k_norm = inv_k[idx3(b, t, h, T, H)];
@@ -1294,9 +1341,9 @@ __global__ void hgdn_backward_bf16_kernel(
       float q_preact = b2f(pre[idx3(b, t, q_channel, T, C)]);
       float k_preact = b2f(pre[idx3(b, t, k_channel, T, C)]);
       grad_pre[idx3(b, t, q_channel, T, C)] =
-          f2b((dq - q_value * shmem[0]) * inv_q_norm * dsilu(q_preact));
+          f2b((dq - q_value * dot_q) * inv_q_norm * dsilu(q_preact));
       grad_pre[idx3(b, t, k_channel, T, C)] =
-          f2b((dk - k_value * shmem[THREADS]) * inv_k_norm * dsilu(k_preact));
+          f2b((dk - k_value * dot_k) * inv_k_norm * dsilu(k_preact));
     }
     for (int j = threadIdx.x; j < Dv; j += blockDim.x) {
       int v_channel = cv(h, j, H, Dk, Dv);
@@ -1407,17 +1454,24 @@ __global__ void hgdn_backward_bf16_kernel(
   }
 }
 
-size_t shared_bytes(int Dk, int Dv) {
-  int dv_tile = Dv < REC_V_TILE ? Dv : REC_V_TILE;
-  size_t recurrence =
-      static_cast<size_t>(
-          (REC_CHUNK_T + 3) * Dk * dv_tile + 3 * Dk + 4 * dv_tile +
-          2 * THREADS + REC_CHUNK_T * (2 * Dk + 2 * dv_tile + 2)) *
-      sizeof(float);
+size_t forward_shared_bytes(int Dk, int Dv) {
+  size_t recurrence = forward_recurrence_bytes(Dk, Dv);
   size_t gemm =
       static_cast<size_t>(WARPS_PER_BLOCK * GEMM_TILE * GEMM_TILE) *
       sizeof(float);
-  return recurrence > gemm ? recurrence : gemm;
+  size_t reduction = static_cast<size_t>(2 * THREADS) * sizeof(float);
+  size_t max_bytes = recurrence > gemm ? recurrence : gemm;
+  return max_bytes > reduction ? max_bytes : reduction;
+}
+
+size_t backward_shared_bytes(int Dk, int Dv) {
+  size_t recurrence = backward_recurrence_bytes(Dk, Dv);
+  size_t gemm =
+      static_cast<size_t>(WARPS_PER_BLOCK * GEMM_TILE * GEMM_TILE) *
+      sizeof(float);
+  size_t reduction = static_cast<size_t>(2 * THREADS) * sizeof(float);
+  size_t max_bytes = recurrence > gemm ? recurrence : gemm;
+  return max_bytes > reduction ? max_bytes : reduction;
 }
 
 template <typename KernelFn>
@@ -1536,7 +1590,7 @@ std::vector<torch::Tensor> forward(
   int iK = static_cast<int>(K);
   int iNChunks = static_cast<int>(NChunks);
   int iAllow = allow_neg_eigval ? 1 : 0;
-  size_t shmem_bytes = shared_bytes(iDk, iDv);
+  size_t shmem_bytes = forward_shared_bytes(iDk, iDv);
   C10_CUDA_CHECK(cudaFuncSetAttribute(
       hgdn_forward_bf16_kernel,
       cudaFuncAttributeMaxDynamicSharedMemorySize,
@@ -1706,7 +1760,7 @@ std::vector<torch::Tensor> backward(
   int iK = static_cast<int>(K);
   int iNChunks = static_cast<int>(NChunks);
   int iAllow = allow_neg_eigval ? 1 : 0;
-  size_t shmem_bytes = shared_bytes(iDk, iDv);
+  size_t shmem_bytes = backward_shared_bytes(iDk, iDv);
   C10_CUDA_CHECK(cudaFuncSetAttribute(
       hgdn_backward_bf16_kernel,
       cudaFuncAttributeMaxDynamicSharedMemorySize,

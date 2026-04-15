@@ -26,6 +26,8 @@
   - warp-local scalar fallback for dense edge tiles
   - forward saves only recurrence chunk-start checkpoints
   - backward replays each chunk inside the same cooperative kernel
+  - warp-shuffle-backed CTA reductions replace the old full-block tree
+    reductions in q/k norm, output RMSNorm, and backward scalar reductions
   - forward launch count remains `1`
   - backward launch count remains `1`
 
@@ -144,13 +146,13 @@ These timings are for the local `sm_89` device only.
 
 ### `B=1, T=8`
 
-- forward: `0.80691 ms`
-- forward + backward: `1.20627 ms`
+- forward: `0.78131 ms`
+- forward + backward: `1.17862 ms`
 
 ### `B=1, T=32`
 
-- forward: `0.25293 ms`
-- forward + backward: `0.66355 ms`
+- forward: `0.27955 ms`
+- forward + backward: `0.65536 ms`
 
 ## 4070 speed comparison vs current packed HGDN CUDA path
 
@@ -168,50 +170,62 @@ Comparison setup:
 ### `B=1, T=128`
 
 - current path:
-  - forward `1.18047 ms`
-  - forward + backward `3.17204 ms`
+  - forward `0.88205 ms`
+  - forward + backward `2.86856 ms`
 - megakernel:
-  - forward `0.54773 ms`
-  - forward + backward `1.76025 ms`
+  - forward `0.46963 ms`
+  - forward + backward `1.67334 ms`
 - relative:
-  - forward speedup `2.155x`
-  - forward + backward speedup `1.802x`
+  - forward speedup `1.878x`
+  - forward + backward speedup `1.714x`
 
 ### `B=1, T=512`
 
 - current path:
-  - forward `1.23888 ms`
-  - forward + backward `3.14762 ms`
+  - forward `0.92052 ms`
+  - forward + backward `3.14583 ms`
 - megakernel:
-  - forward `1.31921 ms`
-  - forward + backward `4.81146 ms`
+  - forward `1.50341 ms`
+  - forward + backward `4.20698 ms`
 - relative:
-  - forward speedup `0.939x`
-  - forward + backward speedup `0.654x`
+  - forward speedup `0.612x`
+  - forward + backward speedup `0.748x`
 
 ### `B=1, T=1024`
 
 - current path:
-  - forward `1.11729 ms`
-  - forward + backward `2.94275 ms`
+  - forward `0.85161 ms`
+  - forward + backward `3.18556 ms`
 - megakernel:
-  - forward `2.20609 ms`
-  - forward + backward `8.65826 ms`
+  - forward `2.01953 ms`
+  - forward + backward `8.41846 ms`
 - relative:
-  - forward speedup `0.506x`
-  - forward + backward speedup `0.340x`
+  - forward speedup `0.422x`
+  - forward + backward speedup `0.378x`
+
+### `B=1, T=2048`
+
+- current path:
+  - forward `0.89764 ms`
+  - forward + backward `2.94656 ms`
+- megakernel:
+  - forward `4.00794 ms`
+  - forward + backward `17.31799 ms`
+- relative:
+  - forward speedup `0.224x`
+  - forward + backward speedup `0.170x`
 
 ### `B=2, T=512`
 
 - current path:
-  - forward `1.06188 ms`
-  - forward + backward `2.85931 ms`
+  - forward `0.87286 ms`
+  - forward + backward `3.06202 ms`
 - megakernel:
-  - forward `1.34434 ms`
-  - forward + backward `5.16017 ms`
+  - forward `1.17706 ms`
+  - forward + backward `4.95916 ms`
 - relative:
-  - forward speedup `0.790x`
-  - forward + backward speedup `0.554x`
+  - forward speedup `0.742x`
+  - forward + backward speedup `0.617x`
 
 Local conclusion:
 
@@ -220,11 +234,14 @@ Local conclusion:
 - the portable tensor-core dense path is real and materially improved the local
   speed curve
 - the current megakernel is a strong local win at `B=1,T=128`
-- forward at `B=1,T=512` is now close to parity with the live packed path
+- the warp-shuffle reduction cleanup shaved small-shape overhead but did not
+  change the long-sequence story
+- forward still loses to the live packed path once the sequence reaches
+  `T=512+`
 - backward is still the clear long-sequence bottleneck
 - the next meaningful speed step is recurrence-core work:
-  fewer global atomics, better backward accumulation structure, or a more
-  aggressive Hopper-specific recurrence implementation
+  fewer global atomics without crushing occupancy, tensor-core-friendly
+  recurrence restructuring, or a more aggressive Hopper-specific implementation
 
 ## Readiness call
 
