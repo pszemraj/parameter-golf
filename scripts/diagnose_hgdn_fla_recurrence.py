@@ -79,6 +79,66 @@ def sequence_lengths(max_small_t: int, extra_ts: list[int]) -> list[int]:
     return sorted({*range(1, max_small_t + 1), *extra_ts})
 
 
+def closed_form_t1_candidates(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    beta: torch.Tensor,
+) -> dict[str, torch.Tensor]:
+    """Return closed-form `T=1` recurrence candidates.
+
+    :param torch.Tensor q: Query tensor shaped `(B, 1, H, Dk)`.
+    :param torch.Tensor k: Key tensor shaped `(B, 1, H, Dk)`.
+    :param torch.Tensor v: Value tensor shaped `(B, 1, H, Dv)`.
+    :param torch.Tensor beta: Beta/write gate shaped `(B, 1, H)`.
+    :return dict[str, torch.Tensor]: Candidate `T=1` outputs shaped `(B, H, Dv)`.
+    """
+    q0 = q[:, 0].float()
+    k0 = k[:, 0].float()
+    v0 = v[:, 0].float()
+    beta0 = beta[:, 0].float().unsqueeze(-1)
+    dot = (q0 * k0).sum(dim=-1, keepdim=True)
+    dk = q0.shape[-1]
+    return {
+        "formal_no_beta_write": dot * v0,
+        "beta_write": beta0 * dot * v0,
+        "formal_scaled_by_sqrt_dk": dot * v0 / (float(dk) ** 0.5),
+        "pre_update_readout": torch.zeros_like(v0),
+    }
+
+
+def closed_form_t1_report(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    beta: torch.Tensor,
+    eager_out: torch.Tensor,
+    fla_out: torch.Tensor,
+) -> dict[str, dict[str, dict[str, float | int]]]:
+    """Compare `T=1` closed forms against eager and FLA outputs.
+
+    :param torch.Tensor q: Query tensor shaped `(B, 1, H, Dk)`.
+    :param torch.Tensor k: Key tensor shaped `(B, 1, H, Dk)`.
+    :param torch.Tensor v: Value tensor shaped `(B, 1, H, Dv)`.
+    :param torch.Tensor beta: Beta tensor shaped `(B, 1, H)`.
+    :param torch.Tensor eager_out: Eager recurrence output shaped `(B, 1, H, Dv)`.
+    :param torch.Tensor fla_out: FLA recurrence output shaped `(B, 1, H, Dv)`.
+    :return dict[str, dict[str, dict[str, float | int]]]: Per-target candidate stats.
+    """
+    candidates = closed_form_t1_candidates(q, k, v, beta)
+    targets = {
+        "eager": eager_out[:, 0].float(),
+        "fla": fla_out[:, 0].float(),
+    }
+    report: dict[str, dict[str, dict[str, float | int]]] = {}
+    for target_name, target in targets.items():
+        report[target_name] = {
+            name: diff_stats(candidate, target)
+            for name, candidate in candidates.items()
+        }
+    return report
+
+
 def run_case(
     *,
     allow_neg_eigval: bool,
@@ -102,6 +162,7 @@ def run_case(
     x_full = torch.randn(1, max_t, 384, device="cuda", dtype=torch.bfloat16)
     rows: list[dict[str, object]] = []
     first_fail_t: int | None = None
+    t1_closed_form: dict[str, dict[str, dict[str, float | int]]] | None = None
 
     with torch.no_grad():
         for seq_len in seq_lengths:
@@ -109,6 +170,10 @@ def run_case(
             q, k, v, g, beta = module._project_recurrence_inputs(x)
             eager_out, _ = gdn_recurrent_naive(q, k, v, g.exp(), beta)
             fla_out = fla_chunk_gated_delta_rule_compile_visible(q, k, v, g, beta)
+            if seq_len == 1:
+                t1_closed_form = closed_form_t1_report(
+                    q, k, v, beta, eager_out, fla_out
+                )
             stats = diff_stats(fla_out, eager_out)
             ok = torch.allclose(
                 fla_out.detach().float().cpu(),
@@ -129,6 +194,7 @@ def run_case(
         "allow_neg_eigval": allow_neg_eigval,
         "first_fail_t": first_fail_t,
         "rows": rows,
+        "t1_closed_form": t1_closed_form,
     }
 
 
@@ -199,6 +265,16 @@ def main() -> None:
                 f"rmse={row['rmse']:.6g} "
                 f"norm_rel={row['norm_rel']:.6g}"
             )
+        t1_closed_form = case.get("t1_closed_form")
+        if t1_closed_form is not None:
+            for target_name in ("eager", "fla"):
+                print(f"  closed_form_target={target_name}")
+                for candidate_name, stats in t1_closed_form[target_name].items():
+                    print(
+                        f"    {candidate_name}: "
+                        f"max_abs={stats['max_abs']:.6g} "
+                        f"norm_rel={stats['norm_rel']:.6g}"
+                    )
 
     if args.json_out is not None:
         args.json_out.parent.mkdir(parents=True, exist_ok=True)

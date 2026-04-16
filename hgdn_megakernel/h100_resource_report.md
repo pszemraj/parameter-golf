@@ -15,6 +15,41 @@ This report targets the live winner-style HGDN contract:
 - packed depthwise causal qkv conv
 - dense cross-head `W_out`
 
+## Batch interpretation
+
+The current report uses two different batch meanings and they should not be
+mixed:
+
+- `B=32,T=2048` is the current **1xH100 compile/parity proxy**
+- `B=128,T=2048` is the likely **exact 8x bridge per-rank stress shape** under
+  the live bridge-style contract:
+  - `TRAIN_BATCH_TOKENS = 2,097,152`
+  - `TRAIN_SEQ_LEN = 2,048`
+  - `WORLD_SIZE = 8`
+  - `GRAD_ACCUM_STEPS = 1`
+  - `local_batch_size = 2,097,152 / (8 * 1 * 2,048) = 128`
+
+Do not extrapolate saved-state size, HBM traffic, or allocator pressure from
+`B=32` alone when the eventual question is the exact 8x bridge.
+
+Approximate saved forward tensors per GDN block at `B=128,T=2048`:
+
+| Tensor group | Bytes | MiB |
+| --- | ---: | ---: |
+| `qkv` | `603,979,776` | `576` |
+| `pre` | `603,979,776` | `576` |
+| `q_norm + k_norm + v_post` | `603,979,776` | `576` |
+| `inv_q + inv_k` | `16,777,216` | `16` |
+| `g_pre + beta_pre + g_log + beta` | `16,777,216` | `16` |
+| `g_out + o_raw + o_norm + z` | `805,306,368` | `768` |
+| `state_ckpt` | `2,415,919,104` | `2,304` |
+| **Total per GDN block** | **`5,066,739,456`** | **`4,832`** |
+
+That is about **4.72 GiB per GDN block** at the exact-bridge per-rank stress
+shape. For a 14-layer 1:1 model with 7 GDN blocks, that is roughly **33 GiB**
+of saved GDN block state before attention/MLP activations, optimizer state,
+workspace, and allocator overhead.
+
 ## Current checkpointed candidate
 
 The current repo-backed candidate is no longer the save-heavy version.
@@ -64,6 +99,7 @@ That means the honest status of this checkpoint is:
 
 - **ready for H100 compile/parity**
 - **not ready for H100 timing**
+- **not yet validated as a drop-in replacement for a historically FLA-trained winner**
 
 One extra local finding matters for interpretation:
 
@@ -77,6 +113,11 @@ One extra local finding matters for interpretation:
     abs `0.152049`, norm-rel `0.524228`
   - `allow_neg_eigval=True`: first failing `T=3`, worst sampled `T=4`, max abs
     `0.0744246`, norm-rel `0.327112`
+- the new closed-form `T=1` diagnostic makes the semantic split explicit:
+  - eager matches the formal no-beta-write recurrence essentially exactly
+  - local FLA matches a beta-gated write candidate essentially exactly
+  - so the current local eager-vs-FLA mismatch is not just late-sequence numeric drift;
+    it is a different recurrence convention at the first token already
 - the first cooperative split-K weight-gradient trial for `grad_w_out`,
   `grad_w_qkv`, and `grad_w_g` stayed parity-clean and kept the one-launch
   contract, but it was slightly slower on the local 4070 helper and was

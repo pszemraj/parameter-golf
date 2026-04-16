@@ -168,6 +168,10 @@ These are still diagnostic bf16 tolerances, not the final tightened threshold se
     abs `0.152049`, norm-rel `0.524228`
   - `allow_neg_eigval=True`: first failing `T=3`, worst sampled `T=4`, max abs
     `0.0744246`, norm-rel `0.327112`
+  - the new closed-form `T=1` check is decisive:
+    - eager matches the formal no-beta-write recurrence essentially exactly
+    - local FLA matches a beta-gated write candidate essentially exactly
+    - this is a recurrence-semantics mismatch, not only late-sequence numeric drift
   - artifact: `hgdn_megakernel/cases/fla_recurrence_diag.json`
 
 ## Launch count
@@ -267,6 +271,16 @@ These timings are for the local `sm_89` device only.
 
 I also benchmarked the new megakernel against the current packed `GatedDeltaNet`
 CUDA block path on the same local RTX 4070 laptop GPU.
+
+Important interpretation note:
+
+- this section is a runtime-path speed comparison, not a same-equation parity
+  comparison
+- the baseline side used the historical local `use_fla=True` path
+- the megakernel numerical contract is currently the eager HGDN path because
+  local FLA still diverges materially from eager
+- some numbers in this section are older point-in-time measurements; use the
+  explicit checkpoint delta notes below when comparing newer commits
 
 Comparison setup:
 
