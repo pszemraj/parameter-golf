@@ -65,7 +65,7 @@ constexpr int REC_DOT_COL_SLICE = 8;
 #endif
 
 constexpr int REC_V_TILE = HGDN_REC_V_TILE;
-constexpr int REC_CHUNK_T = HGDN_REC_CHUNK_T;
+constexpr int REC_CHUNK_T_MAX = HGDN_REC_CHUNK_T;
 constexpr float EPS = 1.0e-6f;
 
 struct DeviceReport {
@@ -878,7 +878,7 @@ __host__ __device__ __forceinline__ size_t backward_recurrence_bytes(
   int dv_tile = Dv < REC_V_TILE ? Dv : REC_V_TILE;
   return static_cast<size_t>(
              3 * Dk * dv_tile + 3 * Dk + 4 * dv_tile + THREADS +
-             REC_CHUNK_T * (2 * Dk + dv_tile + 2)) *
+             REC_CHUNK_T_MAX * (2 * Dk + dv_tile + 2)) *
          sizeof(float);
 }
 
@@ -930,13 +930,13 @@ __device__ BackwardSharedState backward_shared_ptrs(
   s.reduce0 = base + offset;
   offset += THREADS;
   s.q_hist = base + offset;
-  offset += REC_CHUNK_T * Dk;
+  offset += REC_CHUNK_T_MAX * Dk;
   s.k_hist = base + offset;
-  offset += REC_CHUNK_T * Dk;
+  offset += REC_CHUNK_T_MAX * Dk;
   s.v_hist = base + offset;
-  offset += REC_CHUNK_T * Dv;
+  offset += REC_CHUNK_T_MAX * Dv;
   s.alpha_hist = base + offset;
-  offset += REC_CHUNK_T;
+  offset += REC_CHUNK_T_MAX;
   s.beta_hist = base + offset;
   return s;
 }
@@ -970,6 +970,7 @@ __global__ void hgdn_forward_bf16_kernel(
     int Dv,
     int K,
     int n_chunks,
+    int rec_chunk_t,
     int allow_neg_eigval) {
   cg::grid_group grid = cg::this_grid();
   extern __shared__ float shmem[];
@@ -1073,8 +1074,8 @@ __global__ void hgdn_forward_bf16_kernel(
       }
       __syncthreads();
 
-      if ((t % REC_CHUNK_T) == 0) {
-        int chunk = t / REC_CHUNK_T;
+      if ((t % rec_chunk_t) == 0) {
+        int chunk = t / rec_chunk_t;
         for (int idx = threadIdx.x; idx < state_elems; idx += blockDim.x) {
           int i = idx / dv_local;
           int j = idx - i * dv_local;
@@ -1200,6 +1201,7 @@ __global__ void hgdn_backward_bf16_kernel(
     int Dv,
     int K,
     int n_chunks,
+    int rec_chunk_t,
     int allow_neg_eigval) {
   cg::grid_group grid = cg::this_grid();
   extern __shared__ float shmem[];
@@ -1309,8 +1311,8 @@ __global__ void hgdn_backward_bf16_kernel(
     __syncthreads();
 
     for (int chunk = n_chunks - 1; chunk >= 0; --chunk) {
-      int chunk_start = chunk * REC_CHUNK_T;
-      int chunk_end = min(T, chunk_start + REC_CHUNK_T);
+      int chunk_start = chunk * rec_chunk_t;
+      int chunk_end = min(T, chunk_start + rec_chunk_t);
       int chunk_len = chunk_end - chunk_start;
 
       for (int idx = threadIdx.x; idx < state_elems; idx += blockDim.x) {
@@ -1821,18 +1823,25 @@ std::vector<torch::Tensor> forward(
     int64_t Dk,
     int64_t Dv,
     int64_t K,
+    int64_t rec_chunk_t,
     bool allow_neg_eigval) {
   c10::cuda::CUDAGuard guard(x.device());
   validate_runtime_device();
   validate_inputs(
       x, w_qkv, w_a, w_b, w_g, w_out, conv_w, A_log, dt_bias, H, Dk, Dv, K);
+  TORCH_CHECK(
+      rec_chunk_t > 0 && rec_chunk_t <= REC_CHUNK_T_MAX,
+      "HGDN megakernel rec_chunk_t must be in [1, ",
+      REC_CHUNK_T_MAX,
+      "], got ",
+      rec_chunk_t);
 
   int64_t B = x.size(0);
   int64_t T = x.size(1);
   int64_t D = x.size(2);
   int64_t P = H * Dv;
   int64_t C = H * (2 * Dk + Dv);
-  int64_t NChunks = (T + REC_CHUNK_T - 1) / REC_CHUNK_T;
+  int64_t NChunks = (T + rec_chunk_t - 1) / rec_chunk_t;
   auto bf16_options = x.options();
   auto f32_options = x.options().dtype(torch::kFloat32);
 
@@ -1856,6 +1865,7 @@ std::vector<torch::Tensor> forward(
   int iDv = static_cast<int>(Dv);
   int iK = static_cast<int>(K);
   int iNChunks = static_cast<int>(NChunks);
+  int iChunkT = static_cast<int>(rec_chunk_t);
   int iAllow = allow_neg_eigval ? 1 : 0;
   size_t shmem_bytes = forward_shared_bytes(iDk, iDv);
   C10_CUDA_CHECK(cudaFuncSetAttribute(
@@ -1914,6 +1924,7 @@ std::vector<torch::Tensor> forward(
       &iDv,
       &iK,
       &iNChunks,
+      &iChunkT,
       &iAllow,
   };
   C10_CUDA_CHECK(cudaLaunchCooperativeKernel(
@@ -1953,19 +1964,26 @@ std::vector<torch::Tensor> backward(
     int64_t Dk,
     int64_t Dv,
     int64_t K,
+    int64_t rec_chunk_t,
     bool allow_neg_eigval) {
   c10::cuda::CUDAGuard guard(x.device());
   validate_runtime_device();
   validate_inputs(
       x, w_qkv, w_a, w_b, w_g, w_out, conv_w, A_log, dt_bias, H, Dk, Dv, K);
   chk_bf16(grad_y, "grad_y");
+  TORCH_CHECK(
+      rec_chunk_t > 0 && rec_chunk_t <= REC_CHUNK_T_MAX,
+      "HGDN megakernel rec_chunk_t must be in [1, ",
+      REC_CHUNK_T_MAX,
+      "], got ",
+      rec_chunk_t);
 
   int64_t B = x.size(0);
   int64_t T = x.size(1);
   int64_t D = x.size(2);
   int64_t P = H * Dv;
   int64_t C = H * (2 * Dk + Dv);
-  int64_t NChunks = (T + REC_CHUNK_T - 1) / REC_CHUNK_T;
+  int64_t NChunks = (T + rec_chunk_t - 1) / rec_chunk_t;
   auto bf16_options = x.options();
   auto f32_options = x.options().dtype(torch::kFloat32);
 
@@ -2001,6 +2019,7 @@ std::vector<torch::Tensor> backward(
   int iDv = static_cast<int>(Dv);
   int iK = static_cast<int>(K);
   int iNChunks = static_cast<int>(NChunks);
+  int iChunkT = static_cast<int>(rec_chunk_t);
   int iAllow = allow_neg_eigval ? 1 : 0;
   size_t shmem_bytes = backward_shared_bytes(iDk, iDv);
   C10_CUDA_CHECK(cudaFuncSetAttribute(
@@ -2066,7 +2085,7 @@ std::vector<torch::Tensor> backward(
       &grad_o_raw_ptr,   &grad_g_out_ptr,  &grad_v_post_ptr,  &grad_pre_ptr,
       &grad_qkv_ptr,     &grad_g_pre_ptr,  &grad_beta_pre_ptr,
       &iB,               &iT,              &iD,               &iH,
-      &iDk,              &iDv,             &iK,               &iNChunks,
+      &iDk,              &iDv,             &iK,               &iNChunks,       &iChunkT,
       &iAllow,
   };
   C10_CUDA_CHECK(cudaLaunchCooperativeKernel(
@@ -2090,10 +2109,15 @@ std::vector<torch::Tensor> backward(
   };
 }
 
+int64_t rec_chunk_t_max() {
+  return REC_CHUNK_T_MAX;
+}
+
 }  // namespace
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("device_report", &device_report_string);
+  m.def("rec_chunk_t_max", &rec_chunk_t_max);
   m.def("forward", &forward);
   m.def("backward", &backward);
 }

@@ -5,6 +5,7 @@ from .hgdn_megakernel_binding import (
     extension_loaded,
     extension_status,
     hgdn_megakernel,
+    rec_chunk_t_max,
     run_from_gated_delta_net,
 )
 
@@ -13,5 +14,6 @@ __all__ = [
     "extension_loaded",
     "extension_status",
     "hgdn_megakernel",
+    "rec_chunk_t_max",
     "run_from_gated_delta_net",
 ]

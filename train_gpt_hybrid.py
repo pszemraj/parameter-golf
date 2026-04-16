@@ -980,13 +980,19 @@ def main() -> None:
     log0(f"PyTorch {torch.__version__}", console=False)
     if args.gdn_use_cuda_megakernel:
         megakernel_status = hgdn_megakernel_extension_status()
+        megakernel_rec_chunk_t = int(os.environ.get("GDN_MEGAKERNEL_REC_CHUNK_T", "8"))
         log0(
             f"hgdn_megakernel_preflight:{json.dumps(megakernel_status, sort_keys=True)}"
         )
+        log0(f"hgdn_megakernel_rec_chunk_t:{megakernel_rec_chunk_t}")
         if args.gdn_control_proj_fp32:
             raise RuntimeError(
                 "GDN_USE_CUDA_MEGAKERNEL=1 requires GDN_CONTROL_PROJ_FP32=0 "
                 "because the megakernel expects bf16 w_a/w_b/w_g weights."
+            )
+        if megakernel_rec_chunk_t <= 0:
+            raise RuntimeError(
+                "GDN_MEGAKERNEL_REC_CHUNK_T must be > 0 when GDN_USE_CUDA_MEGAKERNEL=1."
             )
         if not megakernel_status["loaded"]:
             raise RuntimeError(
@@ -995,6 +1001,13 @@ def main() -> None:
                 "`conda run -s --name pg python setup_hgdn_megakernel.py "
                 "build_ext --inplace` or explicitly enable "
                 "`GDN_MEGAKERNEL_ALLOW_JIT_BUILD=1`."
+            )
+        if megakernel_rec_chunk_t > int(megakernel_status["rec_chunk_t_max"]):
+            raise RuntimeError(
+                "GDN_MEGAKERNEL_REC_CHUNK_T exceeds the compiled megakernel "
+                "maximum. Rebuild with a larger HGDN_REC_CHUNK_T or lower "
+                f"GDN_MEGAKERNEL_REC_CHUNK_T. got={megakernel_rec_chunk_t} "
+                f"max={int(megakernel_status['rec_chunk_t_max'])}"
             )
     log0(
         f"compile:{int(args.compile)} compile_strategy:{args.compile_strategy} "

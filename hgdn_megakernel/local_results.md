@@ -30,11 +30,16 @@
 - Current candidate here is the chunk-checkpointed megakernel:
   - `THREADS = 128`
   - `REC_V_TILE = 8`
-  - `REC_CHUNK_T = 8`
+  - compiled `REC_CHUNK_T_MAX = 8`
+  - live runtime `rec_chunk_t = 8`
   - `THREADS`, `GEMM_ATB_BLOCK_SPLIT_M_THRESHOLD`, `REC_V_TILE`, and
-    `REC_CHUNK_T` are now explicit compile-time knobs via `HGDN_THREADS`,
+    `REC_CHUNK_T_MAX` are now explicit compile-time knobs via `HGDN_THREADS`,
     `HGDN_GEMM_ATB_SPLIT_M_THRESHOLD`, `HGDN_REC_V_TILE`, and
-    `HGDN_REC_CHUNK_T`, but the live defaults remain `128 / 2048 / 8 / 8`
+    `HGDN_REC_CHUNK_T`
+  - runtime checkpoint cadence is selected through
+    `GDN_MEGAKERNEL_REC_CHUNK_T` or `module.megakernel_rec_chunk_t`, bounded by
+    the compiled `REC_CHUNK_T_MAX`
+  - current live defaults remain `128 / 2048 / 8 / 8`
   - bf16 WMMA tensor-core path for full dense tiles on `sm_80+`
   - warp-local scalar fallback for dense edge tiles
   - forward saves only recurrence chunk-start checkpoints
@@ -293,20 +298,21 @@ Local conclusion:
 
 ## Chunk replay cadence experiment
 
-I also tested a higher-memory replay-cadence variant by rebuilding the same
-source with `HGDN_REC_CHUNK_T=4` instead of the live `8`.
+The current build now compiles a maximum checkpoint cadence of
+`REC_CHUNK_T_MAX=8` and selects the live cadence at runtime with
+`GDN_MEGAKERNEL_REC_CHUNK_T` or `module.megakernel_rec_chunk_t`.
 
 This keeps the same one-forward / one-backward launch contract and the same
-model math, but it doubles the number of saved recurrence checkpoints and cuts
-the within-chunk replay span in half.
+model math while allowing same-build cadence sweeps up to the compiled max.
+The high-memory candidate remains `rec_chunk_t=4`, which doubles the number of
+saved recurrence checkpoints and cuts the within-chunk replay span in half.
 
-Same-session repeated timing summary on the local `sm_89` helper:
+Same-build repeated timing summary on the local `sm_89` helper:
 
-| Build | `B=1,T=128` median fwd+bwd | `B=1,T=512` median fwd+bwd | `B=2,T=512` median fwd+bwd | `B=1,T=2048` median fwd+bwd | Notes |
+| Runtime cadence | `B=1,T=128` median fwd+bwd | `B=1,T=512` median fwd+bwd | `B=2,T=512` median fwd+bwd | `B=1,T=2048` median fwd+bwd | Notes |
 | --- | ---: | ---: | ---: | ---: | --- |
-| default `REC_CHUNK_T=8` | `2.41 ms` | `9.08 ms` | `9.81 ms` | `29.50 ms` | same-session rerun after restoring the default build |
-| `REC_CHUNK_T=4` pass 1 | `2.23 ms` | `8.09 ms` | `8.93 ms` | `23.24 ms` | best long-sequence sample |
-| `REC_CHUNK_T=4` pass 2 | `2.23 ms` | `8.10 ms` | `8.87 ms` | `28.30 ms` | second confirmation pass |
+| default `rec_chunk_t=8` | `2.45 ms` | `9.15 ms` | `9.11 ms` | `30.73 ms` | current same-build default run |
+| runtime `rec_chunk_t=4` | `2.20 ms` | `8.16 ms` | `8.94 ms` | `26.19 ms` | same binary, runtime override only |
 
 Memory cost of the same variant:
 
@@ -318,12 +324,13 @@ Memory cost of the same variant:
 
 Local conclusion:
 
-- `REC_CHUNK_T=4` looks like a real speed-vs-memory trade rather than pure
-  noise; it beat the same-session default on every measured case
-- the long `T=2048` helper point improved materially but was less stable than
-  the medium-length points
-- the checkpoint-state increase is large enough that this should stay a bounded
-  H100 compile/parity candidate for now, not the new live default
+- runtime-selectable cadence works on the same compiled binary and preserves the
+  single-kernel forward/backward contract
+- `rec_chunk_t=4` remains a real speed-vs-memory trade; it improved every
+  measured helper case on the same build, especially the long `T=2048` point
+- the checkpoint-state increase is still large enough that `rec_chunk_t=4`
+  should stay a bounded H100 compile/parity candidate for now, not the new live
+  default
 
 ## Rejected local variants
 
@@ -347,15 +354,14 @@ The binding path now presents the HGDN block through a compile-visible
 
 Fresh-cache trainer smoke used:
 
-- `TORCH_LOGS=graph_breaks,recompiles`
-- `TORCHINDUCTOR_CACHE_DIR=/tmp/pg_inductor_mk_grad_tail`
 - `USE_WANDB=0`
 - `WANDB_WATCH=none`
 - `PERF_SKIP_FINAL_EVAL=1`
 - `COMPILE=1`
 - `COMPILE_STRATEGY=hybrid`
-- `WARMUP_STEPS=1`
-- `ITERATIONS=1`
+- `COMPILE_WARMUP_STEPS=1`
+- `TORCHINDUCTOR_CACHE_DIR=/tmp/pg_inductor_mk_rec_chunk_t_runtime_3`
+- `ITERATIONS=2`
 - `TRAIN_BATCH_TOKENS=1024`
 - `TRAIN_SEQ_LEN=128`
 - `VAL_LOSS_EVERY=0`
@@ -369,27 +375,35 @@ Fresh-cache trainer smoke used:
 - `GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=0`
 - `GDN_CONV_OUTPUT_CONTIGUOUS=1`
 - `GDN_CONTROL_PROJ_FP32=0`
+- `GDN_MEGAKERNEL_REC_CHUNK_T=4`
 
 Observed trainer-path result on the local 4070 helper:
 
-- preflight reported `loaded=true`
+- preflight reported `loaded=true` and `rec_chunk_t_max=8`
+- runtime knob logged `hgdn_megakernel_rec_chunk_t:4`
 - compile plan reported `gdn_disabled:0` and `gdn_megakernel_left_enabled:1`
 - warmup completed
-- the real training step executed
+- the compiled training loop executed cleanly
 - peak memory log completed
 - `PERF_SKIP_FINAL_EVAL=1` exited the run before artifact roundtrip/eval
 - no graph-break or recompile log lines were emitted around the HGDN block path
+- after replacing the `lru_cache`/pybind max checks with Python-side cached values,
+  the compile-visible smoke no longer emitted Dynamo warnings from the megakernel
+  binding itself
 
 Representative output:
 
 ```text
-hgdn_megakernel_preflight:{"allow_jit_build": false, "arch_list": null, "loaded": true}
-launch_contract:planned_train_tokens:1024 train_batch_tokens:1024 train_seq_len:128 grad_accum_steps:8 local_batch_size:1
+hgdn_megakernel_preflight:{"allow_jit_build": false, "arch_list": null, "loaded": true, "rec_chunk_t_max": 8}
+hgdn_megakernel_rec_chunk_t:4
+launch_contract:planned_train_tokens:2048 train_batch_tokens:1024 train_seq_len:128 grad_accum_steps:8 local_batch_size:1
 compile_plan:strategy:hybrid gdn_disabled:0 gdn_megakernel_left_enabled:1 gdn_mlps_compiled:1 attn_blocks_compiled:1 model_compiled:1
-warmup_step:1/1
+warmup_step:10/20
+warmup_step:20/20
 compile_prewarm: muon_shapes:5 rotary_modules:1
-step:1/1 train_loss:6.9387 train_time:35ms step_avg:35.30ms
-peak memory allocated: 46 MiB reserved: 68 MiB
+step:1/2 train_loss:6.9387 train_time:37ms step_avg:37.50ms
+step:2/2 train_loss:16.3329 train_time:71ms step_avg:35.30ms
+peak memory allocated: 53 MiB reserved: 84 MiB
 perf_mode: skipping serialization and final roundtrip eval
 ```
 

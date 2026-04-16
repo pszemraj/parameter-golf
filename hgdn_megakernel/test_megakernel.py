@@ -184,6 +184,7 @@ def forward_backward_case(
     atol: float,
     rtol: float,
     grad_scale: float,
+    rec_chunk_t: int | None,
     timing_warmups: int,
     timing_repeats: int,
 ) -> dict[str, float | int]:
@@ -193,6 +194,7 @@ def forward_backward_case(
     :param float atol: Forward tolerance.
     :param float rtol: Forward tolerance.
     :param float grad_scale: Multiplier for backward tolerances.
+    :param int | None rec_chunk_t: Runtime checkpoint cadence override.
     :param int timing_warmups: Number of timing warmup iterations.
     :param int timing_repeats: Number of measured timing iterations.
     :return dict[str, float | int]: Event timing metrics.
@@ -237,6 +239,7 @@ def forward_backward_case(
         head_k_dim=int(meta["Dk"]),
         head_v_dim=int(meta["Dv"]),
         conv_size=int(meta["K"]),
+        rec_chunk_t=rec_chunk_t,
         allow_neg_eigval=bool(meta["allow_neg_eigval"]),
     )
     torch.cuda.synchronize()
@@ -297,6 +300,7 @@ def forward_backward_case(
             head_k_dim=int(meta["Dk"]),
             head_v_dim=int(meta["Dv"]),
             conv_size=int(meta["K"]),
+            rec_chunk_t=rec_chunk_t,
             allow_neg_eigval=bool(meta["allow_neg_eigval"]),
         )
         torch.autograd.backward((out,), (grad_out,))
@@ -319,6 +323,7 @@ def forward_backward_case(
             head_k_dim=int(meta["Dk"]),
             head_v_dim=int(meta["Dv"]),
             conv_size=int(meta["K"]),
+            rec_chunk_t=rec_chunk_t,
             allow_neg_eigval=bool(meta["allow_neg_eigval"]),
         )
         mid.record()
@@ -345,10 +350,11 @@ def forward_backward_case(
     return result
 
 
-def count_launches(path: Path) -> dict[str, object]:
+def count_launches(path: Path, *, rec_chunk_t: int | None) -> dict[str, object]:
     """Count megakernel launches for one reference case with torch profiler.
 
     :param Path path: Case file path.
+    :param int | None rec_chunk_t: Runtime checkpoint cadence override.
     :return dict[str, object]: Launch-count summary.
     """
     meta, _payload, tensors = load_case(path)
@@ -365,6 +371,7 @@ def count_launches(path: Path) -> dict[str, object]:
         head_k_dim=int(meta["Dk"]),
         head_v_dim=int(meta["Dv"]),
         conv_size=int(meta["K"]),
+        rec_chunk_t=rec_chunk_t,
         allow_neg_eigval=bool(meta["allow_neg_eigval"]),
     )
     torch.autograd.backward((warmup_out,), (grad_out,))
@@ -383,6 +390,7 @@ def count_launches(path: Path) -> dict[str, object]:
             head_k_dim=int(meta["Dk"]),
             head_v_dim=int(meta["Dv"]),
             conv_size=int(meta["K"]),
+            rec_chunk_t=rec_chunk_t,
             allow_neg_eigval=bool(meta["allow_neg_eigval"]),
         )
         torch.autograd.backward((out,), (grad_out,))
@@ -513,6 +521,12 @@ def main() -> None:
         default=1,
         help="Number of measured forward/backward timing iterations per case.",
     )
+    parser.add_argument(
+        "--rec-chunk-t",
+        type=int,
+        default=None,
+        help="Optional runtime checkpoint cadence override for the megakernel.",
+    )
     args = parser.parse_args()
 
     if not torch.cuda.is_available():
@@ -525,6 +539,8 @@ def main() -> None:
             "`conda run -s --name pg python setup_hgdn_megakernel.py build_ext --inplace` "
             "or enable `GDN_MEGAKERNEL_ALLOW_JIT_BUILD=1`."
         )
+    if args.rec_chunk_t is not None:
+        print(f"runtime_rec_chunk_t:{int(args.rec_chunk_t)}")
 
     case_dir = args.case_dir
     case_dir.mkdir(parents=True, exist_ok=True)
@@ -551,12 +567,13 @@ def main() -> None:
             atol=args.atol,
             rtol=args.rtol,
             grad_scale=args.grad_scale,
+            rec_chunk_t=args.rec_chunk_t,
             timing_warmups=args.timing_warmups,
             timing_repeats=args.timing_repeats,
         )
         if label == "B1_T32":
             case_32 = path
-    results["launch_counts"] = count_launches(case_32)
+    results["launch_counts"] = count_launches(case_32, rec_chunk_t=args.rec_chunk_t)
     print(json.dumps(results, indent=2))
 
 

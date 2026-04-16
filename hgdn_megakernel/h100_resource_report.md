@@ -53,11 +53,16 @@ The current repo-backed candidate is no longer the save-heavy version.
 
 - `THREADS = 128`
 - `REC_V_TILE = 8`
-- `REC_CHUNK_T = 8`
+- compiled `REC_CHUNK_T_MAX = 8`
+- live runtime `rec_chunk_t = 8`
 - `THREADS`, `GEMM_ATB_BLOCK_SPLIT_M_THRESHOLD`, `REC_V_TILE`, and
-  `REC_CHUNK_T` are now explicit compile-time knobs through `HGDN_THREADS`,
+  `REC_CHUNK_T_MAX` are now explicit compile-time knobs through `HGDN_THREADS`,
   `HGDN_GEMM_ATB_SPLIT_M_THRESHOLD`, `HGDN_REC_V_TILE`, and
-  `HGDN_REC_CHUNK_T`, but the live default remains `128 / 2048 / 8 / 8`
+  `HGDN_REC_CHUNK_T`
+- runtime checkpoint cadence is selected through
+  `GDN_MEGAKERNEL_REC_CHUNK_T` or `module.megakernel_rec_chunk_t`, bounded by
+  the compiled `REC_CHUNK_T_MAX`
+- the live default remains `128 / 2048 / 8 / 8`
 - bf16 WMMA tensor-core path for full dense tiles on `sm_80+`
 - forward saves only recurrence chunk-start checkpoints
 - forward keeps conv preactivations only in a temporary `pre_tmp`, not as a
@@ -200,15 +205,17 @@ save-heavy layout.
 
 A bounded high-memory speed candidate is now also identified:
 
-- rebuilding the same source with `REC_CHUNK_T=4` keeps the one-launch
-  forward/backward structure but doubles checkpoint count
+- the current portable build compiles `REC_CHUNK_T_MAX=8` and can now select
+  `rec_chunk_t=4` on the same binary while keeping the one-launch
+  forward/backward structure
+- `rec_chunk_t=4` still doubles checkpoint count versus the live `8`
 - that pushes saved forward state to about **1.36 GiB per GDN block** at
   `B=32,T=2048` and about **5.45 GiB per GDN block** at `B=128,T=2048`
-- same-session local helper timing versus the restored `REC_CHUNK_T=8` default:
-  - default `REC_CHUNK_T=8`: `B=1,T=512` about `9.08 ms`,
-    `B=2,T=512` about `9.81 ms`, `B=1,T=2048` about `29.50 ms`
-  - `REC_CHUNK_T=4` pass 1: `8.09 ms`, `8.93 ms`, `23.24 ms`
-  - `REC_CHUNK_T=4` pass 2: `8.10 ms`, `8.87 ms`, `28.30 ms`
+- same-build local helper timing with the current runtime-selectable path:
+  - default `rec_chunk_t=8`: `B=1,T=128` about `2.45 ms`,
+    `B=1,T=512` about `9.15 ms`, `B=2,T=512` about `9.11 ms`,
+    `B=1,T=2048` about `30.73 ms`
+  - runtime `rec_chunk_t=4`: `2.20 ms`, `8.16 ms`, `8.94 ms`, `26.19 ms`
 - interpretation: promising speed-vs-memory trade, worth a bounded H100
   compile/parity check if memory headroom allows it, but not safe to flip the
   live default from local `sm_89` data alone

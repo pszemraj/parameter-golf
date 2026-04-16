@@ -200,13 +200,27 @@ def main() -> None:
             "constexpr int THREADS = HGDN_THREADS;",
             "HGDN_GEMM_ATB_SPLIT_M_THRESHOLD",
             "constexpr int REC_V_TILE = HGDN_REC_V_TILE;",
-            "constexpr int REC_CHUNK_T = HGDN_REC_CHUNK_T;",
+            "constexpr int REC_CHUNK_T_MAX = HGDN_REC_CHUNK_T;",
         )
     )
     failures += not check(
         "recurrence tile build knobs",
         tile_knobs,
         "setup and CUDA sources should expose THREADS/GEMM split threshold/REC_V_TILE/REC_CHUNK_T as explicit compile-time tuning knobs",
+    )
+
+    runtime_chunk_knob = (
+        "int rec_chunk_t" in binding
+        and "GDN_MEGAKERNEL_REC_CHUNK_T" in binding
+        and "rec_chunk_t_max" in binding
+        and "int rec_chunk_t" in cuda
+        and "REC_CHUNK_T_MAX" in cuda
+        and "GDN_MEGAKERNEL_REC_CHUNK_T" in trainer
+    )
+    failures += not check(
+        "runtime chunk cadence control",
+        runtime_chunk_knob,
+        "megakernel path should accept a runtime rec_chunk_t bounded by the compiled REC_CHUNK_T max and preflight it in the trainer",
     )
 
     tiled_dot_helper = all(
@@ -301,8 +315,9 @@ def main() -> None:
     control_guard = (
         "gdn_use_cuda_megakernel" in trainer
         and "gdn_control_proj_fp32" in trainer
+        and "GDN_USE_CUDA_MEGAKERNEL=1 requires GDN_CONTROL_PROJ_FP32=0" in trainer
         and re.search(
-            r"gdn_use_cuda_megakernel[\s\S]{0,300}gdn_control_proj_fp32[\s\S]{0,120}(raise|parser\.error|SystemExit)",
+            r"if args\.gdn_use_cuda_megakernel:[\s\S]{0,1200}if args\.gdn_control_proj_fp32:[\s\S]{0,240}raise RuntimeError",
             trainer,
         )
     )

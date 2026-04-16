@@ -5,7 +5,6 @@ from __future__ import annotations
 import importlib
 import os
 import warnings
-from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -14,8 +13,10 @@ from torch import Tensor
 
 _EXTENSION_NAME = "hgdn_megakernel_ext"
 _WARNED_KEYS: set[str] = set()
-# Keep the fake/meta contract aligned with the current CUDA checkpoint cadence.
-_REC_CHUNK_T = 8
+_REC_CHUNK_T_DEFAULT = 8
+_CACHED_EXTENSION: Any | None = None
+_EXTENSION_LOAD_ATTEMPTED = False
+_REC_CHUNK_T_MAX_CACHE: int | None = None
 
 
 def _warn_once(key: str, message: str) -> None:
@@ -49,7 +50,6 @@ def _arch_list_from_env_or_device() -> str | None:
     return ";".join(sorted(arches))
 
 
-@lru_cache(maxsize=1)
 def _load_extension() -> Any | None:
     """Load the optional HGDN megakernel extension when available.
 
@@ -60,8 +60,13 @@ def _load_extension() -> Any | None:
 
     :return Any | None: Imported extension module, or `None`.
     """
+    global _CACHED_EXTENSION, _EXTENSION_LOAD_ATTEMPTED
+    if _EXTENSION_LOAD_ATTEMPTED:
+        return _CACHED_EXTENSION
+    _EXTENSION_LOAD_ATTEMPTED = True
     try:
-        return importlib.import_module(_EXTENSION_NAME)
+        _CACHED_EXTENSION = importlib.import_module(_EXTENSION_NAME)
+        return _CACHED_EXTENSION
     except Exception:
         pass
 
@@ -86,7 +91,7 @@ def _load_extension() -> Any | None:
     root = Path(__file__).resolve().parent
     verbose = bool(int(os.environ.get("GDN_MEGAKERNEL_BUILD_VERBOSE", "0")))
     try:
-        return load(
+        _CACHED_EXTENSION = load(
             name=_EXTENSION_NAME,
             sources=[str(root / "hgdn_megakernel.cu")],
             extra_cflags=["-O3", "-std=c++17"],
@@ -99,6 +104,7 @@ def _load_extension() -> Any | None:
             with_cuda=True,
             verbose=verbose,
         )
+        return _CACHED_EXTENSION
     except Exception as exc:  # pragma: no cover - requires CUDA toolchain
         _warn_once(
             "hgdn_megakernel_build",
@@ -121,12 +127,16 @@ def extension_status() -> dict[str, object]:
 
     :return dict[str, object]: Extension availability and build settings.
     """
+    ext = _load_extension()
     return {
-        "loaded": extension_loaded(),
+        "loaded": ext is not None,
         "allow_jit_build": bool(
             int(os.environ.get("GDN_MEGAKERNEL_ALLOW_JIT_BUILD", "0"))
         ),
         "arch_list": os.environ.get("TORCH_CUDA_ARCH_LIST"),
+        "rec_chunk_t_max": rec_chunk_t_max()
+        if ext is not None
+        else _REC_CHUNK_T_DEFAULT,
     }
 
 
@@ -155,6 +165,45 @@ def _require_loaded_extension() -> Any:
             "`hgdn_megakernel_ext` or disable `GDN_USE_CUDA_MEGAKERNEL`."
         )
     return ext
+
+
+def rec_chunk_t_max() -> int:
+    """Return the compiled megakernel checkpoint-chunk upper bound.
+
+    :return int: Maximum runtime `rec_chunk_t` supported by the loaded extension.
+    """
+    global _REC_CHUNK_T_MAX_CACHE
+    if _REC_CHUNK_T_MAX_CACHE is not None:
+        return _REC_CHUNK_T_MAX_CACHE
+    ext = _require_loaded_extension()
+    _REC_CHUNK_T_MAX_CACHE = int(ext.rec_chunk_t_max())
+    return _REC_CHUNK_T_MAX_CACHE
+
+
+def _resolve_rec_chunk_t(module: torch.nn.Module | None = None) -> int:
+    """Return the runtime checkpoint cadence for the megakernel path.
+
+    Resolution order:
+
+    1. `module.megakernel_rec_chunk_t` when present.
+    2. `GDN_MEGAKERNEL_REC_CHUNK_T` environment variable.
+    3. Current default cadence.
+
+    :param torch.nn.Module | None module: Optional HGDN module, defaults to `None`.
+    :raises ValueError: If the requested cadence is not positive.
+    :return int: Runtime checkpoint cadence.
+    """
+    if module is not None and hasattr(module, "megakernel_rec_chunk_t"):
+        value = int(getattr(module, "megakernel_rec_chunk_t"))
+    else:
+        value = int(
+            os.environ.get("GDN_MEGAKERNEL_REC_CHUNK_T", str(_REC_CHUNK_T_DEFAULT))
+        )
+    if value <= 0:
+        raise ValueError(
+            f"HGDN megakernel requires GDN_MEGAKERNEL_REC_CHUNK_T > 0, got {value}."
+        )
+    return value
 
 
 def _require_cuda_tensor(
@@ -249,7 +298,7 @@ _HGDN_MEGAKERNEL_V1_LIB.define(
     "run("
     "Tensor x, Tensor w_qkv, Tensor w_a, Tensor w_b, Tensor w_g, Tensor w_out, "
     "Tensor conv_w, Tensor A_log, Tensor dt_bias, int n_heads, int head_k_dim, "
-    "int head_v_dim, int conv_size, bool allow_neg_eigval"
+    "int head_v_dim, int conv_size, int rec_chunk_t, bool allow_neg_eigval"
     ") -> ("
     "Tensor y, Tensor qkv, Tensor g_pre, Tensor beta_pre, Tensor g_log, "
     "Tensor beta, Tensor g_out, Tensor o_raw, Tensor state_ckpt)"
@@ -260,7 +309,7 @@ _HGDN_MEGAKERNEL_V1_LIB.define(
     "Tensor w_out, Tensor conv_w, Tensor A_log, Tensor dt_bias, Tensor qkv, "
     "Tensor g_pre, Tensor beta_pre, Tensor g_log, Tensor beta, Tensor g_out, "
     "Tensor o_raw, Tensor state_ckpt, int n_heads, "
-    "int head_k_dim, int head_v_dim, int conv_size, bool allow_neg_eigval"
+    "int head_k_dim, int head_v_dim, int conv_size, int rec_chunk_t, bool allow_neg_eigval"
     ") -> ("
     "Tensor dx, Tensor dw_qkv, Tensor dw_a, Tensor dw_b, Tensor dw_g, Tensor dw_out, "
     "Tensor dconv_w, Tensor dA_log, Tensor ddt_bias)"
@@ -281,6 +330,7 @@ def _run_megakernel_forward(
     head_k_dim: int,
     head_v_dim: int,
     conv_size: int,
+    rec_chunk_t: int,
     allow_neg_eigval: bool,
 ) -> tuple[Tensor, ...]:
     """Run the owned megakernel forward implementation.
@@ -298,10 +348,17 @@ def _run_megakernel_forward(
     :param int head_k_dim: Per-head key width.
     :param int head_v_dim: Per-head value width.
     :param int conv_size: Causal conv width.
+    :param int rec_chunk_t: Runtime checkpoint cadence.
     :param bool allow_neg_eigval: Whether beta is scaled by `2.0`.
     :return tuple[Tensor, ...]: Forward output plus saved activations.
     """
     ext = _require_loaded_extension()
+    max_chunk_t = rec_chunk_t_max()
+    if rec_chunk_t > max_chunk_t:
+        raise RuntimeError(
+            "HGDN megakernel rec_chunk_t exceeds the compiled maximum: "
+            f"got {rec_chunk_t}, max {max_chunk_t}."
+        )
     _validate_forward_inputs(
         x,
         w_qkv,
@@ -328,6 +385,7 @@ def _run_megakernel_forward(
             int(head_k_dim),
             int(head_v_dim),
             int(conv_size),
+            int(rec_chunk_t),
             bool(allow_neg_eigval),
         )
     )
@@ -356,6 +414,7 @@ def _run_megakernel_backward(
     head_k_dim: int,
     head_v_dim: int,
     conv_size: int,
+    rec_chunk_t: int,
     allow_neg_eigval: bool,
 ) -> tuple[Tensor, ...]:
     """Run the owned megakernel backward implementation.
@@ -382,10 +441,17 @@ def _run_megakernel_backward(
     :param int head_k_dim: Per-head key width.
     :param int head_v_dim: Per-head value width.
     :param int conv_size: Causal conv width.
+    :param int rec_chunk_t: Runtime checkpoint cadence.
     :param bool allow_neg_eigval: Whether beta is scaled by `2.0`.
     :return tuple[Tensor, ...]: Gradients for the differentiable inputs.
     """
     ext = _require_loaded_extension()
+    max_chunk_t = rec_chunk_t_max()
+    if rec_chunk_t > max_chunk_t:
+        raise RuntimeError(
+            "HGDN megakernel rec_chunk_t exceeds the compiled maximum: "
+            f"got {rec_chunk_t}, max {max_chunk_t}."
+        )
     _require_cuda_tensor("grad_y", grad_y, dtype=torch.bfloat16, device=x.device)
     return tuple(
         ext.backward(
@@ -411,6 +477,7 @@ def _run_megakernel_backward(
             int(head_k_dim),
             int(head_v_dim),
             int(conv_size),
+            int(rec_chunk_t),
             bool(allow_neg_eigval),
         )
     )
@@ -431,6 +498,7 @@ def _hgdn_megakernel_run_cpu(
     head_k_dim: int,
     head_v_dim: int,
     conv_size: int,
+    rec_chunk_t: int,
     allow_neg_eigval: bool,
 ) -> tuple[Tensor, ...]:
     """CPU stub for the compile-visible megakernel op.
@@ -448,6 +516,7 @@ def _hgdn_megakernel_run_cpu(
     :param int head_k_dim: Per-head key width.
     :param int head_v_dim: Per-head value width.
     :param int conv_size: Causal conv width.
+    :param int rec_chunk_t: Runtime checkpoint cadence.
     :param bool allow_neg_eigval: Whether beta is scaled by `2.0`.
     :raises RuntimeError: Always, because the megakernel is CUDA-only.
     :return tuple[Tensor, ...]: Never returns.
@@ -466,6 +535,7 @@ def _hgdn_megakernel_run_cpu(
         head_k_dim,
         head_v_dim,
         conv_size,
+        rec_chunk_t,
         allow_neg_eigval,
     )
     raise RuntimeError("HGDN megakernel only supports CUDA execution")
@@ -486,6 +556,7 @@ def _hgdn_megakernel_run_cuda(
     head_k_dim: int,
     head_v_dim: int,
     conv_size: int,
+    rec_chunk_t: int,
     allow_neg_eigval: bool,
 ) -> tuple[Tensor, ...]:
     """CUDA implementation for the compile-visible megakernel op.
@@ -503,6 +574,7 @@ def _hgdn_megakernel_run_cuda(
     :param int head_k_dim: Per-head key width.
     :param int head_v_dim: Per-head value width.
     :param int conv_size: Causal conv width.
+    :param int rec_chunk_t: Runtime checkpoint cadence.
     :param bool allow_neg_eigval: Whether beta is scaled by `2.0`.
     :return tuple[Tensor, ...]: Forward output plus saved activations.
     """
@@ -520,6 +592,7 @@ def _hgdn_megakernel_run_cuda(
         head_k_dim,
         head_v_dim,
         conv_size,
+        rec_chunk_t,
         allow_neg_eigval,
     )
 
@@ -548,6 +621,7 @@ def _hgdn_megakernel_run_backward_cpu(
     head_k_dim: int,
     head_v_dim: int,
     conv_size: int,
+    rec_chunk_t: int,
     allow_neg_eigval: bool,
 ) -> tuple[Tensor, ...]:
     """CPU stub for the compile-visible megakernel backward op.
@@ -574,6 +648,7 @@ def _hgdn_megakernel_run_backward_cpu(
     :param int head_k_dim: Per-head key width.
     :param int head_v_dim: Per-head value width.
     :param int conv_size: Causal conv width.
+    :param int rec_chunk_t: Runtime checkpoint cadence.
     :param bool allow_neg_eigval: Whether beta is scaled by `2.0`.
     :raises RuntimeError: Always, because the megakernel is CUDA-only.
     :return tuple[Tensor, ...]: Never returns.
@@ -601,6 +676,7 @@ def _hgdn_megakernel_run_backward_cpu(
         head_k_dim,
         head_v_dim,
         conv_size,
+        rec_chunk_t,
         allow_neg_eigval,
     )
     raise RuntimeError("HGDN megakernel only supports CUDA execution")
@@ -630,6 +706,7 @@ def _hgdn_megakernel_run_backward_cuda(
     head_k_dim: int,
     head_v_dim: int,
     conv_size: int,
+    rec_chunk_t: int,
     allow_neg_eigval: bool,
 ) -> tuple[Tensor, ...]:
     """CUDA implementation for the compile-visible megakernel backward op.
@@ -656,6 +733,7 @@ def _hgdn_megakernel_run_backward_cuda(
     :param int head_k_dim: Per-head key width.
     :param int head_v_dim: Per-head value width.
     :param int conv_size: Causal conv width.
+    :param int rec_chunk_t: Runtime checkpoint cadence.
     :param bool allow_neg_eigval: Whether beta is scaled by `2.0`.
     :return tuple[Tensor, ...]: Gradients for the differentiable inputs.
     """
@@ -682,6 +760,7 @@ def _hgdn_megakernel_run_backward_cuda(
         head_k_dim,
         head_v_dim,
         conv_size,
+        rec_chunk_t,
         allow_neg_eigval,
     )
 
@@ -701,6 +780,7 @@ def _hgdn_megakernel_run_fake(
     head_k_dim: int,
     head_v_dim: int,
     conv_size: int,
+    rec_chunk_t: int,
     allow_neg_eigval: bool,
 ) -> tuple[Tensor, ...]:
     """Meta kernel for the compile-visible megakernel forward op.
@@ -718,6 +798,7 @@ def _hgdn_megakernel_run_fake(
     :param int head_k_dim: Per-head key width.
     :param int head_v_dim: Per-head value width.
     :param int conv_size: Causal conv width.
+    :param int rec_chunk_t: Runtime checkpoint cadence.
     :param bool allow_neg_eigval: Whether beta is scaled by `2.0`.
     :return tuple[Tensor, ...]: Meta outputs matching the CUDA forward schema.
     """
@@ -727,7 +808,7 @@ def _hgdn_megakernel_run_fake(
     dk = int(head_k_dim)
     dv = int(head_v_dim)
     channels = heads * (2 * dk + dv)
-    n_chunks = (seq + _REC_CHUNK_T - 1) // _REC_CHUNK_T
+    n_chunks = (seq + int(rec_chunk_t) - 1) // int(rec_chunk_t)
     return (
         _meta_empty(x, x.shape),
         _meta_empty(x, (batch, seq, channels)),
@@ -765,6 +846,7 @@ def _hgdn_megakernel_run_backward_fake(
     head_k_dim: int,
     head_v_dim: int,
     conv_size: int,
+    rec_chunk_t: int,
     allow_neg_eigval: bool,
 ) -> tuple[Tensor, ...]:
     """Meta kernel for the compile-visible megakernel backward op.
@@ -791,6 +873,7 @@ def _hgdn_megakernel_run_backward_fake(
     :param int head_k_dim: Per-head key width.
     :param int head_v_dim: Per-head value width.
     :param int conv_size: Causal conv width.
+    :param int rec_chunk_t: Runtime checkpoint cadence.
     :param bool allow_neg_eigval: Whether beta is scaled by `2.0`.
     :return tuple[Tensor, ...]: Meta gradients matching the CUDA backward schema.
     """
@@ -808,6 +891,7 @@ def _hgdn_megakernel_run_backward_fake(
         head_k_dim,
         head_v_dim,
         conv_size,
+        rec_chunk_t,
         allow_neg_eigval,
     )
     return (
@@ -849,6 +933,7 @@ def _setup_hgdn_megakernel_context(
         head_k_dim,
         head_v_dim,
         conv_size,
+        rec_chunk_t,
         allow_neg_eigval,
     ) = inputs
     (
@@ -886,6 +971,7 @@ def _setup_hgdn_megakernel_context(
     ctx.head_k_dim = int(head_k_dim)
     ctx.head_v_dim = int(head_v_dim)
     ctx.conv_size = int(conv_size)
+    ctx.rec_chunk_t = int(rec_chunk_t)
     ctx.allow_neg_eigval = bool(allow_neg_eigval)
 
 
@@ -926,7 +1012,7 @@ def _hgdn_megakernel_backward_formula(
         _grad_state_ckpt,
     )
     if grad_y is None:
-        return (None,) * 14
+        return (None,) * 15
     (
         x,
         w_qkv,
@@ -969,9 +1055,10 @@ def _hgdn_megakernel_backward_formula(
         int(ctx.head_k_dim),
         int(ctx.head_v_dim),
         int(ctx.conv_size),
+        int(ctx.rec_chunk_t),
         bool(ctx.allow_neg_eigval),
     )
-    return (*grads, None, None, None, None, None)
+    return (*grads, None, None, None, None, None, None)
 
 
 torch.library.register_autograd(
@@ -996,6 +1083,7 @@ def hgdn_megakernel(
     head_k_dim: int,
     head_v_dim: int,
     conv_size: int,
+    rec_chunk_t: int | None = None,
     allow_neg_eigval: bool = True,
 ) -> Tensor:
     """Run the HGDN megakernel through the compile-visible custom-op path.
@@ -1013,9 +1101,13 @@ def hgdn_megakernel(
     :param int head_k_dim: Per-head key width.
     :param int head_v_dim: Per-head value width.
     :param int conv_size: Causal conv width.
+    :param int | None rec_chunk_t: Runtime checkpoint cadence, defaults to `None`.
     :param bool allow_neg_eigval: Whether to scale beta by `2.0`, defaults to True.
     :return Tensor: HGDN block output shaped `(batch, seq, d_model)`.
     """
+    rec_chunk_t = (
+        _resolve_rec_chunk_t(None) if rec_chunk_t is None else int(rec_chunk_t)
+    )
     y, *_saved = torch.ops.hgdn_megakernel_v1.run(
         x,
         w_qkv,
@@ -1030,6 +1122,7 @@ def hgdn_megakernel(
         int(head_k_dim),
         int(head_v_dim),
         int(conv_size),
+        int(rec_chunk_t),
         bool(allow_neg_eigval),
     )
     return y
@@ -1092,6 +1185,14 @@ def run_from_gated_delta_net(module: torch.nn.Module, x: Tensor) -> Tensor:
         module.qkv_conv.conv.weight.shape[0],
         module.qkv_conv.conv.weight.shape[-1],
     )
+    rec_chunk_t = _resolve_rec_chunk_t(module)
+    max_chunk_t = rec_chunk_t_max()
+    if rec_chunk_t > max_chunk_t:
+        raise ValueError(
+            "HGDN megakernel rec_chunk_t exceeds the compiled maximum: "
+            f"got {rec_chunk_t}, max {max_chunk_t}. "
+            "Rebuild the extension with a larger HGDN_REC_CHUNK_T if needed."
+        )
     return hgdn_megakernel(
         x,
         module.w_qkv.weight,
@@ -1106,5 +1207,6 @@ def run_from_gated_delta_net(module: torch.nn.Module, x: Tensor) -> Tensor:
         head_k_dim=int(module.head_k_dim),
         head_v_dim=int(module.head_v_dim),
         conv_size=int(conv_w.shape[-1]),
+        rec_chunk_t=rec_chunk_t,
         allow_neg_eigval=bool(module.allow_neg_eigval),
     )
