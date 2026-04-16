@@ -259,6 +259,21 @@ Local conclusion:
 - keep `HGDN_GEMM_ATB_SPLIT_M_THRESHOLD=2048` as the live default
 - keep the threshold exposed for future H100-specific qkv splitM tuning
 
+## Rejected local variants
+
+These bounded local `sm_89` trials were architecture-faithful and stayed inside
+the one-forward / one-backward owned megakernel path, but they did not survive
+the local timing gate:
+
+| Variant | Local result | Decision |
+| --- | --- | --- |
+| long-`BT` splitM for `grad_w_g` | one fast-looking single sample did not reproduce; repeat landed back near the committed baseline | reject |
+| long-`BT` splitM for `grad_w_out` | about `29.89 ms` at `B=1,T=2048`, worse than the live default repeated gate | reject |
+| `REC_CHUNK_T=16` | about `9.53 ms` at `B=1,T=512`, `10.69 ms` at `B=2,T=512`, and `33.98 ms` at `B=1,T=2048` | reject |
+
+Keep these as recorded local dead ends unless a future H100-specific reason
+justifies reopening them under a different measurement contract.
+
 ## Trainer compile smoke
 
 The binding path now presents the HGDN block through a compile-visible
