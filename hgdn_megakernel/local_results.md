@@ -8,6 +8,7 @@
 - Build command:
   `python setup_hgdn_megakernel.py build_ext --inplace`
 - Optional recurrence-tile sweep build:
+  `HGDN_THREADS=256 python setup_hgdn_megakernel.py build_ext --inplace`
   `HGDN_REC_V_TILE=16 python setup_hgdn_megakernel.py build_ext --inplace`
 - Validation command:
   `python hgdn_megakernel/test_megakernel.py`
@@ -27,8 +28,9 @@
   - `THREADS = 128`
   - `REC_V_TILE = 8`
   - `REC_CHUNK_T = 8`
-  - `REC_V_TILE` and `REC_CHUNK_T` are now explicit compile-time knobs via
-    `HGDN_REC_V_TILE` / `HGDN_REC_CHUNK_T`, but the live default remains `8/8`
+  - `THREADS`, `REC_V_TILE`, and `REC_CHUNK_T` are now explicit compile-time
+    knobs via `HGDN_THREADS`, `HGDN_REC_V_TILE`, and `HGDN_REC_CHUNK_T`, but
+    the live defaults remain `128 / 8 / 8`
   - bf16 WMMA tensor-core path for full dense tiles on `sm_80+`
   - warp-local scalar fallback for dense edge tiles
   - forward saves only recurrence chunk-start checkpoints
@@ -61,6 +63,10 @@
   now switches to a CTA-local split over the token-reduction dimension when
   `BT >= 2048`, then reduces those warp partials in shared memory inside the
   same cooperative launch
+- the kernel CTA width is now an explicit compile-time knob via
+  `HGDN_THREADS`; a local `HGDN_THREADS=256` trial remained architecture-faithful
+  but regressed the long-sequence helper point, so the live default stays
+  `THREADS=128` until H100 data says otherwise
 
 ## Device report
 
@@ -203,6 +209,24 @@ Observed CUDA-side entries for the HGDN path:
 
 No extra CUDA helper kernels, memsets, or memcpys from the HGDN block path
 itself appeared in the isolated launch-count region.
+
+## CTA-width experiment
+
+The default kernel build remains `THREADS=128`. A bounded local compile/test
+trial with `HGDN_THREADS=256` preserved eager parity and the one-forward /
+one-backward launch contract, but it was clearly worse on the local `sm_89`
+helper:
+
+| `HGDN_THREADS` | `B=1,T=512` fwd+bwd | `B=2,T=512` fwd+bwd | `B=1,T=2048` fwd+bwd | Result |
+| ---: | ---: | ---: | ---: | --- |
+| `128` | about `7.45 ms` | about `8.56 ms` | about `29.27 ms` | live default |
+| `256` | `11.45 ms` | `14.91 ms` | `34.70 ms` | reject locally |
+
+Local conclusion:
+
+- keep `THREADS=128` as the default local/H100 starting point
+- keep `HGDN_THREADS` exposed so H100-specific CTA-width tuning can happen
+  without hand-editing the CUDA source
 
 ## Trainer compile smoke
 

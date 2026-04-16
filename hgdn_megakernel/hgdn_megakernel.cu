@@ -40,8 +40,14 @@ constexpr int MAX_H = 16;
 constexpr int MAX_DK = 64;
 constexpr int MAX_DV = 64;
 constexpr int MAX_K = 8;
-constexpr int THREADS = 128;
 constexpr int WARP_SIZE = 32;
+#ifndef HGDN_THREADS
+#define HGDN_THREADS 128
+#endif
+constexpr int THREADS = HGDN_THREADS;
+static_assert(
+    THREADS % WARP_SIZE == 0,
+    "HGDN megakernel requires THREADS to be a multiple of warp size.");
 constexpr int WARPS_PER_BLOCK = THREADS / WARP_SIZE;
 constexpr int GEMM_TILE = 16;
 constexpr int GEMM_ATB_BLOCK_SPLIT_M_THRESHOLD = 2048;

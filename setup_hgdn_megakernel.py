@@ -4,6 +4,7 @@ Usage:
   conda run -s --name pg python setup_hgdn_megakernel.py build_ext --inplace
 
 Optional compile-time tuning:
+  HGDN_THREADS=256 conda run -s --name pg python setup_hgdn_megakernel.py build_ext --inplace
   HGDN_REC_V_TILE=16 conda run -s --name pg python setup_hgdn_megakernel.py build_ext --inplace
   HGDN_REC_CHUNK_T=16 conda run -s --name pg python setup_hgdn_megakernel.py build_ext --inplace
 """
@@ -44,6 +45,10 @@ nvcc_args = [
     "--expt-extended-lambda",
     "-lineinfo",
 ]
+
+threads = os.environ.get("HGDN_THREADS")
+if threads:
+    nvcc_args.append(f"-DHGDN_THREADS={int(threads)}")
 
 rec_v_tile = os.environ.get("HGDN_REC_V_TILE")
 if rec_v_tile:
