@@ -955,8 +955,7 @@ __global__ void hgdn_forward_bf16_kernel(
     bf16* __restrict__ beta,
     bf16* __restrict__ g_out,
     bf16* __restrict__ o_raw,
-    bf16* __restrict__ o_norm,
-    bf16* __restrict__ z,
+    bf16* __restrict__ z_tmp,
     float* __restrict__ state_ckpt,
     int B,
     int T,
@@ -1145,14 +1144,14 @@ __global__ void hgdn_forward_bf16_kernel(
       int p = h * Dv + j;
       float o_value = b2f(o_raw[idx4(b, t, h, j, T, H, Dv)]) * inv_rms;
       float gate_value = silu(b2f(g_out[idx3(b, t, p, T, P)]));
-      o_norm[idx4(b, t, h, j, T, H, Dv)] = f2b(o_value);
-      z[idx3(b, t, p, T, P)] = f2b(o_value * gate_value);
+      z_tmp[idx3(b, t, p, T, P)] = f2b(o_value * gate_value);
     }
     __syncthreads();
   }
   grid.sync();
 
-  phase_gemm_abt_store_bf16(z, w_out, y, static_cast<int>(BT), P, D, shmem);
+  phase_gemm_abt_store_bf16(
+      z_tmp, w_out, y, static_cast<int>(BT), P, D, shmem);
 }
 
 __global__ void hgdn_backward_bf16_kernel(
@@ -1179,8 +1178,6 @@ __global__ void hgdn_backward_bf16_kernel(
     const bf16* __restrict__ beta,
     const bf16* __restrict__ g_out,
     const bf16* __restrict__ o_raw,
-    const bf16* __restrict__ o_norm,
-    const bf16* __restrict__ z,
     const float* __restrict__ state_ckpt,
     float* __restrict__ grad_q_norm_accum,
     float* __restrict__ grad_k_norm_accum,
@@ -1236,10 +1233,33 @@ __global__ void hgdn_backward_bf16_kernel(
   }
   grid.sync();
 
-  phase_gemm_ab_store_bf16(grad_y, w_out, grad_z, static_cast<int>(BT), D, P, shmem);
+  for (int64_t job = blockIdx.x; job < BT * H; job += gridDim.x) {
+    int h = job % H;
+    int64_t bt = job / H;
+    int t = bt % T;
+    int b = bt / T;
+
+    float sum_sq = 0.0f;
+    for (int j = threadIdx.x; j < Dv; j += blockDim.x) {
+      float o_value = b2f(o_raw[idx4(b, t, h, j, T, H, Dv)]);
+      sum_sq += o_value * o_value;
+    }
+    sum_sq = block_sum(sum_sq, shmem);
+    float inv_rms = rsqrtf(sum_sq / static_cast<float>(Dv) + EPS);
+    for (int j = threadIdx.x; j < Dv; j += blockDim.x) {
+      int p = h * Dv + j;
+      float o_value = b2f(o_raw[idx4(b, t, h, j, T, H, Dv)]) * inv_rms;
+      float gate_value = silu(b2f(g_out[idx3(b, t, p, T, P)]));
+      grad_z[idx3(b, t, p, T, P)] = f2b(o_value * gate_value);
+    }
+    __syncthreads();
+  }
   grid.sync();
   phase_gemm_aT_b_store_bf16(
-      grad_y, z, grad_w_out, static_cast<int>(BT), D, P, shmem);
+      grad_y, grad_z, grad_w_out, static_cast<int>(BT), D, P, shmem);
+  grid.sync();
+  phase_gemm_ab_store_bf16(
+      grad_y, w_out, grad_z, static_cast<int>(BT), D, P, shmem);
   grid.sync();
 
   for (int64_t job = blockIdx.x; job < BT * H; job += gridDim.x) {
@@ -1249,22 +1269,26 @@ __global__ void hgdn_backward_bf16_kernel(
     int b = bt / T;
 
     float sum_sq = 0.0f;
+    for (int j = threadIdx.x; j < Dv; j += blockDim.x) {
+      float o_value = b2f(o_raw[idx4(b, t, h, j, T, H, Dv)]);
+      sum_sq += o_value * o_value;
+    }
+    sum_sq = block_sum(sum_sq, shmem);
+    float inv_rms = rsqrtf(sum_sq / static_cast<float>(Dv) + EPS);
     float dot_go = 0.0f;
     for (int j = threadIdx.x; j < Dv; j += blockDim.x) {
       int p = h * Dv + j;
       float o_value = b2f(o_raw[idx4(b, t, h, j, T, H, Dv)]);
-      float on_value = b2f(o_norm[idx4(b, t, h, j, T, H, Dv)]);
-      float gate_value = b2f(g_out[idx3(b, t, p, T, P)]);
+      float on_value = o_value * inv_rms;
+      float gate_input = b2f(g_out[idx3(b, t, p, T, P)]);
       float dz_value = b2f(grad_z[idx3(b, t, p, T, P)]);
-      float grad_norm = dz_value * silu(gate_value);
+      float grad_norm = dz_value * silu(gate_input);
       grad_g_out[idx3(b, t, p, T, P)] =
-          f2b(dz_value * on_value * dsilu(gate_value));
-      sum_sq += o_value * o_value;
+          f2b(dz_value * on_value * dsilu(gate_input));
       dot_go += grad_norm * o_value;
       grad_o_raw[idx4(b, t, h, j, T, H, Dv)] = f2b(grad_norm);
     }
-    block_sum2(sum_sq, dot_go, shmem);
-    float inv_rms = rsqrtf(sum_sq / static_cast<float>(Dv) + EPS);
+    dot_go = block_sum(dot_go, shmem);
     float coeff =
         inv_rms * inv_rms * inv_rms * dot_go / static_cast<float>(Dv);
     for (int j = threadIdx.x; j < Dv; j += blockDim.x) {
@@ -1801,8 +1825,7 @@ std::vector<torch::Tensor> forward(
   auto beta = torch::empty({B, T, H}, bf16_options);
   auto g_out = torch::empty({B, T, P}, bf16_options);
   auto o_raw = torch::empty({B, T, H, Dv}, bf16_options);
-  auto o_norm = torch::empty({B, T, H, Dv}, bf16_options);
-  auto z = torch::empty({B, T, P}, bf16_options);
+  auto z_tmp = torch::empty({B, T, P}, bf16_options);
   auto state_ckpt = torch::empty({B, NChunks, H, Dk, Dv}, f32_options);
 
   int iB = static_cast<int>(B);
@@ -1844,8 +1867,7 @@ std::vector<torch::Tensor> forward(
   bf16* beta_ptr = bptr(beta);
   bf16* g_out_ptr = bptr(g_out);
   bf16* o_raw_ptr = bptr(o_raw);
-  bf16* o_norm_ptr = bptr(o_norm);
-  bf16* z_ptr = bptr(z);
+  bf16* z_tmp_ptr = bptr(z_tmp);
   float* state_ckpt_ptr = state_ckpt.data_ptr<float>();
 
   void* args[] = {
@@ -1872,8 +1894,7 @@ std::vector<torch::Tensor> forward(
       &beta_ptr,
       &g_out_ptr,
       &o_raw_ptr,
-      &o_norm_ptr,
-      &z_ptr,
+      &z_tmp_ptr,
       &state_ckpt_ptr,
       &iB,
       &iT,
@@ -1896,7 +1917,7 @@ std::vector<torch::Tensor> forward(
   return {
       y,         qkv,      pre,      q_norm,   k_norm,   v_post,
       inv_q,     inv_k,    g_pre,    beta_pre, g_log,    beta,
-      g_out,     o_raw,    o_norm,   z,        state_ckpt,
+      g_out,     o_raw,    state_ckpt,
   };
 }
 
@@ -1924,8 +1945,6 @@ std::vector<torch::Tensor> backward(
     torch::Tensor beta,
     torch::Tensor g_out,
     torch::Tensor o_raw,
-    torch::Tensor o_norm,
-    torch::Tensor z,
     torch::Tensor state_ckpt,
     int64_t H,
     int64_t Dk,
@@ -2010,8 +2029,6 @@ std::vector<torch::Tensor> backward(
   const bf16* beta_ptr = cbptr(beta);
   const bf16* g_out_ptr = cbptr(g_out);
   const bf16* o_raw_ptr = cbptr(o_raw);
-  const bf16* o_norm_ptr = cbptr(o_norm);
-  const bf16* z_ptr = cbptr(z);
   const float* state_ckpt_ptr = state_ckpt.data_ptr<float>();
 
   float* grad_q_norm_accum_ptr = grad_q_norm_accum.data_ptr<float>();
@@ -2043,8 +2060,8 @@ std::vector<torch::Tensor> backward(
       &A_log_ptr,        &dt_bias_ptr,     &qkv_ptr,          &pre_ptr,
       &q_norm_ptr,       &k_norm_ptr,      &v_post_ptr,       &inv_q_ptr,
       &inv_k_ptr,        &g_pre_ptr,       &beta_pre_ptr,     &g_log_ptr,
-      &beta_ptr,         &g_out_ptr,       &o_raw_ptr,          &o_norm_ptr,
-      &z_ptr,            &state_ckpt_ptr,  &grad_q_norm_accum_ptr,
+      &beta_ptr,         &g_out_ptr,       &o_raw_ptr,        &state_ckpt_ptr,
+      &grad_q_norm_accum_ptr,
       &grad_k_norm_accum_ptr,              &grad_g_log_accum_ptr,
       &grad_beta_accum_ptr,                &grad_x_accum_ptr,
       &grad_x_ptr,       &grad_w_qkv_ptr,  &grad_w_a_ptr,       &grad_w_b_ptr,

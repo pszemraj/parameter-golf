@@ -253,7 +253,7 @@ _HGDN_MEGAKERNEL_V1_LIB.define(
     ") -> ("
     "Tensor y, Tensor qkv, Tensor pre, Tensor q_norm, Tensor k_norm, Tensor v_post, "
     "Tensor inv_q, Tensor inv_k, Tensor g_pre, Tensor beta_pre, Tensor g_log, "
-    "Tensor beta, Tensor g_out, Tensor o_raw, Tensor o_norm, Tensor z, Tensor state_ckpt)"
+    "Tensor beta, Tensor g_out, Tensor o_raw, Tensor state_ckpt)"
 )
 _HGDN_MEGAKERNEL_V1_LIB.define(
     "run_backward("
@@ -261,7 +261,7 @@ _HGDN_MEGAKERNEL_V1_LIB.define(
     "Tensor w_out, Tensor conv_w, Tensor A_log, Tensor dt_bias, Tensor qkv, Tensor pre, "
     "Tensor q_norm, Tensor k_norm, Tensor v_post, Tensor inv_q, Tensor inv_k, "
     "Tensor g_pre, Tensor beta_pre, Tensor g_log, Tensor beta, Tensor g_out, "
-    "Tensor o_raw, Tensor o_norm, Tensor z, Tensor state_ckpt, int n_heads, "
+    "Tensor o_raw, Tensor state_ckpt, int n_heads, "
     "int head_k_dim, int head_v_dim, int conv_size, bool allow_neg_eigval"
     ") -> ("
     "Tensor dx, Tensor dw_qkv, Tensor dw_a, Tensor dw_b, Tensor dw_g, Tensor dw_out, "
@@ -345,8 +345,6 @@ def _run_megakernel_backward(
     beta: Tensor,
     g_out: Tensor,
     o_raw: Tensor,
-    o_norm: Tensor,
-    z: Tensor,
     state_ckpt: Tensor,
     n_heads: int,
     head_k_dim: int,
@@ -385,8 +383,6 @@ def _run_megakernel_backward(
             beta,
             g_out,
             o_raw,
-            o_norm,
-            z,
             state_ckpt,
             int(n_heads),
             int(head_k_dim),
@@ -495,8 +491,6 @@ def _hgdn_megakernel_run_backward_cpu(
     beta: Tensor,
     g_out: Tensor,
     o_raw: Tensor,
-    o_norm: Tensor,
-    z: Tensor,
     state_ckpt: Tensor,
     n_heads: int,
     head_k_dim: int,
@@ -529,8 +523,6 @@ def _hgdn_megakernel_run_backward_cpu(
         beta,
         g_out,
         o_raw,
-        o_norm,
-        z,
         state_ckpt,
         n_heads,
         head_k_dim,
@@ -566,8 +558,6 @@ def _hgdn_megakernel_run_backward_cuda(
     beta: Tensor,
     g_out: Tensor,
     o_raw: Tensor,
-    o_norm: Tensor,
-    z: Tensor,
     state_ckpt: Tensor,
     n_heads: int,
     head_k_dim: int,
@@ -600,8 +590,6 @@ def _hgdn_megakernel_run_backward_cuda(
         beta,
         g_out,
         o_raw,
-        o_norm,
-        z,
         state_ckpt,
         n_heads,
         head_k_dim,
@@ -651,8 +639,6 @@ def _hgdn_megakernel_run_fake(
         _meta_empty(x, (batch, seq, heads)),
         _meta_empty(x, (batch, seq, d_model)),
         _meta_empty(x, (batch, seq, heads, dv)),
-        _meta_empty(x, (batch, seq, heads, dv)),
-        _meta_empty(x, (batch, seq, d_model)),
         _meta_empty(x, (batch, n_chunks, heads, dk, dv), dtype=torch.float32),
     )
 
@@ -682,8 +668,6 @@ def _hgdn_megakernel_run_backward_fake(
     beta: Tensor,
     g_out: Tensor,
     o_raw: Tensor,
-    o_norm: Tensor,
-    z: Tensor,
     state_ckpt: Tensor,
     n_heads: int,
     head_k_dim: int,
@@ -707,8 +691,6 @@ def _hgdn_megakernel_run_backward_fake(
         beta,
         g_out,
         o_raw,
-        o_norm,
-        z,
         state_ckpt,
         n_heads,
         head_k_dim,
@@ -766,8 +748,6 @@ def _setup_hgdn_megakernel_context(
         beta,
         g_out,
         o_raw,
-        o_norm,
-        z,
         state_ckpt,
     ) = output
     ctx.set_materialize_grads(False)
@@ -794,8 +774,6 @@ def _setup_hgdn_megakernel_context(
         beta,
         g_out,
         o_raw,
-        o_norm,
-        z,
         state_ckpt,
     )
     ctx.n_heads = int(n_heads)
@@ -821,8 +799,6 @@ def _hgdn_megakernel_backward_formula(
     _grad_beta: Tensor | None,
     _grad_g_out: Tensor | None,
     _grad_o_raw: Tensor | None,
-    _grad_o_norm: Tensor | None,
-    _grad_z: Tensor | None,
     _grad_state_ckpt: Tensor | None,
 ) -> tuple[Tensor | None, ...]:
     """Backward formula for the compile-visible megakernel op."""
@@ -840,8 +816,6 @@ def _hgdn_megakernel_backward_formula(
         _grad_beta,
         _grad_g_out,
         _grad_o_raw,
-        _grad_o_norm,
-        _grad_z,
         _grad_state_ckpt,
     )
     if grad_y is None:
@@ -869,8 +843,6 @@ def _hgdn_megakernel_backward_formula(
         beta,
         g_out,
         o_raw,
-        o_norm,
-        z,
         state_ckpt,
     ) = ctx.saved_tensors
     grads = torch.ops.hgdn_megakernel_v1.run_backward(
@@ -897,8 +869,6 @@ def _hgdn_megakernel_backward_formula(
         beta,
         g_out,
         o_raw,
-        o_norm,
-        z,
         state_ckpt,
         int(ctx.n_heads),
         int(ctx.head_k_dim),

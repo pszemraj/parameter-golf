@@ -32,7 +32,10 @@
   - bf16 WMMA tensor-core path for full dense tiles on `sm_80+`
   - warp-local scalar fallback for dense edge tiles
   - forward saves only recurrence chunk-start checkpoints
+  - forward keeps `g_out` and `o_raw` but no longer saves `o_norm` or `z`
   - backward replays each chunk inside the same cooperative kernel
+  - backward recomputes output RMSNorm and gated `z` from `o_raw` and `g_out`
+    before the dense `W_out` gradient phases
   - warp-shuffle-backed CTA reductions replace the old full-block tree
     reductions in q/k norm, output RMSNorm, and backward scalar reductions
   - `REC_V_TILE=8` recurrence dot products now use all block warps instead of
@@ -205,17 +208,27 @@ The binding path now presents the HGDN block through a compile-visible
 Fresh-cache trainer smoke used:
 
 - `TORCH_LOGS=graph_breaks,recompiles`
+- `TORCHINDUCTOR_CACHE_DIR=/tmp/pg_inductor_mk_recompute`
+- `USE_WANDB=0`
+- `WANDB_WATCH=none`
 - `PERF_SKIP_FINAL_EVAL=1`
 - `COMPILE=1`
 - `COMPILE_STRATEGY=hybrid`
-- `COMPILE_WARMUP_STEPS=1`
+- `WARMUP_STEPS=1`
 - `ITERATIONS=1`
 - `TRAIN_BATCH_TOKENS=1024`
 - `TRAIN_SEQ_LEN=128`
+- `VAL_LOSS_EVERY=0`
 - `NUM_LAYERS=2`
 - `MODEL_DIM=384`
+- `MLP_MULT=3.25`
 - `GDN_RATIO=1`
 - `GDN_USE_CUDA_MEGAKERNEL=1`
+- `GDN_USE_PACKED_QKV_CONV=1`
+- `GDN_USE_PACKED_QKV_PROJ=1`
+- `GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=0`
+- `GDN_CONV_OUTPUT_CONTIGUOUS=1`
+- `GDN_CONTROL_PROJ_FP32=0`
 
 Observed trainer-path result on the local 4070 helper:
 
@@ -231,50 +244,51 @@ Representative output:
 
 ```text
 hgdn_megakernel_preflight:{"allow_jit_build": false, "arch_list": null, "loaded": true}
+launch_contract:planned_train_tokens:1024 train_batch_tokens:1024 train_seq_len:128 grad_accum_steps:8 local_batch_size:1
 compile_plan:strategy:hybrid gdn_disabled:0 gdn_megakernel_left_enabled:1 gdn_mlps_compiled:1 attn_blocks_compiled:1 model_compiled:1
-warmup_step:10/20
-warmup_step:20/20
-compile_prewarm: muon_shapes:4 rotary_modules:1
-step:1/1 train_loss:6.9398 train_time:22ms step_avg:22.30ms
-peak memory allocated: 75 MiB reserved: 92 MiB
+warmup_step:1/1
+compile_prewarm: muon_shapes:5 rotary_modules:1
+step:1/1 train_loss:6.9387 train_time:35ms step_avg:34.52ms
+peak memory allocated: 46 MiB reserved: 68 MiB
 perf_mode: skipping serialization and final roundtrip eval
 ```
 
 ## CUDA-event timing
 
 These timings are for the local `sm_89` device only.
-Unless otherwise noted, the numbers below reflect the latest rebuilt default
-`REC_V_TILE=8`, `REC_CHUNK_T=8` parity binary after the tiled-dot-helper fix.
+Unless otherwise noted, the numbers below reflect the latest rebuilt
+output-recompute checkpoint with the live defaults
+`REC_V_TILE=8`, `REC_CHUNK_T=8`.
 
 ### `B=1, T=8`
 
-- forward: `0.80384 ms`
-- forward + backward: `1.22061 ms`
+- forward: `0.78131 ms`
+- forward + backward: `1.12640 ms`
 
 ### `B=1, T=32`
 
-- forward: `0.24576 ms`
-- forward + backward: `0.84992 ms`
+- forward: `0.23654 ms`
+- forward + backward: `0.77926 ms`
 
 ### `B=1, T=128`
 
-- forward: `0.50176 ms`
-- forward + backward: `2.17498 ms`
+- forward: `0.51200 ms`
+- forward + backward: `2.10637 ms`
 
 ### `B=1, T=512`
 
-- forward: `1.54419 ms`
-- forward + backward: `8.01280 ms`
+- forward: `1.45715 ms`
+- forward + backward: `7.66566 ms`
 
 ### optional `B=2, T=512`
 
-- forward: `1.70701 ms`
-- forward + backward: `8.92211 ms`
+- forward: `1.81555 ms`
+- forward + backward: `9.11770 ms`
 
 ### optional `B=1, T=2048`
 
-- forward: `6.15936 ms`
-- forward + backward: `32.60621 ms`
+- forward: `5.38112 ms`
+- forward + backward: `31.00570 ms`
 
 ## REC_V_TILE sweep
 
@@ -301,10 +315,11 @@ Local conclusion from this bounded sweep:
   parallelism more than they save cross-tile accumulation work
 - `REC_V_TILE=8` remains the live default until H100 data says otherwise
 
-## 4070 speed comparison vs current packed HGDN CUDA path
+## Historical 4070 speed comparison vs current packed HGDN CUDA path
 
-I also benchmarked the new megakernel against the current packed `GatedDeltaNet`
-CUDA block path on the same local RTX 4070 laptop GPU.
+I also benchmarked an earlier pre-output-recompute megakernel checkpoint
+against the current packed `GatedDeltaNet` CUDA block path on the same local
+RTX 4070 laptop GPU.
 
 Important interpretation note:
 
@@ -313,10 +328,10 @@ Important interpretation note:
 - the baseline side used the historical local `use_fla=True` path
 - the megakernel numerical contract is currently the eager HGDN path because
   local FLA still diverges materially from eager
-- some numbers in this section are older point-in-time measurements; use the
-  explicit checkpoint delta notes below when comparing newer commits
-- this comparison predates the later recurrence-tile helper generalization, so
-  use the `REC_V_TILE` sweep above for the current same-source local default
+- these numbers are kept as historical reference only
+- they predate the current output-recompute checkpoint
+- use the explicit timing table above plus the checkpoint delta notes below for
+  the current same-source local status
 
 Comparison setup:
 
@@ -417,20 +432,22 @@ Local conclusion:
   fewer global accumulations, better dense phases, or a more aggressive
   Hopper-specific implementation
 
-Latest long-sequence delta versus `cb60b32`:
+Latest output-recompute checkpoint delta versus `2babf1e`:
 
-- the new qkv-only long-`BT` CTA-local split keeps the same one-forward and
-  one-backward launch structure
-- `B=1,T=512` stayed near the old checkpoint at `7.93 ms` forward+backward
-  versus about `7.85 ms` before
-- optional `B=1,T=2048` improved from about `31.28 ms` to about `26.83 ms`
-  forward+backward in the parity harness
-- one direct packed-path comparison on the same helper moved the megakernel
-  block from about `25.48 ms` to about `23.59 ms` forward+backward at
-  `B=1,T=2048`
-- that is still far behind the current packed HGDN path on this local helper,
-  but it is the first backward-structure change on this branch that materially
-  improves the real long-sequence point instead of washing out or losing
+- the one-forward and one-backward launch structure stayed intact
+- eager parity still passed through optional `B=1,T=2048`
+- the checkpoint now drops saved `o_norm` and `z`, recomputing them in backward
+  from `o_raw` and `g_out`
+- local parity-harness forward + backward moved:
+  - `B=1,T=128`: `2.17498 ms` -> `2.10637 ms`
+  - `B=1,T=512`: `8.01280 ms` -> `7.66566 ms`
+  - `B=2,T=512`: `8.92211 ms` -> `9.11770 ms`
+  - `B=1,T=2048`: `32.60621 ms` -> `31.00570 ms`
+- the output recompute saves:
+  - `96 MiB` per GDN block at `B=32,T=2048`
+  - `384 MiB` per GDN block at `B=128,T=2048`
+- this is a real memory win and a small local long-sequence win at `B=1`, but
+  it is not yet enough to change the H100 timing-readiness label by itself
 
 ## Rejected follow-up branch
 
@@ -469,7 +486,7 @@ Rationale:
 
 - builds cleanly on the local GPU
 - parity now passes against the eager repo contract for `B=1,T=8/32/128/512`
-  and optional `B=2,T=512`
+  plus optional `B=2,T=512` and `B=1,T=2048`
 - isolated launch counting shows exactly one HGDN forward kernel launch and one HGDN backward kernel launch
 - no hidden CUDA-side copy, cast, memset, or helper kernel appears in the
   measured region

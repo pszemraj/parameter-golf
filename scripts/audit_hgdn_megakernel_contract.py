@@ -135,6 +135,30 @@ def main() -> None:
         "binding should expose the megakernel through a torch.library op instead of an eager-only autograd.Function island",
     )
 
+    binding_output_contract = (
+        "Tensor beta, Tensor g_out, Tensor o_raw, Tensor state_ckpt)" in binding
+        and "Tensor o_norm" not in binding
+        and "Tensor z, Tensor state_ckpt" not in binding
+    )
+    failures += not check(
+        "binding forward saved-tensor contract",
+        binding_output_contract,
+        "forward binding should save g_out/o_raw/state_ckpt and should not still expose saved o_norm/z tensors",
+    )
+
+    binding_backward_contract = (
+        '"Tensor g_pre, Tensor beta_pre, Tensor g_log, Tensor beta, Tensor g_out, "'
+        in binding
+        and '"Tensor o_raw, Tensor state_ckpt, int n_heads, "' in binding
+        and "ctx.save_for_backward(" in binding
+        and "o_norm" not in binding
+    )
+    failures += not check(
+        "binding backward saved-tensor contract",
+        binding_backward_contract,
+        "backward binding should consume the reduced saved-tensor set without saved o_norm/z inputs",
+    )
+
     failures += not check(
         "no fast-math in parity build",
         "--use_fast_math" not in setup and "--use_fast_math" not in binding,
@@ -186,12 +210,34 @@ def main() -> None:
         "forward/backward should be one cooperative CUDA kernel each",
     )
 
+    dense_w_out = (
+        bool(re.search(r"phase_gemm_abt_store_bf16\(\s*z_tmp,\s*w_out,\s*y", cuda))
+        and bool(
+            re.search(
+                r"phase_gemm_aT_b_store_bf16\(\s*grad_y,\s*grad_z,\s*grad_w_out",
+                cuda,
+            )
+        )
+        and bool(
+            re.search(r"phase_gemm_ab_store_bf16\(\s*grad_y,\s*w_out,\s*grad_z", cuda)
+        )
+    )
     failures += not check(
         "dense W_out inside kernel",
-        "phase_gemm_abt_store_bf16(z, w_out, y" in cuda
-        or "w_out" in cuda
-        and "dense cross-head W_out" in cuda,
-        "full-block path must handle dense cross-head output projection",
+        dense_w_out,
+        "full-block path must handle dense cross-head output projection and its gradients inside the owned CUDA path",
+    )
+
+    output_recompute = (
+        "auto z_tmp = torch::empty({B, T, P}, bf16_options);" in cuda
+        and "phase_gemm_abt_store_bf16(" in cuda
+        and "grad_z[idx3(b, t, p, T, P)] = f2b(o_value * gate_value);" in cuda
+        and "sum_sq = block_sum(sum_sq, shmem);" in cuda
+    )
+    failures += not check(
+        "output gate recompute path",
+        output_recompute,
+        "current checkpoint should recompute z/output-norm state in backward instead of saving o_norm/z from forward",
     )
 
     control_guard = (
