@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import os
 import warnings
 from pathlib import Path
@@ -128,12 +129,18 @@ def extension_status() -> dict[str, object]:
     :return dict[str, object]: Extension availability and build settings.
     """
     ext = _load_extension()
+    build_config: dict[str, object] | None = None
+    module_file = getattr(ext, "__file__", None) if ext is not None else None
+    if ext is not None and hasattr(ext, "build_config_json"):
+        build_config = json.loads(str(ext.build_config_json()))
     return {
         "loaded": ext is not None,
         "allow_jit_build": bool(
             int(os.environ.get("GDN_MEGAKERNEL_ALLOW_JIT_BUILD", "0"))
         ),
         "arch_list": os.environ.get("TORCH_CUDA_ARCH_LIST"),
+        "module_file": module_file,
+        "build_config": build_config,
         "rec_chunk_t_max": rec_chunk_t_max()
         if ext is not None
         else _REC_CHUNK_T_DEFAULT,

@@ -32,6 +32,88 @@ mixed:
 Do not extrapolate saved-state size, HBM traffic, or allocator pressure from
 `B=32` alone when the eventual question is the exact 8x bridge.
 
+## First bounded 1xH100 checkpoint
+
+The first real target-silicon validation is already complete. I inspected the
+bundle from:
+
+- `local-scratch/h100mk_1xh100.7z`
+
+Bundle provenance:
+
+- commit: `e883b9b9f187f6c92719b59fb6946a6c35fd0643`
+- branch: `exp/hgdn`
+- mode: `all`
+- target arch: `TORCH_CUDA_ARCH_LIST=9.0`
+- runtime cadence: `rec_chunk_t=8`
+- timing repeats: `3`
+
+Observed target device from the bundle:
+
+```text
+GPU_NAME=NVIDIA H100 80GB HBM3
+major=9
+minor=0
+multiProcessorCount=132
+l2CacheSize=52428800
+sharedMemPerMultiprocessor=233472
+sharedMemPerBlockOptin=232448
+regsPerMultiprocessor=65536
+warpSize=32
+maxThreadsPerMultiProcessor=2048
+cooperativeLaunch=1
+scope=target_h100_class
+```
+
+What that H100 bundle proved:
+
+- `setup_hgdn_megakernel.py build_ext --inplace` succeeded for `sm_90`
+- `scripts/audit_hgdn_megakernel_contract.py` passed
+- eager-contract parity passed through `B=1,T=2048`
+- isolated launch counting still showed exactly `1` forward launch and `1`
+  backward launch, with `suspicious_cuda_keys=[]`
+- parity-harness H100 timing at `B=1,T=2048` was:
+  - forward `8.90 ms`
+  - forward + backward `37.21 ms`
+- bounded trainer smoke completed all `5` steps with:
+  - `compile_plan:strategy:hybrid gdn_disabled:0 gdn_megakernel_left_enabled:7`
+  - `step_avg:10232.29 ms`
+  - peak memory `17447 MiB` allocated, `17726 MiB` reserved
+
+What that H100 bundle did not prove:
+
+- it did not resolve the eager-vs-FLA recurrence mismatch
+- it did not make the branch ready for paid H100 timing claims
+- it did not come from a fully producer-grade helper yet
+
+The operational caveat is important. That first bundle came from `e883b9b`,
+before three helper fixes landed:
+
+1. archive-on-failure was missing, so failed remote runs were not guaranteed to
+   return a `.7z` bundle
+2. the helper did not yet hard-refuse
+   `GDN_MEGAKERNEL_ALLOW_JIT_BUILD=1`, so a polluted shell could have changed
+   the run contract
+3. the bundle did not yet record compiled binary provenance such as
+   `THREADS`, `REC_V_TILE`, `REC_CHUNK_T_MAX`, and
+   `GEMM_ATB_BLOCK_SPLIT_M_THRESHOLD`
+
+Current HEAD fixes those gaps:
+
+- the H100 helper now archives once on both success and failure through an
+  `EXIT` trap
+- the helper now hard-refuses any nonzero
+  `GDN_MEGAKERNEL_ALLOW_JIT_BUILD`
+- `extension_status()` now reports `module_file` and parsed
+  `build_config_json()`, and the helper writes that into both
+  `metadata.txt` and `bundle_manifest.json`
+
+Status after that first H100 bundle is therefore:
+
+- **ready for H100 compile/parity against eager**
+- **not ready for H100 timing claims**
+- **not yet validated as a drop-in replacement for a historically FLA-trained winner**
+
 Approximate saved forward tensors per GDN block at `B=128,T=2048`:
 
 | Tensor group | Bytes | MiB |
@@ -220,9 +302,9 @@ A bounded high-memory speed candidate is now also identified:
   compile/parity check if memory headroom allows it, but not safe to flip the
   live default from local `sm_89` data alone
 
-That makes the next validation gate straightforward:
+That makes the current rerun gate straightforward:
 
-- bounded `1xH100` compile/parity on the current default checkpoint
+- rerun the bounded `1xH100` helper from current HEAD, not from `e883b9b`
 - helper command:
   `scripts/run_h100_single_gpu_hgdn_megakernel.sh all`
 - helper Python runtime selection is now portable:
@@ -230,21 +312,21 @@ That makes the next validation gate straightforward:
   - else plain `python3` / `python`
 - structured launcher:
   `python scripts/hgdn.py h100-megakernel all --offline`
-- helper bundle behavior:
-  - set `MK_OUTPUT_DIR=/path/to/output_dir`
+- helper bundle behavior now includes:
+  - `MK_OUTPUT_DIR=/path/to/output_dir`
   - optional explicit archive path:
     `MK_ARCHIVE_OUTPUT=/path/to/output_dir.7z`
-  - the structured launcher also accepts `--mk-output-dir` and
-    `--mk-archive-output`
-  - the helper records `build.log`, `audit.log`, `parity.log`,
-    `trainer_smoke.log` when present, plus `commands.sh`, `metadata.txt`, and
-    `bundle_manifest.json`
-  - `metadata.txt` and `bundle_manifest.json` record commit/branch/host/time
-    provenance for retrieval-side analysis
-  - the helper archives that stage directory with `py7zr` before returning
-- then one narrow `1xH100` timing sanity comparing `rec_chunk_t=8` against the
-  existing `rec_chunk_t=4` candidate
-- do not upgrade the label to “ready for H100 timing” from local helper data
+  - `build.log`, `audit.log`, `parity.log`, `trainer_smoke.log` when present,
+    plus `commands.sh`, `metadata.txt`, and `bundle_manifest.json`
+  - archive-on-failure as well as archive-on-success
+  - `bundle_exit_status`
+  - `extension_status_json`
+  - compiled binary provenance via `build_config_json()`
+- after the corrected default rerun, do at most one narrow `1xH100` timing
+  sanity comparing `rec_chunk_t=8` against the existing `rec_chunk_t=4`
+  candidate
+- do not upgrade the label to “ready for H100 timing” until the corrected rerun
+  passes and the next structural bottleneck branch lands
 
 ## Save-vs-recompute decisions
 

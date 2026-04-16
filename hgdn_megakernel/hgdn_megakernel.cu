@@ -2124,11 +2124,23 @@ int64_t rec_chunk_t_max() {
   return REC_CHUNK_T_MAX;
 }
 
+std::string build_config_json() {
+  std::ostringstream out;
+  out << "{"
+      << "\"threads\":" << THREADS << ","
+      << "\"rec_v_tile\":" << REC_V_TILE << ","
+      << "\"rec_chunk_t_max\":" << REC_CHUNK_T_MAX << ","
+      << "\"gemm_atb_split_m_threshold\":"
+      << GEMM_ATB_BLOCK_SPLIT_M_THRESHOLD << "}";
+  return out.str();
+}
+
 }  // namespace
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("device_report", &device_report_string);
   m.def("rec_chunk_t_max", &rec_chunk_t_max);
+  m.def("build_config_json", &build_config_json);
   m.def("forward", &forward);
   m.def("backward", &backward);
 }

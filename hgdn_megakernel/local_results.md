@@ -19,6 +19,91 @@
   `python hgdn_megakernel/test_megakernel.py --include-b1-t2048`
 - Correctness build note: the current parity binary removes `--use_fast_math`
 
+## First H100 checkpoint
+
+The first real bounded `1xH100` bundle is already complete and was inspected
+directly from:
+
+- `local-scratch/h100mk_1xh100.7z`
+
+Bundle provenance:
+
+- commit: `e883b9b9f187f6c92719b59fb6946a6c35fd0643`
+- branch: `exp/hgdn`
+- mode: `all`
+- target arch: `TORCH_CUDA_ARCH_LIST=9.0`
+- runtime cadence: `rec_chunk_t=8`
+- timing repeats: `3`
+
+Observed target device from the bundle:
+
+```text
+GPU_NAME=NVIDIA H100 80GB HBM3
+major=9
+minor=0
+multiProcessorCount=132
+l2CacheSize=52428800
+sharedMemPerMultiprocessor=233472
+sharedMemPerBlockOptin=232448
+regsPerMultiprocessor=65536
+warpSize=32
+maxThreadsPerMultiProcessor=2048
+cooperativeLaunch=1
+scope=target_h100_class
+```
+
+What that first H100 bundle proved:
+
+- `setup_hgdn_megakernel.py build_ext --inplace` succeeded for `sm_90`
+- `scripts/audit_hgdn_megakernel_contract.py` passed
+- eager-contract parity passed through `B=1,T=2048`
+- isolated launch counting still showed exactly `1` forward launch and `1`
+  backward launch, with `suspicious_cuda_keys=[]`
+- parity-harness H100 timing at `B=1,T=2048` was:
+  - forward `8.90 ms`
+  - forward + backward `37.21 ms`
+- bounded trainer smoke completed all `5` steps with:
+  - `compile_plan:strategy:hybrid gdn_disabled:0 gdn_megakernel_left_enabled:7`
+  - `step_avg:10232.29 ms`
+  - peak memory `17447 MiB` allocated, `17726 MiB` reserved
+
+What it did not prove:
+
+- it did not resolve the eager-vs-FLA recurrence mismatch
+- it did not make the branch ready for paid H100 timing claims
+- it did not come from a fully producer-grade helper yet
+
+The important operational caveat is that the first bundle was produced from
+`e883b9b`, before three helper fixes landed:
+
+1. archive-on-failure was missing, so failed remote runs were not guaranteed to
+   produce a `.7z` bundle
+2. the helper did not yet hard-refuse
+   `GDN_MEGAKERNEL_ALLOW_JIT_BUILD=1`, so a polluted shell could have turned a
+   remote validation into a JIT-rescue run
+3. the bundle did not yet record compiled binary provenance such as
+   `THREADS`, `REC_V_TILE`, `REC_CHUNK_T_MAX`, and
+   `GEMM_ATB_BLOCK_SPLIT_M_THRESHOLD`
+
+Current HEAD fixes those gaps:
+
+- the H100 helper now archives once on both success and failure through an
+  `EXIT` trap
+- the helper now hard-refuses any nonzero
+  `GDN_MEGAKERNEL_ALLOW_JIT_BUILD`
+- `extension_status()` now reports `module_file` and parsed
+  `build_config_json()`, and the helper writes that into both
+  `metadata.txt` and `bundle_manifest.json`
+
+Interpretation:
+
+- the first H100 spend was still worth doing and validated the eager-contract
+  megakernel path on target silicon
+- the next H100 rerun should be done from the current helper, not from
+  `e883b9b`
+- that rerun is a verification rerun with honest bundle provenance, not a reset
+  of the plan
+
 ## Branch direction
 
 - Branch rule as of 2026-04-15: old HGDN sidecar kernels are retired for new
@@ -310,12 +395,15 @@ model math while allowing same-build cadence sweeps up to the compiled max.
 The high-memory candidate remains `rec_chunk_t=4`, which doubles the number of
 saved recurrence checkpoints and cuts the within-chunk replay span in half.
 
-Same-build repeated timing summary on the local `sm_89` helper:
+The earlier same-build local checkpoint was what originally justified carrying
+`rec_chunk_t=4` forward as a narrow H100 candidate. After the helper hardening
+pass, I reran the current source locally with `--timing-repeats 5` for both
+runtime cadences:
 
-| Runtime cadence | `B=1,T=128` median fwd+bwd | `B=1,T=512` median fwd+bwd | `B=2,T=512` median fwd+bwd | `B=1,T=2048` median fwd+bwd | Notes |
-| --- | ---: | ---: | ---: | ---: | --- |
-| default `rec_chunk_t=8` | `2.45 ms` | `9.15 ms` | `9.11 ms` | `30.73 ms` | current same-build default run |
-| runtime `rec_chunk_t=4` | `2.20 ms` | `8.16 ms` | `8.94 ms` | `26.19 ms` | same binary, runtime override only |
+| Runtime cadence | `B=1,T=512` median fwd+bwd | `B=1,T=2048` median fwd+bwd | `B=1,T=2048` min-max fwd+bwd | Notes |
+| --- | ---: | ---: | ---: | --- |
+| default `rec_chunk_t=8` | `9.54 ms` | `68.79 ms` | `59.20-69.94 ms` | current-source rerun, very noisy |
+| runtime `rec_chunk_t=4` | `8.81 ms` | `38.20 ms` | `22.88-61.90 ms` | current-source rerun, still faster but also noisy |
 
 Memory cost of the same variant:
 
@@ -329,8 +417,9 @@ Local conclusion:
 
 - runtime-selectable cadence works on the same compiled binary and preserves the
   single-kernel forward/backward contract
-- `rec_chunk_t=4` remains a real speed-vs-memory trade; it improved every
-  measured helper case on the same build, especially the long `T=2048` point
+- `rec_chunk_t=4` still looks directionally better than `8` on the current
+  source, but the local 4070 timing is now noisy enough that it should only be
+  used to justify one narrow H100 follow-up, not a stronger conclusion
 - the checkpoint-state increase is still large enough that `rec_chunk_t=4`
   should stay a bounded H100 compile/parity candidate for now, not the new live
   default
@@ -489,6 +578,8 @@ Important interpretation note:
   local FLA still diverges materially from eager
 - these numbers are kept as historical reference only
 - they predate the current pre-drop checkpoint
+- they also predate the real `1xH100` bundle from `e883b9b` and the later
+  helper hardening work
 - use the explicit timing table above plus the checkpoint delta notes below for
   the current same-source local status
 

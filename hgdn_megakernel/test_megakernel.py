@@ -536,7 +536,7 @@ def main() -> None:
     if not status["loaded"]:
         raise RuntimeError(
             "HGDN megakernel extension is not loaded. Build it with "
-            "`conda run -s --name pg python setup_hgdn_megakernel.py build_ext --inplace` "
+            "`python setup_hgdn_megakernel.py build_ext --inplace` "
             "or enable `GDN_MEGAKERNEL_ALLOW_JIT_BUILD=1`."
         )
     if args.rec_chunk_t is not None:

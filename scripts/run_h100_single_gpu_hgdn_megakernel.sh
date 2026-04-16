@@ -64,6 +64,7 @@ Important notes:
 Environment overrides:
   PYTHON_BIN                Explicit Python executable to use.
   TORCH_CUDA_ARCH_LIST      Defaults to 9.0.
+  GDN_MEGAKERNEL_ALLOW_JIT_BUILD Must remain 0 for this helper.
   GDN_MEGAKERNEL_REC_CHUNK_T Defaults to 8.
   MK_TIMING_REPEATS         Defaults to 3.
   MK_CASES_DIR              Defaults to hgdn_megakernel/cases.
@@ -126,6 +127,15 @@ git_commit="$(git rev-parse HEAD)"
 git_branch="$(git rev-parse --abbrev-ref HEAD)"
 host_name="$(hostname)"
 timestamp_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+allow_jit_build="${GDN_MEGAKERNEL_ALLOW_JIT_BUILD:-0}"
+_mk_bundle_done=0
+_mk_exit_status=0
+
+if [[ "${allow_jit_build}" != "0" ]]; then
+    echo "Refusing H100 helper run with GDN_MEGAKERNEL_ALLOW_JIT_BUILD=${allow_jit_build}" >&2
+    exit 1
+fi
+export GDN_MEGAKERNEL_ALLOW_JIT_BUILD=0
 
 mkdir -p "${output_dir}"
 : > "${commands_file}"
@@ -140,6 +150,7 @@ mk_cases_dir=${cases_dir}
 torchinductor_cache_dir=${trainer_cache_dir}
 mk_archive_output=${archive_output}
 python_cmd=${python_cmd_rendered% }
+gdn_megakernel_allow_jit_build=${allow_jit_build}
 git_commit=${git_commit}
 git_branch=${git_branch}
 host_name=${host_name}
@@ -239,7 +250,9 @@ build_bundle() {
         "${git_commit}" \
         "${git_branch}" \
         "${host_name}" \
-        "${timestamp_utc}" <<'PY'
+        "${timestamp_utc}" \
+        "${_mk_exit_status}" \
+        "${metadata_file}" <<'PY'
 from __future__ import annotations
 
 import json
@@ -257,7 +270,8 @@ cases_dir = sys.argv[8]
 trainer_cache_dir = sys.argv[9]
 archive_output = sys.argv[10]
 commands_file = Path(sys.argv[11]).name
-metadata_file = Path(sys.argv[12]).name
+metadata_path = Path(sys.argv[12])
+metadata_file = metadata_path.name
 torch_logs = sys.argv[13]
 iterations = int(sys.argv[14])
 compile_warmup_steps = int(sys.argv[15])
@@ -269,16 +283,35 @@ git_commit = sys.argv[20]
 git_branch = sys.argv[21]
 host_name = sys.argv[22]
 timestamp_utc = sys.argv[23]
+exit_status = int(sys.argv[24])
+metadata_path = Path(sys.argv[25])
 
 logs = sorted(
     path.name for path in bundle_dir.glob("*.log") if path.is_file()
 )
+extension_status = None
+try:
+    from hgdn_megakernel import extension_status as get_extension_status
+
+    extension_status = get_extension_status()
+except Exception as exc:  # pragma: no cover - best-effort bundle metadata
+    extension_status = {"error": str(exc), "loaded": False}
+
+with metadata_path.open("a", encoding="utf-8") as fh:
+    fh.write(f"bundle_exit_status={exit_status}\n")
+    if extension_status is not None:
+        fh.write(
+            "extension_status_json="
+            + json.dumps(extension_status, sort_keys=True)
+            + "\n"
+        )
 
 manifest = {
     "mode": mode,
     "run_prefix": run_prefix,
     "trainer_run_id": trainer_run_id,
     "archive_output": archive_output,
+    "exit_status": exit_status,
     "paths": {
         "commands": commands_file,
         "metadata": metadata_file,
@@ -298,6 +331,7 @@ manifest = {
         "val_loss_every": val_loss_every,
         "train_log_every": train_log_every,
     },
+    "extension_status": extension_status,
     "provenance": {
         "git_commit": git_commit,
         "git_branch": git_branch,
@@ -317,6 +351,14 @@ PY
     echo "bundle_archive=${archive_output}"
 }
 
+build_bundle_once() {
+    if [[ "${_mk_bundle_done}" == "1" ]]; then
+        return 0
+    fi
+    _mk_bundle_done=1
+    build_bundle || true
+}
+
 run_parity() {
     echo
     echo "### HGDN megakernel parity gate"
@@ -325,10 +367,10 @@ run_parity() {
     if [[ "${torch_arch_list}" != "9.0" && "${torch_arch_list}" != "9.0a" ]]; then
         echo "note: non-H100 arch override detected; treat this as command-path/correctness validation only"
     fi
-    run_cmd "${output_dir}/build.log" env TORCH_CUDA_ARCH_LIST="${torch_arch_list}" "${python_cmd[@]}" \
+    run_cmd "${output_dir}/build.log" env GDN_MEGAKERNEL_ALLOW_JIT_BUILD=0 TORCH_CUDA_ARCH_LIST="${torch_arch_list}" "${python_cmd[@]}" \
         setup_hgdn_megakernel.py build_ext --inplace
-    run_cmd "${output_dir}/audit.log" "${python_cmd[@]}" scripts/audit_hgdn_megakernel_contract.py
-    run_cmd "${output_dir}/parity.log" "${python_cmd[@]}" hgdn_megakernel/test_megakernel.py \
+    run_cmd "${output_dir}/audit.log" env GDN_MEGAKERNEL_ALLOW_JIT_BUILD=0 "${python_cmd[@]}" scripts/audit_hgdn_megakernel_contract.py
+    run_cmd "${output_dir}/parity.log" env GDN_MEGAKERNEL_ALLOW_JIT_BUILD=0 "${python_cmd[@]}" hgdn_megakernel/test_megakernel.py \
         --case-dir "${cases_dir}" \
         --timing-repeats "${timing_repeats}" \
         --rec-chunk-t "${rec_chunk_t}" \
@@ -342,6 +384,7 @@ run_trainer_smoke() {
     echo "run_id=${trainer_run_id} arch_list=${torch_arch_list} rec_chunk_t=${rec_chunk_t}"
     echo "output_dir=${output_dir}"
     run_cmd "${output_dir}/trainer_smoke.log" env \
+        GDN_MEGAKERNEL_ALLOW_JIT_BUILD=0 \
         TORCH_CUDA_ARCH_LIST="${torch_arch_list}" \
         TORCHINDUCTOR_CACHE_DIR="${trainer_cache_dir}" \
         TORCH_LOGS="${TORCH_LOGS:-graph_breaks,recompiles}" \
@@ -373,22 +416,23 @@ run_trainer_smoke() {
         train_gpt_hybrid.py
 }
 
+if [[ "${mode}" == "help" || "${mode}" == "-h" || "${mode}" == "--help" ]]; then
+    usage
+    exit 0
+fi
+
+trap '_mk_exit_status=$?; build_bundle_once; exit ${_mk_exit_status}' EXIT
+
 case "${mode}" in
 parity)
     run_parity
-    build_bundle
     ;;
 trainer-smoke)
     run_trainer_smoke
-    build_bundle
     ;;
 all)
     run_parity
     run_trainer_smoke
-    build_bundle
-    ;;
-help|-h|--help)
-    usage
     ;;
 *)
     echo "Unknown mode: ${mode}" >&2

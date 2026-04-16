@@ -998,8 +998,7 @@ def main() -> None:
             raise RuntimeError(
                 "GDN_USE_CUDA_MEGAKERNEL=1 but the HGDN megakernel extension is "
                 "unavailable. Build it before training with "
-                "`conda run -s --name pg python setup_hgdn_megakernel.py "
-                "build_ext --inplace` or explicitly enable "
+                "`python setup_hgdn_megakernel.py build_ext --inplace` or explicitly enable "
                 "`GDN_MEGAKERNEL_ALLOW_JIT_BUILD=1`."
             )
         if megakernel_rec_chunk_t > int(megakernel_status["rec_chunk_t_max"]):
