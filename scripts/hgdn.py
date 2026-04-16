@@ -462,6 +462,16 @@ def parse_args() -> argparse.Namespace:
         choices=("parity", "trainer-smoke", "all"),
         help="Backend mode for scripts/run_h100_single_gpu_hgdn_megakernel.sh.",
     )
+    h100_megakernel.add_argument(
+        "--mk-output-dir",
+        type=Path,
+        help="Set MK_OUTPUT_DIR for the megakernel helper bundle stage directory.",
+    )
+    h100_megakernel.add_argument(
+        "--mk-archive-output",
+        type=Path,
+        help="Set MK_ARCHIVE_OUTPUT for the megakernel helper .7z bundle.",
+    )
     return parser.parse_args()
 
 
@@ -523,6 +533,12 @@ def build_env(args: argparse.Namespace) -> dict[str, str]:
         env["GDN_USE_CUDA_PACKED_CONV_ATEN_BACKWARD"] = "1"
     if args.cuda_packed_conv_aten_weight_backward:
         env["GDN_USE_CUDA_PACKED_CONV_ATEN_WEIGHT_BACKWARD"] = "1"
+    mk_output_dir = getattr(args, "mk_output_dir", None)
+    if mk_output_dir is not None:
+        env["MK_OUTPUT_DIR"] = str(mk_output_dir)
+    mk_archive_output = getattr(args, "mk_archive_output", None)
+    if mk_archive_output is not None:
+        env["MK_ARCHIVE_OUTPUT"] = str(mk_archive_output)
 
     for raw in args.set:
         key, value = parse_kv_assignment(raw)

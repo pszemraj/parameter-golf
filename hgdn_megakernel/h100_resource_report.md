@@ -229,8 +229,16 @@ That makes the next validation gate straightforward:
   `conda run -s --name pg python scripts/hgdn.py h100-megakernel all --offline`
 - helper bundle behavior:
   - set `MK_OUTPUT_DIR=/path/to/output_dir`
+  - optional explicit archive path:
+    `MK_ARCHIVE_OUTPUT=/path/to/output_dir.7z`
+  - the structured launcher also accepts `--mk-output-dir` and
+    `--mk-archive-output`
   - the helper records `build.log`, `audit.log`, `parity.log`,
-    `trainer_smoke.log` when present, plus `commands.sh` and `metadata.txt`
+    `trainer_smoke.log` when present, plus `commands.sh`, `metadata.txt`, and
+    `bundle_manifest.json`
+  - `metadata.txt` and `bundle_manifest.json` record commit/branch/host/time
+    provenance for retrieval-side analysis
+  - the helper archives that stage directory with `py7zr` before returning
 - then one narrow `1xH100` timing sanity comparing `rec_chunk_t=8` against the
   existing `rec_chunk_t=4` candidate
 - do not upgrade the label to “ready for H100 timing” from local helper data

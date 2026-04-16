@@ -68,6 +68,7 @@ Environment overrides:
   MK_TIMING_REPEATS         Defaults to 3.
   MK_CASES_DIR              Defaults to hgdn_megakernel/cases.
   MK_OUTPUT_DIR             Defaults to artifacts/hgdn_megakernel/<run>.
+  MK_ARCHIVE_OUTPUT         Defaults to <MK_OUTPUT_DIR>.7z.
   RUN_PREFIX                Base prefix for trainer smoke run ids.
   RUN_ID                    Explicit trainer smoke run id.
   TORCH_LOGS                Defaults to graph_breaks,recompiles.
@@ -83,6 +84,7 @@ Examples:
   scripts/run_h100_single_gpu_hgdn_megakernel.sh all
   TORCH_CUDA_ARCH_LIST=8.9 scripts/run_h100_single_gpu_hgdn_megakernel.sh parity
   GDN_MEGAKERNEL_REC_CHUNK_T=4 scripts/run_h100_single_gpu_hgdn_megakernel.sh trainer-smoke
+  MK_OUTPUT_DIR=/tmp/h100mk_case MK_ARCHIVE_OUTPUT=/tmp/h100mk_case.7z scripts/run_h100_single_gpu_hgdn_megakernel.sh all
   DRY_RUN=1 scripts/run_h100_single_gpu_hgdn_megakernel.sh all
 EOF
 }
@@ -101,8 +103,13 @@ trainer_run_id="${RUN_ID:-${run_prefix}_compile_parity_smoke_rc${rec_chunk_t}}"
 trainer_cache_dir="${TORCHINDUCTOR_CACHE_DIR:-/tmp/${trainer_run_id}_inductor}"
 bundle_name="${run_prefix}_${mode}_rc${rec_chunk_t}"
 output_dir="${MK_OUTPUT_DIR:-artifacts/hgdn_megakernel/${bundle_name}}"
+archive_output="${MK_ARCHIVE_OUTPUT:-${output_dir}.7z}"
 commands_file="${output_dir}/commands.sh"
 metadata_file="${output_dir}/metadata.txt"
+git_commit="$(git rev-parse HEAD)"
+git_branch="$(git rev-parse --abbrev-ref HEAD)"
+host_name="$(hostname)"
+timestamp_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 mkdir -p "${output_dir}"
 : > "${commands_file}"
@@ -115,8 +122,57 @@ gdn_megakernel_rec_chunk_t=${rec_chunk_t}
 mk_timing_repeats=${timing_repeats}
 mk_cases_dir=${cases_dir}
 torchinductor_cache_dir=${trainer_cache_dir}
+mk_archive_output=${archive_output}
+git_commit=${git_commit}
+git_branch=${git_branch}
+host_name=${host_name}
+timestamp_utc=${timestamp_utc}
 EOF
 chmod +x "${commands_file}"
+
+python_has_module() {
+    local module_name="${1:?module name required}"
+    "${python_cmd[@]}" - "${module_name}" <<'PY' >/dev/null 2>&1
+import importlib.util
+import sys
+
+raise SystemExit(0 if importlib.util.find_spec(sys.argv[1]) is not None else 1)
+PY
+}
+
+ensure_python_module() {
+    local module_name="${1:?module name required}"
+    local package_name="${2:-$module_name}"
+    if python_has_module "${module_name}"; then
+        return 0
+    fi
+    echo
+    echo ">>> install python package: ${package_name}"
+    "${python_cmd[@]}" -m pip install "${package_name}"
+}
+
+create_7z_archive() {
+    local archive_path="${1:?archive path required}"
+    local source_path="${2:?source path required}"
+    rm -f "${archive_path}"
+    mkdir -p "$(dirname "${archive_path}")"
+    "${python_cmd[@]}" - "${archive_path}" "${source_path}" <<'PY'
+from pathlib import Path
+import sys
+
+import py7zr
+
+archive_output = Path(sys.argv[1])
+source_path = Path(sys.argv[2])
+
+with py7zr.SevenZipFile(archive_output, "w") as archive:
+    archive.writeall(source_path, arcname=source_path.name)
+PY
+}
+
+if [[ "${DRY_RUN:-0}" != "1" ]]; then
+    ensure_python_module py7zr py7zr
+fi
 
 run_cmd() {
     local logfile="$1"
@@ -133,6 +189,115 @@ run_cmd() {
         set -o pipefail
         "$@" 2>&1 | tee "${logfile}"
     )
+}
+
+build_bundle() {
+    if [[ "${DRY_RUN:-0}" == "1" ]]; then
+        echo
+        echo "bundle_dir=${output_dir}"
+        echo "bundle_archive=${archive_output}"
+        return 0
+    fi
+
+    "${python_cmd[@]}" - \
+        "${output_dir}" \
+        "${mode}" \
+        "${run_prefix}" \
+        "${trainer_run_id}" \
+        "${torch_arch_list}" \
+        "${rec_chunk_t}" \
+        "${timing_repeats}" \
+        "${cases_dir}" \
+        "${trainer_cache_dir}" \
+        "${archive_output}" \
+        "${commands_file}" \
+        "${metadata_file}" \
+        "${TORCH_LOGS:-graph_breaks,recompiles}" \
+        "${ITERATIONS:-5}" \
+        "${COMPILE_WARMUP_STEPS:-2}" \
+        "${TRAIN_SEQ_LEN:-2048}" \
+        "${TRAIN_BATCH_TOKENS:-524288}" \
+        "${VAL_LOSS_EVERY:-0}" \
+        "${TRAIN_LOG_EVERY:-1}" \
+        "${git_commit}" \
+        "${git_branch}" \
+        "${host_name}" \
+        "${timestamp_utc}" <<'PY'
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+bundle_dir = Path(sys.argv[1])
+mode = sys.argv[2]
+run_prefix = sys.argv[3]
+trainer_run_id = sys.argv[4]
+torch_cuda_arch_list = sys.argv[5]
+rec_chunk_t = int(sys.argv[6])
+timing_repeats = int(sys.argv[7])
+cases_dir = sys.argv[8]
+trainer_cache_dir = sys.argv[9]
+archive_output = sys.argv[10]
+commands_file = Path(sys.argv[11]).name
+metadata_file = Path(sys.argv[12]).name
+torch_logs = sys.argv[13]
+iterations = int(sys.argv[14])
+compile_warmup_steps = int(sys.argv[15])
+train_seq_len = int(sys.argv[16])
+train_batch_tokens = int(sys.argv[17])
+val_loss_every = int(sys.argv[18])
+train_log_every = int(sys.argv[19])
+git_commit = sys.argv[20]
+git_branch = sys.argv[21]
+host_name = sys.argv[22]
+timestamp_utc = sys.argv[23]
+
+logs = sorted(
+    path.name for path in bundle_dir.glob("*.log") if path.is_file()
+)
+
+manifest = {
+    "mode": mode,
+    "run_prefix": run_prefix,
+    "trainer_run_id": trainer_run_id,
+    "archive_output": archive_output,
+    "paths": {
+        "commands": commands_file,
+        "metadata": metadata_file,
+        "logs": logs,
+    },
+    "contract": {
+        "torch_cuda_arch_list": torch_cuda_arch_list,
+        "gdn_megakernel_rec_chunk_t": rec_chunk_t,
+        "mk_timing_repeats": timing_repeats,
+        "mk_cases_dir": cases_dir,
+        "torchinductor_cache_dir": trainer_cache_dir,
+        "torch_logs": torch_logs or None,
+        "iterations": iterations,
+        "compile_warmup_steps": compile_warmup_steps,
+        "train_seq_len": train_seq_len,
+        "train_batch_tokens": train_batch_tokens,
+        "val_loss_every": val_loss_every,
+        "train_log_every": train_log_every,
+    },
+    "provenance": {
+        "git_commit": git_commit,
+        "git_branch": git_branch,
+        "host_name": host_name,
+        "timestamp_utc": timestamp_utc,
+    },
+}
+(bundle_dir / "bundle_manifest.json").write_text(
+    json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+PY
+
+    create_7z_archive "${archive_output}" "${output_dir}"
+    echo
+    echo "bundle_dir=${output_dir}"
+    echo "bundle_archive=${archive_output}"
 }
 
 run_parity() {
@@ -194,13 +359,16 @@ run_trainer_smoke() {
 case "${mode}" in
 parity)
     run_parity
+    build_bundle
     ;;
 trainer-smoke)
     run_trainer_smoke
+    build_bundle
     ;;
 all)
     run_parity
     run_trainer_smoke
+    build_bundle
     ;;
 help|-h|--help)
     usage
