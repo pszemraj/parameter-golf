@@ -318,6 +318,7 @@ def parse_args() -> argparse.Namespace:
             "Examples:\n"
             "  python scripts/hgdn.py h100-profile hybrid-eager --preset winner-20260405-19 --run-prefix h100k10a\n"
             "  python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k10a --offline\n"
+            "  python scripts/hgdn.py h100-megakernel all --offline --set GDN_MEGAKERNEL_REC_CHUNK_T=8\n"
             "  python scripts/hgdn.py local-phase1 --preset winner-20260405-19-single-contig --run-prefix rtx4070_singlecontig\n"
             "  python scripts/hgdn.py local-phase1 --preset winner-20260405-19-split-copy --run-prefix rtx4070_splitcopy\n"
             "  conda run -s --name pg python scripts/hgdn.py arch-size-screen --config configs/hgdn/winner_20260405_11_retune.toml\n"
@@ -448,6 +449,19 @@ def parse_args() -> argparse.Namespace:
         ),
         help="Backend mode for scripts/run_h100_single_gpu_hgdn_profile.sh.",
     )
+
+    h100_megakernel = subparsers.add_parser(
+        "h100-megakernel",
+        help="Run the bounded 1xH100 HGDN megakernel validation helper.",
+    )
+    add_common_args(h100_megakernel)
+    h100_megakernel.add_argument(
+        "mode",
+        nargs="?",
+        default="all",
+        choices=("parity", "trainer-smoke", "all"),
+        help="Backend mode for scripts/run_h100_single_gpu_hgdn_megakernel.sh.",
+    )
     return parser.parse_args()
 
 
@@ -572,6 +586,12 @@ def command_for_args(args: argparse.Namespace) -> list[str]:
         return [
             "bash",
             str(REPO_ROOT / "scripts" / "run_h100_single_gpu_hgdn_profile.sh"),
+            args.mode,
+        ]
+    if args.command == "h100-megakernel":
+        return [
+            "bash",
+            str(REPO_ROOT / "scripts" / "run_h100_single_gpu_hgdn_megakernel.sh"),
             args.mode,
         ]
     raise ValueError(f"Unsupported command: {args.command}")

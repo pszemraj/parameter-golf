@@ -672,6 +672,15 @@ Current status is **not** “ready for H100 timing testing” because:
 Next real-validation step:
 
 - run a bounded `1xH100` compile/parity check on this exact checkpoint
+- the repo helper for that gate is now:
+  `scripts/run_h100_single_gpu_hgdn_megakernel.sh all`
+- the structured launcher equivalent is:
+  `conda run -s --name pg python scripts/hgdn.py h100-megakernel all --offline`
+- local command-path validation of that helper on `TORCH_CUDA_ARCH_LIST=8.9`:
+  - build, static audit, parity, and isolated launch-count all completed
+  - the trainer-smoke leg reached `hgdn_megakernel_preflight` and
+    `gdn_megakernel_left_enabled:7` on the real trainer contract before local
+    compile latency dominated the helper run
 - if that passes cleanly, run one narrow `1xH100` timing sanity on:
   - live default `rec_chunk_t=8`
   - bounded speed candidate `rec_chunk_t=4`

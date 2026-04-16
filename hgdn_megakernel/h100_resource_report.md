@@ -223,6 +223,10 @@ A bounded high-memory speed candidate is now also identified:
 That makes the next validation gate straightforward:
 
 - bounded `1xH100` compile/parity on the current default checkpoint
+- helper command:
+  `scripts/run_h100_single_gpu_hgdn_megakernel.sh all`
+- structured launcher:
+  `conda run -s --name pg python scripts/hgdn.py h100-megakernel all --offline`
 - then one narrow `1xH100` timing sanity comparing `rec_chunk_t=8` against the
   existing `rec_chunk_t=4` candidate
 - do not upgrade the label to “ready for H100 timing” from local helper data
