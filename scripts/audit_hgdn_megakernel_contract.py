@@ -8,7 +8,7 @@ Run from the repository root:
 This is intentionally conservative. It does not prove numerical correctness; it
 checks for the failure modes that make a claimed megakernel experiment
 misleading: silent fallback, hidden copy/cast kernels, missing sidecar exclusion,
-and unsafe CUDA build flags for recurrent parity.
+compile-visible regressions, and unsafe CUDA build flags for recurrent parity.
 """
 
 from __future__ import annotations
@@ -115,6 +115,24 @@ def main() -> None:
         "no hidden copy/cast in autograd wrapper",
         not hidden_forward_copy and not hidden_backward_copy,
         "wrapper should validate contiguity/dtype instead of calling .contiguous()/.to() inside measured path",
+    )
+
+    custom_op_contract = (
+        all(
+            token in binding
+            for token in (
+                'torch.library.Library("hgdn_megakernel_v1", "DEF")',
+                '@torch.library.register_fake("hgdn_megakernel_v1::run")',
+                "torch.library.register_autograd(",
+                "ctx.set_materialize_grads(False)",
+            )
+        )
+        and "torch.autograd.Function" not in binding
+    )
+    failures += not check(
+        "compile-visible custom-op boundary",
+        custom_op_contract,
+        "binding should expose the megakernel through a torch.library op instead of an eager-only autograd.Function island",
     )
 
     failures += not check(

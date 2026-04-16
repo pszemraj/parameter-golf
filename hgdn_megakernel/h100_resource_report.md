@@ -42,6 +42,9 @@ The immediate parity-contract hardening pass is now complete:
 - selective/hybrid compile no longer preemptively force megakernel GDN blocks
   into eager islands; compile stats now record
   `gdn_megakernel_left_enabled`
+- the Python binding now exposes the HGDN block as a compile-visible
+  `torch.library` custom op with registered fake/autograd formulas instead of
+  an eager-only `torch.autograd.Function` island
 - trainer preflight now prints extension status and rejects
   `GDN_CONTROL_PROJ_FP32=1` before training starts in megakernel mode
 - the autograd wrapper now rejects non-contiguous or wrongly typed inputs
@@ -53,6 +56,9 @@ The immediate parity-contract hardening pass is now complete:
   helper
 - isolated launch counting still shows exactly one forward launch and one
   backward launch, with no extra CUDA-side copy or memset events
+- a fresh-cache local trainer smoke with `TORCH_LOGS=graph_breaks,recompiles`
+  and `PERF_SKIP_FINAL_EVAL=1` now completes warmup plus the real training step
+  with `gdn_disabled:0` and no HGDN-path graph-break log lines
 
 That means the honest status of this checkpoint is:
 

@@ -2,7 +2,7 @@
 
 ## Environment
 
-- Date: 2026-04-15
+- Date: 2026-04-16
 - Host: local WSL laptop helper
 - Python env: `conda run -s --name pg`
 - Build command:
@@ -181,6 +181,49 @@ Observed CUDA-side entries for the HGDN path:
 
 No extra CUDA helper kernels, memsets, or memcpys from the HGDN block path
 itself appeared in the isolated launch-count region.
+
+## Trainer compile smoke
+
+The binding path now presents the HGDN block through a compile-visible
+`torch.library` custom op rather than a local `torch.autograd.Function` island.
+
+Fresh-cache trainer smoke used:
+
+- `TORCH_LOGS=graph_breaks,recompiles`
+- `PERF_SKIP_FINAL_EVAL=1`
+- `COMPILE=1`
+- `COMPILE_STRATEGY=hybrid`
+- `COMPILE_WARMUP_STEPS=1`
+- `ITERATIONS=1`
+- `TRAIN_BATCH_TOKENS=1024`
+- `TRAIN_SEQ_LEN=128`
+- `NUM_LAYERS=2`
+- `MODEL_DIM=384`
+- `GDN_RATIO=1`
+- `GDN_USE_CUDA_MEGAKERNEL=1`
+
+Observed trainer-path result on the local 4070 helper:
+
+- preflight reported `loaded=true`
+- compile plan reported `gdn_disabled:0` and `gdn_megakernel_left_enabled:1`
+- warmup completed
+- the real training step executed
+- peak memory log completed
+- `PERF_SKIP_FINAL_EVAL=1` exited the run before artifact roundtrip/eval
+- no graph-break or recompile log lines were emitted around the HGDN block path
+
+Representative output:
+
+```text
+hgdn_megakernel_preflight:{"allow_jit_build": false, "arch_list": null, "loaded": true}
+compile_plan:strategy:hybrid gdn_disabled:0 gdn_megakernel_left_enabled:1 gdn_mlps_compiled:1 attn_blocks_compiled:1 model_compiled:1
+warmup_step:10/20
+warmup_step:20/20
+compile_prewarm: muon_shapes:4 rotary_modules:1
+step:1/1 train_loss:6.9398 train_time:22ms step_avg:22.30ms
+peak memory allocated: 75 MiB reserved: 92 MiB
+perf_mode: skipping serialization and final roundtrip eval
+```
 
 ## CUDA-event timing
 
