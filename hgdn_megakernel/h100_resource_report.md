@@ -198,6 +198,21 @@ Total saved forward state in the current checkpointed version is about
 block** at `B=128,T=2048`, instead of about **5.12 GiB** in the original
 save-heavy layout.
 
+A bounded high-memory speed candidate is now also identified:
+
+- rebuilding the same source with `REC_CHUNK_T=4` keeps the one-launch
+  forward/backward structure but doubles checkpoint count
+- that pushes saved forward state to about **1.36 GiB per GDN block** at
+  `B=32,T=2048` and about **5.45 GiB per GDN block** at `B=128,T=2048`
+- same-session local helper timing versus the restored `REC_CHUNK_T=8` default:
+  - default `REC_CHUNK_T=8`: `B=1,T=512` about `9.08 ms`,
+    `B=2,T=512` about `9.81 ms`, `B=1,T=2048` about `29.50 ms`
+  - `REC_CHUNK_T=4` pass 1: `8.09 ms`, `8.93 ms`, `23.24 ms`
+  - `REC_CHUNK_T=4` pass 2: `8.10 ms`, `8.87 ms`, `28.30 ms`
+- interpretation: promising speed-vs-memory trade, worth a bounded H100
+  compile/parity check if memory headroom allows it, but not safe to flip the
+  live default from local `sm_89` data alone
+
 ## Save-vs-recompute decisions
 
 | Saved tensor | Shape | Dtype | Bytes | If not saved | Decision |

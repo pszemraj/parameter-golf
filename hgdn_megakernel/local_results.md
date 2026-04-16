@@ -291,6 +291,40 @@ Local conclusion:
   materially reduces saved state and improves the long-sequence helper point,
   but it is still not a local proof of H100 timing quality
 
+## Chunk replay cadence experiment
+
+I also tested a higher-memory replay-cadence variant by rebuilding the same
+source with `HGDN_REC_CHUNK_T=4` instead of the live `8`.
+
+This keeps the same one-forward / one-backward launch contract and the same
+model math, but it doubles the number of saved recurrence checkpoints and cuts
+the within-chunk replay span in half.
+
+Same-session repeated timing summary on the local `sm_89` helper:
+
+| Build | `B=1,T=128` median fwd+bwd | `B=1,T=512` median fwd+bwd | `B=2,T=512` median fwd+bwd | `B=1,T=2048` median fwd+bwd | Notes |
+| --- | ---: | ---: | ---: | ---: | --- |
+| default `REC_CHUNK_T=8` | `2.41 ms` | `9.08 ms` | `9.81 ms` | `29.50 ms` | same-session rerun after restoring the default build |
+| `REC_CHUNK_T=4` pass 1 | `2.23 ms` | `8.09 ms` | `8.93 ms` | `23.24 ms` | best long-sequence sample |
+| `REC_CHUNK_T=4` pass 2 | `2.23 ms` | `8.10 ms` | `8.87 ms` | `28.30 ms` | second confirmation pass |
+
+Memory cost of the same variant:
+
+- `state_ckpt` doubles because chunk count doubles
+- saved forward state per GDN block rises from about `0.80 GiB` to about
+  `1.36 GiB` at `B=32,T=2048`
+- saved forward state per GDN block rises from about `3.20 GiB` to about
+  `5.45 GiB` at `B=128,T=2048`
+
+Local conclusion:
+
+- `REC_CHUNK_T=4` looks like a real speed-vs-memory trade rather than pure
+  noise; it beat the same-session default on every measured case
+- the long `T=2048` helper point improved materially but was less stable than
+  the medium-length points
+- the checkpoint-state increase is large enough that this should stay a bounded
+  H100 compile/parity candidate for now, not the new live default
+
 ## Rejected local variants
 
 These bounded local `sm_89` trials were architecture-faithful and stayed inside
