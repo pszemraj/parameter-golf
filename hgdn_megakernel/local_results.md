@@ -676,8 +676,17 @@ Next real-validation step:
   `scripts/run_h100_single_gpu_hgdn_megakernel.sh all`
 - the structured launcher equivalent is:
   `conda run -s --name pg python scripts/hgdn.py h100-megakernel all --offline`
+- the helper now emits a retrievable bundle directory via `MK_OUTPUT_DIR`
+  containing at least:
+  - `build.log`
+  - `audit.log`
+  - `parity.log`
+  - `trainer_smoke.log` when that leg is run
+  - `commands.sh`
+  - `metadata.txt`
 - local command-path validation of that helper on `TORCH_CUDA_ARCH_LIST=8.9`:
   - build, static audit, parity, and isolated launch-count all completed
+  - the helper bundle path itself was validated with a real local parity run
   - the trainer-smoke leg reached `hgdn_megakernel_preflight` and
     `gdn_megakernel_left_enabled:7` on the real trainer contract before local
     compile latency dominated the helper run

@@ -67,6 +67,7 @@ Environment overrides:
   GDN_MEGAKERNEL_REC_CHUNK_T Defaults to 8.
   MK_TIMING_REPEATS         Defaults to 3.
   MK_CASES_DIR              Defaults to hgdn_megakernel/cases.
+  MK_OUTPUT_DIR             Defaults to artifacts/hgdn_megakernel/<run>.
   RUN_PREFIX                Base prefix for trainer smoke run ids.
   RUN_ID                    Explicit trainer smoke run id.
   TORCH_LOGS                Defaults to graph_breaks,recompiles.
@@ -98,29 +99,54 @@ run_stamp="$(date +%Y%m%d_%H%M%S)"
 run_prefix="${RUN_PREFIX:-h100mk_${run_stamp}}"
 trainer_run_id="${RUN_ID:-${run_prefix}_compile_parity_smoke_rc${rec_chunk_t}}"
 trainer_cache_dir="${TORCHINDUCTOR_CACHE_DIR:-/tmp/${trainer_run_id}_inductor}"
+bundle_name="${run_prefix}_${mode}_rc${rec_chunk_t}"
+output_dir="${MK_OUTPUT_DIR:-artifacts/hgdn_megakernel/${bundle_name}}"
+commands_file="${output_dir}/commands.sh"
+metadata_file="${output_dir}/metadata.txt"
+
+mkdir -p "${output_dir}"
+: > "${commands_file}"
+cat > "${metadata_file}" <<EOF
+mode=${mode}
+run_prefix=${run_prefix}
+trainer_run_id=${trainer_run_id}
+torch_cuda_arch_list=${torch_arch_list}
+gdn_megakernel_rec_chunk_t=${rec_chunk_t}
+mk_timing_repeats=${timing_repeats}
+mk_cases_dir=${cases_dir}
+torchinductor_cache_dir=${trainer_cache_dir}
+EOF
+chmod +x "${commands_file}"
 
 run_cmd() {
+    local logfile="$1"
+    shift
     echo
     printf '>>> '
     printf '%q ' "$@"
     printf '\n'
+    hgdn_append_plain_command "${commands_file}" "$@"
     if [[ "${DRY_RUN:-0}" == "1" ]]; then
         return 0
     fi
-    "$@"
+    (
+        set -o pipefail
+        "$@" 2>&1 | tee "${logfile}"
+    )
 }
 
 run_parity() {
     echo
     echo "### HGDN megakernel parity gate"
     echo "arch_list=${torch_arch_list} rec_chunk_t=${rec_chunk_t} timing_repeats=${timing_repeats}"
+    echo "output_dir=${output_dir}"
     if [[ "${torch_arch_list}" != "9.0" && "${torch_arch_list}" != "9.0a" ]]; then
         echo "note: non-H100 arch override detected; treat this as command-path/correctness validation only"
     fi
-    run_cmd env TORCH_CUDA_ARCH_LIST="${torch_arch_list}" "${python_cmd[@]}" \
+    run_cmd "${output_dir}/build.log" env TORCH_CUDA_ARCH_LIST="${torch_arch_list}" "${python_cmd[@]}" \
         setup_hgdn_megakernel.py build_ext --inplace
-    run_cmd "${python_cmd[@]}" scripts/audit_hgdn_megakernel_contract.py
-    run_cmd "${python_cmd[@]}" hgdn_megakernel/test_megakernel.py \
+    run_cmd "${output_dir}/audit.log" "${python_cmd[@]}" scripts/audit_hgdn_megakernel_contract.py
+    run_cmd "${output_dir}/parity.log" "${python_cmd[@]}" hgdn_megakernel/test_megakernel.py \
         --case-dir "${cases_dir}" \
         --timing-repeats "${timing_repeats}" \
         --rec-chunk-t "${rec_chunk_t}" \
@@ -132,7 +158,8 @@ run_trainer_smoke() {
     echo
     echo "### HGDN megakernel trainer smoke"
     echo "run_id=${trainer_run_id} arch_list=${torch_arch_list} rec_chunk_t=${rec_chunk_t}"
-    run_cmd env \
+    echo "output_dir=${output_dir}"
+    run_cmd "${output_dir}/trainer_smoke.log" env \
         TORCH_CUDA_ARCH_LIST="${torch_arch_list}" \
         TORCHINDUCTOR_CACHE_DIR="${trainer_cache_dir}" \
         TORCH_LOGS="${TORCH_LOGS:-graph_breaks,recompiles}" \
