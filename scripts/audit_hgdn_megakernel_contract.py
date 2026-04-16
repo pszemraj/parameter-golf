@@ -254,6 +254,15 @@ def main() -> None:
         "current checkpoint should keep pre temporary in forward and recompute conv preactivations in backward instead of saving pre",
     )
 
+    control_tail_parallel = (
+        "atomicAdd(&grad_A_log[h]," in cuda and "atomicAdd(&grad_dt_bias[h]," in cuda
+    )
+    failures += not check(
+        "control-tail reduction parallelized",
+        control_tail_parallel,
+        "current checkpoint should accumulate grad_A_log/grad_dt_bias across the BT*H control loop instead of leaving a serialized H-job tail",
+    )
+
     control_guard = (
         "gdn_use_cuda_megakernel" in trainer
         and "gdn_control_proj_fp32" in trainer

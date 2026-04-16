@@ -68,6 +68,9 @@ The current repo-backed candidate is no longer the save-heavy version.
   SiLU derivative path
 - backward recomputes output RMSNorm and gated `z` from `o_raw` and `g_out`
   before the dense `W_out` gradient phases
+- backward now accumulates `grad_A_log` and `grad_dt_bias` across the existing
+  `BT * H` control loop instead of leaving a serialized `H=8` tail at the end
+  of the cooperative kernel
 - backward reconstructs each token-local in-chunk recurrence state from the
   chunk checkpoint instead of storing a full shared-memory `chunk_states` table
 - backward now consumes `grad_q_norm_accum`, `grad_k_norm_accum`,
@@ -155,6 +158,9 @@ One extra local finding matters for interpretation:
   additional `144 MiB` of saved forward state per GDN block at
   `B=32,T=2048`, and moved the local `B=1,T=2048` parity-harness point to
   `30.89 ms`
+- the current control-tail checkpoint keeps the same memory contract but
+  parallelizes `grad_A_log` / `grad_dt_bias` accumulation, moving the local
+  `B=1,T=2048` parity-harness point again to `29.77 ms`
 
 The main activation-state change is:
 

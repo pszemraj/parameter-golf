@@ -1630,29 +1630,27 @@ __global__ void hgdn_backward_bf16_kernel(
   }
   grid.sync();
 
+  for (int64_t h = linear_tid; h < H; h += linear_stride) {
+    grad_A_log[h] = 0.0f;
+    grad_dt_bias[h] = 0.0f;
+  }
+  grid.sync();
+
   for (int64_t idx = linear_tid; idx < BT * H; idx += linear_stride) {
     int h = idx % H;
     float exp_A = expf(A_log[h]);
     float z_value = b2f(g_pre[idx]) + dt_bias[h];
-    grad_g_pre[idx] = f2b(grad_g_log_accum[idx] * (-exp_A * sig(z_value)));
+    float sig_z = sig(z_value);
+    float grad_g_log_value = grad_g_log_accum[idx];
+    float grad_dt_value = grad_g_log_value * (-exp_A * sig_z);
+    grad_g_pre[idx] = f2b(grad_dt_value);
     float s = sig(b2f(beta_pre[idx]));
     float scale = allow_neg_eigval ? 2.0f : 1.0f;
     grad_beta_pre[idx] =
         f2b(grad_beta_accum[idx] * scale * s * (1.0f - s));
-  }
-  for (int64_t h = linear_tid; h < H; h += linear_stride) {
-    float acc_A = 0.0f;
-    float acc_dt = 0.0f;
-    float exp_A = expf(A_log[h]);
-    for (int64_t bt = 0; bt < BT; ++bt) {
-      int64_t idx = bt * H + h;
-      float z_value = b2f(g_pre[idx]) + dt_bias[h];
-      float g_value = -exp_A * softplus(z_value);
-      acc_A += grad_g_log_accum[idx] * g_value;
-      acc_dt += grad_g_log_accum[idx] * (-exp_A * sig(z_value));
-    }
-    grad_A_log[h] = acc_A;
-    grad_dt_bias[h] = acc_dt;
+    float g_value = -exp_A * softplus(z_value);
+    atomicAdd(&grad_A_log[h], grad_g_log_value * g_value);
+    atomicAdd(&grad_dt_bias[h], grad_dt_value);
   }
   grid.sync();
 

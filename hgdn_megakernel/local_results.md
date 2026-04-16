@@ -212,7 +212,7 @@ The binding path now presents the HGDN block through a compile-visible
 Fresh-cache trainer smoke used:
 
 - `TORCH_LOGS=graph_breaks,recompiles`
-- `TORCHINDUCTOR_CACHE_DIR=/tmp/pg_inductor_mk_drop_pre`
+- `TORCHINDUCTOR_CACHE_DIR=/tmp/pg_inductor_mk_grad_tail`
 - `USE_WANDB=0`
 - `WANDB_WATCH=none`
 - `PERF_SKIP_FINAL_EVAL=1`
@@ -252,7 +252,7 @@ launch_contract:planned_train_tokens:1024 train_batch_tokens:1024 train_seq_len:
 compile_plan:strategy:hybrid gdn_disabled:0 gdn_megakernel_left_enabled:1 gdn_mlps_compiled:1 attn_blocks_compiled:1 model_compiled:1
 warmup_step:1/1
 compile_prewarm: muon_shapes:5 rotary_modules:1
-step:1/1 train_loss:6.9387 train_time:41ms step_avg:40.70ms
+step:1/1 train_loss:6.9387 train_time:35ms step_avg:35.30ms
 peak memory allocated: 46 MiB reserved: 68 MiB
 perf_mode: skipping serialization and final roundtrip eval
 ```
@@ -261,38 +261,38 @@ perf_mode: skipping serialization and final roundtrip eval
 
 These timings are for the local `sm_89` device only.
 Unless otherwise noted, the numbers below reflect the latest rebuilt
-pre-drop checkpoint with the live defaults
+control-tail checkpoint with the live defaults
 `REC_V_TILE=8`, `REC_CHUNK_T=8`.
 
 ### `B=1, T=8`
 
-- forward: `0.79360 ms`
-- forward + backward: `1.13971 ms`
+- forward: `0.78746 ms`
+- forward + backward: `1.12538 ms`
 
 ### `B=1, T=32`
 
-- forward: `0.24986 ms`
-- forward + backward: `0.79155 ms`
+- forward: `0.24474 ms`
+- forward + backward: `0.76800 ms`
 
 ### `B=1, T=128`
 
-- forward: `0.64816 ms`
-- forward + backward: `2.25379 ms`
+- forward: `0.48845 ms`
+- forward + backward: `2.02957 ms`
 
 ### `B=1, T=512`
 
-- forward: `1.58720 ms`
-- forward + backward: `7.83974 ms`
+- forward: `1.50323 ms`
+- forward + backward: `7.49875 ms`
 
 ### optional `B=2, T=512`
 
-- forward: `1.66400 ms`
-- forward + backward: `8.97126 ms`
+- forward: `1.79610 ms`
+- forward + backward: `8.60365 ms`
 
 ### optional `B=1, T=2048`
 
-- forward: `5.44358 ms`
-- forward + backward: `30.88589 ms`
+- forward: `5.37395 ms`
+- forward + backward: `29.76870 ms`
 
 ## REC_V_TILE sweep
 
@@ -436,25 +436,21 @@ Local conclusion:
   fewer global accumulations, better dense phases, or a more aggressive
   Hopper-specific implementation
 
-Latest pre-drop checkpoint delta versus `e346a0c`:
+Latest control-tail checkpoint delta versus `243bda5`:
 
 - the one-forward and one-backward launch structure stayed intact
 - eager parity still passed through optional `B=1,T=2048`
-- the checkpoint now keeps conv preactivations temporary-only in forward and
-  recomputes them in backward from `qkv` and `conv_w`
+- the checkpoint now parallelizes `grad_A_log` and `grad_dt_bias` accumulation
+  across the existing `BT * H` control loop instead of leaving a serialized
+  `H=8` tail at the end of the cooperative backward kernel
 - local parity-harness forward + backward moved:
-  - `B=1,T=128`: `2.10637 ms` -> `2.25379 ms`
-  - `B=1,T=512`: `7.66566 ms` -> `7.83974 ms`
-  - `B=2,T=512`: `9.11770 ms` -> `8.97126 ms`
-  - `B=1,T=2048`: `31.00570 ms` -> `30.88589 ms`
-- the `pre` drop saves an additional:
-  - `144 MiB` per GDN block at `B=32,T=2048`
-  - `576 MiB` per GDN block at `B=128,T=2048`
-- total saved forward state is now about:
-  - `0.95 GiB` per GDN block at `B=32,T=2048`
-  - `3.78 GiB` per GDN block at `B=128,T=2048`
-- on this `sm_89` helper the near-term speed effect is mixed, but the owned
-  kernel contract and saved-state reduction both survive the change cleanly
+  - `B=1,T=128`: `2.25379 ms` -> `2.02957 ms`
+  - `B=1,T=512`: `7.83974 ms` -> `7.49875 ms`
+  - `B=2,T=512`: `8.97126 ms` -> `8.60365 ms`
+  - `B=1,T=2048`: `30.88589 ms` -> `29.76870 ms`
+- saved forward state is unchanged from `243bda5`
+- on this `sm_89` helper this is the cleanest local long-sequence win since the
+  earlier qkv-only long-`BT` dense-gradient split
 
 ## Rejected follow-up branch
 
