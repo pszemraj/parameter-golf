@@ -58,6 +58,10 @@ One extra local finding matters for interpretation:
   HGDN reference on the same saved weights and inputs, so eager remains the
   megakernel numerical contract until that separate control-path mismatch is
   resolved
+- the first cooperative split-K weight-gradient trial for `grad_w_out`,
+  `grad_w_qkv`, and `grad_w_g` stayed parity-clean and kept the one-launch
+  contract, but it was slightly slower on the local 4070 helper and was
+  therefore reverted instead of kept live
 
 The main activation-state change is:
 
@@ -261,3 +265,10 @@ If H100 parity is clean, the next speed branch should be one of:
 
 The first branch is the purist megakernel route.
 The second branch may be the faster route to a competition-worthy H100 candidate.
+
+The first split-K attempt was enough to rule out one naive design:
+
+- writing one set of fp32 partial tiles and reducing them later inside the same
+  cooperative kernel did not beat the hardened baseline on the local 4070
+- any next dense-phase rewrite needs a better ownership/scheduling story than
+  the simple partial-buffer reduction path

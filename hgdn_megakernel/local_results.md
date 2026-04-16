@@ -298,6 +298,35 @@ Local conclusion:
   fewer global accumulations, better dense phases, or a more aggressive
   Hopper-specific implementation
 
+## Rejected follow-up branch
+
+I also tried the first structural follow-up after the hardening commit:
+
+- split the backward dense weight-gradient phases over the token dimension
+  inside the same cooperative backward kernel
+- wrote fp32 partial tiles into a reusable workspace
+- reduced those partials back to `grad_w_out`, `grad_w_qkv`, and `grad_w_g`
+  inside the same single backward launch
+- eager parity still passed
+- launch count stayed at `1` forward and `1` backward
+- no extra CUDA-side helper kernels appeared
+
+Local result: not a win on this `sm_89` 4070 laptop helper, so it was reverted
+instead of kept live in the branch.
+
+Representative forward + backward timing deltas versus the hardened baseline:
+
+- `B=1,T=128`: baseline `2.12275 ms`, split-K trial `2.12787 ms`
+- `B=1,T=512`: baseline `7.84794 ms`, split-K trial `7.94010 ms`
+- `B=2,T=512`: baseline `8.92211 ms`, split-K trial `9.09414 ms`
+
+Interpretation:
+
+- the added partial-write plus reduction pass inside the cooperative kernel
+  did not pay for itself on this local GPU
+- dense weight-gradient parallelism is still the right problem to attack
+  next, but this specific split-K layout is not yet the answer
+
 ## Readiness call
 
 Current status: **ready for H100 compile/parity**
