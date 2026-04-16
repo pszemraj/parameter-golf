@@ -343,6 +343,7 @@ the local timing gate:
 | long-`BT` splitM for `grad_w_g` | one fast-looking single sample did not reproduce; repeat landed back near the committed baseline | reject |
 | long-`BT` splitM for `grad_w_out` | about `29.89 ms` at `B=1,T=2048`, worse than the live default repeated gate | reject |
 | `REC_CHUNK_T=16` | about `9.53 ms` at `B=1,T=512`, `10.69 ms` at `B=2,T=512`, and `33.98 ms` at `B=1,T=2048` | reject |
+| `REC_V_TILE=16` | parity still passed and launch count stayed `1/1`, but helper timing regressed hard: at `rec_chunk_t=8` about `13.82 ms` at `B=1,T=512` and `37.87 ms` at `B=1,T=2048`; at `rec_chunk_t=4` about `12.17 ms` and `37.81 ms` | reject |
 
 Keep these as recorded local dead ends unless a future H100-specific reason
 justifies reopening them under a different measurement contract.
