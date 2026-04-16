@@ -5,6 +5,7 @@ Usage:
 
 Optional compile-time tuning:
   HGDN_THREADS=256 conda run -s --name pg python setup_hgdn_megakernel.py build_ext --inplace
+  HGDN_GEMM_ATB_SPLIT_M_THRESHOLD=1024 conda run -s --name pg python setup_hgdn_megakernel.py build_ext --inplace
   HGDN_REC_V_TILE=16 conda run -s --name pg python setup_hgdn_megakernel.py build_ext --inplace
   HGDN_REC_CHUNK_T=16 conda run -s --name pg python setup_hgdn_megakernel.py build_ext --inplace
 """
@@ -49,6 +50,10 @@ nvcc_args = [
 threads = os.environ.get("HGDN_THREADS")
 if threads:
     nvcc_args.append(f"-DHGDN_THREADS={int(threads)}")
+
+split_m_threshold = os.environ.get("HGDN_GEMM_ATB_SPLIT_M_THRESHOLD")
+if split_m_threshold:
+    nvcc_args.append(f"-DHGDN_GEMM_ATB_SPLIT_M_THRESHOLD={int(split_m_threshold)}")
 
 rec_v_tile = os.environ.get("HGDN_REC_V_TILE")
 if rec_v_tile:

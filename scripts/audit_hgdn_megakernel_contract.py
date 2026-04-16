@@ -172,9 +172,11 @@ def main() -> None:
         token in setup
         for token in (
             'os.environ.get("HGDN_THREADS")',
+            'os.environ.get("HGDN_GEMM_ATB_SPLIT_M_THRESHOLD")',
             'os.environ.get("HGDN_REC_V_TILE")',
             'os.environ.get("HGDN_REC_CHUNK_T")',
             "-DHGDN_THREADS=",
+            "-DHGDN_GEMM_ATB_SPLIT_M_THRESHOLD=",
             "-DHGDN_REC_V_TILE=",
             "-DHGDN_REC_CHUNK_T=",
         )
@@ -182,9 +184,11 @@ def main() -> None:
         token in cuda
         for token in (
             "#ifndef HGDN_THREADS",
+            "#ifndef HGDN_GEMM_ATB_SPLIT_M_THRESHOLD",
             "#ifndef HGDN_REC_V_TILE",
             "#ifndef HGDN_REC_CHUNK_T",
             "constexpr int THREADS = HGDN_THREADS;",
+            "HGDN_GEMM_ATB_SPLIT_M_THRESHOLD",
             "constexpr int REC_V_TILE = HGDN_REC_V_TILE;",
             "constexpr int REC_CHUNK_T = HGDN_REC_CHUNK_T;",
         )
@@ -192,7 +196,7 @@ def main() -> None:
     failures += not check(
         "recurrence tile build knobs",
         tile_knobs,
-        "setup and CUDA sources should expose THREADS/REC_V_TILE/REC_CHUNK_T as explicit compile-time tuning knobs",
+        "setup and CUDA sources should expose THREADS/GEMM split threshold/REC_V_TILE/REC_CHUNK_T as explicit compile-time tuning knobs",
     )
 
     tiled_dot_helper = all(

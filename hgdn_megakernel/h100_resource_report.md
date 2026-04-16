@@ -56,9 +56,10 @@ The current repo-backed candidate is no longer the save-heavy version.
 - `THREADS = 128`
 - `REC_V_TILE = 8`
 - `REC_CHUNK_T = 8`
-- `THREADS`, `REC_V_TILE`, and `REC_CHUNK_T` are now explicit compile-time
-  knobs through `HGDN_THREADS`, `HGDN_REC_V_TILE`, and `HGDN_REC_CHUNK_T`, but
-  the live default remains `128 / 8 / 8`
+- `THREADS`, `GEMM_ATB_BLOCK_SPLIT_M_THRESHOLD`, `REC_V_TILE`, and
+  `REC_CHUNK_T` are now explicit compile-time knobs through `HGDN_THREADS`,
+  `HGDN_GEMM_ATB_SPLIT_M_THRESHOLD`, `HGDN_REC_V_TILE`, and
+  `HGDN_REC_CHUNK_T`, but the live default remains `128 / 2048 / 8 / 8`
 - bf16 WMMA tensor-core path for full dense tiles on `sm_80+`
 - forward saves only recurrence chunk-start checkpoints
 - forward keeps conv preactivations only in a temporary `pre_tmp`, not as a
@@ -86,6 +87,10 @@ The current repo-backed candidate is no longer the save-heavy version.
   tested on H100 without source edits; a local `HGDN_THREADS=256` trial was
   materially worse than the `128`-thread default, so `128` remains the live
   starting point until real H100 data says otherwise
+- the qkv weight-gradient splitM activation threshold is now an explicit
+  compile-time knob via `HGDN_GEMM_ATB_SPLIT_M_THRESHOLD`; a local trial at
+  `1024` was worse than the live `2048` default on the repeated timing gate,
+  so `2048` remains the starting point until H100 evidence says otherwise
 - the local harness now supports repeated CUDA-event timing; on the live
   `THREADS=128`, `REC_V_TILE=8`, `REC_CHUNK_T=8` build, a 3-repeat local helper
   pass measured about `27.78 ms` median forward+backward at `B=1,T=2048`

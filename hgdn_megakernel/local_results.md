@@ -9,6 +9,7 @@
   `python setup_hgdn_megakernel.py build_ext --inplace`
 - Optional recurrence-tile sweep build:
   `HGDN_THREADS=256 python setup_hgdn_megakernel.py build_ext --inplace`
+  `HGDN_GEMM_ATB_SPLIT_M_THRESHOLD=1024 python setup_hgdn_megakernel.py build_ext --inplace`
   `HGDN_REC_V_TILE=16 python setup_hgdn_megakernel.py build_ext --inplace`
 - Validation command:
   `python hgdn_megakernel/test_megakernel.py`
@@ -30,9 +31,10 @@
   - `THREADS = 128`
   - `REC_V_TILE = 8`
   - `REC_CHUNK_T = 8`
-  - `THREADS`, `REC_V_TILE`, and `REC_CHUNK_T` are now explicit compile-time
-    knobs via `HGDN_THREADS`, `HGDN_REC_V_TILE`, and `HGDN_REC_CHUNK_T`, but
-    the live defaults remain `128 / 8 / 8`
+  - `THREADS`, `GEMM_ATB_BLOCK_SPLIT_M_THRESHOLD`, `REC_V_TILE`, and
+    `REC_CHUNK_T` are now explicit compile-time knobs via `HGDN_THREADS`,
+    `HGDN_GEMM_ATB_SPLIT_M_THRESHOLD`, `HGDN_REC_V_TILE`, and
+    `HGDN_REC_CHUNK_T`, but the live defaults remain `128 / 2048 / 8 / 8`
   - bf16 WMMA tensor-core path for full dense tiles on `sm_80+`
   - warp-local scalar fallback for dense edge tiles
   - forward saves only recurrence chunk-start checkpoints
@@ -237,6 +239,25 @@ Local conclusion:
   - `B=1,T=2048`: `27.78 ms` median, range `26.37-27.96 ms`
   Use the repeated timing path for future local kernel comparisons rather than
   trusting single-sample outliers.
+
+## QKV splitM threshold experiment
+
+The qkv weight-gradient splitM path remains the only dense-phase splitM variant
+that has paid locally so far. The activation threshold for that path is now an
+explicit compile-time knob via `HGDN_GEMM_ATB_SPLIT_M_THRESHOLD`. A bounded
+local trial lowering the trigger from the live default `2048` to `1024`
+preserved eager parity and the one-forward / one-backward launch contract, but
+it did not beat the current default on the repeated timing gate:
+
+| `HGDN_GEMM_ATB_SPLIT_M_THRESHOLD` | `B=1,T=512` median fwd+bwd | `B=2,T=512` median fwd+bwd | `B=1,T=2048` median fwd+bwd | Result |
+| ---: | ---: | ---: | ---: | --- |
+| `2048` | `7.53 ms` | `8.47 ms` | `27.78 ms` | live default |
+| `1024` | `7.51 ms` | `8.54 ms` | `29.75 ms` | reject locally |
+
+Local conclusion:
+
+- keep `HGDN_GEMM_ATB_SPLIT_M_THRESHOLD=2048` as the live default
+- keep the threshold exposed for future H100-specific qkv splitM tuning
 
 ## Trainer compile smoke
 

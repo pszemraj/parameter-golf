@@ -50,7 +50,11 @@ static_assert(
     "HGDN megakernel requires THREADS to be a multiple of warp size.");
 constexpr int WARPS_PER_BLOCK = THREADS / WARP_SIZE;
 constexpr int GEMM_TILE = 16;
-constexpr int GEMM_ATB_BLOCK_SPLIT_M_THRESHOLD = 2048;
+#ifndef HGDN_GEMM_ATB_SPLIT_M_THRESHOLD
+#define HGDN_GEMM_ATB_SPLIT_M_THRESHOLD 2048
+#endif
+constexpr int GEMM_ATB_BLOCK_SPLIT_M_THRESHOLD =
+    HGDN_GEMM_ATB_SPLIT_M_THRESHOLD;
 constexpr int REC_DOT_COL_SLICE = 8;
 #ifndef HGDN_REC_V_TILE
 #define HGDN_REC_V_TILE 8
