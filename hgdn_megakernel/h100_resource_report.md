@@ -57,6 +57,8 @@ The current repo-backed candidate is no longer the save-heavy version.
 - `THREADS = 128`
 - `REC_V_TILE = 8`
 - `REC_CHUNK_T = 8`
+- `REC_V_TILE` / `REC_CHUNK_T` are now explicit compile-time knobs through
+  `HGDN_REC_V_TILE` / `HGDN_REC_CHUNK_T`, but the live default remains `8/8`
 - bf16 WMMA tensor-core path for full dense tiles on `sm_80+`
 - forward saves only recurrence chunk-start checkpoints
 - backward replays each chunk inside the same cooperative kernel
@@ -67,6 +69,9 @@ The current repo-backed candidate is no longer the save-heavy version.
   separate global copies before the tail backward phases
 - `REC_V_TILE=8` recurrence dot products use all block warps for the
   column-dot loops instead of leaving most of the CTA idle
+- the recurrence column-dot helper no longer assumes the whole tile width is
+  exactly `8`; wider tile experiments now reuse the same 8-column primitive in
+  slices inside the same owned kernels
 - launch contract is still exactly one forward kernel and one backward kernel
 
 The immediate parity-contract hardening pass is now complete:
@@ -129,9 +134,17 @@ One extra local finding matters for interpretation:
   - that split is gated to long reductions only (`BT >= 2048`)
   - the warp partials are reduced in shared memory inside the same cooperative
     backward launch
-  - local result on the 4070 helper:
+  - earlier point-in-time local result on the 4070 helper:
     `B=1,T=2048` parity-harness forward+backward improved from about
     `31.28 ms` to about `26.83 ms`
+- a later bounded local sweep tested wider recurrence value tiles on the same
+  source after fixing the hidden 8-column assumption in the helper:
+  - `REC_V_TILE=8`: `32.61 ms` forward+backward at `B=1,T=2048`
+  - `REC_V_TILE=16`: `43.59 ms`
+  - `REC_V_TILE=24`: `53.78 ms`
+  - `REC_V_TILE=48`: `76.64 ms`
+  - local conclusion: keep `REC_V_TILE=8` as the live default unless H100 data
+    proves a different value wins there
 
 The main activation-state change is:
 

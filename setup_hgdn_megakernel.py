@@ -2,6 +2,10 @@
 
 Usage:
   conda run -s --name pg python setup_hgdn_megakernel.py build_ext --inplace
+
+Optional compile-time tuning:
+  HGDN_REC_V_TILE=16 conda run -s --name pg python setup_hgdn_megakernel.py build_ext --inplace
+  HGDN_REC_CHUNK_T=16 conda run -s --name pg python setup_hgdn_megakernel.py build_ext --inplace
 """
 
 from __future__ import annotations
@@ -34,6 +38,21 @@ def maybe_set_arch_list() -> None:
 
 maybe_set_arch_list()
 
+nvcc_args = [
+    "-O3",
+    "--expt-relaxed-constexpr",
+    "--expt-extended-lambda",
+    "-lineinfo",
+]
+
+rec_v_tile = os.environ.get("HGDN_REC_V_TILE")
+if rec_v_tile:
+    nvcc_args.append(f"-DHGDN_REC_V_TILE={int(rec_v_tile)}")
+
+rec_chunk_t = os.environ.get("HGDN_REC_CHUNK_T")
+if rec_chunk_t:
+    nvcc_args.append(f"-DHGDN_REC_CHUNK_T={int(rec_chunk_t)}")
+
 setup(
     name="hgdn_megakernel_ext",
     ext_modules=[
@@ -42,12 +61,7 @@ setup(
             sources=[SOURCE],
             extra_compile_args={
                 "cxx": ["-O3", "-std=c++17"],
-                "nvcc": [
-                    "-O3",
-                    "--expt-relaxed-constexpr",
-                    "--expt-extended-lambda",
-                    "-lineinfo",
-                ],
+                "nvcc": nvcc_args,
             },
         )
     ],

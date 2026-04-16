@@ -141,6 +141,43 @@ def main() -> None:
         "remove --use_fast_math until long recurrent parity is clean",
     )
 
+    tile_knobs = all(
+        token in setup
+        for token in (
+            'os.environ.get("HGDN_REC_V_TILE")',
+            'os.environ.get("HGDN_REC_CHUNK_T")',
+            "-DHGDN_REC_V_TILE=",
+            "-DHGDN_REC_CHUNK_T=",
+        )
+    ) and all(
+        token in cuda
+        for token in (
+            "#ifndef HGDN_REC_V_TILE",
+            "#ifndef HGDN_REC_CHUNK_T",
+            "constexpr int REC_V_TILE = HGDN_REC_V_TILE;",
+            "constexpr int REC_CHUNK_T = HGDN_REC_CHUNK_T;",
+        )
+    )
+    failures += not check(
+        "recurrence tile build knobs",
+        tile_knobs,
+        "setup and CUDA sources should expose REC_V_TILE/REC_CHUNK_T as explicit compile-time tuning knobs",
+    )
+
+    tiled_dot_helper = all(
+        token in cuda
+        for token in (
+            "block_dot_cols_slice8",
+            "block_dot_cols_tiled",
+            "REC_DOT_COL_SLICE",
+        )
+    )
+    failures += not check(
+        "recurrence dot helper supports tiled columns",
+        tiled_dot_helper,
+        "the recurrence dot helper should support wider REC_V_TILE sweeps without changing model math",
+    )
+
     failures += not check(
         "cooperative one-launch kernels present",
         "cudaLaunchCooperativeKernel" in cuda

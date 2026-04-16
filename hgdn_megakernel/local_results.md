@@ -7,6 +7,8 @@
 - Python env: `conda run -s --name pg`
 - Build command:
   `python setup_hgdn_megakernel.py build_ext --inplace`
+- Optional recurrence-tile sweep build:
+  `HGDN_REC_V_TILE=16 python setup_hgdn_megakernel.py build_ext --inplace`
 - Validation command:
   `python hgdn_megakernel/test_megakernel.py`
 - Optional long-sequence gate:
@@ -25,6 +27,8 @@
   - `THREADS = 128`
   - `REC_V_TILE = 8`
   - `REC_CHUNK_T = 8`
+  - `REC_V_TILE` and `REC_CHUNK_T` are now explicit compile-time knobs via
+    `HGDN_REC_V_TILE` / `HGDN_REC_CHUNK_T`, but the live default remains `8/8`
   - bf16 WMMA tensor-core path for full dense tiles on `sm_80+`
   - warp-local scalar fallback for dense edge tiles
   - forward saves only recurrence chunk-start checkpoints
@@ -33,6 +37,9 @@
     reductions in q/k norm, output RMSNorm, and backward scalar reductions
   - `REC_V_TILE=8` recurrence dot products now use all block warps instead of
     only the first `8` threads for the per-column dot loops
+  - the recurrence column-dot helper now supports wider `REC_V_TILE` sweeps by
+    slicing tiles through the same 8-column reduction primitive instead of
+    assuming the whole tile width is exactly `8`
 - backward no longer keeps per-token `chunk_states` or `dv0_hist` in shared
   memory
 - backward reconstructs each token's in-chunk recurrence state from the chunk
@@ -236,26 +243,28 @@ perf_mode: skipping serialization and final roundtrip eval
 ## CUDA-event timing
 
 These timings are for the local `sm_89` device only.
+Unless otherwise noted, the numbers below reflect the latest rebuilt default
+`REC_V_TILE=8`, `REC_CHUNK_T=8` parity binary after the tiled-dot-helper fix.
 
 ### `B=1, T=8`
 
-- forward: `0.77722 ms`
-- forward + backward: `1.20013 ms`
+- forward: `0.80384 ms`
+- forward + backward: `1.22061 ms`
 
 ### `B=1, T=32`
 
-- forward: `0.23552 ms`
-- forward + backward: `0.72397 ms`
+- forward: `0.24576 ms`
+- forward + backward: `0.84992 ms`
 
 ### `B=1, T=128`
 
-- forward: `0.47821 ms`
-- forward + backward: `2.12275 ms`
+- forward: `0.50176 ms`
+- forward + backward: `2.17498 ms`
 
 ### `B=1, T=512`
 
-- forward: `1.44077 ms`
-- forward + backward: `7.84794 ms`
+- forward: `1.54419 ms`
+- forward + backward: `8.01280 ms`
 
 ### optional `B=2, T=512`
 
@@ -264,8 +273,33 @@ These timings are for the local `sm_89` device only.
 
 ### optional `B=1, T=2048`
 
-- forward: `5.37907 ms`
-- forward + backward: `31.2832 ms`
+- forward: `6.15936 ms`
+- forward + backward: `32.60621 ms`
+
+## REC_V_TILE sweep
+
+The recurrence dot helper originally had a hidden 8-column assumption. I fixed
+that by routing wider tiles through repeated 8-column slices inside the same
+owned forward/backward kernels, then reran a bounded local sweep on the 4070
+helper.
+
+Same-source local timing summary, all with `REC_CHUNK_T=8` and the same
+single-launch forward/backward contract:
+
+| `REC_V_TILE` | `B=1,T=512` fwd+bwd | `B=1,T=2048` fwd+bwd | Result |
+| ---: | ---: | ---: | --- |
+| `8` | `8.01280 ms` | `32.60621 ms` | current default |
+| `16` | `13.51475 ms` | `43.58963 ms` | slower |
+| `24` | `16.87142 ms` | `53.78151 ms` | slower |
+| `48` | `27.98899 ms` | `76.64436 ms` | much slower |
+
+Local conclusion from this bounded sweep:
+
+- wider recurrence value tiles are now parity-correct, so the earlier
+  `REC_V_TILE=16` failure was an implementation bug rather than a math issue
+- on this `sm_89` helper, larger `REC_V_TILE` values reduce recurrence-stream
+  parallelism more than they save cross-tile accumulation work
+- `REC_V_TILE=8` remains the live default until H100 data says otherwise
 
 ## 4070 speed comparison vs current packed HGDN CUDA path
 
@@ -281,6 +315,8 @@ Important interpretation note:
   local FLA still diverges materially from eager
 - some numbers in this section are older point-in-time measurements; use the
   explicit checkpoint delta notes below when comparing newer commits
+- this comparison predates the later recurrence-tile helper generalization, so
+  use the `REC_V_TILE` sweep above for the current same-source local default
 
 Comparison setup:
 
