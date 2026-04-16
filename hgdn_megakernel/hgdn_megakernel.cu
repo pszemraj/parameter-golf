@@ -44,6 +44,7 @@ constexpr int THREADS = 128;
 constexpr int WARP_SIZE = 32;
 constexpr int WARPS_PER_BLOCK = THREADS / WARP_SIZE;
 constexpr int GEMM_TILE = 16;
+constexpr int GEMM_ATB_BLOCK_SPLIT_M_THRESHOLD = 2048;
 constexpr int REC_V_TILE = 8;
 constexpr int REC_CHUNK_T = 8;
 constexpr float EPS = 1.0e-6f;
@@ -653,6 +654,116 @@ __device__ void phase_gemm_aT_b_store_bf16(
           }
           Out[static_cast<int64_t>(r) * C + c] = f2b(acc);
         });
+  }
+}
+
+__device__ void phase_gemm_aT_b_store_bf16_splitm_block(
+    const bf16* A,
+    const bf16* B,
+    bf16* Out,
+    int M,
+    int R,
+    int C,
+    float* shmem) {
+  int warp_id = threadIdx.x / WARP_SIZE;
+  int lane = threadIdx.x % WARP_SIZE;
+  int tiles_c = ceil_div_int(C, GEMM_TILE);
+  int total_tiles = ceil_div_int(R, GEMM_TILE) * tiles_c;
+  float* warp_tile = shmem + warp_id * GEMM_TILE * GEMM_TILE;
+
+  for (int tile = blockIdx.x; tile < total_tiles; tile += gridDim.x) {
+    int tile_r = tile / tiles_c;
+    int tile_c = tile % tiles_c;
+    int r0 = tile_r * GEMM_TILE;
+    int c0 = tile_c * GEMM_TILE;
+    bool full_tile = (r0 + GEMM_TILE <= R) && (c0 + GEMM_TILE <= C) &&
+                     (M % GEMM_TILE == 0);
+
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+    if (full_tile) {
+      nvcuda::wmma::fragment<
+          nvcuda::wmma::matrix_a,
+          GEMM_TILE,
+          GEMM_TILE,
+          GEMM_TILE,
+          bf16,
+          nvcuda::wmma::col_major>
+          a_frag;
+      nvcuda::wmma::fragment<
+          nvcuda::wmma::matrix_b,
+          GEMM_TILE,
+          GEMM_TILE,
+          GEMM_TILE,
+          bf16,
+          nvcuda::wmma::row_major>
+          b_frag;
+      nvcuda::wmma::fragment<
+          nvcuda::wmma::accumulator,
+          GEMM_TILE,
+          GEMM_TILE,
+          GEMM_TILE,
+          float>
+          acc_frag;
+      nvcuda::wmma::fill_fragment(acc_frag, 0.0f);
+      for (int m0 = warp_id * GEMM_TILE; m0 < M;
+           m0 += WARPS_PER_BLOCK * GEMM_TILE) {
+        const bf16* a_ptr = A + static_cast<int64_t>(m0) * R + r0;
+        const bf16* b_ptr = B + static_cast<int64_t>(m0) * C + c0;
+        nvcuda::wmma::load_matrix_sync(a_frag, a_ptr, R);
+        nvcuda::wmma::load_matrix_sync(b_frag, b_ptr, C);
+        nvcuda::wmma::mma_sync(acc_frag, a_frag, b_frag, acc_frag);
+      }
+      nvcuda::wmma::store_matrix_sync(
+          warp_tile, acc_frag, GEMM_TILE, nvcuda::wmma::mem_row_major);
+      __syncthreads();
+      for (int idx = threadIdx.x; idx < GEMM_TILE * GEMM_TILE;
+           idx += blockDim.x) {
+        float acc = 0.0f;
+#pragma unroll
+        for (int w = 0; w < WARPS_PER_BLOCK; ++w) {
+          acc += shmem[w * GEMM_TILE * GEMM_TILE + idx];
+        }
+        int r = idx / GEMM_TILE;
+        int c = idx % GEMM_TILE;
+        Out[static_cast<int64_t>(r0 + r) * C + (c0 + c)] = f2b(acc);
+      }
+      __syncthreads();
+      continue;
+    }
+#endif
+
+    for (int idx = threadIdx.x;
+         idx < WARPS_PER_BLOCK * GEMM_TILE * GEMM_TILE;
+         idx += blockDim.x) {
+      shmem[idx] = 0.0f;
+    }
+    __syncthreads();
+    phase_gemm_warp_scalar(
+        r0, c0, R, C, lane, [&](int r, int c) {
+          float acc = 0.0f;
+          for (int m = warp_id; m < M; m += WARPS_PER_BLOCK) {
+            acc += b2f(A[static_cast<int64_t>(m) * R + r]) *
+                   b2f(B[static_cast<int64_t>(m) * C + c]);
+          }
+          warp_tile[(r - r0) * GEMM_TILE + (c - c0)] = acc;
+        });
+    __syncthreads();
+    for (int idx = threadIdx.x; idx < GEMM_TILE * GEMM_TILE;
+         idx += blockDim.x) {
+      int r = idx / GEMM_TILE;
+      int c = idx % GEMM_TILE;
+      int rr = r0 + r;
+      int cc = c0 + c;
+      if (rr < R && cc < C) {
+        float acc = 0.0f;
+#pragma unroll
+        for (int w = 0; w < WARPS_PER_BLOCK; ++w) {
+          acc += shmem[w * GEMM_TILE * GEMM_TILE + idx];
+        }
+        Out[static_cast<int64_t>(rr) * C + cc] = f2b(acc);
+      }
+    }
+    __syncthreads();
   }
 }
 
@@ -1554,8 +1665,13 @@ __global__ void hgdn_backward_bf16_kernel(
   phase_gemm_ab_accum_f32(
       grad_qkv, w_qkv, grad_x_accum, static_cast<int>(BT), C, D, shmem, true);
   grid.sync();
-  phase_gemm_aT_b_store_bf16(
-      grad_qkv, x, grad_w_qkv, static_cast<int>(BT), C, D, shmem);
+  if (BT >= GEMM_ATB_BLOCK_SPLIT_M_THRESHOLD) {
+    phase_gemm_aT_b_store_bf16_splitm_block(
+        grad_qkv, x, grad_w_qkv, static_cast<int>(BT), C, D, shmem);
+  } else {
+    phase_gemm_aT_b_store_bf16(
+        grad_qkv, x, grad_w_qkv, static_cast<int>(BT), C, D, shmem);
+  }
   grid.sync();
   for (int64_t idx = linear_tid; idx < static_cast<int64_t>(H) * D;
        idx += linear_stride) {

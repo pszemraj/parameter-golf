@@ -81,6 +81,16 @@ One extra local finding matters for interpretation:
   `grad_w_qkv`, and `grad_w_g` stayed parity-clean and kept the one-launch
   contract, but it was slightly slower on the local 4070 helper and was
   therefore reverted instead of kept live
+- the next backward-structure experiment keeps the same one-launch contract but
+  is narrower:
+  - only the dominant `grad_w_qkv` dense weight-gradient phase switches to a
+    CTA-local split over the token-reduction dimension
+  - that split is gated to long reductions only (`BT >= 2048`)
+  - the warp partials are reduced in shared memory inside the same cooperative
+    backward launch
+  - local result on the 4070 helper:
+    `B=1,T=2048` parity-harness forward+backward improved from about
+    `31.28 ms` to about `26.83 ms`
 
 The main activation-state change is:
 
@@ -273,6 +283,9 @@ The blunt bottlenecks are:
    pays for replay arithmetic inside the kernel.
 3. The recurrence is value-tiled, but the core algorithm is still sequential within each tile and remains the scaling limiter at longer sequence lengths.
 4. Backward global accumulation for `grad_q_norm_accum` and `grad_k_norm_accum` is still an obvious cost center.
+5. The new qkv-only CTA-local split is a better direction than the rejected
+   global-partial split-K layout, but it has only moved the long-sequence local
+   point; it has not closed the overall gap to the packed HGDN path.
 
 If H100 parity is clean, the next speed branch should be one of:
 

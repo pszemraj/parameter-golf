@@ -43,6 +43,10 @@
 - later backward phases now read the existing fp32 accumulators directly
 - forward launch count remains `1`
 - backward launch count remains `1`
+- for the dominant long-sequence `grad_w_qkv` phase only, the backward kernel
+  now switches to a CTA-local split over the token-reduction dimension when
+  `BT >= 2048`, then reduces those warp partials in shared memory inside the
+  same cooperative launch
 
 ## Device report
 
@@ -362,6 +366,21 @@ Local conclusion:
 - the next meaningful speed step is still backward-focused:
   fewer global accumulations, better dense phases, or a more aggressive
   Hopper-specific implementation
+
+Latest long-sequence delta versus `cb60b32`:
+
+- the new qkv-only long-`BT` CTA-local split keeps the same one-forward and
+  one-backward launch structure
+- `B=1,T=512` stayed near the old checkpoint at `7.93 ms` forward+backward
+  versus about `7.85 ms` before
+- optional `B=1,T=2048` improved from about `31.28 ms` to about `26.83 ms`
+  forward+backward in the parity harness
+- one direct packed-path comparison on the same helper moved the megakernel
+  block from about `25.48 ms` to about `23.59 ms` forward+backward at
+  `B=1,T=2048`
+- that is still far behind the current packed HGDN path on this local helper,
+  but it is the first backward-structure change on this branch that materially
+  improves the real long-sequence point instead of washing out or losing
 
 ## Rejected follow-up branch
 
