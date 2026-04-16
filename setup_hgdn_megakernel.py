@@ -44,7 +44,6 @@ setup(
                 "cxx": ["-O3", "-std=c++17"],
                 "nvcc": [
                     "-O3",
-                    "--use_fast_math",
                     "--expt-relaxed-constexpr",
                     "--expt-extended-lambda",
                     "-lineinfo",

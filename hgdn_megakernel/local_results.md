@@ -9,6 +9,7 @@
   `python setup_hgdn_megakernel.py build_ext --inplace`
 - Validation command:
   `python hgdn_megakernel/test_megakernel.py`
+- Correctness build note: the current parity binary removes `--use_fast_math`
 
 ## Branch direction
 
@@ -76,55 +77,9 @@ Reference cases were generated from the live packed `GatedDeltaNet` module with:
 - `gates_fp32=True`
 - `output_norm_fp32=True`
 - `gdn_control_proj_fp32=False`
-- eager recurrence reference (`use_fla=False`)
-
-### `B=1, T=8`
-
-- forward `y`: pass
-  max abs `0.00585938`
-  max rel `39.9146`
-- `grad_x`: pass
-  max abs `0.000671387`
-- `grad_w_qkv`: pass
-  max abs `0.0117188`
-- `grad_w_a`: pass
-  max abs `0.000366211`
-- `grad_w_b`: pass
-  max abs `9.15527e-05`
-- `grad_w_g`: pass
-  max abs `0.0012207`
-- `grad_w_out`: pass
-  max abs `0.000518799`
-- `grad_conv_w`: pass
-  max abs `0.00488281`
-- `grad_A_log`: pass
-  max abs `0.000276035`
-- `grad_dt_bias`: pass
-  max abs `0.000178222`
-
-### `B=1, T=32`
-
-- forward `y`: pass
-  max abs `0.0078125`
-  max rel `166.647`
-- `grad_x`: pass
-  max abs `0.000747681`
-- `grad_w_qkv`: pass
-  max abs `0.0158691`
-- `grad_w_a`: pass
-  max abs `0.000976562`
-- `grad_w_b`: pass
-  max abs `0.000244141`
-- `grad_w_g`: pass
-  max abs `0.00244141`
-- `grad_w_out`: pass
-  max abs `0.000915527`
-- `grad_conv_w`: pass
-  max abs `0.00878906`
-- `grad_A_log`: pass
-  max abs `0.000457941`
-- `grad_dt_bias`: pass
-  max abs `0.000311824`
+- eager recurrence reference (`use_fla=False`) is the hard parity gate
+- the harness also records the live `use_fla=True` control path when FLA is
+  installed
 
 The parity tolerances used by the harness were:
 
@@ -132,6 +87,67 @@ The parity tolerances used by the harness were:
 - backward: `atol=1.2e-1`, `rtol=1.2e-1`
 
 These are still diagnostic bf16 tolerances, not the final tightened threshold set.
+
+### Eager reference pass cases
+
+- `B=1,T=8`
+  - `forward_y`: max abs `0.00585938`, rmse `0.00148067`, norm-rel `0.00854068`
+  - `grad_x`: max abs `0.000671387`
+  - `grad_w_qkv`: max abs `0.0117188`
+  - `grad_w_out`: max abs `0.000518799`
+  - `grad_conv_w`: max abs `0.00488281`
+  - `grad_A_log`: max abs `0.000276035`
+  - `grad_dt_bias`: max abs `0.000178221`
+- `B=1,T=32`
+  - `forward_y`: max abs `0.0078125`, rmse `0.00150397`, norm-rel `0.00797955`
+  - `grad_x`: max abs `0.000747681`
+  - `grad_w_qkv`: max abs `0.0161133`
+  - `grad_w_out`: max abs `0.000915527`
+  - `grad_conv_w`: max abs `0.0078125`
+  - `grad_A_log`: max abs `0.000457931`
+  - `grad_dt_bias`: max abs `0.000311816`
+- `B=1,T=128`
+  - `forward_y`: max abs `0.0136719`, rmse `0.00146453`, norm-rel `0.0080668`
+  - `grad_x`: max abs `0.00183105`
+  - `grad_w_qkv`: max abs `0.0390625`
+  - `grad_w_out`: max abs `0.00149536`
+  - `grad_conv_w`: max abs `0.0175781`
+  - `grad_A_log`: max abs `0.00159452`
+  - `grad_dt_bias`: max abs `0.00105244`
+- `B=1,T=512`
+  - `forward_y`: max abs `0.0117188`, rmse `0.00139698`, norm-rel `0.00762117`
+  - `grad_x`: max abs `0.00305176`
+  - `grad_w_qkv`: max abs `0.0605469`
+  - `grad_w_out`: max abs `0.00195312`
+  - `grad_conv_w`: max abs `0.0332031`
+  - `grad_A_log`: max abs `0.00456837`
+  - `grad_dt_bias`: max abs `0.00265132`
+- optional `B=2,T=512`
+  - `forward_y`: max abs `0.0185547`, rmse `0.00143757`, norm-rel `0.00786403`
+  - `grad_x`: max abs `0.00256348`
+  - `grad_w_qkv`: max abs `0.0585938`
+  - `grad_w_out`: max abs `0.00230026`
+  - `grad_conv_w`: max abs `0.0664062`
+  - `grad_A_log`: max abs `0.00595432`
+  - `grad_dt_bias`: max abs `0.00418161`
+
+### FLA control result
+
+- the live `use_fla=True` control path is now measured on the same saved weights
+  and inputs
+- on this local machine, FLA differs materially from eager even at `B=1,T=8`
+  and continues to drift through `T=512`
+- representative forward drift:
+  - `B=1,T=8`: max abs `0.134766`, norm-rel `0.138049`
+  - `B=1,T=32`: max abs `0.255859`, norm-rel `0.183047`
+  - `B=1,T=128`: max abs `0.177734`, norm-rel `0.171794`
+  - `B=1,T=512`: max abs `0.197266`, norm-rel `0.166777`
+- representative backward-control drift:
+  - `B=1,T=512 grad_w_qkv`: max abs `0.333984`, norm-rel `0.264985`
+  - `B=1,T=512 grad_w_b`: max abs `0.43642`, norm-rel `6.75898`
+- because the FLA control itself does not match eager, the harness records FLA
+  comparisons as diagnostics only where the control drifts; eager remains the
+  contract gate for the megakernel path
 
 ## Launch count
 
@@ -145,10 +161,9 @@ Observed CUDA-side entries for the HGDN path:
 
 - `hgdn_forward_bf16_kernel`
 - `hgdn_backward_bf16_kernel`
-- host/autograd bookkeeping around the custom function
 
-No extra CUDA helper kernels from the HGDN block path itself appeared in the
-isolated launch-count region.
+No extra CUDA helper kernels, memsets, or memcpys from the HGDN block path
+itself appeared in the isolated launch-count region.
 
 ## CUDA-event timing
 
@@ -156,13 +171,28 @@ These timings are for the local `sm_89` device only.
 
 ### `B=1, T=8`
 
-- forward: `0.82739 ms`
-- forward + backward: `1.25338 ms`
+- forward: `0.77722 ms`
+- forward + backward: `1.20013 ms`
 
 ### `B=1, T=32`
 
-- forward: `0.22323 ms`
-- forward + backward: `0.70554 ms`
+- forward: `0.23552 ms`
+- forward + backward: `0.72397 ms`
+
+### `B=1, T=128`
+
+- forward: `0.47821 ms`
+- forward + backward: `2.12275 ms`
+
+### `B=1, T=512`
+
+- forward: `1.44077 ms`
+- forward + backward: `7.84794 ms`
+
+### optional `B=2, T=512`
+
+- forward: `1.70701 ms`
+- forward + backward: `8.92211 ms`
 
 ## 4070 speed comparison vs current packed HGDN CUDA path
 
@@ -270,19 +300,28 @@ Local conclusion:
 
 ## Readiness call
 
-Current status: **ready for H100 compile/parity testing**
+Current status: **ready for H100 compile/parity**
 
 Rationale:
 
 - builds cleanly on the local GPU
-- forward parity passes for `B=1,T=8` and `B=1,T=32`
-- backward parity passes for the requested gradients on both shapes
+- parity now passes against the eager repo contract for `B=1,T=8/32/128/512`
+  and optional `B=2,T=512`
 - isolated launch counting shows exactly one HGDN forward kernel launch and one HGDN backward kernel launch
+- no hidden CUDA-side copy, cast, memset, or helper kernel appears in the
+  measured region
+- trainer-side preflight now rejects missing extension availability and
+  `GDN_CONTROL_PROJ_FP32=1` in megakernel mode
+- autograd wrapper now hard-fails instead of inserting hidden `.contiguous()`
+  or `.to()` kernels
 - device properties are printed explicitly
 
 Current status is **not** “ready for H100 timing testing” because:
 
 - local `sm_89` timing is not a proxy for H100
+- the current local FLA control path does not match eager, so the megakernel
+  must continue to treat eager as the numerical contract until that divergence
+  is separately resolved
 - the current tensor-core path is WMMA-based and portable, not yet Hopper-tuned
 - the recurrent core still loses to the live packed path at `T=512+` on the
   local 4070

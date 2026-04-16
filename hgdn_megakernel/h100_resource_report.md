@@ -34,6 +34,31 @@ The current repo-backed candidate is no longer the save-heavy version.
   column-dot loops instead of leaving most of the CTA idle
 - launch contract is still exactly one forward kernel and one backward kernel
 
+The immediate parity-contract hardening pass is now complete:
+
+- megakernel mode no longer silently falls back to eager when CUDA `bf16`
+  execution requested the extension but the extension is unavailable
+- trainer preflight now prints extension status and rejects
+  `GDN_CONTROL_PROJ_FP32=1` before training starts in megakernel mode
+- the autograd wrapper now rejects non-contiguous or wrongly typed inputs
+  instead of inserting hidden `.contiguous()` or `.to()` kernels
+- correctness builds now omit `--use_fast_math`
+- local eager parity now covers `B=1,T=8/32/128/512` and optional `B=2,T=512`
+- isolated launch counting still shows exactly one forward launch and one
+  backward launch, with no extra CUDA-side copy or memset events
+
+That means the honest status of this checkpoint is:
+
+- **ready for H100 compile/parity**
+- **not ready for H100 timing**
+
+One extra local finding matters for interpretation:
+
+- the installed `use_fla=True` control path diverges materially from the eager
+  HGDN reference on the same saved weights and inputs, so eager remains the
+  megakernel numerical contract until that separate control-path mismatch is
+  resolved
+
 The main activation-state change is:
 
 | Tensor strategy | Shape | Dtype | Bytes |
@@ -228,6 +253,8 @@ The blunt bottlenecks are:
 
 If H100 parity is clean, the next speed branch should be one of:
 
+- split-K or other token-dimension parallelization for the dense backward
+  weight-gradient phases inside the same cooperative backward kernel
 - Hopper-specific dense phases (`wgmma` / better scheduling) inside the megakernel
 - or a justified split where cuBLAS/cuBLASLt owns dense GEMMs and one fused HGDN kernel owns the recurrent shell
 - or a recurrence-focused rewrite that removes or sharply reduces the backward global-atomic path

@@ -19,6 +19,7 @@ import copy
 import gc
 import glob
 import io
+import json
 import math
 import os
 import random
@@ -37,6 +38,7 @@ import torch.distributed as dist
 from torch import Tensor, nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 
+from hgdn_megakernel import extension_status as hgdn_megakernel_extension_status
 from hgdn_runtime_utils import (
     dequantize_state_dict_int8,
     maybe_compile,
@@ -973,6 +975,24 @@ def main() -> None:
     log0(code, console=False)
     log0(f"Python {sys.version}", console=False)
     log0(f"PyTorch {torch.__version__}", console=False)
+    if args.gdn_use_cuda_megakernel:
+        megakernel_status = hgdn_megakernel_extension_status()
+        log0(
+            f"hgdn_megakernel_preflight:{json.dumps(megakernel_status, sort_keys=True)}"
+        )
+        if args.gdn_control_proj_fp32:
+            raise RuntimeError(
+                "GDN_USE_CUDA_MEGAKERNEL=1 requires GDN_CONTROL_PROJ_FP32=0 "
+                "because the megakernel expects bf16 w_a/w_b/w_g weights."
+            )
+        if not megakernel_status["loaded"]:
+            raise RuntimeError(
+                "GDN_USE_CUDA_MEGAKERNEL=1 but the HGDN megakernel extension is "
+                "unavailable. Build it before training with "
+                "`conda run -s --name pg python setup_hgdn_megakernel.py "
+                "build_ext --inplace` or explicitly enable "
+                "`GDN_MEGAKERNEL_ALLOW_JIT_BUILD=1`."
+            )
     log0(
         f"compile:{int(args.compile)} compile_strategy:{args.compile_strategy} "
         f"seed:{args.seed} pythonhashseed:{os.environ.get('PYTHONHASHSEED', '<unset>')} "

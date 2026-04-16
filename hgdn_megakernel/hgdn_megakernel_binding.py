@@ -90,7 +90,6 @@ def _load_extension() -> Any | None:
             extra_cflags=["-O3", "-std=c++17"],
             extra_cuda_cflags=[
                 "-O3",
-                "--use_fast_math",
                 "--expt-relaxed-constexpr",
                 "--expt-extended-lambda",
                 "-lineinfo",
@@ -101,7 +100,7 @@ def _load_extension() -> Any | None:
     except Exception as exc:  # pragma: no cover - requires CUDA toolchain
         _warn_once(
             "hgdn_megakernel_build",
-            "HGDN megakernel JIT build failed; using the eager HGDN path instead. "
+            "HGDN megakernel JIT build failed; the extension remains unavailable. "
             f"Details: {exc}",
         )
         return None
@@ -139,6 +138,73 @@ def device_report() -> str:
     if ext is None:
         raise RuntimeError("HGDN megakernel extension is not available")
     return str(ext.device_report())
+
+
+def _require_cuda_tensor(
+    name: str,
+    tensor: Tensor,
+    *,
+    dtype: torch.dtype,
+    device: torch.device | None = None,
+) -> None:
+    """Validate one CUDA tensor precondition for the megakernel path.
+
+    :param str name: Tensor label for error messages.
+    :param Tensor tensor: Tensor to validate.
+    :param torch.dtype dtype: Required dtype.
+    :param torch.device | None device: Required device, defaults to `None`.
+    :raises RuntimeError: If the tensor violates the CUDA megakernel contract.
+    """
+    if not tensor.is_cuda:
+        raise RuntimeError(f"HGDN megakernel requires `{name}` to be a CUDA tensor")
+    if tensor.dtype != dtype:
+        raise RuntimeError(
+            f"HGDN megakernel requires `{name}` dtype {dtype}, got {tensor.dtype}"
+        )
+    if not tensor.is_contiguous():
+        raise RuntimeError(
+            f"HGDN megakernel requires `{name}` to be contiguous in memory"
+        )
+    if device is not None and tensor.device != device:
+        raise RuntimeError(
+            "HGDN megakernel requires all tensors on the same CUDA device, "
+            f"but `{name}` is on {tensor.device} and expected {device}"
+        )
+
+
+def _validate_forward_inputs(
+    x: Tensor,
+    w_qkv: Tensor,
+    w_a: Tensor,
+    w_b: Tensor,
+    w_g: Tensor,
+    w_out: Tensor,
+    conv_w: Tensor,
+    A_log: Tensor,
+    dt_bias: Tensor,
+) -> None:
+    """Validate the forward tensor contract without inserting hidden kernels.
+
+    :param Tensor x: Input activations.
+    :param Tensor w_qkv: Packed qkv projection weight.
+    :param Tensor w_a: Decay projection weight.
+    :param Tensor w_b: Beta projection weight.
+    :param Tensor w_g: Output-gate projection weight.
+    :param Tensor w_out: Dense output projection weight.
+    :param Tensor conv_w: Packed depthwise conv weights.
+    :param Tensor A_log: Learnable decay magnitudes.
+    :param Tensor dt_bias: Learnable decay biases.
+    """
+    device = x.device
+    _require_cuda_tensor("x", x, dtype=torch.bfloat16)
+    _require_cuda_tensor("w_qkv", w_qkv, dtype=torch.bfloat16, device=device)
+    _require_cuda_tensor("w_a", w_a, dtype=torch.bfloat16, device=device)
+    _require_cuda_tensor("w_b", w_b, dtype=torch.bfloat16, device=device)
+    _require_cuda_tensor("w_g", w_g, dtype=torch.bfloat16, device=device)
+    _require_cuda_tensor("w_out", w_out, dtype=torch.bfloat16, device=device)
+    _require_cuda_tensor("conv_w", conv_w, dtype=torch.bfloat16, device=device)
+    _require_cuda_tensor("A_log", A_log, dtype=torch.float32, device=device)
+    _require_cuda_tensor("dt_bias", dt_bias, dtype=torch.float32, device=device)
 
 
 class HGDNMegakernelFunction(torch.autograd.Function):
@@ -184,16 +250,27 @@ class HGDNMegakernelFunction(torch.autograd.Function):
         ext = _load_extension()
         if ext is None:
             raise RuntimeError("HGDN megakernel extension is not available")
+        _validate_forward_inputs(
+            x,
+            w_qkv,
+            w_a,
+            w_b,
+            w_g,
+            w_out,
+            conv_w,
+            A_log,
+            dt_bias,
+        )
         outputs = ext.forward(
-            x.contiguous(),
-            w_qkv.contiguous(),
-            w_a.contiguous(),
-            w_b.contiguous(),
-            w_g.contiguous(),
-            w_out.contiguous(),
-            conv_w.contiguous(),
-            A_log.contiguous().float(),
-            dt_bias.contiguous().float(),
+            x,
+            w_qkv,
+            w_a,
+            w_b,
+            w_g,
+            w_out,
+            conv_w,
+            A_log,
+            dt_bias,
             int(n_heads),
             int(head_k_dim),
             int(head_v_dim),
@@ -261,17 +338,23 @@ class HGDNMegakernelFunction(torch.autograd.Function):
         ext = _load_extension()
         if ext is None:
             raise RuntimeError("HGDN megakernel extension is not available")
+        _require_cuda_tensor(
+            "grad_y",
+            grad_y,
+            dtype=torch.bfloat16,
+            device=x.device,
+        )
         grads = ext.backward(
-            grad_y.contiguous().to(dtype=torch.bfloat16),
-            x.contiguous(),
-            w_qkv.contiguous(),
-            w_a.contiguous(),
-            w_b.contiguous(),
-            w_g.contiguous(),
-            w_out.contiguous(),
-            conv_w.contiguous(),
-            A_log.contiguous().float(),
-            dt_bias.contiguous().float(),
+            grad_y,
+            x,
+            w_qkv,
+            w_a,
+            w_b,
+            w_g,
+            w_out,
+            conv_w,
+            A_log,
+            dt_bias,
             qkv,
             pre,
             q_norm,
@@ -385,6 +468,18 @@ def run_from_gated_delta_net(module: torch.nn.Module, x: Tensor) -> Tensor:
         raise ValueError("HGDN megakernel requires gates_fp32=True")
     if not bool(getattr(module, "output_norm_fp32", True)):
         raise ValueError("HGDN megakernel requires output_norm_fp32=True")
+    if module.w_a.weight.dtype != torch.bfloat16:
+        raise ValueError(
+            "HGDN megakernel requires bf16 `w_a`; set GDN_CONTROL_PROJ_FP32=0"
+        )
+    if module.w_b.weight.dtype != torch.bfloat16:
+        raise ValueError(
+            "HGDN megakernel requires bf16 `w_b`; set GDN_CONTROL_PROJ_FP32=0"
+        )
+    if module.w_g.weight.dtype != torch.bfloat16:
+        raise ValueError(
+            "HGDN megakernel requires bf16 `w_g`; set GDN_CONTROL_PROJ_FP32=0"
+        )
     if bool(getattr(module, "use_cuda_fused_frontend", False)):
         raise ValueError("HGDN megakernel is incompatible with use_cuda_fused_frontend")
     if bool(getattr(module, "use_cuda_fused_frontend_lib", False)):

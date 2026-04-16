@@ -62,6 +62,21 @@ The live HGDN block contract comes from [`model.py`](/home/pszemraj/workspace/pr
 - Gate math, norm reductions, and recurrence state: fp32
 - Saved forward activations and parameter grads for feature maps: bf16
 
+## Runtime megakernel preconditions
+
+The repo-backed megakernel path now treats these as hard runtime contract
+checks rather than hidden wrapper fixes:
+
+- when `use_cuda_megakernel=True` and `x` is CUDA `bf16`, missing extension
+  availability is a hard error, not a silent eager fallback
+- `x`, `w_qkv`, `w_a`, `w_b`, `w_g`, `w_out`, `conv_w`, and backward `grad_y`
+  must already be CUDA `bf16` contiguous tensors
+- `A_log` and `dt_bias` must already be CUDA `fp32` contiguous tensors
+- `w_a`, `w_b`, and `w_g` must remain `bf16`, so
+  `GDN_CONTROL_PROJ_FP32=0` is required in megakernel mode
+- correctness/parity builds omit `--use_fast_math`; any fast-math variant is a
+  separate opt-in performance experiment, not the default validation target
+
 ## Winner-style contract used for the first pass
 
 From [`configs/hgdn/current_winner_retune.toml`](/home/pszemraj/workspace/projects/parameter-golf/configs/hgdn/current_winner_retune.toml):
