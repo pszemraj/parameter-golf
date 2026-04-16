@@ -27,6 +27,9 @@ The current repo-backed candidate is no longer the save-heavy version.
 - backward replays each chunk inside the same cooperative kernel
 - backward reconstructs each token-local in-chunk recurrence state from the
   chunk checkpoint instead of storing a full shared-memory `chunk_states` table
+- backward now consumes `grad_q_norm_accum`, `grad_k_norm_accum`,
+  `grad_g_log_accum`, and `grad_beta_accum` directly instead of staging
+  separate global copies before the tail backward phases
 - winner-shape `Dv=8` recurrence dot products use all block warps for the
   column-dot loops instead of leaving most of the CTA idle
 - launch contract is still exactly one forward kernel and one backward kernel
@@ -72,6 +75,17 @@ The implemented save-vs-recompute changes so far are:
 - removal of backward shared-memory `chunk_states` and `dv0_hist`, replaced by
   token-local replay from the chunk checkpoint during the reverse sweep
 
+The latest backward-scratch cleanup also removed these global staging tensors
+from the backward workspace:
+
+| Removed staging tensor | Shape | Dtype | Bytes |
+| --- | --- | --- | ---: |
+| `grad_q_norm` | `(32, 2048, 8, 48)` | bf16 | 50,331,648 |
+| `grad_k_norm` | `(32, 2048, 8, 48)` | bf16 | 50,331,648 |
+| `grad_g_log` | `(32, 2048, 8)` | fp32 | 2,097,152 |
+| `grad_beta` | `(32, 2048, 8)` | fp32 | 2,097,152 |
+| total removed |  |  | 104,857,600 |
+
 The only implemented dense-phase speed change so far is the replacement of the
 old scalar `16 x 16` shared-memory dot-product tiles with a portable bf16 WMMA
 path on `sm_80+`, while keeping scalar edge fallback for non-full tiles.
@@ -83,6 +97,9 @@ The latest reduction-side cleanup is:
 - one dead CTA reduction buffer removed from the backward shared-memory layout
 - `Dv=8` recurrence column-dot helpers now use warp-partitioned block
   cooperation for `tmp_dv0`, `o_raw`, `tmp_dv1`, and `grad_v_post`
+- later backward phases no longer write and reread temporary global copies of
+  q/k norm grads or gate-log grads before finishing `grad_pre`,
+  `grad_g_pre`, `grad_beta_pre`, `grad_A_log`, and `grad_dt_bias`
 
 ## Shared-memory map
 
@@ -179,8 +196,10 @@ HBM traffic is dominated by:
 - dense reads of `x`, `w_qkv`, `w_g`, and `w_out`
 - saved activation traffic other than recurrence state
 - checkpoint reads plus replay staging instead of full `state_prev` rereads
+- global-atomic traffic for `grad_q_norm_accum` and `grad_k_norm_accum`
 
-The current version is therefore expected to be:
+The latest checkpoint does trim about `100 MiB` of backward workspace and one
+full-grid scratch staging pass, but the current version is still expected to be:
 
 - materially better than the first scalar-loop draft
 - materially less memory-heavy than the save-heavy parity version

@@ -1071,11 +1071,7 @@ __global__ void hgdn_backward_bf16_kernel(
     bf16* __restrict__ grad_z,
     bf16* __restrict__ grad_o_raw,
     bf16* __restrict__ grad_g_out,
-    bf16* __restrict__ grad_q_norm,
-    bf16* __restrict__ grad_k_norm,
     bf16* __restrict__ grad_v_post,
-    float* __restrict__ grad_g_log,
-    float* __restrict__ grad_beta,
     bf16* __restrict__ grad_pre,
     bf16* __restrict__ grad_qkv,
     bf16* __restrict__ grad_g_pre,
@@ -1451,16 +1447,6 @@ __global__ void hgdn_backward_bf16_kernel(
   }
   grid.sync();
 
-  for (int64_t idx = linear_tid; idx < BT * H * Dk; idx += linear_stride) {
-    grad_q_norm[idx] = f2b(grad_q_norm_accum[idx]);
-    grad_k_norm[idx] = f2b(grad_k_norm_accum[idx]);
-  }
-  for (int64_t idx = linear_tid; idx < BT * H; idx += linear_stride) {
-    grad_g_log[idx] = grad_g_log_accum[idx];
-    grad_beta[idx] = grad_beta_accum[idx];
-  }
-  grid.sync();
-
   for (int64_t job = blockIdx.x; job < BT * H; job += gridDim.x) {
     int h = job % H;
     int64_t bt = job / H;
@@ -1470,8 +1456,8 @@ __global__ void hgdn_backward_bf16_kernel(
     float dot_q = 0.0f;
     float dot_k = 0.0f;
     for (int i = threadIdx.x; i < Dk; i += blockDim.x) {
-      float dq = b2f(grad_q_norm[idx4(b, t, h, i, T, H, Dk)]);
-      float dk = b2f(grad_k_norm[idx4(b, t, h, i, T, H, Dk)]);
+      float dq = grad_q_norm_accum[idx4(b, t, h, i, T, H, Dk)];
+      float dk = grad_k_norm_accum[idx4(b, t, h, i, T, H, Dk)];
       float q_value = b2f(q_norm[idx4(b, t, h, i, T, H, Dk)]);
       float k_value = b2f(k_norm[idx4(b, t, h, i, T, H, Dk)]);
       dot_q += dq * q_value;
@@ -1484,8 +1470,8 @@ __global__ void hgdn_backward_bf16_kernel(
     for (int i = threadIdx.x; i < Dk; i += blockDim.x) {
       int q_channel = cq(h, i, Dk);
       int k_channel = ck(h, i, H, Dk);
-      float dq = b2f(grad_q_norm[idx4(b, t, h, i, T, H, Dk)]);
-      float dk = b2f(grad_k_norm[idx4(b, t, h, i, T, H, Dk)]);
+      float dq = grad_q_norm_accum[idx4(b, t, h, i, T, H, Dk)];
+      float dk = grad_k_norm_accum[idx4(b, t, h, i, T, H, Dk)];
       float q_value = b2f(q_norm[idx4(b, t, h, i, T, H, Dk)]);
       float k_value = b2f(k_norm[idx4(b, t, h, i, T, H, Dk)]);
       float q_preact = b2f(pre[idx3(b, t, q_channel, T, C)]);
@@ -1543,10 +1529,11 @@ __global__ void hgdn_backward_bf16_kernel(
     int h = idx % H;
     float exp_A = expf(A_log[h]);
     float z_value = b2f(g_pre[idx]) + dt_bias[h];
-    grad_g_pre[idx] = f2b(grad_g_log[idx] * (-exp_A * sig(z_value)));
+    grad_g_pre[idx] = f2b(grad_g_log_accum[idx] * (-exp_A * sig(z_value)));
     float s = sig(b2f(beta_pre[idx]));
     float scale = allow_neg_eigval ? 2.0f : 1.0f;
-    grad_beta_pre[idx] = f2b(grad_beta[idx] * scale * s * (1.0f - s));
+    grad_beta_pre[idx] =
+        f2b(grad_beta_accum[idx] * scale * s * (1.0f - s));
   }
   for (int64_t h = linear_tid; h < H; h += linear_stride) {
     float acc_A = 0.0f;
@@ -1556,8 +1543,8 @@ __global__ void hgdn_backward_bf16_kernel(
       int64_t idx = bt * H + h;
       float z_value = b2f(g_pre[idx]) + dt_bias[h];
       float g_value = -exp_A * softplus(z_value);
-      acc_A += grad_g_log[idx] * g_value;
-      acc_dt += grad_g_log[idx] * (-exp_A * sig(z_value));
+      acc_A += grad_g_log_accum[idx] * g_value;
+      acc_dt += grad_g_log_accum[idx] * (-exp_A * sig(z_value));
     }
     grad_A_log[h] = acc_A;
     grad_dt_bias[h] = acc_dt;
@@ -1891,11 +1878,7 @@ std::vector<torch::Tensor> backward(
   auto grad_k_norm_accum = torch::empty({B, T, H, Dk}, f32_options);
   auto grad_g_log_accum = torch::empty({B, T, H}, f32_options);
   auto grad_beta_accum = torch::empty({B, T, H}, f32_options);
-  auto grad_q_norm = torch::empty({B, T, H, Dk}, bf16_options);
-  auto grad_k_norm = torch::empty({B, T, H, Dk}, bf16_options);
   auto grad_v_post = torch::empty({B, T, H, Dv}, bf16_options);
-  auto grad_g_log = torch::empty({B, T, H}, f32_options);
-  auto grad_beta = torch::empty({B, T, H}, f32_options);
   auto grad_pre = torch::empty({B, T, C}, bf16_options);
   auto grad_qkv = torch::empty({B, T, C}, bf16_options);
   auto grad_g_pre = torch::empty({B, T, H}, bf16_options);
@@ -1961,11 +1944,7 @@ std::vector<torch::Tensor> backward(
   bf16* grad_z_ptr = bptr(grad_z);
   bf16* grad_o_raw_ptr = bptr(grad_o_raw);
   bf16* grad_g_out_ptr = bptr(grad_g_out);
-  bf16* grad_q_norm_ptr = bptr(grad_q_norm);
-  bf16* grad_k_norm_ptr = bptr(grad_k_norm);
   bf16* grad_v_post_ptr = bptr(grad_v_post);
-  float* grad_g_log_ptr = grad_g_log.data_ptr<float>();
-  float* grad_beta_ptr = grad_beta.data_ptr<float>();
   bf16* grad_pre_ptr = bptr(grad_pre);
   bf16* grad_qkv_ptr = bptr(grad_qkv);
   bf16* grad_g_pre_ptr = bptr(grad_g_pre);
@@ -1984,8 +1963,7 @@ std::vector<torch::Tensor> backward(
       &grad_x_ptr,       &grad_w_qkv_ptr,  &grad_w_a_ptr,       &grad_w_b_ptr,
       &grad_w_g_ptr,     &grad_w_out_ptr,
       &grad_conv_w_ptr,  &grad_A_log_ptr,  &grad_dt_bias_ptr, &grad_z_ptr,
-      &grad_o_raw_ptr,   &grad_g_out_ptr,  &grad_q_norm_ptr,  &grad_k_norm_ptr,
-      &grad_v_post_ptr,  &grad_g_log_ptr,  &grad_beta_ptr,    &grad_pre_ptr,
+      &grad_o_raw_ptr,   &grad_g_out_ptr,  &grad_v_post_ptr,  &grad_pre_ptr,
       &grad_qkv_ptr,     &grad_g_pre_ptr,  &grad_beta_pre_ptr,
       &iB,               &iT,              &iD,               &iH,
       &iDk,              &iDv,             &iK,               &iNChunks,

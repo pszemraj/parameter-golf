@@ -30,12 +30,16 @@
     reductions in q/k norm, output RMSNorm, and backward scalar reductions
   - winner-shape `Dv=8` recurrence dot products now use all block warps instead
     of only the first `8` threads for the per-column dot loops
-  - backward no longer keeps per-token `chunk_states` or `dv0_hist` in shared
-    memory
-  - backward reconstructs each token's in-chunk recurrence state from the chunk
-    checkpoint during the reverse sweep
-  - forward launch count remains `1`
-  - backward launch count remains `1`
+- backward no longer keeps per-token `chunk_states` or `dv0_hist` in shared
+  memory
+- backward reconstructs each token's in-chunk recurrence state from the chunk
+  checkpoint during the reverse sweep
+- backward no longer stages `grad_q_norm`, `grad_k_norm`, `grad_g_log`, or
+  `grad_beta` as separate global scratch tensors before the final backward
+  phases
+- later backward phases now read the existing fp32 accumulators directly
+- forward launch count remains `1`
+- backward launch count remains `1`
 
 ## Device report
 
@@ -152,13 +156,13 @@ These timings are for the local `sm_89` device only.
 
 ### `B=1, T=8`
 
-- forward: `0.79258 ms`
-- forward + backward: `1.20525 ms`
+- forward: `0.82739 ms`
+- forward + backward: `1.25338 ms`
 
 ### `B=1, T=32`
 
-- forward: `0.21402 ms`
-- forward + backward: `0.69325 ms`
+- forward: `0.22323 ms`
+- forward + backward: `0.70554 ms`
 
 ## 4070 speed comparison vs current packed HGDN CUDA path
 
@@ -176,81 +180,88 @@ Comparison setup:
 ### `B=1, T=128`
 
 - current path:
-  - forward `0.86925 ms`
-  - forward + backward `2.83228 ms`
+  - forward `1.03690 ms`
+  - forward + backward `3.26577 ms`
 - megakernel:
-  - forward `0.41193 ms`
-  - forward + backward `2.06364 ms`
+  - forward `0.41160 ms`
+  - forward + backward `2.03656 ms`
 - relative:
-  - forward speedup `2.110x`
-  - forward + backward speedup `1.372x`
+  - forward speedup `2.519x`
+  - forward + backward speedup `1.604x`
 
 ### `B=1, T=512`
 
 - current path:
-  - forward `0.87076 ms`
-  - forward + backward `3.86432 ms`
+  - forward `0.91169 ms`
+  - forward + backward `3.09097 ms`
 - megakernel:
-  - forward `1.23343 ms`
-  - forward + backward `5.29029 ms`
+  - forward `0.88722 ms`
+  - forward + backward `5.23036 ms`
 - relative:
-  - forward speedup `0.706x`
-  - forward + backward speedup `0.730x`
+  - forward speedup `1.028x`
+  - forward + backward speedup `0.591x`
 
 ### `B=1, T=1024`
 
 - current path:
-  - forward `0.85423 ms`
-  - forward + backward `3.04876 ms`
+  - forward `0.94669 ms`
+  - forward + backward `3.40004 ms`
 - megakernel:
-  - forward `1.72012 ms`
-  - forward + backward `10.56481 ms`
+  - forward `1.72600 ms`
+  - forward + backward `10.45432 ms`
 - relative:
-  - forward speedup `0.497x`
-  - forward + backward speedup `0.289x`
+  - forward speedup `0.548x`
+  - forward + backward speedup `0.325x`
 
 ### `B=1, T=2048`
 
 - current path:
-  - forward `0.92774 ms`
-  - forward + backward `3.82874 ms`
+  - forward `0.93286 ms`
+  - forward + backward `3.19488 ms`
 - megakernel:
-  - forward `3.42753 ms`
-  - forward + backward `21.49407 ms`
+  - forward `3.42569 ms`
+  - forward + backward `21.20602 ms`
 - relative:
-  - forward speedup `0.271x`
-  - forward + backward speedup `0.178x`
+  - forward speedup `0.272x`
+  - forward + backward speedup `0.151x`
 
 ### `B=2, T=512`
 
 - current path:
-  - forward `0.85545 ms`
-  - forward + backward `2.92895 ms`
+  - forward `0.86564 ms`
+  - forward + backward `3.30463 ms`
 - megakernel:
-  - forward `1.02694 ms`
-  - forward + backward `6.01738 ms`
+  - forward `1.02582 ms`
+  - forward + backward `5.95576 ms`
 - relative:
-  - forward speedup `0.833x`
-  - forward + backward speedup `0.487x`
+  - forward speedup `0.844x`
+  - forward + backward speedup `0.555x`
 
 Local conclusion:
 
 - parity is good
 - launch structure is good
 - the backward shared-memory shrink is a real local improvement
+- the latest backward-scratch cleanup is also a real local improvement
 - removing shared `chunk_states` and `dv0_hist` cut the candidate's dynamic
   backward recurrence tile from about `21.25 KiB` to about `9.00 KiB`
-- that shared-memory drop also materially improved the forward timing even
-  though the forward math did not change
-- relative to the previous clean checkpoint, the current candidate improved by:
-  - about `2.04x` at `B=1,T=512` for forward + backward
-  - about `1.87x` at `B=1,T=1024` for forward + backward
-  - about `1.61x` at `B=1,T=2048` for forward + backward
-  - about `1.93x` at `B=2,T=512` for forward + backward
+- removing global staging copies for `grad_q_norm`, `grad_k_norm`,
+  `grad_g_log`, and `grad_beta` removed one full-grid sync and one dead
+  backward scratch-write/read pass
+- relative to the previous clean checkpoint `f6d0a23`, this checkpoint
+  improved forward + backward by:
+  - about `1.013x` at `B=1,T=128`
+  - about `1.011x` at `B=1,T=512`
+  - about `1.011x` at `B=1,T=1024`
+  - about `1.014x` at `B=1,T=2048`
+  - about `1.010x` at `B=2,T=512`
 - the current megakernel is still a clear local win at `B=1,T=128`
 - the current megakernel is still behind the packed HGDN path for `T=512+`,
-  but the gap is now materially smaller than the previous checkpoint
-- larger local batch points are still not competitive:
+  and especially for larger batch
+- forward-only timing differences in this checkpoint should be treated as noise
+  because the forward kernel itself did not change
+- larger local batch points have not been rerun on this exact checkpoint yet;
+  the last measured previous checkpoint was still not competitive:
   - `B=4,T=512`: baseline `3.39333 ms`, megakernel `14.28992 ms`
   - `B=8,T=512`: baseline `3.97802 ms`, megakernel `19.89581 ms`
 - the next meaningful speed step is still backward-focused:
