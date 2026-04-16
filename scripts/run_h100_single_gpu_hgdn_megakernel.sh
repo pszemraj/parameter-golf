@@ -62,7 +62,9 @@ Important notes:
     in the environment or via repo defaults
 
 Environment overrides:
-  CONDA_ENV_NAME            Defaults to pg.
+  PYTHON_BIN                Explicit Python executable to use.
+  CONDA_ENV_NAME            Optional conda env name if conda is available,
+                            defaults to pg.
   TORCH_CUDA_ARCH_LIST      Defaults to 9.0.
   GDN_MEGAKERNEL_REC_CHUNK_T Defaults to 8.
   MK_TIMING_REPEATS         Defaults to 3.
@@ -83,16 +85,37 @@ Environment overrides:
 Examples:
   scripts/run_h100_single_gpu_hgdn_megakernel.sh all
   TORCH_CUDA_ARCH_LIST=8.9 scripts/run_h100_single_gpu_hgdn_megakernel.sh parity
+  PYTHON_BIN=python3 scripts/run_h100_single_gpu_hgdn_megakernel.sh all
   GDN_MEGAKERNEL_REC_CHUNK_T=4 scripts/run_h100_single_gpu_hgdn_megakernel.sh trainer-smoke
   MK_OUTPUT_DIR=/tmp/h100mk_case MK_ARCHIVE_OUTPUT=/tmp/h100mk_case.7z scripts/run_h100_single_gpu_hgdn_megakernel.sh all
   DRY_RUN=1 scripts/run_h100_single_gpu_hgdn_megakernel.sh all
 EOF
 }
 
-hgdn_require_cmd conda
+resolve_python_cmd() {
+    if [[ -n "${PYTHON_BIN:-}" ]]; then
+        echo "${PYTHON_BIN}"
+        return 0
+    fi
+    if command -v conda >/dev/null 2>&1; then
+        local conda_env_name="${CONDA_ENV_NAME:-pg}"
+        printf 'conda run -s --name %q python\n' "${conda_env_name}"
+        return 0
+    fi
+    if command -v python3 >/dev/null 2>&1; then
+        echo "python3"
+        return 0
+    fi
+    if command -v python >/dev/null 2>&1; then
+        echo "python"
+        return 0
+    fi
+    echo "Missing required Python runtime. Set PYTHON_BIN or install python3/python." >&2
+    exit 1
+}
 
-conda_env_name="${CONDA_ENV_NAME:-pg}"
-python_cmd=(conda run -s --name "${conda_env_name}" python)
+read -r -a python_cmd <<<"$(resolve_python_cmd)"
+python_cmd_rendered="$(printf '%q ' "${python_cmd[@]}")"
 torch_arch_list="${TORCH_CUDA_ARCH_LIST:-9.0}"
 rec_chunk_t="${GDN_MEGAKERNEL_REC_CHUNK_T:-8}"
 timing_repeats="${MK_TIMING_REPEATS:-3}"
@@ -123,6 +146,7 @@ mk_timing_repeats=${timing_repeats}
 mk_cases_dir=${cases_dir}
 torchinductor_cache_dir=${trainer_cache_dir}
 mk_archive_output=${archive_output}
+python_cmd=${python_cmd_rendered% }
 git_commit=${git_commit}
 git_branch=${git_branch}
 host_name=${host_name}
