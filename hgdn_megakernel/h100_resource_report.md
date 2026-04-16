@@ -86,6 +86,11 @@ The current repo-backed candidate is no longer the save-heavy version.
   tested on H100 without source edits; a local `HGDN_THREADS=256` trial was
   materially worse than the `128`-thread default, so `128` remains the live
   starting point until real H100 data says otherwise
+- the local harness now supports repeated CUDA-event timing; on the live
+  `THREADS=128`, `REC_V_TILE=8`, `REC_CHUNK_T=8` build, a 3-repeat local helper
+  pass measured about `27.78 ms` median forward+backward at `B=1,T=2048`
+  (range `26.37-27.96 ms`). That is still `sm_89` sanity data only, not an
+  H100 timing claim.
 - launch contract is still exactly one forward kernel and one backward kernel
 
 The immediate parity-contract hardening pass is now complete:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import statistics
 import sys
 from pathlib import Path
 
@@ -183,14 +184,18 @@ def forward_backward_case(
     atol: float,
     rtol: float,
     grad_scale: float,
-) -> dict[str, float]:
+    timing_warmups: int,
+    timing_repeats: int,
+) -> dict[str, float | int]:
     """Run forward/backward parity for one serialized case.
 
     :param Path path: Case file path.
     :param float atol: Forward tolerance.
     :param float rtol: Forward tolerance.
     :param float grad_scale: Multiplier for backward tolerances.
-    :return dict[str, float]: Event timing metrics.
+    :param int timing_warmups: Number of timing warmup iterations.
+    :param int timing_repeats: Number of measured timing iterations.
+    :return dict[str, float | int]: Event timing metrics.
     """
     meta, payload, tensors = load_case(path)
     references = payload_references(payload)
@@ -284,9 +289,8 @@ def forward_backward_case(
 
     for tensor in tensors:
         tensor.grad = None
-    warmups = 3
     grad_out = torch.randn_like(y)
-    for _ in range(warmups):
+    for _ in range(timing_warmups):
         out = hgdn_megakernel(
             *tensors,
             n_heads=int(meta["H"]),
@@ -300,26 +304,45 @@ def forward_backward_case(
             tensor.grad = None
     torch.cuda.synchronize()
 
-    start = torch.cuda.Event(enable_timing=True)
-    mid = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
-    start.record()
-    out = hgdn_megakernel(
-        *tensors,
-        n_heads=int(meta["H"]),
-        head_k_dim=int(meta["Dk"]),
-        head_v_dim=int(meta["Dv"]),
-        conv_size=int(meta["K"]),
-        allow_neg_eigval=bool(meta["allow_neg_eigval"]),
-    )
-    mid.record()
-    torch.autograd.backward((out,), (grad_out,))
-    end.record()
-    torch.cuda.synchronize()
-    return {
-        "forward_ms": float(start.elapsed_time(mid)),
-        "forward_backward_ms": float(start.elapsed_time(end)),
+    forward_times: list[float] = []
+    forward_backward_times: list[float] = []
+    for _ in range(timing_repeats):
+        for tensor in tensors:
+            tensor.grad = None
+        start = torch.cuda.Event(enable_timing=True)
+        mid = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        out = hgdn_megakernel(
+            *tensors,
+            n_heads=int(meta["H"]),
+            head_k_dim=int(meta["Dk"]),
+            head_v_dim=int(meta["Dv"]),
+            conv_size=int(meta["K"]),
+            allow_neg_eigval=bool(meta["allow_neg_eigval"]),
+        )
+        mid.record()
+        torch.autograd.backward((out,), (grad_out,))
+        end.record()
+        torch.cuda.synchronize()
+        forward_times.append(float(start.elapsed_time(mid)))
+        forward_backward_times.append(float(start.elapsed_time(end)))
+
+    result = {
+        "timing_repeats": timing_repeats,
+        "forward_ms": float(statistics.median(forward_times)),
+        "forward_backward_ms": float(statistics.median(forward_backward_times)),
     }
+    if timing_repeats > 1:
+        result.update(
+            {
+                "forward_ms_min": float(min(forward_times)),
+                "forward_ms_max": float(max(forward_times)),
+                "forward_backward_ms_min": float(min(forward_backward_times)),
+                "forward_backward_ms_max": float(max(forward_backward_times)),
+            }
+        )
+    return result
 
 
 def count_launches(path: Path) -> dict[str, object]:
@@ -478,6 +501,18 @@ def main() -> None:
         action="store_true",
         help="Also validate the H100-gate B=1,T=2048 parity case.",
     )
+    parser.add_argument(
+        "--timing-warmups",
+        type=int,
+        default=3,
+        help="Number of warmup forward/backward timing iterations per case.",
+    )
+    parser.add_argument(
+        "--timing-repeats",
+        type=int,
+        default=1,
+        help="Number of measured forward/backward timing iterations per case.",
+    )
     args = parser.parse_args()
 
     if not torch.cuda.is_available():
@@ -516,6 +551,8 @@ def main() -> None:
             atol=args.atol,
             rtol=args.rtol,
             grad_scale=args.grad_scale,
+            timing_warmups=args.timing_warmups,
+            timing_repeats=args.timing_repeats,
         )
         if label == "B1_T32":
             case_32 = path

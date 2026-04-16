@@ -12,6 +12,8 @@
   `HGDN_REC_V_TILE=16 python setup_hgdn_megakernel.py build_ext --inplace`
 - Validation command:
   `python hgdn_megakernel/test_megakernel.py`
+- Optional median timing pass:
+  `python hgdn_megakernel/test_megakernel.py --timing-repeats 5`
 - Optional long-sequence gate:
   `python hgdn_megakernel/test_megakernel.py --include-b1-t2048`
 - Correctness build note: the current parity binary removes `--use_fast_math`
@@ -227,6 +229,14 @@ Local conclusion:
 - keep `THREADS=128` as the default local/H100 starting point
 - keep `HGDN_THREADS` exposed so H100-specific CTA-width tuning can happen
   without hand-editing the CUDA source
+- the harness now also supports repeated CUDA-event timing via
+  `--timing-repeats`; on the live `128 / 8 / 8` build, a `3`-repeat median pass
+  on the local helper measured:
+  - `B=1,T=512`: `7.53 ms` median forward+backward
+  - `B=2,T=512`: `8.47 ms` median
+  - `B=1,T=2048`: `27.78 ms` median, range `26.37-27.96 ms`
+  Use the repeated timing path for future local kernel comparisons rather than
+  trusting single-sample outliers.
 
 ## Trainer compile smoke
 
