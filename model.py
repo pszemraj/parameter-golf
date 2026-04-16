@@ -35,10 +35,7 @@ from hgdn_cuda import (
     packed_qkv_frontend_compile_visible,
     packed_qkv_split_l2norm_compile_visible,
 )
-from hgdn_megakernel import (
-    extension_loaded as megakernel_extension_loaded,
-    run_from_gated_delta_net,
-)
+from hgdn_megakernel import run_from_gated_delta_net
 
 _HAS_FLA = HAS_FLA_GATED_DELTA_RULE
 
@@ -1554,13 +1551,11 @@ class GatedDeltaNet(nn.Module):
         B, T, _ = x.shape
         H, Dv = self.n_heads, self.head_v_dim
         with profile_range("gdn.forward"):
-            if self.use_cuda_megakernel and x.is_cuda and x.dtype == torch.bfloat16:
-                if not megakernel_extension_loaded():
+            if self.use_cuda_megakernel and x.is_cuda:
+                if x.dtype != torch.bfloat16:
                     raise RuntimeError(
-                        "HGDN megakernel was requested for CUDA bf16 execution, "
-                        "but the extension is unavailable. Build "
-                        "`hgdn_megakernel_ext` or disable "
-                        "`GDN_USE_CUDA_MEGAKERNEL`."
+                        "HGDN megakernel requires CUDA bf16 activations, "
+                        f"got {x.dtype}."
                     )
                 return run_from_gated_delta_net(self, x)
             audit_call_index = begin_gdn_boundary_audit()

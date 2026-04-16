@@ -9,6 +9,8 @@
   `python setup_hgdn_megakernel.py build_ext --inplace`
 - Validation command:
   `python hgdn_megakernel/test_megakernel.py`
+- Optional long-sequence gate:
+  `python hgdn_megakernel/test_megakernel.py --include-b1-t2048`
 - Correctness build note: the current parity binary removes `--use_fast_math`
 
 ## Branch direction
@@ -29,8 +31,8 @@
   - backward replays each chunk inside the same cooperative kernel
   - warp-shuffle-backed CTA reductions replace the old full-block tree
     reductions in q/k norm, output RMSNorm, and backward scalar reductions
-  - winner-shape `Dv=8` recurrence dot products now use all block warps instead
-    of only the first `8` threads for the per-column dot loops
+  - `REC_V_TILE=8` recurrence dot products now use all block warps instead of
+    only the first `8` threads for the per-column dot loops
 - backward no longer keeps per-token `chunk_states` or `dv0_hist` in shared
   memory
 - backward reconstructs each token's in-chunk recurrence state from the chunk
@@ -130,6 +132,14 @@ These are still diagnostic bf16 tolerances, not the final tightened threshold se
   - `grad_conv_w`: max abs `0.0664062`
   - `grad_A_log`: max abs `0.00595432`
   - `grad_dt_bias`: max abs `0.00418161`
+- optional `B=1,T=2048`
+  - `forward_y`: max abs `0.0185547`, rmse `0.00145426`, norm-rel `0.00795628`
+  - `grad_x`: max abs `0.00305176`
+  - `grad_w_qkv`: max abs `0.101562`
+  - `grad_w_out`: max abs `0.00390625`
+  - `grad_conv_w`: max abs `0.0429688`
+  - `grad_A_log`: max abs `0.00585778`
+  - `grad_dt_bias`: max abs `0.00422701`
 
 ### FLA control result
 
@@ -148,6 +158,13 @@ These are still diagnostic bf16 tolerances, not the final tightened threshold se
 - because the FLA control itself does not match eager, the harness records FLA
   comparisons as diagnostics only where the control drifts; eager remains the
   contract gate for the megakernel path
+- a dedicated recurrence-boundary diagnostic now confirms the control mismatch
+  starts immediately rather than only after long chunked replay:
+  - `allow_neg_eigval=False`: first failing `T=1`, worst sampled `T=28`, max
+    abs `0.152049`, norm-rel `0.524228`
+  - `allow_neg_eigval=True`: first failing `T=3`, worst sampled `T=4`, max abs
+    `0.0744246`, norm-rel `0.327112`
+  - artifact: `hgdn_megakernel/cases/fla_recurrence_diag.json`
 
 ## Launch count
 
@@ -193,6 +210,11 @@ These timings are for the local `sm_89` device only.
 
 - forward: `1.70701 ms`
 - forward + backward: `8.92211 ms`
+
+### optional `B=1, T=2048`
+
+- forward: `5.37907 ms`
+- forward + backward: `31.2832 ms`
 
 ## 4070 speed comparison vs current packed HGDN CUDA path
 

@@ -18,6 +18,7 @@ from pathlib import Path
 
 ROOT = Path.cwd()
 MODEL = ROOT / "model.py"
+HGDN_UTILS = ROOT / "hgdn_runtime_utils.py"
 BINDING = ROOT / "hgdn_megakernel" / "hgdn_megakernel_binding.py"
 CUDA = ROOT / "hgdn_megakernel" / "hgdn_megakernel.cu"
 SETUP = ROOT / "setup_hgdn_megakernel.py"
@@ -39,6 +40,7 @@ def check(name: str, ok: bool, detail: str) -> bool:
 
 def main() -> None:
     model = read(MODEL)
+    hgdn_utils = read(HGDN_UTILS)
     binding = read(BINDING)
     cuda = read(CUDA)
     setup = read(SETUP)
@@ -82,6 +84,18 @@ def main() -> None:
         "no silent fallback",
         not fallback_present or explicit_raise_near_forward,
         "if GDN_USE_CUDA_MEGAKERNEL=1 and extension is unavailable, fail before benchmarking",
+    )
+
+    dtype_guard = bool(
+        re.search(
+            r"self\.use_cuda_megakernel\s+and\s+x\.is_cuda[\s\S]{0,200}x\.dtype\s*!=\s*torch\.bfloat16[\s\S]{0,160}RuntimeError",
+            model,
+        )
+    )
+    failures += not check(
+        "cuda bf16 megakernel dtype guard",
+        dtype_guard,
+        "megakernel mode should hard-fail on CUDA activations that are not bf16",
     )
 
     hidden_forward_copy = any(
@@ -153,6 +167,18 @@ def main() -> None:
         "trainer should log extension status and fail before training when megakernel mode is unavailable",
     )
 
+    compile_guard = bool(
+        re.search(
+            r"use_megakernel\s*=\s*bool\([\s\S]{0,200}use_cuda_megakernel[\s\S]{0,400}if not use_megakernel:[\s\S]{0,300}maybe_disable_compile[\s\S]{0,300}else:[\s\S]{0,200}gdn_megakernel_left_enabled",
+            hgdn_utils,
+        )
+    )
+    failures += not check(
+        "megakernel compile integration",
+        compile_guard,
+        "prepare_hybrid_compile should leave megakernel GDN blocks compile-eligible instead of forcing eager disable",
+    )
+
     medium_parity = all(
         token in test_harness
         for token in (
@@ -173,6 +199,13 @@ def main() -> None:
         "optional B2,T512 coverage",
         optional_b2,
         "test harness should expose an optional B=2,T=512 parity case",
+    )
+
+    t2048_flag = "--include-b1-t2048" in test_harness and "B1_T2048" in test_harness
+    failures += not check(
+        "optional B1,T2048 coverage",
+        t2048_flag,
+        "test harness should expose an optional B=1,T=2048 parity case for the H100 gate",
     )
 
     print()

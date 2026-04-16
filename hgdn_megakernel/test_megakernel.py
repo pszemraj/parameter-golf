@@ -473,6 +473,11 @@ def main() -> None:
         action="store_true",
         help="Also validate the optional B=2,T=512 parity case.",
     )
+    parser.add_argument(
+        "--include-b1-t2048",
+        action="store_true",
+        help="Also validate the H100-gate B=1,T=2048 parity case.",
+    )
     args = parser.parse_args()
 
     if not torch.cuda.is_available():
@@ -497,6 +502,8 @@ def main() -> None:
     ]
     if args.include_b2_t512:
         case_specs.append(("B2_T512", 2, 512, 8192))
+    if args.include_b1_t2048:
+        case_specs.append(("B1_T2048", 1, 2048, 16384))
 
     results: dict[str, object] = {}
     case_32 = case_dir / "case_b1_t32.pt"

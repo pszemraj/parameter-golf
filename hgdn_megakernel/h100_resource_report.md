@@ -30,7 +30,7 @@ The current repo-backed candidate is no longer the save-heavy version.
 - backward now consumes `grad_q_norm_accum`, `grad_k_norm_accum`,
   `grad_g_log_accum`, and `grad_beta_accum` directly instead of staging
   separate global copies before the tail backward phases
-- winner-shape `Dv=8` recurrence dot products use all block warps for the
+- `REC_V_TILE=8` recurrence dot products use all block warps for the
   column-dot loops instead of leaving most of the CTA idle
 - launch contract is still exactly one forward kernel and one backward kernel
 
@@ -38,12 +38,19 @@ The immediate parity-contract hardening pass is now complete:
 
 - megakernel mode no longer silently falls back to eager when CUDA `bf16`
   execution requested the extension but the extension is unavailable
+- megakernel mode now hard-fails on CUDA activations that are not `bf16`
+- selective/hybrid compile no longer preemptively force megakernel GDN blocks
+  into eager islands; compile stats now record
+  `gdn_megakernel_left_enabled`
 - trainer preflight now prints extension status and rejects
   `GDN_CONTROL_PROJ_FP32=1` before training starts in megakernel mode
 - the autograd wrapper now rejects non-contiguous or wrongly typed inputs
   instead of inserting hidden `.contiguous()` or `.to()` kernels
 - correctness builds now omit `--use_fast_math`
 - local eager parity now covers `B=1,T=8/32/128/512` and optional `B=2,T=512`
+- the harness now exposes an optional `B=1,T=2048` parity gate for the real
+  submission sequence length, and that case also passes locally on the 4070
+  helper
 - isolated launch counting still shows exactly one forward launch and one
   backward launch, with no extra CUDA-side copy or memset events
 
@@ -58,6 +65,12 @@ One extra local finding matters for interpretation:
   HGDN reference on the same saved weights and inputs, so eager remains the
   megakernel numerical contract until that separate control-path mismatch is
   resolved
+- a dedicated recurrence-boundary diagnostic confirms that this FLA drift is
+  immediate rather than only a late chunk-boundary artifact:
+  - `allow_neg_eigval=False`: first failing `T=1`, worst sampled `T=28`, max
+    abs `0.152049`, norm-rel `0.524228`
+  - `allow_neg_eigval=True`: first failing `T=3`, worst sampled `T=4`, max abs
+    `0.0744246`, norm-rel `0.327112`
 - the first cooperative split-K weight-gradient trial for `grad_w_out`,
   `grad_w_qkv`, and `grad_w_g` stayed parity-clean and kept the one-launch
   contract, but it was slightly slower on the local 4070 helper and was
@@ -124,7 +137,7 @@ The latest reduction-side cleanup is:
 - warp-shuffle-backed CTA reductions for q/k norm, output RMSNorm, and the
   backward scalar gate accumulations
 - one dead CTA reduction buffer removed from the backward shared-memory layout
-- `Dv=8` recurrence column-dot helpers now use warp-partitioned block
+- `REC_V_TILE=8` recurrence column-dot helpers now use warp-partitioned block
   cooperation for `tmp_dv0`, `o_raw`, `tmp_dv1`, and `grad_v_post`
 - later backward phases no longer write and reread temporary global copies of
   q/k norm grads or gate-log grads before finishing `grad_pre`,

@@ -277,6 +277,7 @@ def prepare_hybrid_compile(
     compile_stats: dict[str, int | str] = {
         "strategy": "off" if not enabled else strategy,
         "gdn_disabled": 0,
+        "gdn_megakernel_left_enabled": 0,
         "gdn_mlps_compiled": 0,
         "attn_blocks_compiled": 0,
         "model_compiled": 0,
@@ -293,15 +294,19 @@ def prepare_hybrid_compile(
         for idx, block_type in enumerate(model.block_types):
             block = model.blocks[idx]
             if block_type == "gdn" and hasattr(block, "gdn") and hasattr(block, "mlp"):
-                block.gdn = maybe_disable_compile(
-                    block.gdn,
-                    enabled=True,
-                    reason="FLA GDN path already dispatches Triton kernels",
-                )
+                use_megakernel = bool(getattr(block.gdn, "use_cuda_megakernel", False))
+                if not use_megakernel:
+                    block.gdn = maybe_disable_compile(
+                        block.gdn,
+                        enabled=True,
+                        reason="FLA GDN path already dispatches Triton kernels",
+                    )
+                    compile_stats["gdn_disabled"] += 1
+                else:
+                    compile_stats["gdn_megakernel_left_enabled"] += 1
                 block.mlp = maybe_compile(
                     block.mlp, enabled=True, dynamic=False, fullgraph=True
                 )
-                compile_stats["gdn_disabled"] += 1
                 compile_stats["gdn_mlps_compiled"] += 1
             elif block_type == "attn":
                 model.blocks[idx] = maybe_compile(
