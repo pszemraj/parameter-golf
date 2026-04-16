@@ -1666,21 +1666,32 @@ __global__ void hgdn_backward_bf16_kernel(
   }
   grid.sync();
 
-  for (int64_t idx = linear_tid; idx < BT * H; idx += linear_stride) {
-    int h = idx % H;
+  float beta_scale = allow_neg_eigval ? 2.0f : 1.0f;
+  for (int h = 0; h < H; ++h) {
+    float local_grad_A = 0.0f;
+    float local_grad_dt = 0.0f;
     float exp_A = expf(A_log[h]);
-    float z_value = b2f(g_pre[idx]) + dt_bias[h];
-    float sig_z = sig(z_value);
-    float grad_g_log_value = grad_g_log_accum[idx];
-    float grad_dt_value = grad_g_log_value * (-exp_A * sig_z);
-    grad_g_pre[idx] = f2b(grad_dt_value);
-    float s = sig(b2f(beta_pre[idx]));
-    float scale = allow_neg_eigval ? 2.0f : 1.0f;
-    grad_beta_pre[idx] =
-        f2b(grad_beta_accum[idx] * scale * s * (1.0f - s));
-    float g_value = -exp_A * softplus(z_value);
-    atomicAdd(&grad_A_log[h], grad_g_log_value * g_value);
-    atomicAdd(&grad_dt_bias[h], grad_dt_value);
+    for (int64_t bt = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         bt < BT;
+         bt += linear_stride) {
+      int64_t idx = bt * H + h;
+      float z_value = b2f(g_pre[idx]) + dt_bias[h];
+      float sig_z = sig(z_value);
+      float grad_g_log_value = grad_g_log_accum[idx];
+      float grad_dt_value = grad_g_log_value * (-exp_A * sig_z);
+      grad_g_pre[idx] = f2b(grad_dt_value);
+      float s = sig(b2f(beta_pre[idx]));
+      grad_beta_pre[idx] =
+          f2b(grad_beta_accum[idx] * beta_scale * s * (1.0f - s));
+      local_grad_A += grad_g_log_value * (-exp_A * softplus(z_value));
+      local_grad_dt += grad_dt_value;
+    }
+    block_sum2(local_grad_A, local_grad_dt, shmem);
+    if (threadIdx.x == 0) {
+      atomicAdd(&grad_A_log[h], local_grad_A);
+      atomicAdd(&grad_dt_bias[h], local_grad_dt);
+    }
+    __syncthreads();
   }
   grid.sync();
 

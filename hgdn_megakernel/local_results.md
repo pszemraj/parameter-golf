@@ -64,6 +64,9 @@
   - the recurrence column-dot helper now supports wider `REC_V_TILE` sweeps by
     slicing tiles through the same 8-column reduction primitive instead of
     assuming the whole tile width is exactly `8`
+  - the latest local checkpoint also reduces the final control-tail global
+    atomics by accumulating `grad_A_log` and `grad_dt_bias` through per-head
+    block reductions over `BT` inside the same cooperative backward kernel
 - backward no longer keeps per-token `chunk_states` or `dv0_hist` in shared
   memory
 - backward reconstructs each token's in-chunk recurrence state from the chunk
@@ -413,38 +416,38 @@ perf_mode: skipping serialization and final roundtrip eval
 
 These timings are for the local `sm_89` device only.
 Unless otherwise noted, the numbers below reflect the latest rebuilt
-control-tail checkpoint with the live defaults
+reduced-control-tail checkpoint with the live defaults
 `REC_V_TILE=8`, `REC_CHUNK_T=8`.
 
 ### `B=1, T=8`
 
 - forward: `0.78746 ms`
-- forward + backward: `1.12538 ms`
+- forward + backward: `1.14790 ms`
 
 ### `B=1, T=32`
 
-- forward: `0.24474 ms`
-- forward + backward: `0.76800 ms`
+- forward: `0.29184 ms`
+- forward + backward: `0.85094 ms`
 
 ### `B=1, T=128`
 
-- forward: `0.48845 ms`
-- forward + backward: `2.02957 ms`
+- forward: `0.64307 ms`
+- forward + backward: `2.46682 ms`
 
 ### `B=1, T=512`
 
-- forward: `1.50323 ms`
-- forward + backward: `7.49875 ms`
+- forward: `2.05926 ms`
+- forward + backward: `9.17094 ms`
 
 ### optional `B=2, T=512`
 
-- forward: `1.79610 ms`
-- forward + backward: `8.60365 ms`
+- forward: `2.29786 ms`
+- forward + backward: `9.90925 ms`
 
 ### optional `B=1, T=2048`
 
-- forward: `5.37395 ms`
-- forward + backward: `29.76870 ms`
+- forward: `5.35040 ms`
+- forward + backward: `25.03475 ms`
 
 ## REC_V_TILE sweep
 
@@ -588,21 +591,24 @@ Local conclusion:
   fewer global accumulations, better dense phases, or a more aggressive
   Hopper-specific implementation
 
-Latest control-tail checkpoint delta versus `243bda5`:
+Latest reduced-control-tail checkpoint delta versus `7196231`:
 
 - the one-forward and one-backward launch structure stayed intact
 - eager parity still passed through optional `B=1,T=2048`
-- the checkpoint now parallelizes `grad_A_log` and `grad_dt_bias` accumulation
-  across the existing `BT * H` control loop instead of leaving a serialized
-  `H=8` tail at the end of the cooperative backward kernel
+- the checkpoint now reduces `grad_A_log` and `grad_dt_bias` global atomic
+  traffic by accumulating each head through block-local `BT` reductions before
+  the final global add
 - local parity-harness forward + backward moved:
-  - `B=1,T=128`: `2.25379 ms` -> `2.02957 ms`
-  - `B=1,T=512`: `7.83974 ms` -> `7.49875 ms`
-  - `B=2,T=512`: `8.97126 ms` -> `8.60365 ms`
-  - `B=1,T=2048`: `30.88589 ms` -> `29.76870 ms`
-- saved forward state is unchanged from `243bda5`
-- on this `sm_89` helper this is the cleanest local long-sequence win since the
-  earlier qkv-only long-`BT` dense-gradient split
+  - `B=1,T=128`: `2.45 ms` -> `2.47 ms`
+  - `B=1,T=512`: `9.15 ms` -> `9.17 ms`
+  - `B=2,T=512`: `9.11 ms` -> `9.91 ms`
+  - `B=1,T=2048`: `30.73 ms` -> `25.03 ms`
+- saved forward state is unchanged from `7196231`
+- local interpretation:
+  - the shorter helper points are flat to worse
+  - the target-like long-sequence helper point moved by about `5.70 ms`
+  - that is large enough that this checkpoint is worth a bounded `1xH100`
+    compile/parity sanity pass before reading too much more into the 4070
 
 ## Rejected follow-up branch
 
@@ -662,3 +668,12 @@ Current status is **not** “ready for H100 timing testing” because:
   local 4070
 - backward recurrence/replay and its global accumulation traffic are still too
   expensive
+
+Next real-validation step:
+
+- run a bounded `1xH100` compile/parity check on this exact checkpoint
+- if that passes cleanly, run one narrow `1xH100` timing sanity on:
+  - live default `rec_chunk_t=8`
+  - bounded speed candidate `rec_chunk_t=4`
+- do not turn that into an H100 timing claim until the H100 compile/parity gate
+  is clean and the result reproduces there

@@ -100,13 +100,12 @@ The current repo-backed candidate is no longer the save-heavy version.
   compile-time knob via `HGDN_GEMM_ATB_SPLIT_M_THRESHOLD`; a local trial at
   `1024` was worse than the live `2048` default on the repeated timing gate,
   so `2048` remains the starting point until H100 evidence says otherwise
-- the local harness now supports repeated CUDA-event timing; on the live
-  `THREADS=128`, `REC_V_TILE=8`, `REC_CHUNK_T=8` build, the new qkv
-  post/norm recompute checkpoint measured about `24.65-26.86 ms` median
-  forward+backward at `B=1,T=2048` across three 3-repeat local passes, versus
-  the prior `27.78 ms` median baseline. Shorter local helper cases regressed,
-  so this is still a long-sequence memory-traffic hypothesis rather than an
-  H100 timing claim.
+- the local harness now supports repeated CUDA-event timing; on the current
+  `THREADS=128`, `REC_V_TILE=8`, `REC_CHUNK_T=8` build, the latest reduced
+  control-tail checkpoint measured about `25.03 ms` median forward+backward at
+  `B=1,T=2048`, versus the prior local `30.73 ms` point on the previous live
+  checkpoint. Shorter helper cases were flat to worse, so this is still a
+  target-length structural hint rather than an H100 timing claim.
 - launch contract is still exactly one forward kernel and one backward kernel
 
 The immediate parity-contract hardening pass is now complete:
@@ -184,9 +183,10 @@ One extra local finding matters for interpretation:
   additional `144 MiB` of saved forward state per GDN block at
   `B=32,T=2048`, and moved the local `B=1,T=2048` parity-harness point to
   `30.89 ms`
-- the current control-tail checkpoint keeps the same memory contract but
-  parallelizes `grad_A_log` / `grad_dt_bias` accumulation, moving the local
-  `B=1,T=2048` parity-harness point again to `29.77 ms`
+- the current reduced-control-tail checkpoint keeps the same memory contract but
+  reduces `grad_A_log` / `grad_dt_bias` global atomic traffic through per-head
+  block reductions, moving the local `B=1,T=2048` parity-harness point again to
+  `25.03 ms`
 
 The main activation-state change is:
 
@@ -219,6 +219,13 @@ A bounded high-memory speed candidate is now also identified:
 - interpretation: promising speed-vs-memory trade, worth a bounded H100
   compile/parity check if memory headroom allows it, but not safe to flip the
   live default from local `sm_89` data alone
+
+That makes the next validation gate straightforward:
+
+- bounded `1xH100` compile/parity on the current default checkpoint
+- then one narrow `1xH100` timing sanity comparing `rec_chunk_t=8` against the
+  existing `rec_chunk_t=4` candidate
+- do not upgrade the label to “ready for H100 timing” from local helper data
 
 ## Save-vs-recompute decisions
 
