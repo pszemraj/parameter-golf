@@ -63,8 +63,6 @@ Important notes:
 
 Environment overrides:
   PYTHON_BIN                Explicit Python executable to use.
-  CONDA_ENV_NAME            Optional conda env name if conda is available,
-                            defaults to pg.
   TORCH_CUDA_ARCH_LIST      Defaults to 9.0.
   GDN_MEGAKERNEL_REC_CHUNK_T Defaults to 8.
   MK_TIMING_REPEATS         Defaults to 3.
@@ -95,11 +93,6 @@ EOF
 resolve_python_cmd() {
     if [[ -n "${PYTHON_BIN:-}" ]]; then
         echo "${PYTHON_BIN}"
-        return 0
-    fi
-    if command -v conda >/dev/null 2>&1; then
-        local conda_env_name="${CONDA_ENV_NAME:-pg}"
-        printf 'conda run -s --name %q python\n' "${conda_env_name}"
         return 0
     fi
     if command -v python3 >/dev/null 2>&1; then

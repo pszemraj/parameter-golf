@@ -6,7 +6,7 @@ hgdn_setup_repo_root "${BASH_SOURCE[0]}"
 
 usage() {
     cat <<'EOF'
-Usage: conda run -s --name pg bash scripts/run_hgdn_local_phase1.sh
+Usage: bash scripts/run_hgdn_local_phase1.sh
 
 Purpose:
   Run the local RTX 4070 HGDN phase-1 investigation bundle sequentially:
@@ -32,8 +32,8 @@ Defaults:
   - output root: profiles/${RUN_PREFIX}
 
 Examples:
-  conda run -s --name pg bash scripts/run_hgdn_local_phase1.sh
-  RUN_PREFIX=rtx4070_phase1b TRAIN_SEQ_LEN=1024 conda run -s --name pg bash scripts/run_hgdn_local_phase1.sh
+  bash scripts/run_hgdn_local_phase1.sh
+  RUN_PREFIX=rtx4070_phase1b TRAIN_SEQ_LEN=1024 bash scripts/run_hgdn_local_phase1.sh
 EOF
 }
 

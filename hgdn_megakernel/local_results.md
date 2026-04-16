@@ -674,13 +674,11 @@ Next real-validation step:
 - run a bounded `1xH100` compile/parity check on this exact checkpoint
 - the repo helper for that gate is now:
   `scripts/run_h100_single_gpu_hgdn_megakernel.sh all`
-- the helper no longer requires `conda` on the remote box:
+- the helper now uses a plain Python runtime contract on the remote box:
   - if `PYTHON_BIN` is set, it uses that explicitly
-  - otherwise it uses `conda run -s --name ${CONDA_ENV_NAME:-pg} python` when
-    `conda` is available
   - otherwise it falls back to `python3`, then `python`
 - the structured launcher equivalent is:
-  `conda run -s --name pg python scripts/hgdn.py h100-megakernel all --offline`
+  `python scripts/hgdn.py h100-megakernel all --offline`
 - the helper now emits a retrievable bundle stage directory via `MK_OUTPUT_DIR`
   and a `.7z` archive via `MK_ARCHIVE_OUTPUT`:
   - default archive path is `$(MK_OUTPUT_DIR).7z`

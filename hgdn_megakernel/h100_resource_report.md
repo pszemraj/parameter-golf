@@ -227,11 +227,9 @@ That makes the next validation gate straightforward:
   `scripts/run_h100_single_gpu_hgdn_megakernel.sh all`
 - helper Python runtime selection is now portable:
   - `PYTHON_BIN` if explicitly set
-  - else `conda run -s --name ${CONDA_ENV_NAME:-pg} python` when `conda`
-    exists
   - else plain `python3` / `python`
 - structured launcher:
-  `conda run -s --name pg python scripts/hgdn.py h100-megakernel all --offline`
+  `python scripts/hgdn.py h100-megakernel all --offline`
 - helper bundle behavior:
   - set `MK_OUTPUT_DIR=/path/to/output_dir`
   - optional explicit archive path:

@@ -371,7 +371,7 @@ PY
 
     hgdn_create_7z_archive "${python_bin}" "${archive_output}" "${bundle_stage_dir}"
     echo "bundle_archive=${archive_output}"
-    echo "local_compare_hint=conda run -s --name pg python scripts/hgdn.py fixed2k-compare --project ${wandb_project} --reference-entity ${compare_reference_entity} --reference-project ${compare_reference_project:-${wandb_project}} --contains ${run_prefix_base}_ --name ${compare_reference} --reference ${compare_reference}"
+    echo "local_compare_hint=python scripts/hgdn.py fixed2k-compare --project ${wandb_project} --reference-entity ${compare_reference_entity} --reference-project ${compare_reference_project:-${wandb_project}} --contains ${run_prefix_base}_ --name ${compare_reference} --reference ${compare_reference}"
 }
 
 print_plan
