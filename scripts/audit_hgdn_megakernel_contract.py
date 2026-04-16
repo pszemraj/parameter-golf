@@ -136,7 +136,9 @@ def main() -> None:
     )
 
     binding_output_contract = (
-        "Tensor beta, Tensor g_out, Tensor o_raw, Tensor state_ckpt)" in binding
+        "Tensor y, Tensor qkv, Tensor q_norm, Tensor k_norm, Tensor v_post," in binding
+        and "Tensor beta, Tensor g_out, Tensor o_raw, Tensor state_ckpt)" in binding
+        and "Tensor qkv, Tensor pre," not in binding
         and "Tensor o_norm" not in binding
         and "Tensor z, Tensor state_ckpt" not in binding
     )
@@ -150,6 +152,7 @@ def main() -> None:
         '"Tensor g_pre, Tensor beta_pre, Tensor g_log, Tensor beta, Tensor g_out, "'
         in binding
         and '"Tensor o_raw, Tensor state_ckpt, int n_heads, "' in binding
+        and "Tensor qkv, Tensor pre," not in binding
         and "ctx.save_for_backward(" in binding
         and "o_norm" not in binding
     )
@@ -238,6 +241,17 @@ def main() -> None:
         "output gate recompute path",
         output_recompute,
         "current checkpoint should recompute z/output-norm state in backward instead of saving o_norm/z from forward",
+    )
+
+    pre_recompute = (
+        "auto pre_tmp = torch::empty({B, T, C}, bf16_options);" in cuda
+        and "float q_preact = conv_at(qkv, conv_w, b, t, q_channel, T, C, K);" in cuda
+        and "float v_preact = conv_at(qkv, conv_w, b, t, v_channel, T, C, K);" in cuda
+    )
+    failures += not check(
+        "pre activation recompute path",
+        pre_recompute,
+        "current checkpoint should keep pre temporary in forward and recompute conv preactivations in backward instead of saving pre",
     )
 
     control_guard = (

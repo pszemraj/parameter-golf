@@ -32,8 +32,12 @@
   - bf16 WMMA tensor-core path for full dense tiles on `sm_80+`
   - warp-local scalar fallback for dense edge tiles
   - forward saves only recurrence chunk-start checkpoints
+  - forward keeps conv preactivations only in a temporary `pre_tmp`, not as a
+    saved activation
   - forward keeps `g_out` and `o_raw` but no longer saves `o_norm` or `z`
   - backward replays each chunk inside the same cooperative kernel
+  - backward recomputes conv preactivations from `qkv` and `conv_w` before the
+    SiLU derivative path
   - backward recomputes output RMSNorm and gated `z` from `o_raw` and `g_out`
     before the dense `W_out` gradient phases
   - warp-shuffle-backed CTA reductions replace the old full-block tree
@@ -208,7 +212,7 @@ The binding path now presents the HGDN block through a compile-visible
 Fresh-cache trainer smoke used:
 
 - `TORCH_LOGS=graph_breaks,recompiles`
-- `TORCHINDUCTOR_CACHE_DIR=/tmp/pg_inductor_mk_recompute`
+- `TORCHINDUCTOR_CACHE_DIR=/tmp/pg_inductor_mk_drop_pre`
 - `USE_WANDB=0`
 - `WANDB_WATCH=none`
 - `PERF_SKIP_FINAL_EVAL=1`
@@ -248,7 +252,7 @@ launch_contract:planned_train_tokens:1024 train_batch_tokens:1024 train_seq_len:
 compile_plan:strategy:hybrid gdn_disabled:0 gdn_megakernel_left_enabled:1 gdn_mlps_compiled:1 attn_blocks_compiled:1 model_compiled:1
 warmup_step:1/1
 compile_prewarm: muon_shapes:5 rotary_modules:1
-step:1/1 train_loss:6.9387 train_time:35ms step_avg:34.52ms
+step:1/1 train_loss:6.9387 train_time:41ms step_avg:40.70ms
 peak memory allocated: 46 MiB reserved: 68 MiB
 perf_mode: skipping serialization and final roundtrip eval
 ```
@@ -257,38 +261,38 @@ perf_mode: skipping serialization and final roundtrip eval
 
 These timings are for the local `sm_89` device only.
 Unless otherwise noted, the numbers below reflect the latest rebuilt
-output-recompute checkpoint with the live defaults
+pre-drop checkpoint with the live defaults
 `REC_V_TILE=8`, `REC_CHUNK_T=8`.
 
 ### `B=1, T=8`
 
-- forward: `0.78131 ms`
-- forward + backward: `1.12640 ms`
+- forward: `0.79360 ms`
+- forward + backward: `1.13971 ms`
 
 ### `B=1, T=32`
 
-- forward: `0.23654 ms`
-- forward + backward: `0.77926 ms`
+- forward: `0.24986 ms`
+- forward + backward: `0.79155 ms`
 
 ### `B=1, T=128`
 
-- forward: `0.51200 ms`
-- forward + backward: `2.10637 ms`
+- forward: `0.64816 ms`
+- forward + backward: `2.25379 ms`
 
 ### `B=1, T=512`
 
-- forward: `1.45715 ms`
-- forward + backward: `7.66566 ms`
+- forward: `1.58720 ms`
+- forward + backward: `7.83974 ms`
 
 ### optional `B=2, T=512`
 
-- forward: `1.81555 ms`
-- forward + backward: `9.11770 ms`
+- forward: `1.66400 ms`
+- forward + backward: `8.97126 ms`
 
 ### optional `B=1, T=2048`
 
-- forward: `5.38112 ms`
-- forward + backward: `31.00570 ms`
+- forward: `5.44358 ms`
+- forward + backward: `30.88589 ms`
 
 ## REC_V_TILE sweep
 
@@ -317,7 +321,7 @@ Local conclusion from this bounded sweep:
 
 ## Historical 4070 speed comparison vs current packed HGDN CUDA path
 
-I also benchmarked an earlier pre-output-recompute megakernel checkpoint
+I also benchmarked an earlier pre-activation-recompute megakernel checkpoint
 against the current packed `GatedDeltaNet` CUDA block path on the same local
 RTX 4070 laptop GPU.
 
@@ -329,7 +333,7 @@ Important interpretation note:
 - the megakernel numerical contract is currently the eager HGDN path because
   local FLA still diverges materially from eager
 - these numbers are kept as historical reference only
-- they predate the current output-recompute checkpoint
+- they predate the current pre-drop checkpoint
 - use the explicit timing table above plus the checkpoint delta notes below for
   the current same-source local status
 
@@ -432,22 +436,25 @@ Local conclusion:
   fewer global accumulations, better dense phases, or a more aggressive
   Hopper-specific implementation
 
-Latest output-recompute checkpoint delta versus `2babf1e`:
+Latest pre-drop checkpoint delta versus `e346a0c`:
 
 - the one-forward and one-backward launch structure stayed intact
 - eager parity still passed through optional `B=1,T=2048`
-- the checkpoint now drops saved `o_norm` and `z`, recomputing them in backward
-  from `o_raw` and `g_out`
+- the checkpoint now keeps conv preactivations temporary-only in forward and
+  recomputes them in backward from `qkv` and `conv_w`
 - local parity-harness forward + backward moved:
-  - `B=1,T=128`: `2.17498 ms` -> `2.10637 ms`
-  - `B=1,T=512`: `8.01280 ms` -> `7.66566 ms`
-  - `B=2,T=512`: `8.92211 ms` -> `9.11770 ms`
-  - `B=1,T=2048`: `32.60621 ms` -> `31.00570 ms`
-- the output recompute saves:
-  - `96 MiB` per GDN block at `B=32,T=2048`
-  - `384 MiB` per GDN block at `B=128,T=2048`
-- this is a real memory win and a small local long-sequence win at `B=1`, but
-  it is not yet enough to change the H100 timing-readiness label by itself
+  - `B=1,T=128`: `2.10637 ms` -> `2.25379 ms`
+  - `B=1,T=512`: `7.66566 ms` -> `7.83974 ms`
+  - `B=2,T=512`: `9.11770 ms` -> `8.97126 ms`
+  - `B=1,T=2048`: `31.00570 ms` -> `30.88589 ms`
+- the `pre` drop saves an additional:
+  - `144 MiB` per GDN block at `B=32,T=2048`
+  - `576 MiB` per GDN block at `B=128,T=2048`
+- total saved forward state is now about:
+  - `0.95 GiB` per GDN block at `B=32,T=2048`
+  - `3.78 GiB` per GDN block at `B=128,T=2048`
+- on this `sm_89` helper the near-term speed effect is mixed, but the owned
+  kernel contract and saved-state reduction both survive the change cleanly
 
 ## Rejected follow-up branch
 

@@ -37,16 +37,15 @@ Approximate saved forward tensors per GDN block at `B=128,T=2048`:
 | Tensor group | Bytes | MiB |
 | --- | ---: | ---: |
 | `qkv` | `603,979,776` | `576` |
-| `pre` | `603,979,776` | `576` |
 | `q_norm + k_norm + v_post` | `603,979,776` | `576` |
 | `inv_q + inv_k` | `16,777,216` | `16` |
 | `g_pre + beta_pre + g_log + beta` | `16,777,216` | `16` |
 | `g_out + o_raw` | `402,653,184` | `384` |
 | `state_ckpt` | `2,415,919,104` | `2,304` |
-| **Total per GDN block** | **`4,664,066,048`** | **`4,448`** |
+| **Total per GDN block** | **`4,060,086,272`** | **`3,872`** |
 
-That is about **4.34 GiB per GDN block** at the exact-bridge per-rank stress
-shape. For a 14-layer 1:1 model with 7 GDN blocks, that is roughly **30 GiB**
+That is about **3.78 GiB per GDN block** at the exact-bridge per-rank stress
+shape. For a 14-layer 1:1 model with 7 GDN blocks, that is roughly **26 GiB**
 of saved GDN block state before attention/MLP activations, optimizer state,
 workspace, and allocator overhead.
 
@@ -61,8 +60,12 @@ The current repo-backed candidate is no longer the save-heavy version.
   `HGDN_REC_V_TILE` / `HGDN_REC_CHUNK_T`, but the live default remains `8/8`
 - bf16 WMMA tensor-core path for full dense tiles on `sm_80+`
 - forward saves only recurrence chunk-start checkpoints
+- forward keeps conv preactivations only in a temporary `pre_tmp`, not as a
+  saved activation
 - forward keeps `g_out` and `o_raw` but no longer saves `o_norm` or `z`
 - backward replays each chunk inside the same cooperative kernel
+- backward recomputes conv preactivations from `qkv` and `conv_w` before the
+  SiLU derivative path
 - backward recomputes output RMSNorm and gated `z` from `o_raw` and `g_out`
   before the dense `W_out` gradient phases
 - backward reconstructs each token-local in-chunk recurrence state from the
@@ -148,9 +151,10 @@ One extra local finding matters for interpretation:
   - `REC_V_TILE=48`: `76.64 ms`
   - local conclusion: keep `REC_V_TILE=8` as the live default unless H100 data
     proves a different value wins there
-- the current output-recompute checkpoint keeps that `REC_V_TILE=8` default,
-  cuts `96 MiB` of saved forward state per GDN block at `B=32,T=2048`, and
-  moved the local `B=1,T=2048` parity-harness point to `31.01 ms`
+- the current pre-drop checkpoint keeps that `REC_V_TILE=8` default, cuts an
+  additional `144 MiB` of saved forward state per GDN block at
+  `B=32,T=2048`, and moved the local `B=1,T=2048` parity-harness point to
+  `30.89 ms`
 
 The main activation-state change is:
 
@@ -163,7 +167,7 @@ That cuts the recurrence-state save from **4.50 GiB** to **576 MiB** per GDN
 block.
 
 Total saved forward state in the current checkpointed version is about
-**1.09 GiB per GDN block** at `B=32,T=2048` and about **4.34 GiB per GDN
+**0.95 GiB per GDN block** at `B=32,T=2048` and about **3.78 GiB per GDN
 block** at `B=128,T=2048`, instead of about **5.12 GiB** in the original
 save-heavy layout.
 
@@ -172,7 +176,6 @@ save-heavy layout.
 | Saved tensor | Shape | Dtype | Bytes | If not saved | Decision |
 | --- | --- | --- | ---: | --- | --- |
 | `qkv` | `(32, 2048, 1152)` | bf16 | 150,994,944 | rerun packed `W_qkv` dense phase, about `57.98 GF` | keep saved |
-| `pre` | `(32, 2048, 1152)` | bf16 | 150,994,944 | rerun packed causal conv and pre-SiLU staging, about `0.60 GF` plus extra conv bookkeeping | keep saved |
 | `q_norm` | `(32, 2048, 8, 48)` | bf16 | 50,331,648 | recompute q conv, SiLU, and L2 norm path | keep saved |
 | `k_norm` | `(32, 2048, 8, 48)` | bf16 | 50,331,648 | recompute k conv, SiLU, and L2 norm path | keep saved |
 | `v_post` | `(32, 2048, 8, 48)` | bf16 | 50,331,648 | recompute v conv and SiLU path | keep saved |
@@ -190,6 +193,7 @@ The implemented save-vs-recompute changes so far are:
 
 - replacement of full per-token `state_prev` with chunk checkpoints plus
   within-chunk replay
+- removal of saved `pre`, recomputed inside backward from `qkv` and `conv_w`
 - removal of saved `o_norm` and `z`, recomputed inside backward from `o_raw`
   and `g_out`
 - removal of backward shared-memory `chunk_states` and `dv0_hist`, replaced by

@@ -251,14 +251,14 @@ _HGDN_MEGAKERNEL_V1_LIB.define(
     "Tensor conv_w, Tensor A_log, Tensor dt_bias, int n_heads, int head_k_dim, "
     "int head_v_dim, int conv_size, bool allow_neg_eigval"
     ") -> ("
-    "Tensor y, Tensor qkv, Tensor pre, Tensor q_norm, Tensor k_norm, Tensor v_post, "
+    "Tensor y, Tensor qkv, Tensor q_norm, Tensor k_norm, Tensor v_post, "
     "Tensor inv_q, Tensor inv_k, Tensor g_pre, Tensor beta_pre, Tensor g_log, "
     "Tensor beta, Tensor g_out, Tensor o_raw, Tensor state_ckpt)"
 )
 _HGDN_MEGAKERNEL_V1_LIB.define(
     "run_backward("
     "Tensor grad_y, Tensor x, Tensor w_qkv, Tensor w_a, Tensor w_b, Tensor w_g, "
-    "Tensor w_out, Tensor conv_w, Tensor A_log, Tensor dt_bias, Tensor qkv, Tensor pre, "
+    "Tensor w_out, Tensor conv_w, Tensor A_log, Tensor dt_bias, Tensor qkv, "
     "Tensor q_norm, Tensor k_norm, Tensor v_post, Tensor inv_q, Tensor inv_k, "
     "Tensor g_pre, Tensor beta_pre, Tensor g_log, Tensor beta, Tensor g_out, "
     "Tensor o_raw, Tensor state_ckpt, int n_heads, "
@@ -333,7 +333,6 @@ def _run_megakernel_backward(
     A_log: Tensor,
     dt_bias: Tensor,
     qkv: Tensor,
-    pre: Tensor,
     q_norm: Tensor,
     k_norm: Tensor,
     v_post: Tensor,
@@ -371,7 +370,6 @@ def _run_megakernel_backward(
             A_log,
             dt_bias,
             qkv,
-            pre,
             q_norm,
             k_norm,
             v_post,
@@ -479,7 +477,6 @@ def _hgdn_megakernel_run_backward_cpu(
     A_log: Tensor,
     dt_bias: Tensor,
     qkv: Tensor,
-    pre: Tensor,
     q_norm: Tensor,
     k_norm: Tensor,
     v_post: Tensor,
@@ -511,7 +508,6 @@ def _hgdn_megakernel_run_backward_cpu(
         A_log,
         dt_bias,
         qkv,
-        pre,
         q_norm,
         k_norm,
         v_post,
@@ -546,7 +542,6 @@ def _hgdn_megakernel_run_backward_cuda(
     A_log: Tensor,
     dt_bias: Tensor,
     qkv: Tensor,
-    pre: Tensor,
     q_norm: Tensor,
     k_norm: Tensor,
     v_post: Tensor,
@@ -578,7 +573,6 @@ def _hgdn_megakernel_run_backward_cuda(
         A_log,
         dt_bias,
         qkv,
-        pre,
         q_norm,
         k_norm,
         v_post,
@@ -627,7 +621,6 @@ def _hgdn_megakernel_run_fake(
     return (
         _meta_empty(x, x.shape),
         _meta_empty(x, (batch, seq, channels)),
-        _meta_empty(x, (batch, seq, channels)),
         _meta_empty(x, (batch, seq, heads, dk)),
         _meta_empty(x, (batch, seq, heads, dk)),
         _meta_empty(x, (batch, seq, heads, dv)),
@@ -656,7 +649,6 @@ def _hgdn_megakernel_run_backward_fake(
     A_log: Tensor,
     dt_bias: Tensor,
     qkv: Tensor,
-    pre: Tensor,
     q_norm: Tensor,
     k_norm: Tensor,
     v_post: Tensor,
@@ -679,7 +671,6 @@ def _hgdn_megakernel_run_backward_fake(
     del (
         grad_y,
         qkv,
-        pre,
         q_norm,
         k_norm,
         v_post,
@@ -736,7 +727,6 @@ def _setup_hgdn_megakernel_context(
     (
         _y,
         qkv,
-        pre,
         q_norm,
         k_norm,
         v_post,
@@ -762,7 +752,6 @@ def _setup_hgdn_megakernel_context(
         A_log,
         dt_bias,
         qkv,
-        pre,
         q_norm,
         k_norm,
         v_post,
@@ -787,7 +776,6 @@ def _hgdn_megakernel_backward_formula(
     ctx: Any,
     grad_y: Tensor | None,
     _grad_qkv: Tensor | None,
-    _grad_pre: Tensor | None,
     _grad_q_norm: Tensor | None,
     _grad_k_norm: Tensor | None,
     _grad_v_post: Tensor | None,
@@ -804,7 +792,6 @@ def _hgdn_megakernel_backward_formula(
     """Backward formula for the compile-visible megakernel op."""
     del (
         _grad_qkv,
-        _grad_pre,
         _grad_q_norm,
         _grad_k_norm,
         _grad_v_post,
@@ -831,7 +818,6 @@ def _hgdn_megakernel_backward_formula(
         A_log,
         dt_bias,
         qkv,
-        pre,
         q_norm,
         k_norm,
         v_post,
@@ -857,7 +843,6 @@ def _hgdn_megakernel_backward_formula(
         A_log,
         dt_bias,
         qkv,
-        pre,
         q_norm,
         k_norm,
         v_post,
