@@ -136,9 +136,14 @@ def main() -> None:
     )
 
     binding_output_contract = (
-        "Tensor y, Tensor qkv, Tensor q_norm, Tensor k_norm, Tensor v_post," in binding
+        "Tensor y, Tensor qkv, Tensor g_pre, Tensor beta_pre, Tensor g_log," in binding
         and "Tensor beta, Tensor g_out, Tensor o_raw, Tensor state_ckpt)" in binding
         and "Tensor qkv, Tensor pre," not in binding
+        and "Tensor q_norm" not in binding
+        and "Tensor k_norm" not in binding
+        and "Tensor v_post" not in binding
+        and "Tensor inv_q" not in binding
+        and "Tensor inv_k" not in binding
         and "Tensor o_norm" not in binding
         and "Tensor z, Tensor state_ckpt" not in binding
     )
@@ -153,6 +158,11 @@ def main() -> None:
         in binding
         and '"Tensor o_raw, Tensor state_ckpt, int n_heads, "' in binding
         and "Tensor qkv, Tensor pre," not in binding
+        and "Tensor q_norm" not in binding
+        and "Tensor k_norm" not in binding
+        and "Tensor v_post" not in binding
+        and "Tensor inv_q" not in binding
+        and "Tensor inv_k" not in binding
         and "ctx.save_for_backward(" in binding
         and "o_norm" not in binding
     )
@@ -260,6 +270,23 @@ def main() -> None:
         "pre activation recompute path",
         pre_recompute,
         "current checkpoint should keep pre temporary in forward and recompute conv preactivations in backward instead of saving pre",
+    )
+
+    qkv_post_recompute = (
+        "shared.q_hist[local_t * Dk + i] = q_value;" in cuda
+        and "shared.v_hist[local_t * dv_local + j] = v_value;" in cuda
+        and "float* q_preact_s = shmem;" in cuda
+        and "float* k_preact_s = shmem + Dk;" in cuda
+        and "const bf16* __restrict__ q_norm" not in cuda
+        and "const bf16* __restrict__ k_norm" not in cuda
+        and "const bf16* __restrict__ v_post" not in cuda
+        and "const float* __restrict__ inv_q" not in cuda
+        and "const float* __restrict__ inv_k" not in cuda
+    )
+    failures += not check(
+        "qkv post/norm recompute path",
+        qkv_post_recompute,
+        "backward should recompute q/k/v post-conv state from qkv and conv_w instead of saving q_norm/k_norm/v_post/inv_q/inv_k",
     )
 
     control_tail_parallel = (

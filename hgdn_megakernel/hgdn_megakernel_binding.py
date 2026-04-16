@@ -251,15 +251,13 @@ _HGDN_MEGAKERNEL_V1_LIB.define(
     "Tensor conv_w, Tensor A_log, Tensor dt_bias, int n_heads, int head_k_dim, "
     "int head_v_dim, int conv_size, bool allow_neg_eigval"
     ") -> ("
-    "Tensor y, Tensor qkv, Tensor q_norm, Tensor k_norm, Tensor v_post, "
-    "Tensor inv_q, Tensor inv_k, Tensor g_pre, Tensor beta_pre, Tensor g_log, "
+    "Tensor y, Tensor qkv, Tensor g_pre, Tensor beta_pre, Tensor g_log, "
     "Tensor beta, Tensor g_out, Tensor o_raw, Tensor state_ckpt)"
 )
 _HGDN_MEGAKERNEL_V1_LIB.define(
     "run_backward("
     "Tensor grad_y, Tensor x, Tensor w_qkv, Tensor w_a, Tensor w_b, Tensor w_g, "
     "Tensor w_out, Tensor conv_w, Tensor A_log, Tensor dt_bias, Tensor qkv, "
-    "Tensor q_norm, Tensor k_norm, Tensor v_post, Tensor inv_q, Tensor inv_k, "
     "Tensor g_pre, Tensor beta_pre, Tensor g_log, Tensor beta, Tensor g_out, "
     "Tensor o_raw, Tensor state_ckpt, int n_heads, "
     "int head_k_dim, int head_v_dim, int conv_size, bool allow_neg_eigval"
@@ -287,6 +285,20 @@ def _run_megakernel_forward(
 ) -> tuple[Tensor, ...]:
     """Run the owned megakernel forward implementation.
 
+    :param Tensor x: Input activations.
+    :param Tensor w_qkv: Packed qkv projection weight.
+    :param Tensor w_a: Decay projection weight.
+    :param Tensor w_b: Beta projection weight.
+    :param Tensor w_g: Output-gate projection weight.
+    :param Tensor w_out: Dense output projection weight.
+    :param Tensor conv_w: Packed depthwise conv weights.
+    :param Tensor A_log: Decay magnitude parameter.
+    :param Tensor dt_bias: Decay bias parameter.
+    :param int n_heads: Number of HGDN heads.
+    :param int head_k_dim: Per-head key width.
+    :param int head_v_dim: Per-head value width.
+    :param int conv_size: Causal conv width.
+    :param bool allow_neg_eigval: Whether beta is scaled by `2.0`.
     :return tuple[Tensor, ...]: Forward output plus saved activations.
     """
     ext = _require_loaded_extension()
@@ -333,11 +345,6 @@ def _run_megakernel_backward(
     A_log: Tensor,
     dt_bias: Tensor,
     qkv: Tensor,
-    q_norm: Tensor,
-    k_norm: Tensor,
-    v_post: Tensor,
-    inv_q: Tensor,
-    inv_k: Tensor,
     g_pre: Tensor,
     beta_pre: Tensor,
     g_log: Tensor,
@@ -353,6 +360,29 @@ def _run_megakernel_backward(
 ) -> tuple[Tensor, ...]:
     """Run the owned megakernel backward implementation.
 
+    :param Tensor grad_y: Output gradient.
+    :param Tensor x: Input activations.
+    :param Tensor w_qkv: Packed qkv projection weight.
+    :param Tensor w_a: Decay projection weight.
+    :param Tensor w_b: Beta projection weight.
+    :param Tensor w_g: Output-gate projection weight.
+    :param Tensor w_out: Dense output projection weight.
+    :param Tensor conv_w: Packed depthwise conv weights.
+    :param Tensor A_log: Decay magnitude parameter.
+    :param Tensor dt_bias: Decay bias parameter.
+    :param Tensor qkv: Saved packed qkv activations.
+    :param Tensor g_pre: Saved decay preactivation.
+    :param Tensor beta_pre: Saved beta preactivation.
+    :param Tensor g_log: Saved log-decay value.
+    :param Tensor beta: Saved beta value.
+    :param Tensor g_out: Saved output-gate preactivation.
+    :param Tensor o_raw: Saved recurrent readout before output RMSNorm.
+    :param Tensor state_ckpt: Saved chunk-start recurrent checkpoints.
+    :param int n_heads: Number of HGDN heads.
+    :param int head_k_dim: Per-head key width.
+    :param int head_v_dim: Per-head value width.
+    :param int conv_size: Causal conv width.
+    :param bool allow_neg_eigval: Whether beta is scaled by `2.0`.
     :return tuple[Tensor, ...]: Gradients for the differentiable inputs.
     """
     ext = _require_loaded_extension()
@@ -370,11 +400,6 @@ def _run_megakernel_backward(
             A_log,
             dt_bias,
             qkv,
-            q_norm,
-            k_norm,
-            v_post,
-            inv_q,
-            inv_k,
             g_pre,
             beta_pre,
             g_log,
@@ -408,7 +433,25 @@ def _hgdn_megakernel_run_cpu(
     conv_size: int,
     allow_neg_eigval: bool,
 ) -> tuple[Tensor, ...]:
-    """CPU stub for the compile-visible megakernel op."""
+    """CPU stub for the compile-visible megakernel op.
+
+    :param Tensor x: Input activations.
+    :param Tensor w_qkv: Packed qkv projection weight.
+    :param Tensor w_a: Decay projection weight.
+    :param Tensor w_b: Beta projection weight.
+    :param Tensor w_g: Output-gate projection weight.
+    :param Tensor w_out: Dense output projection weight.
+    :param Tensor conv_w: Packed depthwise conv weights.
+    :param Tensor A_log: Decay magnitude parameter.
+    :param Tensor dt_bias: Decay bias parameter.
+    :param int n_heads: Number of HGDN heads.
+    :param int head_k_dim: Per-head key width.
+    :param int head_v_dim: Per-head value width.
+    :param int conv_size: Causal conv width.
+    :param bool allow_neg_eigval: Whether beta is scaled by `2.0`.
+    :raises RuntimeError: Always, because the megakernel is CUDA-only.
+    :return tuple[Tensor, ...]: Never returns.
+    """
     del (
         x,
         w_qkv,
@@ -445,7 +488,24 @@ def _hgdn_megakernel_run_cuda(
     conv_size: int,
     allow_neg_eigval: bool,
 ) -> tuple[Tensor, ...]:
-    """CUDA implementation for the compile-visible megakernel op."""
+    """CUDA implementation for the compile-visible megakernel op.
+
+    :param Tensor x: Input activations.
+    :param Tensor w_qkv: Packed qkv projection weight.
+    :param Tensor w_a: Decay projection weight.
+    :param Tensor w_b: Beta projection weight.
+    :param Tensor w_g: Output-gate projection weight.
+    :param Tensor w_out: Dense output projection weight.
+    :param Tensor conv_w: Packed depthwise conv weights.
+    :param Tensor A_log: Decay magnitude parameter.
+    :param Tensor dt_bias: Decay bias parameter.
+    :param int n_heads: Number of HGDN heads.
+    :param int head_k_dim: Per-head key width.
+    :param int head_v_dim: Per-head value width.
+    :param int conv_size: Causal conv width.
+    :param bool allow_neg_eigval: Whether beta is scaled by `2.0`.
+    :return tuple[Tensor, ...]: Forward output plus saved activations.
+    """
     return _run_megakernel_forward(
         x,
         w_qkv,
@@ -477,11 +537,6 @@ def _hgdn_megakernel_run_backward_cpu(
     A_log: Tensor,
     dt_bias: Tensor,
     qkv: Tensor,
-    q_norm: Tensor,
-    k_norm: Tensor,
-    v_post: Tensor,
-    inv_q: Tensor,
-    inv_k: Tensor,
     g_pre: Tensor,
     beta_pre: Tensor,
     g_log: Tensor,
@@ -495,7 +550,34 @@ def _hgdn_megakernel_run_backward_cpu(
     conv_size: int,
     allow_neg_eigval: bool,
 ) -> tuple[Tensor, ...]:
-    """CPU stub for the compile-visible megakernel backward op."""
+    """CPU stub for the compile-visible megakernel backward op.
+
+    :param Tensor grad_y: Output gradient.
+    :param Tensor x: Input activations.
+    :param Tensor w_qkv: Packed qkv projection weight.
+    :param Tensor w_a: Decay projection weight.
+    :param Tensor w_b: Beta projection weight.
+    :param Tensor w_g: Output-gate projection weight.
+    :param Tensor w_out: Dense output projection weight.
+    :param Tensor conv_w: Packed depthwise conv weights.
+    :param Tensor A_log: Decay magnitude parameter.
+    :param Tensor dt_bias: Decay bias parameter.
+    :param Tensor qkv: Saved packed qkv activations.
+    :param Tensor g_pre: Saved decay preactivation.
+    :param Tensor beta_pre: Saved beta preactivation.
+    :param Tensor g_log: Saved log-decay value.
+    :param Tensor beta: Saved beta value.
+    :param Tensor g_out: Saved output-gate preactivation.
+    :param Tensor o_raw: Saved recurrent readout before output RMSNorm.
+    :param Tensor state_ckpt: Saved chunk-start recurrent checkpoints.
+    :param int n_heads: Number of HGDN heads.
+    :param int head_k_dim: Per-head key width.
+    :param int head_v_dim: Per-head value width.
+    :param int conv_size: Causal conv width.
+    :param bool allow_neg_eigval: Whether beta is scaled by `2.0`.
+    :raises RuntimeError: Always, because the megakernel is CUDA-only.
+    :return tuple[Tensor, ...]: Never returns.
+    """
     del (
         grad_y,
         x,
@@ -508,11 +590,6 @@ def _hgdn_megakernel_run_backward_cpu(
         A_log,
         dt_bias,
         qkv,
-        q_norm,
-        k_norm,
-        v_post,
-        inv_q,
-        inv_k,
         g_pre,
         beta_pre,
         g_log,
@@ -542,11 +619,6 @@ def _hgdn_megakernel_run_backward_cuda(
     A_log: Tensor,
     dt_bias: Tensor,
     qkv: Tensor,
-    q_norm: Tensor,
-    k_norm: Tensor,
-    v_post: Tensor,
-    inv_q: Tensor,
-    inv_k: Tensor,
     g_pre: Tensor,
     beta_pre: Tensor,
     g_log: Tensor,
@@ -560,7 +632,33 @@ def _hgdn_megakernel_run_backward_cuda(
     conv_size: int,
     allow_neg_eigval: bool,
 ) -> tuple[Tensor, ...]:
-    """CUDA implementation for the compile-visible megakernel backward op."""
+    """CUDA implementation for the compile-visible megakernel backward op.
+
+    :param Tensor grad_y: Output gradient.
+    :param Tensor x: Input activations.
+    :param Tensor w_qkv: Packed qkv projection weight.
+    :param Tensor w_a: Decay projection weight.
+    :param Tensor w_b: Beta projection weight.
+    :param Tensor w_g: Output-gate projection weight.
+    :param Tensor w_out: Dense output projection weight.
+    :param Tensor conv_w: Packed depthwise conv weights.
+    :param Tensor A_log: Decay magnitude parameter.
+    :param Tensor dt_bias: Decay bias parameter.
+    :param Tensor qkv: Saved packed qkv activations.
+    :param Tensor g_pre: Saved decay preactivation.
+    :param Tensor beta_pre: Saved beta preactivation.
+    :param Tensor g_log: Saved log-decay value.
+    :param Tensor beta: Saved beta value.
+    :param Tensor g_out: Saved output-gate preactivation.
+    :param Tensor o_raw: Saved recurrent readout before output RMSNorm.
+    :param Tensor state_ckpt: Saved chunk-start recurrent checkpoints.
+    :param int n_heads: Number of HGDN heads.
+    :param int head_k_dim: Per-head key width.
+    :param int head_v_dim: Per-head value width.
+    :param int conv_size: Causal conv width.
+    :param bool allow_neg_eigval: Whether beta is scaled by `2.0`.
+    :return tuple[Tensor, ...]: Gradients for the differentiable inputs.
+    """
     return _run_megakernel_backward(
         grad_y,
         x,
@@ -573,11 +671,6 @@ def _hgdn_megakernel_run_backward_cuda(
         A_log,
         dt_bias,
         qkv,
-        q_norm,
-        k_norm,
-        v_post,
-        inv_q,
-        inv_k,
         g_pre,
         beta_pre,
         g_log,
@@ -610,7 +703,24 @@ def _hgdn_megakernel_run_fake(
     conv_size: int,
     allow_neg_eigval: bool,
 ) -> tuple[Tensor, ...]:
-    """Meta kernel for the compile-visible megakernel forward op."""
+    """Meta kernel for the compile-visible megakernel forward op.
+
+    :param Tensor x: Input activations.
+    :param Tensor w_qkv: Packed qkv projection weight.
+    :param Tensor w_a: Decay projection weight.
+    :param Tensor w_b: Beta projection weight.
+    :param Tensor w_g: Output-gate projection weight.
+    :param Tensor w_out: Dense output projection weight.
+    :param Tensor conv_w: Packed depthwise conv weights.
+    :param Tensor A_log: Decay magnitude parameter.
+    :param Tensor dt_bias: Decay bias parameter.
+    :param int n_heads: Number of HGDN heads.
+    :param int head_k_dim: Per-head key width.
+    :param int head_v_dim: Per-head value width.
+    :param int conv_size: Causal conv width.
+    :param bool allow_neg_eigval: Whether beta is scaled by `2.0`.
+    :return tuple[Tensor, ...]: Meta outputs matching the CUDA forward schema.
+    """
     del conv_w, w_a, w_b, w_g, w_out, A_log, dt_bias, conv_size, allow_neg_eigval
     batch, seq, d_model = x.shape
     heads = int(n_heads)
@@ -621,11 +731,6 @@ def _hgdn_megakernel_run_fake(
     return (
         _meta_empty(x, x.shape),
         _meta_empty(x, (batch, seq, channels)),
-        _meta_empty(x, (batch, seq, heads, dk)),
-        _meta_empty(x, (batch, seq, heads, dk)),
-        _meta_empty(x, (batch, seq, heads, dv)),
-        _meta_empty(x, (batch, seq, heads), dtype=torch.float32),
-        _meta_empty(x, (batch, seq, heads), dtype=torch.float32),
         _meta_empty(x, (batch, seq, heads)),
         _meta_empty(x, (batch, seq, heads)),
         _meta_empty(x, (batch, seq, heads)),
@@ -649,11 +754,6 @@ def _hgdn_megakernel_run_backward_fake(
     A_log: Tensor,
     dt_bias: Tensor,
     qkv: Tensor,
-    q_norm: Tensor,
-    k_norm: Tensor,
-    v_post: Tensor,
-    inv_q: Tensor,
-    inv_k: Tensor,
     g_pre: Tensor,
     beta_pre: Tensor,
     g_log: Tensor,
@@ -667,15 +767,36 @@ def _hgdn_megakernel_run_backward_fake(
     conv_size: int,
     allow_neg_eigval: bool,
 ) -> tuple[Tensor, ...]:
-    """Meta kernel for the compile-visible megakernel backward op."""
+    """Meta kernel for the compile-visible megakernel backward op.
+
+    :param Tensor grad_y: Output gradient.
+    :param Tensor x: Input activations.
+    :param Tensor w_qkv: Packed qkv projection weight.
+    :param Tensor w_a: Decay projection weight.
+    :param Tensor w_b: Beta projection weight.
+    :param Tensor w_g: Output-gate projection weight.
+    :param Tensor w_out: Dense output projection weight.
+    :param Tensor conv_w: Packed depthwise conv weights.
+    :param Tensor A_log: Decay magnitude parameter.
+    :param Tensor dt_bias: Decay bias parameter.
+    :param Tensor qkv: Saved packed qkv activations.
+    :param Tensor g_pre: Saved decay preactivation.
+    :param Tensor beta_pre: Saved beta preactivation.
+    :param Tensor g_log: Saved log-decay value.
+    :param Tensor beta: Saved beta value.
+    :param Tensor g_out: Saved output-gate preactivation.
+    :param Tensor o_raw: Saved recurrent readout before output RMSNorm.
+    :param Tensor state_ckpt: Saved chunk-start recurrent checkpoints.
+    :param int n_heads: Number of HGDN heads.
+    :param int head_k_dim: Per-head key width.
+    :param int head_v_dim: Per-head value width.
+    :param int conv_size: Causal conv width.
+    :param bool allow_neg_eigval: Whether beta is scaled by `2.0`.
+    :return tuple[Tensor, ...]: Meta gradients matching the CUDA backward schema.
+    """
     del (
         grad_y,
         qkv,
-        q_norm,
-        k_norm,
-        v_post,
-        inv_q,
-        inv_k,
         g_pre,
         beta_pre,
         g_log,
@@ -707,7 +828,13 @@ def _setup_hgdn_megakernel_context(
     inputs: tuple[Tensor, ...],
     output: tuple[Tensor, ...],
 ) -> None:
-    """Save tensors needed by the registered megakernel backward formula."""
+    """Save tensors needed by the registered megakernel backward formula.
+
+    :param Any ctx: Custom-op autograd context.
+    :param tuple[Tensor, ...] inputs: Forward inputs passed to the custom op.
+    :param tuple[Tensor, ...] output: Forward outputs returned by the custom op.
+    :return None: Updates `ctx` in place.
+    """
     (
         x,
         w_qkv,
@@ -727,11 +854,6 @@ def _setup_hgdn_megakernel_context(
     (
         _y,
         qkv,
-        q_norm,
-        k_norm,
-        v_post,
-        inv_q,
-        inv_k,
         g_pre,
         beta_pre,
         g_log,
@@ -752,11 +874,6 @@ def _setup_hgdn_megakernel_context(
         A_log,
         dt_bias,
         qkv,
-        q_norm,
-        k_norm,
-        v_post,
-        inv_q,
-        inv_k,
         g_pre,
         beta_pre,
         g_log,
@@ -776,11 +893,6 @@ def _hgdn_megakernel_backward_formula(
     ctx: Any,
     grad_y: Tensor | None,
     _grad_qkv: Tensor | None,
-    _grad_q_norm: Tensor | None,
-    _grad_k_norm: Tensor | None,
-    _grad_v_post: Tensor | None,
-    _grad_inv_q: Tensor | None,
-    _grad_inv_k: Tensor | None,
     _grad_g_pre: Tensor | None,
     _grad_beta_pre: Tensor | None,
     _grad_g_log: Tensor | None,
@@ -789,14 +901,22 @@ def _hgdn_megakernel_backward_formula(
     _grad_o_raw: Tensor | None,
     _grad_state_ckpt: Tensor | None,
 ) -> tuple[Tensor | None, ...]:
-    """Backward formula for the compile-visible megakernel op."""
+    """Backward formula for the compile-visible megakernel op.
+
+    :param Any ctx: Custom-op autograd context.
+    :param Tensor | None grad_y: Output gradient for `y`.
+    :param Tensor | None _grad_qkv: Unused gradient placeholder for saved qkv.
+    :param Tensor | None _grad_g_pre: Unused gradient placeholder for saved g_pre.
+    :param Tensor | None _grad_beta_pre: Unused gradient placeholder for saved beta_pre.
+    :param Tensor | None _grad_g_log: Unused gradient placeholder for saved g_log.
+    :param Tensor | None _grad_beta: Unused gradient placeholder for saved beta.
+    :param Tensor | None _grad_g_out: Unused gradient placeholder for saved g_out.
+    :param Tensor | None _grad_o_raw: Unused gradient placeholder for saved o_raw.
+    :param Tensor | None _grad_state_ckpt: Unused gradient placeholder for saved checkpoints.
+    :return tuple[Tensor | None, ...]: Input gradients plus `None` for scalar args.
+    """
     del (
         _grad_qkv,
-        _grad_q_norm,
-        _grad_k_norm,
-        _grad_v_post,
-        _grad_inv_q,
-        _grad_inv_k,
         _grad_g_pre,
         _grad_beta_pre,
         _grad_g_log,
@@ -818,11 +938,6 @@ def _hgdn_megakernel_backward_formula(
         A_log,
         dt_bias,
         qkv,
-        q_norm,
-        k_norm,
-        v_post,
-        inv_q,
-        inv_k,
         g_pre,
         beta_pre,
         g_log,
@@ -843,11 +958,6 @@ def _hgdn_megakernel_backward_formula(
         A_log,
         dt_bias,
         qkv,
-        q_norm,
-        k_norm,
-        v_post,
-        inv_q,
-        inv_k,
         g_pre,
         beta_pre,
         g_log,

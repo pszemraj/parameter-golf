@@ -37,15 +37,13 @@ Approximate saved forward tensors per GDN block at `B=128,T=2048`:
 | Tensor group | Bytes | MiB |
 | --- | ---: | ---: |
 | `qkv` | `603,979,776` | `576` |
-| `q_norm + k_norm + v_post` | `603,979,776` | `576` |
-| `inv_q + inv_k` | `16,777,216` | `16` |
 | `g_pre + beta_pre + g_log + beta` | `16,777,216` | `16` |
 | `g_out + o_raw` | `402,653,184` | `384` |
 | `state_ckpt` | `2,415,919,104` | `2,304` |
-| **Total per GDN block** | **`4,060,086,272`** | **`3,872`** |
+| **Total per GDN block** | **`3,439,329,280`** | **`3,280`** |
 
-That is about **3.78 GiB per GDN block** at the exact-bridge per-rank stress
-shape. For a 14-layer 1:1 model with 7 GDN blocks, that is roughly **26 GiB**
+That is about **3.20 GiB per GDN block** at the exact-bridge per-rank stress
+shape. For a 14-layer 1:1 model with 7 GDN blocks, that is roughly **22.4 GiB**
 of saved GDN block state before attention/MLP activations, optimizer state,
 workspace, and allocator overhead.
 
@@ -64,10 +62,16 @@ The current repo-backed candidate is no longer the save-heavy version.
 - forward saves only recurrence chunk-start checkpoints
 - forward keeps conv preactivations only in a temporary `pre_tmp`, not as a
   saved activation
+- forward no longer materializes long-lived `q_norm`, `k_norm`, `v_post`,
+  `inv_q`, or `inv_k` tensors; it forms q/k norms and v post-activations
+  on the fly from `pre_tmp` inside the owned recurrence path
 - forward keeps `g_out` and `o_raw` but no longer saves `o_norm` or `z`
 - backward replays each chunk inside the same cooperative kernel
 - backward recomputes conv preactivations from `qkv` and `conv_w` before the
   SiLU derivative path
+- backward also recomputes q/k/v post-conv state and q/k inverse norms from
+  `qkv` and `conv_w` instead of saving `q_norm`, `k_norm`, `v_post`, `inv_q`,
+  or `inv_k` from forward
 - backward recomputes output RMSNorm and gated `z` from `o_raw` and `g_out`
   before the dense `W_out` gradient phases
 - backward now accumulates `grad_A_log` and `grad_dt_bias` across the existing
@@ -92,9 +96,11 @@ The current repo-backed candidate is no longer the save-heavy version.
   `1024` was worse than the live `2048` default on the repeated timing gate,
   so `2048` remains the starting point until H100 evidence says otherwise
 - the local harness now supports repeated CUDA-event timing; on the live
-  `THREADS=128`, `REC_V_TILE=8`, `REC_CHUNK_T=8` build, a 3-repeat local helper
-  pass measured about `27.78 ms` median forward+backward at `B=1,T=2048`
-  (range `26.37-27.96 ms`). That is still `sm_89` sanity data only, not an
+  `THREADS=128`, `REC_V_TILE=8`, `REC_CHUNK_T=8` build, the new qkv
+  post/norm recompute checkpoint measured about `24.65-26.86 ms` median
+  forward+backward at `B=1,T=2048` across three 3-repeat local passes, versus
+  the prior `27.78 ms` median baseline. Shorter local helper cases regressed,
+  so this is still a long-sequence memory-traffic hypothesis rather than an
   H100 timing claim.
 - launch contract is still exactly one forward kernel and one backward kernel
 
@@ -188,7 +194,7 @@ That cuts the recurrence-state save from **4.50 GiB** to **576 MiB** per GDN
 block.
 
 Total saved forward state in the current checkpointed version is about
-**0.95 GiB per GDN block** at `B=32,T=2048` and about **3.78 GiB per GDN
+**0.80 GiB per GDN block** at `B=32,T=2048` and about **3.20 GiB per GDN
 block** at `B=128,T=2048`, instead of about **5.12 GiB** in the original
 save-heavy layout.
 
@@ -197,11 +203,6 @@ save-heavy layout.
 | Saved tensor | Shape | Dtype | Bytes | If not saved | Decision |
 | --- | --- | --- | ---: | --- | --- |
 | `qkv` | `(32, 2048, 1152)` | bf16 | 150,994,944 | rerun packed `W_qkv` dense phase, about `57.98 GF` | keep saved |
-| `q_norm` | `(32, 2048, 8, 48)` | bf16 | 50,331,648 | recompute q conv, SiLU, and L2 norm path | keep saved |
-| `k_norm` | `(32, 2048, 8, 48)` | bf16 | 50,331,648 | recompute k conv, SiLU, and L2 norm path | keep saved |
-| `v_post` | `(32, 2048, 8, 48)` | bf16 | 50,331,648 | recompute v conv and SiLU path | keep saved |
-| `inv_q` | `(32, 2048, 8)` | fp32 | 2,097,152 | cheap recompute from q preactivations | keep for parity simplicity |
-| `inv_k` | `(32, 2048, 8)` | fp32 | 2,097,152 | cheap recompute from k preactivations | keep for parity simplicity |
 | `g_pre` | `(32, 2048, 8)` | bf16 | 1,048,576 | rerun `w_a` projection, about `0.40 GF` | keep for now |
 | `beta_pre` | `(32, 2048, 8)` | bf16 | 1,048,576 | rerun `w_b` projection, about `0.40 GF` | keep for now |
 | `g_log` | `(32, 2048, 8)` | bf16 | 1,048,576 | recompute from `g_pre`, `A_log`, and `dt_bias` | keep for now |
@@ -215,6 +216,8 @@ The implemented save-vs-recompute changes so far are:
 - replacement of full per-token `state_prev` with chunk checkpoints plus
   within-chunk replay
 - removal of saved `pre`, recomputed inside backward from `qkv` and `conv_w`
+- removal of saved `q_norm`, `k_norm`, `v_post`, `inv_q`, and `inv_k`,
+  recomputed inside backward from `qkv` and `conv_w`
 - removal of saved `o_norm` and `z`, recomputed inside backward from `o_raw`
   and `g_out`
 - removal of backward shared-memory `chunk_states` and `dv0_hist`, replaced by

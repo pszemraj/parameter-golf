@@ -954,11 +954,6 @@ __global__ void hgdn_forward_bf16_kernel(
     bf16* __restrict__ y,
     bf16* __restrict__ qkv,
     bf16* __restrict__ pre_tmp,
-    bf16* __restrict__ q_norm,
-    bf16* __restrict__ k_norm,
-    bf16* __restrict__ v_post,
-    float* __restrict__ inv_q,
-    float* __restrict__ inv_k,
     bf16* __restrict__ g_pre,
     bf16* __restrict__ beta_pre,
     bf16* __restrict__ g_log,
@@ -1006,8 +1001,6 @@ __global__ void hgdn_forward_bf16_kernel(
     int t = bt % T;
     int b = bt / T;
 
-    float sq = 0.0f;
-    float sk = 0.0f;
     for (int d = threadIdx.x; d < Dk; d += blockDim.x) {
       int q_channel = cq(h, d, Dk);
       int k_channel = ck(h, d, H, Dk);
@@ -1015,33 +1008,11 @@ __global__ void hgdn_forward_bf16_kernel(
       float k_preact = conv_at(qkv, conv_w, b, t, k_channel, T, C, K);
       pre_tmp[idx3(b, t, q_channel, T, C)] = f2b(q_preact);
       pre_tmp[idx3(b, t, k_channel, T, C)] = f2b(k_preact);
-      float q_activated = silu(q_preact);
-      float k_activated = silu(k_preact);
-      sq += q_activated * q_activated;
-      sk += k_activated * k_activated;
-    }
-    block_sum2(sq, sk, shmem);
-    float inv_q_norm =
-        (sqrtf(sq) > EPS ? 1.0f / sqrtf(sq) : 1.0f / EPS);
-    float inv_k_norm =
-        (sqrtf(sk) > EPS ? 1.0f / sqrtf(sk) : 1.0f / EPS);
-    if (threadIdx.x == 0) {
-      inv_q[idx3(b, t, h, T, H)] = inv_q_norm;
-      inv_k[idx3(b, t, h, T, H)] = inv_k_norm;
-    }
-    for (int d = threadIdx.x; d < Dk; d += blockDim.x) {
-      int q_channel = cq(h, d, Dk);
-      int k_channel = ck(h, d, H, Dk);
-      q_norm[idx4(b, t, h, d, T, H, Dk)] =
-          f2b(silu(b2f(pre_tmp[idx3(b, t, q_channel, T, C)])) * inv_q_norm);
-      k_norm[idx4(b, t, h, d, T, H, Dk)] =
-          f2b(silu(b2f(pre_tmp[idx3(b, t, k_channel, T, C)])) * inv_k_norm);
     }
     for (int d = threadIdx.x; d < Dv; d += blockDim.x) {
       int v_channel = cv(h, d, H, Dk, Dv);
       float v_preact = conv_at(qkv, conv_w, b, t, v_channel, T, C, K);
       pre_tmp[idx3(b, t, v_channel, T, C)] = f2b(v_preact);
-      v_post[idx4(b, t, h, d, T, H, Dv)] = f2b(silu(v_preact));
     }
     __syncthreads();
   }
@@ -1077,12 +1048,28 @@ __global__ void hgdn_forward_bf16_kernel(
     __syncthreads();
 
     for (int t = 0; t < T; ++t) {
+      float sq = 0.0f;
+      float sk = 0.0f;
       for (int i = threadIdx.x; i < Dk; i += blockDim.x) {
-        shared.q[i] = b2f(q_norm[idx4(b, t, h, i, T, H, Dk)]);
-        shared.k[i] = b2f(k_norm[idx4(b, t, h, i, T, H, Dk)]);
+        int q_channel = cq(h, i, Dk);
+        int k_channel = ck(h, i, H, Dk);
+        float q_value = silu(b2f(pre_tmp[idx3(b, t, q_channel, T, C)]));
+        float k_value = silu(b2f(pre_tmp[idx3(b, t, k_channel, T, C)]));
+        shared.q[i] = q_value;
+        shared.k[i] = k_value;
+        sq += q_value * q_value;
+        sk += k_value * k_value;
       }
       for (int j = threadIdx.x; j < dv_local; j += blockDim.x) {
-        shared.v[j] = b2f(v_post[idx4(b, t, h, v_base + j, T, H, Dv)]);
+        int v_channel = cv(h, v_base + j, H, Dk, Dv);
+        shared.v[j] = silu(b2f(pre_tmp[idx3(b, t, v_channel, T, C)]));
+      }
+      block_sum2(sq, sk, shared.scratch);
+      float inv_q_norm = (sqrtf(sq) > EPS ? 1.0f / sqrtf(sq) : 1.0f / EPS);
+      float inv_k_norm = (sqrtf(sk) > EPS ? 1.0f / sqrtf(sk) : 1.0f / EPS);
+      for (int i = threadIdx.x; i < Dk; i += blockDim.x) {
+        shared.q[i] *= inv_q_norm;
+        shared.k[i] *= inv_k_norm;
       }
       __syncthreads();
 
@@ -1176,11 +1163,6 @@ __global__ void hgdn_backward_bf16_kernel(
     const float* __restrict__ A_log,
     const float* __restrict__ dt_bias,
     const bf16* __restrict__ qkv,
-    const bf16* __restrict__ q_norm,
-    const bf16* __restrict__ k_norm,
-    const bf16* __restrict__ v_post,
-    const float* __restrict__ inv_q,
-    const float* __restrict__ inv_k,
     const bf16* __restrict__ g_pre,
     const bf16* __restrict__ beta_pre,
     const bf16* __restrict__ g_log,
@@ -1341,18 +1323,36 @@ __global__ void hgdn_backward_bf16_kernel(
 
       for (int local_t = 0; local_t < chunk_len; ++local_t) {
         int t = chunk_start + local_t;
+        float sq = 0.0f;
+        float sk = 0.0f;
         for (int i = threadIdx.x; i < Dk; i += blockDim.x) {
-          float q_value = b2f(q_norm[idx4(b, t, h, i, T, H, Dk)]);
-          float k_value = b2f(k_norm[idx4(b, t, h, i, T, H, Dk)]);
+          int q_channel = cq(h, i, Dk);
+          int k_channel = ck(h, i, H, Dk);
+          float q_preact = conv_at(qkv, conv_w, b, t, q_channel, T, C, K);
+          float k_preact = conv_at(qkv, conv_w, b, t, k_channel, T, C, K);
+          float q_activated = silu(q_preact);
+          float k_activated = silu(k_preact);
+          shared.q[i] = q_activated;
+          shared.k[i] = k_activated;
+          sq += q_activated * q_activated;
+          sk += k_activated * k_activated;
+        }
+        for (int j = threadIdx.x; j < dv_local; j += blockDim.x) {
+          int v_channel = cv(h, v_base + j, H, Dk, Dv);
+          float v_value = silu(conv_at(qkv, conv_w, b, t, v_channel, T, C, K));
+          shared.v[j] = v_value;
+          shared.v_hist[local_t * dv_local + j] = v_value;
+        }
+        block_sum2(sq, sk, shared.reduce0);
+        float inv_q_norm = (sqrtf(sq) > EPS ? 1.0f / sqrtf(sq) : 1.0f / EPS);
+        float inv_k_norm = (sqrtf(sk) > EPS ? 1.0f / sqrtf(sk) : 1.0f / EPS);
+        for (int i = threadIdx.x; i < Dk; i += blockDim.x) {
+          float q_value = shared.q[i] * inv_q_norm;
+          float k_value = shared.k[i] * inv_k_norm;
           shared.q[i] = q_value;
           shared.k[i] = k_value;
           shared.q_hist[local_t * Dk + i] = q_value;
           shared.k_hist[local_t * Dk + i] = k_value;
-        }
-        for (int j = threadIdx.x; j < dv_local; j += blockDim.x) {
-          float v_value = b2f(v_post[idx4(b, t, h, v_base + j, T, H, Dv)]);
-          shared.v[j] = v_value;
-          shared.v_hist[local_t * dv_local + j] = v_value;
         }
         __syncthreads();
 
@@ -1568,29 +1568,47 @@ __global__ void hgdn_backward_bf16_kernel(
     int t = bt % T;
     int b = bt / T;
 
+    float* q_preact_s = shmem;
+    float* k_preact_s = shmem + Dk;
+    float* reduce_s = shmem + 2 * Dk;
     float dot_q = 0.0f;
     float dot_k = 0.0f;
+    float sq = 0.0f;
+    float sk = 0.0f;
+    for (int i = threadIdx.x; i < Dk; i += blockDim.x) {
+      int q_channel = cq(h, i, Dk);
+      int k_channel = ck(h, i, H, Dk);
+      float q_preact = conv_at(qkv, conv_w, b, t, q_channel, T, C, K);
+      float k_preact = conv_at(qkv, conv_w, b, t, k_channel, T, C, K);
+      q_preact_s[i] = q_preact;
+      k_preact_s[i] = k_preact;
+      float q_value = silu(q_preact);
+      float k_value = silu(k_preact);
+      sq += q_value * q_value;
+      sk += k_value * k_value;
+    }
+    block_sum2(sq, sk, reduce_s);
+
+    float inv_q_norm = (sqrtf(sq) > EPS ? 1.0f / sqrtf(sq) : 1.0f / EPS);
+    float inv_k_norm = (sqrtf(sk) > EPS ? 1.0f / sqrtf(sk) : 1.0f / EPS);
     for (int i = threadIdx.x; i < Dk; i += blockDim.x) {
       float dq = grad_q_norm_accum[idx4(b, t, h, i, T, H, Dk)];
       float dk = grad_k_norm_accum[idx4(b, t, h, i, T, H, Dk)];
-      float q_value = b2f(q_norm[idx4(b, t, h, i, T, H, Dk)]);
-      float k_value = b2f(k_norm[idx4(b, t, h, i, T, H, Dk)]);
+      float q_value = silu(q_preact_s[i]) * inv_q_norm;
+      float k_value = silu(k_preact_s[i]) * inv_k_norm;
       dot_q += dq * q_value;
       dot_k += dk * k_value;
     }
-    block_sum2(dot_q, dot_k, shmem);
-
-    float inv_q_norm = inv_q[idx3(b, t, h, T, H)];
-    float inv_k_norm = inv_k[idx3(b, t, h, T, H)];
+    block_sum2(dot_q, dot_k, reduce_s);
     for (int i = threadIdx.x; i < Dk; i += blockDim.x) {
       int q_channel = cq(h, i, Dk);
       int k_channel = ck(h, i, H, Dk);
       float dq = grad_q_norm_accum[idx4(b, t, h, i, T, H, Dk)];
       float dk = grad_k_norm_accum[idx4(b, t, h, i, T, H, Dk)];
-      float q_value = b2f(q_norm[idx4(b, t, h, i, T, H, Dk)]);
-      float k_value = b2f(k_norm[idx4(b, t, h, i, T, H, Dk)]);
-      float q_preact = conv_at(qkv, conv_w, b, t, q_channel, T, C, K);
-      float k_preact = conv_at(qkv, conv_w, b, t, k_channel, T, C, K);
+      float q_preact = q_preact_s[i];
+      float k_preact = k_preact_s[i];
+      float q_value = silu(q_preact) * inv_q_norm;
+      float k_value = silu(k_preact) * inv_k_norm;
       grad_pre[idx3(b, t, q_channel, T, C)] =
           f2b((dq - q_value * dot_q) * inv_q_norm * dsilu(q_preact));
       grad_pre[idx3(b, t, k_channel, T, C)] =
@@ -1821,11 +1839,6 @@ std::vector<torch::Tensor> forward(
   auto y = torch::empty({B, T, D}, bf16_options);
   auto qkv = torch::empty({B, T, C}, bf16_options);
   auto pre_tmp = torch::empty({B, T, C}, bf16_options);
-  auto q_norm = torch::empty({B, T, H, Dk}, bf16_options);
-  auto k_norm = torch::empty({B, T, H, Dk}, bf16_options);
-  auto v_post = torch::empty({B, T, H, Dv}, bf16_options);
-  auto inv_q = torch::empty({B, T, H}, f32_options);
-  auto inv_k = torch::empty({B, T, H}, f32_options);
   auto g_pre = torch::empty({B, T, H}, bf16_options);
   auto beta_pre = torch::empty({B, T, H}, bf16_options);
   auto g_log = torch::empty({B, T, H}, bf16_options);
@@ -1863,11 +1876,6 @@ std::vector<torch::Tensor> forward(
   bf16* y_ptr = bptr(y);
   bf16* qkv_ptr = bptr(qkv);
   bf16* pre_tmp_ptr = bptr(pre_tmp);
-  bf16* q_norm_ptr = bptr(q_norm);
-  bf16* k_norm_ptr = bptr(k_norm);
-  bf16* v_post_ptr = bptr(v_post);
-  float* inv_q_ptr = inv_q.data_ptr<float>();
-  float* inv_k_ptr = inv_k.data_ptr<float>();
   bf16* g_pre_ptr = bptr(g_pre);
   bf16* beta_pre_ptr = bptr(beta_pre);
   bf16* g_log_ptr = bptr(g_log);
@@ -1890,11 +1898,6 @@ std::vector<torch::Tensor> forward(
       &y_ptr,
       &qkv_ptr,
       &pre_tmp_ptr,
-      &q_norm_ptr,
-      &k_norm_ptr,
-      &v_post_ptr,
-      &inv_q_ptr,
-      &inv_k_ptr,
       &g_pre_ptr,
       &beta_pre_ptr,
       &g_log_ptr,
@@ -1922,9 +1925,8 @@ std::vector<torch::Tensor> forward(
       at::cuda::getCurrentCUDAStream().stream()));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {
-      y,         qkv,      q_norm,   k_norm,   v_post,
-      inv_q,     inv_k,    g_pre,    beta_pre, g_log,    beta,
-      g_out,     o_raw,    state_ckpt,
+      y,      qkv,      g_pre,  beta_pre, g_log,
+      beta,   g_out,    o_raw,  state_ckpt,
   };
 }
 
@@ -1940,11 +1942,6 @@ std::vector<torch::Tensor> backward(
     torch::Tensor A_log,
     torch::Tensor dt_bias,
     torch::Tensor qkv,
-    torch::Tensor q_norm,
-    torch::Tensor k_norm,
-    torch::Tensor v_post,
-    torch::Tensor inv_q,
-    torch::Tensor inv_k,
     torch::Tensor g_pre,
     torch::Tensor beta_pre,
     torch::Tensor g_log,
@@ -2023,11 +2020,6 @@ std::vector<torch::Tensor> backward(
   const float* A_log_ptr = A_log.data_ptr<float>();
   const float* dt_bias_ptr = dt_bias.data_ptr<float>();
   const bf16* qkv_ptr = cbptr(qkv);
-  const bf16* q_norm_ptr = cbptr(q_norm);
-  const bf16* k_norm_ptr = cbptr(k_norm);
-  const bf16* v_post_ptr = cbptr(v_post);
-  const float* inv_q_ptr = inv_q.data_ptr<float>();
-  const float* inv_k_ptr = inv_k.data_ptr<float>();
   const bf16* g_pre_ptr = cbptr(g_pre);
   const bf16* beta_pre_ptr = cbptr(beta_pre);
   const bf16* g_log_ptr = cbptr(g_log);
@@ -2062,9 +2054,8 @@ std::vector<torch::Tensor> backward(
   void* args[] = {
       &grad_y_ptr,       &x_ptr,           &w_qkv_ptr,        &w_a_ptr,
       &w_b_ptr,          &w_g_ptr,         &w_out_ptr,        &conv_w_ptr,
-      &A_log_ptr,        &dt_bias_ptr,     &qkv_ptr,          &q_norm_ptr,
-      &k_norm_ptr,       &v_post_ptr,      &inv_q_ptr,        &inv_k_ptr,
-      &g_pre_ptr,        &beta_pre_ptr,    &g_log_ptr,        &beta_ptr,
+      &A_log_ptr,        &dt_bias_ptr,     &qkv_ptr,          &g_pre_ptr,
+      &beta_pre_ptr,     &g_log_ptr,       &beta_ptr,
       &g_out_ptr,        &o_raw_ptr,       &state_ckpt_ptr,
       &grad_q_norm_accum_ptr,
       &grad_k_norm_accum_ptr,              &grad_g_log_accum_ptr,

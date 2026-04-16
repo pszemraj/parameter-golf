@@ -40,10 +40,16 @@
   - forward saves only recurrence chunk-start checkpoints
   - forward keeps conv preactivations only in a temporary `pre_tmp`, not as a
     saved activation
+  - forward no longer materializes long-lived `q_norm`, `k_norm`, `v_post`,
+    `inv_q`, or `inv_k` tensors; it uses `pre_tmp` plus on-the-fly q/k norm
+    formation inside the owned forward recurrence path
   - forward keeps `g_out` and `o_raw` but no longer saves `o_norm` or `z`
   - backward replays each chunk inside the same cooperative kernel
   - backward recomputes conv preactivations from `qkv` and `conv_w` before the
     SiLU derivative path
+  - backward also recomputes q/k/v post-conv state and q/k inverse norms from
+    `qkv` and `conv_w` instead of saving `q_norm`, `k_norm`, `v_post`, `inv_q`,
+    or `inv_k` from forward
   - backward recomputes output RMSNorm and gated `z` from `o_raw` and `g_out`
     before the dense `W_out` gradient phases
   - warp-shuffle-backed CTA reductions replace the old full-block tree
@@ -258,6 +264,32 @@ Local conclusion:
 
 - keep `HGDN_GEMM_ATB_SPLIT_M_THRESHOLD=2048` as the live default
 - keep the threshold exposed for future H100-specific qkv splitM tuning
+
+## QKV post/norm recompute checkpoint
+
+The current checkpoint removes `q_norm`, `k_norm`, `v_post`, `inv_q`, and
+`inv_k` from the saved forward contract entirely:
+
+- forward now keeps only `qkv`, `g_pre`, `beta_pre`, `g_log`, `beta`, `g_out`,
+  `o_raw`, and `state_ckpt`
+- backward reconstructs q/k/v post-conv state and q/k inverse norms from
+  `qkv` and `conv_w` inside the same cooperative kernel
+- the one-forward / one-backward launch contract remains intact
+
+Local repeated timing on the `sm_89` helper is mixed but directionally useful:
+
+| Checkpoint | `B=1,T=128` median fwd+bwd | `B=1,T=512` median fwd+bwd | `B=2,T=512` median fwd+bwd | `B=1,T=2048` median fwd+bwd | Notes |
+| --- | ---: | ---: | ---: | ---: | --- |
+| prior live default | `2.04 ms` | `7.53 ms` | `8.47 ms` | `27.78 ms` | `3`-repeat median |
+| qkv post/norm recompute | `2.41-2.42 ms` | `9.00-9.04 ms` | `9.38-9.84 ms` | `24.65-26.86 ms` | three `3`-repeat confirmation passes |
+
+Local conclusion:
+
+- this recompute trade is worse on the helper at short/medium lengths
+- it improves the long `T=2048` helper point by about `0.9-3.1 ms`
+- that makes it worth keeping as an H100 compile/parity candidate because it
+  materially reduces saved state and improves the long-sequence helper point,
+  but it is still not a local proof of H100 timing quality
 
 ## Rejected local variants
 
