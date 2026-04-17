@@ -320,6 +320,7 @@ def parse_args() -> argparse.Namespace:
             "  python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k10a --offline\n"
             "  python scripts/hgdn.py h100-megakernel all --offline --set GDN_MEGAKERNEL_REC_CHUNK_T=8\n"
             "  python scripts/hgdn.py h100-megakernel matrix --offline\n"
+            "  python scripts/hgdn.py h100-megakernel compare100 --offline\n"
             "  python scripts/hgdn.py local-phase1 --preset winner-20260405-19-single-contig --run-prefix rtx4070_singlecontig\n"
             "  python scripts/hgdn.py local-phase1 --preset winner-20260405-19-split-copy --run-prefix rtx4070_splitcopy\n"
             "  python scripts/hgdn.py arch-size-screen --config configs/hgdn/winner_20260405_11_retune.toml\n"
@@ -460,7 +461,7 @@ def parse_args() -> argparse.Namespace:
         "mode",
         nargs="?",
         default="all",
-        choices=("parity", "trainer-smoke", "all", "matrix"),
+        choices=("parity", "trainer-smoke", "all", "matrix", "compare100"),
         help="Backend mode for scripts/run_h100_single_gpu_hgdn_megakernel.sh.",
     )
     h100_megakernel.add_argument(

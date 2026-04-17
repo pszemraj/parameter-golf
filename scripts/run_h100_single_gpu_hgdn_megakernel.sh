@@ -8,7 +8,7 @@ mode="${1:-all}"
 
 usage() {
     cat <<'EOF'
-Usage: scripts/run_h100_single_gpu_hgdn_megakernel.sh {parity|trainer-smoke|all|matrix|help}
+Usage: scripts/run_h100_single_gpu_hgdn_megakernel.sh {parity|trainer-smoke|all|matrix|compare100|help}
 
 Purpose:
   Bounded 1xH100 validation helper for the repo-backed HGDN megakernel path.
@@ -58,13 +58,24 @@ Modes:
     Run a small candidate matrix sequentially from one entrypoint. Each
     candidate reuses the same helper contract and gets its own bundle under a
     shared matrix output directory, plus a top-level matrix summary/archive.
-    Candidates may change runtime chunk cadence and/or compile-time build knobs.
-    The default matrix covers the next bounded H100 questions:
+    The default matrix now covers the only runtime cadence points still worth
+    spending H100 time on after the first broad pass:
     - base_rc8_v8:  GDN_MEGAKERNEL_REC_CHUNK_T=8
+    - rc6_v8:       GDN_MEGAKERNEL_REC_CHUNK_T=6
     - rc4_v8:       GDN_MEGAKERNEL_REC_CHUNK_T=4
-    - rc8_v16:      GDN_MEGAKERNEL_REC_CHUNK_T=8, HGDN_REC_V_TILE=16
-    - rc8_v24:      GDN_MEGAKERNEL_REC_CHUNK_T=8, HGDN_REC_V_TILE=24
-    - rc8_v48:      GDN_MEGAKERNEL_REC_CHUNK_T=8, HGDN_REC_V_TILE=48
+
+  compare100
+    Run a narrowed candidate matrix under a more reliable 100-step trainer
+    contract instead of a 5-step smoke. By default it revalidates parity and
+    then runs the trainer for 100 steps on:
+    - base_rc8_v8:  GDN_MEGAKERNEL_REC_CHUNK_T=8
+    - rc6_v8:       GDN_MEGAKERNEL_REC_CHUNK_T=6
+    - rc4_v8:       GDN_MEGAKERNEL_REC_CHUNK_T=4
+    Default compare100 overrides:
+    - MK_MATRIX_CHILD_MODE=all
+    - ITERATIONS=100
+    - COMPILE_WARMUP_STEPS=20
+    - TRAIN_LOG_EVERY=25
 
 Important notes:
   - Default target arch is H100: TORCH_CUDA_ARCH_LIST=9.0
@@ -82,10 +93,8 @@ Environment overrides:
                             Format: label:KEY=VALUE[,KEY=VALUE][;...]
                             Default:
                             base_rc8_v8:GDN_MEGAKERNEL_REC_CHUNK_T=8;
-                            rc4_v8:GDN_MEGAKERNEL_REC_CHUNK_T=4;
-                            rc8_v16:GDN_MEGAKERNEL_REC_CHUNK_T=8,HGDN_REC_V_TILE=16;
-                            rc8_v24:GDN_MEGAKERNEL_REC_CHUNK_T=8,HGDN_REC_V_TILE=24;
-                            rc8_v48:GDN_MEGAKERNEL_REC_CHUNK_T=8,HGDN_REC_V_TILE=48
+                            rc6_v8:GDN_MEGAKERNEL_REC_CHUNK_T=6;
+                            rc4_v8:GDN_MEGAKERNEL_REC_CHUNK_T=4
   MK_MATRIX_CHILD_MODE      Child mode for mode=matrix, defaults to all.
   MK_MATRIX_CONTINUE_ON_ERROR Continue through later candidates when one fails,
                             defaults to 1.
@@ -107,10 +116,12 @@ Environment overrides:
 Examples:
   scripts/run_h100_single_gpu_hgdn_megakernel.sh all
   scripts/run_h100_single_gpu_hgdn_megakernel.sh matrix
+  scripts/run_h100_single_gpu_hgdn_megakernel.sh compare100
   TORCH_CUDA_ARCH_LIST=8.9 scripts/run_h100_single_gpu_hgdn_megakernel.sh parity
   PYTHON_BIN=python3 scripts/run_h100_single_gpu_hgdn_megakernel.sh all
   GDN_MEGAKERNEL_REC_CHUNK_T=4 scripts/run_h100_single_gpu_hgdn_megakernel.sh trainer-smoke
-  MK_CANDIDATE_SPECS='base_rc8_v8:GDN_MEGAKERNEL_REC_CHUNK_T=8;rc8_v16:GDN_MEGAKERNEL_REC_CHUNK_T=8,HGDN_REC_V_TILE=16' scripts/run_h100_single_gpu_hgdn_megakernel.sh matrix
+  MK_CANDIDATE_SPECS='base_rc8_v8:GDN_MEGAKERNEL_REC_CHUNK_T=8;rc4_v8:GDN_MEGAKERNEL_REC_CHUNK_T=4' scripts/run_h100_single_gpu_hgdn_megakernel.sh matrix
+  MK_MATRIX_CHILD_MODE=trainer-smoke ITERATIONS=100 scripts/run_h100_single_gpu_hgdn_megakernel.sh compare100
   MK_OUTPUT_DIR=/tmp/h100mk_case MK_ARCHIVE_OUTPUT=/tmp/h100mk_case.7z scripts/run_h100_single_gpu_hgdn_megakernel.sh all
   DRY_RUN=1 scripts/run_h100_single_gpu_hgdn_megakernel.sh all
 EOF
@@ -153,7 +164,8 @@ git_branch="$(git rev-parse --abbrev-ref HEAD)"
 host_name="$(hostname)"
 timestamp_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 allow_jit_build="${GDN_MEGAKERNEL_ALLOW_JIT_BUILD:-0}"
-default_matrix_candidate_specs="base_rc8_v8:GDN_MEGAKERNEL_REC_CHUNK_T=8;rc4_v8:GDN_MEGAKERNEL_REC_CHUNK_T=4;rc8_v16:GDN_MEGAKERNEL_REC_CHUNK_T=8,HGDN_REC_V_TILE=16;rc8_v24:GDN_MEGAKERNEL_REC_CHUNK_T=8,HGDN_REC_V_TILE=24;rc8_v48:GDN_MEGAKERNEL_REC_CHUNK_T=8,HGDN_REC_V_TILE=48"
+default_matrix_candidate_specs="base_rc8_v8:GDN_MEGAKERNEL_REC_CHUNK_T=8;rc6_v8:GDN_MEGAKERNEL_REC_CHUNK_T=6;rc4_v8:GDN_MEGAKERNEL_REC_CHUNK_T=4"
+default_compare100_candidate_specs="${default_matrix_candidate_specs}"
 _mk_bundle_done=0
 _mk_exit_status=0
 
@@ -163,7 +175,7 @@ if [[ "${allow_jit_build}" != "0" ]]; then
 fi
 export GDN_MEGAKERNEL_ALLOW_JIT_BUILD=0
 
-if [[ "${mode}" != "matrix" ]]; then
+if [[ "${mode}" != "matrix" && "${mode}" != "compare100" ]]; then
     mkdir -p "${output_dir}"
     : > "${commands_file}"
     cat > "${metadata_file}" <<EOF
@@ -237,10 +249,26 @@ json_escape() {
 }
 
 run_matrix() {
+    local matrix_mode_label="${1:-matrix}"
     local matrix_child_mode="${MK_MATRIX_CHILD_MODE:-all}"
     local matrix_continue_on_error="${MK_MATRIX_CONTINUE_ON_ERROR:-1}"
     local matrix_candidate_specs="${MK_CANDIDATE_SPECS:-${default_matrix_candidate_specs}}"
-    local matrix_output_dir="${MK_OUTPUT_DIR:-artifacts/hgdn_megakernel/${run_prefix}_matrix}"
+    local matrix_output_dir_default="artifacts/hgdn_megakernel/${run_prefix}_matrix"
+    local -a matrix_shared_env
+    matrix_shared_env=()
+    if [[ "${matrix_mode_label}" == "compare100" ]]; then
+        if [[ -z "${MK_MATRIX_CHILD_MODE:-}" ]]; then
+            matrix_child_mode="all"
+        fi
+        if [[ -z "${MK_CANDIDATE_SPECS:-}" ]]; then
+            matrix_candidate_specs="${default_compare100_candidate_specs}"
+        fi
+        matrix_shared_env+=("ITERATIONS=${ITERATIONS:-100}")
+        matrix_shared_env+=("COMPILE_WARMUP_STEPS=${COMPILE_WARMUP_STEPS:-20}")
+        matrix_shared_env+=("TRAIN_LOG_EVERY=${TRAIN_LOG_EVERY:-25}")
+        matrix_output_dir_default="artifacts/hgdn_megakernel/${run_prefix}_compare100"
+    fi
+    local matrix_output_dir="${MK_OUTPUT_DIR:-${matrix_output_dir_default}}"
     local matrix_archive_output="${MK_ARCHIVE_OUTPUT:-${matrix_output_dir}.7z}"
     local matrix_commands_file="${matrix_output_dir}/commands.sh"
     local matrix_metadata_file="${matrix_output_dir}/metadata.txt"
@@ -267,7 +295,7 @@ run_matrix() {
     : > "${matrix_commands_file}"
     chmod +x "${matrix_commands_file}"
     cat > "${matrix_metadata_file}" <<EOF
-mode=matrix
+mode=${matrix_mode_label}
 run_prefix=${run_prefix}
 matrix_child_mode=${matrix_child_mode}
 matrix_continue_on_error=${matrix_continue_on_error}
@@ -321,6 +349,7 @@ EOF
             "MK_OUTPUT_DIR=${child_output_dir}"
             "MK_ARCHIVE_OUTPUT=${child_archive_output}"
         )
+        child_env+=("${matrix_shared_env[@]}")
 
         IFS=',' read -r -a override_pairs <<< "${overrides_csv}"
         for override in "${override_pairs[@]}"; do
@@ -384,7 +413,7 @@ EOF
 
     cat > "${matrix_manifest_file}" <<EOF
 {
-  "mode": "matrix",
+  "mode": "$(json_escape "${matrix_mode_label}")",
   "run_prefix": "$(json_escape "${run_prefix}")",
   "matrix_child_mode": "$(json_escape "${matrix_child_mode}")",
   "matrix_continue_on_error": ${matrix_continue_on_error},
@@ -639,8 +668,8 @@ if [[ "${mode}" == "help" || "${mode}" == "-h" || "${mode}" == "--help" ]]; then
     exit 0
 fi
 
-if [[ "${mode}" == "matrix" ]]; then
-    run_matrix
+if [[ "${mode}" == "matrix" || "${mode}" == "compare100" ]]; then
+    run_matrix "${mode}"
     exit $?
 fi
 
