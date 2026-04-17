@@ -76,6 +76,7 @@ Modes:
     - ITERATIONS=100
     - COMPILE_WARMUP_STEPS=20
     - TRAIN_LOG_EVERY=25
+    - MAX_WALLCLOCK_SECONDS=0
 
 Important notes:
   - Default target arch is H100: TORCH_CUDA_ARCH_LIST=9.0
@@ -121,7 +122,7 @@ Examples:
   PYTHON_BIN=python3 scripts/run_h100_single_gpu_hgdn_megakernel.sh all
   GDN_MEGAKERNEL_REC_CHUNK_T=4 scripts/run_h100_single_gpu_hgdn_megakernel.sh trainer-smoke
   MK_CANDIDATE_SPECS='base_rc8_v8:GDN_MEGAKERNEL_REC_CHUNK_T=8;rc4_v8:GDN_MEGAKERNEL_REC_CHUNK_T=4' scripts/run_h100_single_gpu_hgdn_megakernel.sh matrix
-  MK_MATRIX_CHILD_MODE=trainer-smoke ITERATIONS=100 scripts/run_h100_single_gpu_hgdn_megakernel.sh compare100
+  MK_MATRIX_CHILD_MODE=trainer-smoke ITERATIONS=100 MAX_WALLCLOCK_SECONDS=0 scripts/run_h100_single_gpu_hgdn_megakernel.sh compare100
   MK_OUTPUT_DIR=/tmp/h100mk_case MK_ARCHIVE_OUTPUT=/tmp/h100mk_case.7z scripts/run_h100_single_gpu_hgdn_megakernel.sh all
   DRY_RUN=1 scripts/run_h100_single_gpu_hgdn_megakernel.sh all
 EOF
@@ -266,6 +267,7 @@ run_matrix() {
         matrix_shared_env+=("ITERATIONS=${ITERATIONS:-100}")
         matrix_shared_env+=("COMPILE_WARMUP_STEPS=${COMPILE_WARMUP_STEPS:-20}")
         matrix_shared_env+=("TRAIN_LOG_EVERY=${TRAIN_LOG_EVERY:-25}")
+        matrix_shared_env+=("MAX_WALLCLOCK_SECONDS=${MAX_WALLCLOCK_SECONDS:-0}")
         matrix_output_dir_default="artifacts/hgdn_megakernel/${run_prefix}_compare100"
     fi
     local matrix_output_dir="${MK_OUTPUT_DIR:-${matrix_output_dir_default}}"
