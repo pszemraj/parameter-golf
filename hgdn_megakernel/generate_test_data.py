@@ -15,7 +15,8 @@ if str(REPO_ROOT) not in sys.path:
 from hgdn_runtime_utils import restore_low_dim_params_to_fp32  # noqa: E402
 from model import GatedDeltaNet, _HAS_FLA  # noqa: E402
 
-CASE_FORMAT_VERSION = 2
+CASE_FORMAT_VERSION = 3
+RECURRENCE_CONTRACT = "beta_write"
 
 
 def make_module(
@@ -167,6 +168,7 @@ def generate_case(
             "K": conv_size,
             "allow_neg_eigval": True,
             "expand_v": expand_v,
+            "recurrence_contract": RECURRENCE_CONTRACT,
             "has_fla_reference": "fla" in references,
         },
         "inputs": {

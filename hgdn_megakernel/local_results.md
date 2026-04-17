@@ -103,6 +103,8 @@ Interpretation:
   `e883b9b`
 - that rerun is a verification rerun with honest bundle provenance, not a reset
   of the plan
+- after the 2026-04-17 recurrence-contract fix below, that bundle should now be
+  treated as a **pre-beta-write checkpoint**, not as the current semantic gate
 
 ## Branch direction
 
@@ -272,30 +274,33 @@ These are still diagnostic bf16 tolerances, not the final tightened threshold se
 
 - the live `use_fla=True` control path is now measured on the same saved weights
   and inputs
-- on this local machine, FLA differs materially from eager even at `B=1,T=8`
-  and continues to drift through `T=512`
-- representative forward drift:
-  - `B=1,T=8`: max abs `0.134766`, norm-rel `0.138049`
-  - `B=1,T=32`: max abs `0.255859`, norm-rel `0.183047`
-  - `B=1,T=128`: max abs `0.177734`, norm-rel `0.171794`
-  - `B=1,T=512`: max abs `0.197266`, norm-rel `0.166777`
-- representative backward-control drift:
-  - `B=1,T=512 grad_w_qkv`: max abs `0.333984`, norm-rel `0.264985`
-  - `B=1,T=512 grad_w_b`: max abs `0.43642`, norm-rel `6.75898`
-- because the FLA control itself does not match eager, the harness records FLA
-  comparisons as diagnostics only where the control drifts; eager remains the
-  contract gate for the megakernel path
-- a dedicated recurrence-boundary diagnostic now confirms the control mismatch
-  starts immediately rather than only after long chunked replay:
-  - `allow_neg_eigval=False`: first failing `T=1`, worst sampled `T=28`, max
-    abs `0.152049`, norm-rel `0.524228`
-  - `allow_neg_eigval=True`: first failing `T=3`, worst sampled `T=4`, max abs
-    `0.0744246`, norm-rel `0.327112`
-  - the new closed-form `T=1` check is decisive:
-    - eager matches the formal no-beta-write recurrence essentially exactly
-    - local FLA matches a beta-gated write candidate essentially exactly
-    - this is a recurrence-semantics mismatch, not only late-sequence numeric drift
+- as of the 2026-04-17 recurrence patch, eager fallback and the megakernel now
+  use the canonical beta-write update rather than the earlier no-beta-write
+  variant
+- the dedicated recurrence-boundary diagnostic now shows eager and FLA aligned
+  within bf16-level drift rather than a semantic mismatch:
+  - `allow_neg_eigval=False`: first failing `T=None`, worst sampled `T=55`, max
+    abs `0.000866883`, norm-rel `0.0035972`
+  - `allow_neg_eigval=True`: first failing `T=None`, worst sampled `T=4`, max
+    abs `0.00111803`, norm-rel `0.00443445`
+  - the closed-form `T=1` check now matches the intended contract:
+    - eager matches `canonical_beta_write` essentially exactly
+    - local FLA also matches `canonical_beta_write` within small bf16 drift
+    - `diagnostic_no_beta_write` is now the intentional non-canonical variant
   - artifact: `hgdn_megakernel/cases/fla_recurrence_diag.json`
+- the regenerated parity cases now carry
+  `recurrence_contract='beta_write'` in their metadata, so future recurrence
+  math changes force case regeneration instead of comparing against stale saved
+  references
+- with regenerated beta-write references, eager and FLA control comparisons both
+  pass across:
+  - `B=1,T=8/32/128/512/2048`
+  - optional `B=2,T=512`
+- that re-establishes the intended contract ordering:
+  - canonical recurrence: beta-write
+  - eager fallback: matches canonical recurrence
+  - megakernel: matches eager/canonical recurrence
+  - FLA control: numerically close diagnostic and parity target again
 
 ## Launch count
 

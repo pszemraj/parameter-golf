@@ -17,6 +17,7 @@ if str(REPO_ROOT) not in sys.path:
 from hgdn_megakernel import device_report, extension_status, hgdn_megakernel  # noqa: E402
 from hgdn_megakernel.generate_test_data import (  # noqa: E402
     CASE_FORMAT_VERSION,
+    RECURRENCE_CONTRACT,
     generate_case,
 )
 from model import _HAS_FLA  # noqa: E402
@@ -452,6 +453,8 @@ def _case_needs_regen(path: Path) -> bool:
     if payload.get("format_version") != CASE_FORMAT_VERSION:
         return True
     if "inputs" not in payload or "references" not in payload:
+        return True
+    if payload["meta"].get("recurrence_contract") != RECURRENCE_CONTRACT:
         return True
     references = payload_references(payload)
     if "eager" not in references:

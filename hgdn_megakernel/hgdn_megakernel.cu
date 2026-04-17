@@ -1102,7 +1102,7 @@ __global__ void hgdn_forward_bf16_kernel(
         shared.S1[idx] = alpha *
                              (shared.S0[idx] -
                               beta_value * shared.k[i] * shared.tmp_dv0[j]) +
-                         shared.k[i] * shared.v[j];
+                         beta_value * shared.k[i] * shared.v[j];
       }
       __syncthreads();
       block_dot_cols_tiled(
@@ -1380,7 +1380,7 @@ __global__ void hgdn_backward_bf16_kernel(
           shared.S1[idx] = alpha *
                                (shared.S0[idx] -
                                 beta_value * shared.k[i] * shared.tmp_dv0[j]) +
-                           shared.k[i] * shared.v[j];
+                           beta_value * shared.k[i] * shared.v[j];
         }
         __syncthreads();
         for (int idx = threadIdx.x; idx < state_elems; idx += blockDim.x) {
@@ -1426,7 +1426,7 @@ __global__ void hgdn_backward_bf16_kernel(
             shared.S1[idx] = replay_alpha *
                                  (shared.S0[idx] -
                                   replay_beta * shared.k[i] * shared.tmp_dv0[j]) +
-                             shared.k[i] * shared.v[j];
+                             replay_beta * shared.k[i] * shared.v[j];
           }
           __syncthreads();
           for (int idx = threadIdx.x; idx < state_elems; idx += blockDim.x) {
@@ -1463,7 +1463,7 @@ __global__ void hgdn_backward_bf16_kernel(
           shared.S1[idx] = alpha *
                                (shared.S0[idx] -
                                 beta_value * shared.k[i] * shared.tmp_dv0[j]) +
-                           shared.k[i] * shared.v[j];
+                           beta_value * shared.k[i] * shared.v[j];
         }
         __syncthreads();
 
@@ -1503,7 +1503,8 @@ __global__ void hgdn_backward_bf16_kernel(
             dv_local,
             shared.reduce0);
         for (int j = threadIdx.x; j < dv_local; j += blockDim.x) {
-          grad_v_post[idx4(b, t, h, v_base + j, T, H, Dv)] = f2b(shared.go[j]);
+          grad_v_post[idx4(b, t, h, v_base + j, T, H, Dv)] =
+              f2b(beta_value * shared.go[j]);
         }
         for (int i = threadIdx.x; i < Dk; i += blockDim.x) {
           float acc = 0.0f;
@@ -1522,7 +1523,8 @@ __global__ void hgdn_backward_bf16_kernel(
               shared.S0[idx] - beta_value * shared.k[i] * shared.tmp_dv0[j];
           local_da += shared.adj[idx] * Aij;
           local_db +=
-              (alpha * shared.adj[idx]) * (-shared.k[i] * shared.tmp_dv0[j]);
+              (alpha * shared.adj[idx]) * (-shared.k[i] * shared.tmp_dv0[j]) +
+              shared.adj[idx] * shared.k[i] * shared.v[j];
         }
         block_sum2(local_da, local_db, shared.reduce0);
         if (threadIdx.x == 0) {
@@ -1544,7 +1546,7 @@ __global__ void hgdn_backward_bf16_kernel(
           }
           atomicAdd(
               &grad_k_norm_accum[idx4(b, t, h, i, T, H, Dk)],
-              term0 - beta_value * (term1 + term2));
+              beta_value * (term0 - term1 - term2));
         }
         __syncthreads();
 

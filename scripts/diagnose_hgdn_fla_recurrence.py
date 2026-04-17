@@ -100,8 +100,8 @@ def closed_form_t1_candidates(
     dot = (q0 * k0).sum(dim=-1, keepdim=True)
     dk = q0.shape[-1]
     return {
-        "formal_no_beta_write": dot * v0,
-        "beta_write": beta0 * dot * v0,
+        "canonical_beta_write": beta0 * dot * v0,
+        "diagnostic_no_beta_write": dot * v0,
         "formal_scaled_by_sqrt_dk": dot * v0 / (float(dk) ** 0.5),
         "pre_update_readout": torch.zeros_like(v0),
     }

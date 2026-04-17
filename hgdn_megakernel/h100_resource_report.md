@@ -114,6 +114,10 @@ Status after that first H100 bundle is therefore:
 - **not ready for H100 timing claims**
 - **not yet validated as a drop-in replacement for a historically FLA-trained winner**
 
+After the 2026-04-17 recurrence correction, that bundle should be read as a
+**pre-beta-write checkpoint**. It still matters operationally, but it no longer
+validates the exact current recurrence contract.
+
 Approximate saved forward tensors per GDN block at `B=128,T=2048`:
 
 | Tensor group | Bytes | MiB |
@@ -224,21 +228,24 @@ That means the honest status of this checkpoint is:
 
 One extra local finding matters for interpretation:
 
-- the installed `use_fla=True` control path diverges materially from the eager
-  HGDN reference on the same saved weights and inputs, so eager remains the
-  megakernel numerical contract until that separate control-path mismatch is
-  resolved
-- a dedicated recurrence-boundary diagnostic confirms that this FLA drift is
-  immediate rather than only a late chunk-boundary artifact:
-  - `allow_neg_eigval=False`: first failing `T=1`, worst sampled `T=28`, max
-    abs `0.152049`, norm-rel `0.524228`
-  - `allow_neg_eigval=True`: first failing `T=3`, worst sampled `T=4`, max abs
-    `0.0744246`, norm-rel `0.327112`
-- the new closed-form `T=1` diagnostic makes the semantic split explicit:
-  - eager matches the formal no-beta-write recurrence essentially exactly
-  - local FLA matches a beta-gated write candidate essentially exactly
-  - so the current local eager-vs-FLA mismatch is not just late-sequence numeric drift;
-    it is a different recurrence convention at the first token already
+- the branch no longer treats no-beta-write as the live HGDN contract
+- on 2026-04-17, eager fallback and the megakernel were both corrected to the
+  canonical beta-write recurrence, matching the Gated DeltaNet / FLA-style
+  contract rather than the older eager fallback variant
+- the dedicated recurrence-boundary diagnostic now shows eager and FLA aligned
+  within bf16-level drift rather than a semantic mismatch:
+  - `allow_neg_eigval=False`: first failing `T=None`, worst sampled `T=55`, max
+    abs `0.000866883`, norm-rel `0.0035972`
+  - `allow_neg_eigval=True`: first failing `T=None`, worst sampled `T=4`, max
+    abs `0.00111803`, norm-rel `0.00443445`
+- the closed-form `T=1` diagnostic now matches the intended ordering:
+  - eager matches `canonical_beta_write` essentially exactly
+  - local FLA also matches `canonical_beta_write` within small bf16 drift
+  - `diagnostic_no_beta_write` is now only the intentional non-canonical
+    comparison
+- regenerated megakernel parity cases now record
+  `recurrence_contract='beta_write'` so future recurrence math changes force
+  case regeneration instead of reusing stale saved references
 - the first cooperative split-K weight-gradient trial for `grad_w_out`,
   `grad_w_qkv`, and `grad_w_g` stayed parity-clean and kept the one-launch
   contract, but it was slightly slower on the local 4070 helper and was
@@ -305,6 +312,8 @@ A bounded high-memory speed candidate is now also identified:
 That makes the current rerun gate straightforward:
 
 - rerun the bounded `1xH100` helper from current HEAD, not from `e883b9b`
+- this rerun is now required not only for helper hardening, but also because
+  the live recurrence contract has changed from the pre-beta-write H100 bundle
 - helper command:
   `scripts/run_h100_single_gpu_hgdn_megakernel.sh all`
 - helper Python runtime selection is now portable:

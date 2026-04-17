@@ -674,7 +674,8 @@ def gdn_recurrent_naive(
         b_t = beta[:, t, :, None, None]
         kS = torch.einsum("bhd,bhdv->bhv", k_t, S)
         kkS = torch.einsum("bhd,bhv->bhdv", k_t, kS)
-        S = a_t * (S - b_t * kkS) + torch.einsum("bhd,bhv->bhdv", k_t, v_t)
+        write = torch.einsum("bhd,bhv->bhdv", k_t, v_t)
+        S = a_t * (S - b_t * kkS) + b_t * write
         outputs.append(torch.einsum("bhdv,bhd->bhv", S, q_t))
     return torch.stack(outputs, dim=1), S
 
