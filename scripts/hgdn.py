@@ -319,6 +319,7 @@ def parse_args() -> argparse.Namespace:
             "  python scripts/hgdn.py h100-profile hybrid-eager --preset winner-20260405-19 --run-prefix h100k10a\n"
             "  python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k10a --offline\n"
             "  python scripts/hgdn.py h100-megakernel all --offline --set GDN_MEGAKERNEL_REC_CHUNK_T=8\n"
+            "  python scripts/hgdn.py h100-megakernel matrix --offline\n"
             "  python scripts/hgdn.py local-phase1 --preset winner-20260405-19-single-contig --run-prefix rtx4070_singlecontig\n"
             "  python scripts/hgdn.py local-phase1 --preset winner-20260405-19-split-copy --run-prefix rtx4070_splitcopy\n"
             "  python scripts/hgdn.py arch-size-screen --config configs/hgdn/winner_20260405_11_retune.toml\n"
@@ -459,7 +460,7 @@ def parse_args() -> argparse.Namespace:
         "mode",
         nargs="?",
         default="all",
-        choices=("parity", "trainer-smoke", "all"),
+        choices=("parity", "trainer-smoke", "all", "matrix"),
         help="Backend mode for scripts/run_h100_single_gpu_hgdn_megakernel.sh.",
     )
     h100_megakernel.add_argument(
@@ -471,6 +472,24 @@ def parse_args() -> argparse.Namespace:
         "--mk-archive-output",
         type=Path,
         help="Set MK_ARCHIVE_OUTPUT for the megakernel helper .7z bundle.",
+    )
+    h100_megakernel.add_argument(
+        "--mk-candidate-specs",
+        help=(
+            "Set MK_CANDIDATE_SPECS for matrix mode. Format: "
+            "label:KEY=VALUE[,KEY=VALUE][;...]"
+        ),
+    )
+    h100_megakernel.add_argument(
+        "--mk-matrix-child-mode",
+        choices=("parity", "trainer-smoke", "all"),
+        help="Set MK_MATRIX_CHILD_MODE for matrix mode.",
+    )
+    h100_megakernel.add_argument(
+        "--mk-matrix-continue-on-error",
+        type=int,
+        choices=(0, 1),
+        help="Set MK_MATRIX_CONTINUE_ON_ERROR for matrix mode.",
     )
     return parser.parse_args()
 
@@ -539,6 +558,15 @@ def build_env(args: argparse.Namespace) -> dict[str, str]:
     mk_archive_output = getattr(args, "mk_archive_output", None)
     if mk_archive_output is not None:
         env["MK_ARCHIVE_OUTPUT"] = str(mk_archive_output)
+    mk_candidate_specs = getattr(args, "mk_candidate_specs", None)
+    if mk_candidate_specs is not None:
+        env["MK_CANDIDATE_SPECS"] = mk_candidate_specs
+    mk_matrix_child_mode = getattr(args, "mk_matrix_child_mode", None)
+    if mk_matrix_child_mode is not None:
+        env["MK_MATRIX_CHILD_MODE"] = mk_matrix_child_mode
+    mk_matrix_continue_on_error = getattr(args, "mk_matrix_continue_on_error", None)
+    if mk_matrix_continue_on_error is not None:
+        env["MK_MATRIX_CONTINUE_ON_ERROR"] = str(mk_matrix_continue_on_error)
 
     for raw in args.set:
         key, value = parse_kv_assignment(raw)

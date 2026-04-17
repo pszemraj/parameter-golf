@@ -8,7 +8,7 @@ mode="${1:-all}"
 
 usage() {
     cat <<'EOF'
-Usage: scripts/run_h100_single_gpu_hgdn_megakernel.sh {parity|trainer-smoke|all|help}
+Usage: scripts/run_h100_single_gpu_hgdn_megakernel.sh {parity|trainer-smoke|all|matrix|help}
 
 Purpose:
   Bounded 1xH100 validation helper for the repo-backed HGDN megakernel path.
@@ -54,6 +54,18 @@ Modes:
   all
     Run parity first, then the bounded trainer smoke.
 
+  matrix
+    Run a small candidate matrix sequentially from one entrypoint. Each
+    candidate reuses the same helper contract and gets its own bundle under a
+    shared matrix output directory, plus a top-level matrix summary/archive.
+    Candidates may change runtime chunk cadence and/or compile-time build knobs.
+    The default matrix covers the next bounded H100 questions:
+    - base_rc8_v8:  GDN_MEGAKERNEL_REC_CHUNK_T=8
+    - rc4_v8:       GDN_MEGAKERNEL_REC_CHUNK_T=4
+    - rc8_v16:      GDN_MEGAKERNEL_REC_CHUNK_T=8, HGDN_REC_V_TILE=16
+    - rc8_v24:      GDN_MEGAKERNEL_REC_CHUNK_T=8, HGDN_REC_V_TILE=24
+    - rc8_v48:      GDN_MEGAKERNEL_REC_CHUNK_T=8, HGDN_REC_V_TILE=48
+
 Important notes:
   - Default target arch is H100: TORCH_CUDA_ARCH_LIST=9.0
   - For local command-path validation only, override TORCH_CUDA_ARCH_LIST=8.9
@@ -66,6 +78,17 @@ Environment overrides:
   TORCH_CUDA_ARCH_LIST      Defaults to 9.0.
   GDN_MEGAKERNEL_ALLOW_JIT_BUILD Must remain 0 for this helper.
   GDN_MEGAKERNEL_REC_CHUNK_T Defaults to 8.
+  MK_CANDIDATE_SPECS        Candidate matrix specs for mode=matrix.
+                            Format: label:KEY=VALUE[,KEY=VALUE][;...]
+                            Default:
+                            base_rc8_v8:GDN_MEGAKERNEL_REC_CHUNK_T=8;
+                            rc4_v8:GDN_MEGAKERNEL_REC_CHUNK_T=4;
+                            rc8_v16:GDN_MEGAKERNEL_REC_CHUNK_T=8,HGDN_REC_V_TILE=16;
+                            rc8_v24:GDN_MEGAKERNEL_REC_CHUNK_T=8,HGDN_REC_V_TILE=24;
+                            rc8_v48:GDN_MEGAKERNEL_REC_CHUNK_T=8,HGDN_REC_V_TILE=48
+  MK_MATRIX_CHILD_MODE      Child mode for mode=matrix, defaults to all.
+  MK_MATRIX_CONTINUE_ON_ERROR Continue through later candidates when one fails,
+                            defaults to 1.
   MK_TIMING_REPEATS         Defaults to 3.
   MK_CASES_DIR              Defaults to hgdn_megakernel/cases.
   MK_OUTPUT_DIR             Defaults to artifacts/hgdn_megakernel/<run>.
@@ -83,9 +106,11 @@ Environment overrides:
 
 Examples:
   scripts/run_h100_single_gpu_hgdn_megakernel.sh all
+  scripts/run_h100_single_gpu_hgdn_megakernel.sh matrix
   TORCH_CUDA_ARCH_LIST=8.9 scripts/run_h100_single_gpu_hgdn_megakernel.sh parity
   PYTHON_BIN=python3 scripts/run_h100_single_gpu_hgdn_megakernel.sh all
   GDN_MEGAKERNEL_REC_CHUNK_T=4 scripts/run_h100_single_gpu_hgdn_megakernel.sh trainer-smoke
+  MK_CANDIDATE_SPECS='base_rc8_v8:GDN_MEGAKERNEL_REC_CHUNK_T=8;rc8_v16:GDN_MEGAKERNEL_REC_CHUNK_T=8,HGDN_REC_V_TILE=16' scripts/run_h100_single_gpu_hgdn_megakernel.sh matrix
   MK_OUTPUT_DIR=/tmp/h100mk_case MK_ARCHIVE_OUTPUT=/tmp/h100mk_case.7z scripts/run_h100_single_gpu_hgdn_megakernel.sh all
   DRY_RUN=1 scripts/run_h100_single_gpu_hgdn_megakernel.sh all
 EOF
@@ -128,6 +153,7 @@ git_branch="$(git rev-parse --abbrev-ref HEAD)"
 host_name="$(hostname)"
 timestamp_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 allow_jit_build="${GDN_MEGAKERNEL_ALLOW_JIT_BUILD:-0}"
+default_matrix_candidate_specs="base_rc8_v8:GDN_MEGAKERNEL_REC_CHUNK_T=8;rc4_v8:GDN_MEGAKERNEL_REC_CHUNK_T=4;rc8_v16:GDN_MEGAKERNEL_REC_CHUNK_T=8,HGDN_REC_V_TILE=16;rc8_v24:GDN_MEGAKERNEL_REC_CHUNK_T=8,HGDN_REC_V_TILE=24;rc8_v48:GDN_MEGAKERNEL_REC_CHUNK_T=8,HGDN_REC_V_TILE=48"
 _mk_bundle_done=0
 _mk_exit_status=0
 
@@ -137,9 +163,10 @@ if [[ "${allow_jit_build}" != "0" ]]; then
 fi
 export GDN_MEGAKERNEL_ALLOW_JIT_BUILD=0
 
-mkdir -p "${output_dir}"
-: > "${commands_file}"
-cat > "${metadata_file}" <<EOF
+if [[ "${mode}" != "matrix" ]]; then
+    mkdir -p "${output_dir}"
+    : > "${commands_file}"
+    cat > "${metadata_file}" <<EOF
 mode=${mode}
 run_prefix=${run_prefix}
 trainer_run_id=${trainer_run_id}
@@ -156,7 +183,8 @@ git_branch=${git_branch}
 host_name=${host_name}
 timestamp_utc=${timestamp_utc}
 EOF
-chmod +x "${commands_file}"
+    chmod +x "${commands_file}"
+fi
 
 python_has_module() {
     local module_name="${1:?module name required}"
@@ -196,6 +224,196 @@ source_path = Path(sys.argv[2])
 with py7zr.SevenZipFile(archive_output, "w") as archive:
     archive.writeall(source_path, arcname=source_path.name)
 PY
+}
+
+json_escape() {
+    local value="${1-}"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    value="${value//$'\n'/\\n}"
+    value="${value//$'\r'/\\r}"
+    value="${value//$'\t'/\\t}"
+    printf '%s' "${value}"
+}
+
+run_matrix() {
+    local matrix_child_mode="${MK_MATRIX_CHILD_MODE:-all}"
+    local matrix_continue_on_error="${MK_MATRIX_CONTINUE_ON_ERROR:-1}"
+    local matrix_candidate_specs="${MK_CANDIDATE_SPECS:-${default_matrix_candidate_specs}}"
+    local matrix_output_dir="${MK_OUTPUT_DIR:-artifacts/hgdn_megakernel/${run_prefix}_matrix}"
+    local matrix_archive_output="${MK_ARCHIVE_OUTPUT:-${matrix_output_dir}.7z}"
+    local matrix_commands_file="${matrix_output_dir}/commands.sh"
+    local matrix_metadata_file="${matrix_output_dir}/metadata.txt"
+    local matrix_summary_file="${matrix_output_dir}/matrix_summary.tsv"
+    local matrix_manifest_file="${matrix_output_dir}/matrix_manifest.json"
+
+    case "${matrix_child_mode}" in
+        parity|trainer-smoke|all)
+            ;;
+        *)
+            echo "Unsupported MK_MATRIX_CHILD_MODE=${matrix_child_mode}; expected parity, trainer-smoke, or all" >&2
+            exit 1
+            ;;
+    esac
+    if [[ "${matrix_continue_on_error}" != "0" && "${matrix_continue_on_error}" != "1" ]]; then
+        echo "Unsupported MK_MATRIX_CONTINUE_ON_ERROR=${matrix_continue_on_error}; expected 0 or 1" >&2
+        exit 1
+    fi
+    if [[ "${DRY_RUN:-0}" != "1" ]]; then
+        ensure_python_module py7zr py7zr
+    fi
+
+    mkdir -p "${matrix_output_dir}"
+    : > "${matrix_commands_file}"
+    chmod +x "${matrix_commands_file}"
+    cat > "${matrix_metadata_file}" <<EOF
+mode=matrix
+run_prefix=${run_prefix}
+matrix_child_mode=${matrix_child_mode}
+matrix_continue_on_error=${matrix_continue_on_error}
+matrix_candidate_specs=${matrix_candidate_specs}
+torch_cuda_arch_list=${torch_arch_list}
+mk_timing_repeats=${timing_repeats}
+mk_cases_dir=${cases_dir}
+python_cmd=${python_cmd_rendered% }
+gdn_megakernel_allow_jit_build=${allow_jit_build}
+git_commit=${git_commit}
+git_branch=${git_branch}
+host_name=${host_name}
+timestamp_utc=${timestamp_utc}
+EOF
+    printf 'label\tstatus\texit_code\tmode\toutput_dir\tarchive_output\toverrides\n' > "${matrix_summary_file}"
+
+    IFS=';' read -r -a candidate_specs <<< "${matrix_candidate_specs}"
+    if [[ "${#candidate_specs[@]}" -eq 0 ]]; then
+        echo "MK_CANDIDATE_SPECS resolved to zero candidates" >&2
+        exit 1
+    fi
+
+    local overall_status=0
+    local manifest_candidates=""
+    local manifest_separator=""
+
+    for raw_spec in "${candidate_specs[@]}"; do
+        local spec="${raw_spec}"
+        if [[ -z "${spec// }" ]]; then
+            continue
+        fi
+        if [[ "${spec}" != *:* ]]; then
+            echo "Invalid candidate spec: ${spec}. Expected label:KEY=VALUE[,KEY=VALUE]" >&2
+            overall_status=1
+            if [[ "${matrix_continue_on_error}" == "1" ]]; then
+                continue
+            fi
+            break
+        fi
+
+        local label="${spec%%:*}"
+        local overrides_csv="${spec#*:}"
+        local child_output_dir="${matrix_output_dir}/${label}"
+        local child_archive_output="${matrix_output_dir}/${label}.7z"
+        local child_run_prefix="${run_prefix}_${label}"
+        local child_exit_code=0
+        local child_status="ok"
+        local -a child_env
+        child_env=(
+            "RUN_PREFIX=${child_run_prefix}"
+            "MK_OUTPUT_DIR=${child_output_dir}"
+            "MK_ARCHIVE_OUTPUT=${child_archive_output}"
+        )
+
+        IFS=',' read -r -a override_pairs <<< "${overrides_csv}"
+        for override in "${override_pairs[@]}"; do
+            if [[ -z "${override// }" ]]; then
+                continue
+            fi
+            if [[ "${override}" != *=* ]]; then
+                echo "Invalid override in candidate ${label}: ${override}" >&2
+                overall_status=1
+                child_exit_code=2
+                child_status="invalid_override"
+                break
+            fi
+            child_env+=("${override}")
+        done
+        if [[ "${child_exit_code}" != "0" ]]; then
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+                "${label}" "${child_status}" "${child_exit_code}" "${matrix_child_mode}" \
+                "${child_output_dir}" "${child_archive_output}" "${overrides_csv}" >> "${matrix_summary_file}"
+            manifest_candidates+="${manifest_separator}{\"label\":\"$(json_escape "${label}")\",\"status\":\"$(json_escape "${child_status}")\",\"exit_code\":${child_exit_code},\"mode\":\"$(json_escape "${matrix_child_mode}")\",\"output_dir\":\"$(json_escape "${child_output_dir}")\",\"archive_output\":\"$(json_escape "${child_archive_output}")\",\"overrides\":\"$(json_escape "${overrides_csv}")\"}"
+            manifest_separator=","
+            if [[ "${matrix_continue_on_error}" == "1" ]]; then
+                continue
+            fi
+            break
+        fi
+
+        echo
+        echo "### HGDN megakernel matrix candidate"
+        echo "label=${label} mode=${matrix_child_mode} overrides=${overrides_csv}"
+        local -a child_cmd
+        child_cmd=("env")
+        child_cmd+=("${child_env[@]}")
+        child_cmd+=("bash" "${HGDN_REPO_ROOT}/scripts/run_h100_single_gpu_hgdn_megakernel.sh" "${matrix_child_mode}")
+        hgdn_append_plain_command "${matrix_commands_file}" "${child_cmd[@]}"
+        if [[ "${DRY_RUN:-0}" == "1" ]]; then
+            printf '>>> '
+            printf '%q ' "${child_cmd[@]}"
+            printf '\n'
+        else
+            if "${child_cmd[@]}"; then
+                child_exit_code=0
+                child_status="ok"
+            else
+                child_exit_code=$?
+                child_status="failed"
+                overall_status=1
+            fi
+        fi
+
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "${label}" "${child_status}" "${child_exit_code}" "${matrix_child_mode}" \
+            "${child_output_dir}" "${child_archive_output}" "${overrides_csv}" >> "${matrix_summary_file}"
+        manifest_candidates+="${manifest_separator}{\"label\":\"$(json_escape "${label}")\",\"status\":\"$(json_escape "${child_status}")\",\"exit_code\":${child_exit_code},\"mode\":\"$(json_escape "${matrix_child_mode}")\",\"output_dir\":\"$(json_escape "${child_output_dir}")\",\"archive_output\":\"$(json_escape "${child_archive_output}")\",\"overrides\":\"$(json_escape "${overrides_csv}")\"}"
+        manifest_separator=","
+
+        if [[ "${child_exit_code}" != "0" && "${matrix_continue_on_error}" != "1" ]]; then
+            break
+        fi
+    done
+
+    cat > "${matrix_manifest_file}" <<EOF
+{
+  "mode": "matrix",
+  "run_prefix": "$(json_escape "${run_prefix}")",
+  "matrix_child_mode": "$(json_escape "${matrix_child_mode}")",
+  "matrix_continue_on_error": ${matrix_continue_on_error},
+  "torch_cuda_arch_list": "$(json_escape "${torch_arch_list}")",
+  "mk_timing_repeats": ${timing_repeats},
+  "mk_cases_dir": "$(json_escape "${cases_dir}")",
+  "archive_output": "$(json_escape "${matrix_archive_output}")",
+  "git_commit": "$(json_escape "${git_commit}")",
+  "git_branch": "$(json_escape "${git_branch}")",
+  "host_name": "$(json_escape "${host_name}")",
+  "timestamp_utc": "$(json_escape "${timestamp_utc}")",
+  "candidates": [
+    ${manifest_candidates}
+  ]
+}
+EOF
+
+    if [[ "${DRY_RUN:-0}" == "1" ]]; then
+        echo
+        echo "matrix_bundle_dir=${matrix_output_dir}"
+        echo "matrix_bundle_archive=${matrix_archive_output}"
+        return "${overall_status}"
+    fi
+
+    create_7z_archive "${matrix_archive_output}" "${matrix_output_dir}"
+    echo
+    echo "matrix_bundle_dir=${matrix_output_dir}"
+    echo "matrix_bundle_archive=${matrix_archive_output}"
+    return "${overall_status}"
 }
 
 if [[ "${DRY_RUN:-0}" != "1" ]]; then
@@ -419,6 +637,11 @@ run_trainer_smoke() {
 if [[ "${mode}" == "help" || "${mode}" == "-h" || "${mode}" == "--help" ]]; then
     usage
     exit 0
+fi
+
+if [[ "${mode}" == "matrix" ]]; then
+    run_matrix
+    exit $?
 fi
 
 trap '_mk_exit_status=$?; build_bundle_once; exit ${_mk_exit_status}' EXIT
