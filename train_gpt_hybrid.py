@@ -38,7 +38,10 @@ import torch.distributed as dist
 from torch import Tensor, nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from hgdn_megakernel import extension_status as hgdn_megakernel_extension_status
+from hgdn_megakernel import (
+    extension_status as hgdn_megakernel_extension_status,
+    resolve_runtime_rec_chunk_t as hgdn_resolve_runtime_rec_chunk_t,
+)
 from hgdn_runtime_utils import (
     dequantize_state_dict_int8,
     maybe_compile,
@@ -989,21 +992,31 @@ def main() -> None:
         )
     if args.gdn_use_cuda_corekernel or args.gdn_use_cuda_megakernel:
         megakernel_status = hgdn_megakernel_extension_status()
-        megakernel_rec_chunk_t = int(os.environ.get("GDN_MEGAKERNEL_REC_CHUNK_T", "8"))
         mode_name = "corekernel" if args.gdn_use_cuda_corekernel else "megakernel"
+        rec_chunk_t_env_name = (
+            "GDN_COREKERNEL_REC_CHUNK_T"
+            if args.gdn_use_cuda_corekernel
+            else "GDN_MEGAKERNEL_REC_CHUNK_T"
+        )
+        rec_chunk_t_fallback = (
+            " (fallback GDN_MEGAKERNEL_REC_CHUNK_T)"
+            if args.gdn_use_cuda_corekernel
+            else ""
+        )
+        try:
+            owned_runtime_rec_chunk_t = hgdn_resolve_runtime_rec_chunk_t(
+                prefer_corekernel=args.gdn_use_cuda_corekernel
+            )
+        except ValueError as exc:
+            raise RuntimeError(str(exc)) from exc
         log0(
             f"hgdn_{mode_name}_preflight:{json.dumps(megakernel_status, sort_keys=True)}"
         )
-        log0(f"hgdn_{mode_name}_rec_chunk_t:{megakernel_rec_chunk_t}")
+        log0(f"hgdn_{mode_name}_rec_chunk_t:{owned_runtime_rec_chunk_t}")
         if args.gdn_control_proj_fp32:
             raise RuntimeError(
                 f"GDN_USE_CUDA_{mode_name.upper()}=1 requires GDN_CONTROL_PROJ_FP32=0 "
                 "because the owned CUDA path expects bf16 w_a/w_b/w_g weights."
-            )
-        if megakernel_rec_chunk_t <= 0:
-            raise RuntimeError(
-                "GDN_MEGAKERNEL_REC_CHUNK_T must be > 0 when an owned HGDN CUDA "
-                "kernel path is enabled."
             )
         if not megakernel_status["loaded"]:
             raise RuntimeError(
@@ -1012,11 +1025,12 @@ def main() -> None:
                 "`python setup_hgdn_megakernel.py build_ext --inplace` or explicitly enable "
                 "`GDN_MEGAKERNEL_ALLOW_JIT_BUILD=1`."
             )
-        if megakernel_rec_chunk_t > int(megakernel_status["rec_chunk_t_max"]):
+        if owned_runtime_rec_chunk_t > int(megakernel_status["rec_chunk_t_max"]):
             raise RuntimeError(
-                "GDN_MEGAKERNEL_REC_CHUNK_T exceeds the compiled megakernel "
-                "maximum. Rebuild with a larger HGDN_REC_CHUNK_T or lower "
-                f"GDN_MEGAKERNEL_REC_CHUNK_T. got={megakernel_rec_chunk_t} "
+                f"{rec_chunk_t_env_name} exceeds the compiled HGDN kernel maximum. "
+                "Rebuild with a larger HGDN_REC_CHUNK_T or lower "
+                f"{rec_chunk_t_env_name}{rec_chunk_t_fallback}. "
+                f"got={owned_runtime_rec_chunk_t} "
                 f"max={int(megakernel_status['rec_chunk_t_max'])}"
             )
     log0(

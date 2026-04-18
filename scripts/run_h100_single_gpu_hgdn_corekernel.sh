@@ -53,9 +53,12 @@ Modes:
 
     Default candidates:
     - packed_control:
-        GDN_USE_CUDA_COREKERNEL=0,GDN_USE_CUDA_MEGAKERNEL=0
+        GDN_USE_CUDA_COREKERNEL=0,GDN_USE_CUDA_MEGAKERNEL=0,
+        GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=1
     - core_rc8:
-        GDN_USE_CUDA_COREKERNEL=1,GDN_USE_CUDA_MEGAKERNEL=0,GDN_MEGAKERNEL_REC_CHUNK_T=8
+        GDN_USE_CUDA_COREKERNEL=1,GDN_USE_CUDA_MEGAKERNEL=0,
+        GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=0,
+        GDN_COREKERNEL_REC_CHUNK_T=8
 
 Important notes:
   - Default target arch is H100: TORCH_CUDA_ARCH_LIST=9.0
@@ -68,7 +71,8 @@ Environment overrides:
   PYTHON_BIN                Explicit Python executable to use.
   TORCH_CUDA_ARCH_LIST      Defaults to 9.0.
   GDN_MEGAKERNEL_ALLOW_JIT_BUILD Must remain 0 for this helper.
-  GDN_MEGAKERNEL_REC_CHUNK_T Shared runtime checkpoint cadence knob, defaults to 8.
+  GDN_COREKERNEL_REC_CHUNK_T Preferred runtime checkpoint cadence knob, defaults to 8.
+                            `GDN_MEGAKERNEL_REC_CHUNK_T` remains a legacy fallback.
   HK_CASES_DIR              Defaults to hgdn_megakernel/cases.
   HK_TIMING_REPEATS         Defaults to 3.
   HK_OUTPUT_DIR             Defaults to artifacts/hgdn_corekernel/<run>.
@@ -76,8 +80,8 @@ Environment overrides:
   HK_CANDIDATE_SPECS        Candidate specs for compare100.
                             Format: label:KEY=VALUE[,KEY=VALUE][;...]
                             Default:
-                            packed_control:GDN_USE_CUDA_COREKERNEL=0,GDN_USE_CUDA_MEGAKERNEL=0;
-                            core_rc8:GDN_USE_CUDA_COREKERNEL=1,GDN_USE_CUDA_MEGAKERNEL=0,GDN_MEGAKERNEL_REC_CHUNK_T=8
+                            packed_control:GDN_USE_CUDA_COREKERNEL=0,GDN_USE_CUDA_MEGAKERNEL=0,GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=1;
+                            core_rc8:GDN_USE_CUDA_COREKERNEL=1,GDN_USE_CUDA_MEGAKERNEL=0,GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=0,GDN_COREKERNEL_REC_CHUNK_T=8
   RUN_PREFIX                Base prefix for trainer smoke run ids.
   RUN_ID                    Explicit trainer smoke run id.
   TORCH_LOGS                Defaults to graph_breaks,recompiles.
@@ -96,8 +100,8 @@ Examples:
   scripts/run_h100_single_gpu_hgdn_corekernel.sh compare100
   TORCH_CUDA_ARCH_LIST=8.9 scripts/run_h100_single_gpu_hgdn_corekernel.sh parity
   PYTHON_BIN=python3 scripts/run_h100_single_gpu_hgdn_corekernel.sh all
-  GDN_MEGAKERNEL_REC_CHUNK_T=4 scripts/run_h100_single_gpu_hgdn_corekernel.sh trainer-smoke
-  HK_CANDIDATE_SPECS='packed_control:GDN_USE_CUDA_COREKERNEL=0,GDN_USE_CUDA_MEGAKERNEL=0;core_rc4:GDN_USE_CUDA_COREKERNEL=1,GDN_USE_CUDA_MEGAKERNEL=0,GDN_MEGAKERNEL_REC_CHUNK_T=4' scripts/run_h100_single_gpu_hgdn_corekernel.sh compare100
+  GDN_COREKERNEL_REC_CHUNK_T=4 scripts/run_h100_single_gpu_hgdn_corekernel.sh trainer-smoke
+  HK_CANDIDATE_SPECS='packed_control:GDN_USE_CUDA_COREKERNEL=0,GDN_USE_CUDA_MEGAKERNEL=0,GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=1;core_rc4:GDN_USE_CUDA_COREKERNEL=1,GDN_USE_CUDA_MEGAKERNEL=0,GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=0,GDN_COREKERNEL_REC_CHUNK_T=4' scripts/run_h100_single_gpu_hgdn_corekernel.sh compare100
   HK_OUTPUT_DIR=/tmp/h100core_case HK_ARCHIVE_OUTPUT=/tmp/h100core_case.7z scripts/run_h100_single_gpu_hgdn_corekernel.sh compare100
   DRY_RUN=1 scripts/run_h100_single_gpu_hgdn_corekernel.sh compare100
 EOF
@@ -123,7 +127,7 @@ resolve_python_cmd() {
 read -r -a python_cmd <<<"$(resolve_python_cmd)"
 python_cmd_rendered="$(printf '%q ' "${python_cmd[@]}")"
 torch_arch_list="${TORCH_CUDA_ARCH_LIST:-9.0}"
-rec_chunk_t="${GDN_MEGAKERNEL_REC_CHUNK_T:-8}"
+rec_chunk_t="${GDN_COREKERNEL_REC_CHUNK_T:-${GDN_MEGAKERNEL_REC_CHUNK_T:-8}}"
 timing_repeats="${HK_TIMING_REPEATS:-3}"
 cases_dir="${HK_CASES_DIR:-hgdn_megakernel/cases}"
 run_stamp="$(date +%Y%m%d_%H%M%S)"
@@ -140,7 +144,7 @@ git_branch="$(git rev-parse --abbrev-ref HEAD)"
 host_name="$(hostname)"
 timestamp_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 allow_jit_build="${GDN_MEGAKERNEL_ALLOW_JIT_BUILD:-0}"
-default_compare100_candidate_specs="packed_control:GDN_USE_CUDA_COREKERNEL=0,GDN_USE_CUDA_MEGAKERNEL=0;core_rc8:GDN_USE_CUDA_COREKERNEL=1,GDN_USE_CUDA_MEGAKERNEL=0,GDN_MEGAKERNEL_REC_CHUNK_T=8"
+default_compare100_candidate_specs="packed_control:GDN_USE_CUDA_COREKERNEL=0,GDN_USE_CUDA_MEGAKERNEL=0,GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=1;core_rc8:GDN_USE_CUDA_COREKERNEL=1,GDN_USE_CUDA_MEGAKERNEL=0,GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=0,GDN_COREKERNEL_REC_CHUNK_T=8"
 _hk_bundle_done=0
 _hk_exit_status=0
 
@@ -158,7 +162,7 @@ mode=${mode}
 run_prefix=${run_prefix}
 trainer_run_id=${trainer_run_id}
 torch_cuda_arch_list=${torch_arch_list}
-gdn_megakernel_rec_chunk_t=${rec_chunk_t}
+gdn_corekernel_rec_chunk_t=${rec_chunk_t}
 hk_timing_repeats=${timing_repeats}
 hk_cases_dir=${cases_dir}
 torchinductor_cache_dir=${trainer_cache_dir}
@@ -347,7 +351,7 @@ manifest = {
     },
     "contract": {
         "torch_cuda_arch_list": torch_cuda_arch_list,
-        "gdn_megakernel_rec_chunk_t": rec_chunk_t,
+        "gdn_corekernel_rec_chunk_t": rec_chunk_t,
         "hk_timing_repeats": timing_repeats,
         "hk_cases_dir": cases_dir,
         "torchinductor_cache_dir": trainer_cache_dir,
@@ -398,7 +402,7 @@ run_parity() {
     run_cmd "${output_dir}/build.log" env GDN_MEGAKERNEL_ALLOW_JIT_BUILD=0 TORCH_CUDA_ARCH_LIST="${torch_arch_list}" "${python_cmd[@]}" \
         setup_hgdn_megakernel.py build_ext --inplace
     run_cmd "${output_dir}/audit.log" env GDN_MEGAKERNEL_ALLOW_JIT_BUILD=0 "${python_cmd[@]}" scripts/audit_hgdn_megakernel_contract.py
-    run_cmd "${output_dir}/parity.log" env GDN_MEGAKERNEL_ALLOW_JIT_BUILD=0 GDN_MEGAKERNEL_REC_CHUNK_T="${rec_chunk_t}" "${python_cmd[@]}" \
+    run_cmd "${output_dir}/parity.log" env GDN_MEGAKERNEL_ALLOW_JIT_BUILD=0 GDN_COREKERNEL_REC_CHUNK_T="${rec_chunk_t}" "${python_cmd[@]}" \
         hgdn_megakernel/test_corekernel.py \
         --case-dir "${cases_dir}" \
         --timing-repeats "${timing_repeats}" \
@@ -415,8 +419,9 @@ run_trainer_smoke() {
     local cache_dir="${TORCHINDUCTOR_CACHE_DIR:-${trainer_cache_dir}}"
     local use_core="${GDN_USE_CUDA_COREKERNEL:-1}"
     local use_megakernel="${GDN_USE_CUDA_MEGAKERNEL:-0}"
-    local runtime_rec_chunk_t="${GDN_MEGAKERNEL_REC_CHUNK_T:-${rec_chunk_t}}"
+    local runtime_rec_chunk_t="${GDN_COREKERNEL_REC_CHUNK_T:-${GDN_MEGAKERNEL_REC_CHUNK_T:-${rec_chunk_t}}}"
     local max_wallclock="${MAX_WALLCLOCK_SECONDS:-0}"
+    local packed_custom_backward="${GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD:-0}"
 
     for assignment in "${extra_env[@]}"; do
         case "${assignment}" in
@@ -432,8 +437,14 @@ run_trainer_smoke() {
             GDN_USE_CUDA_MEGAKERNEL=*)
                 use_megakernel="${assignment#GDN_USE_CUDA_MEGAKERNEL=}"
                 ;;
+            GDN_COREKERNEL_REC_CHUNK_T=*)
+                runtime_rec_chunk_t="${assignment#GDN_COREKERNEL_REC_CHUNK_T=}"
+                ;;
             GDN_MEGAKERNEL_REC_CHUNK_T=*)
                 runtime_rec_chunk_t="${assignment#GDN_MEGAKERNEL_REC_CHUNK_T=}"
+                ;;
+            GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=*)
+                packed_custom_backward="${assignment#GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=}"
                 ;;
             MAX_WALLCLOCK_SECONDS=*)
                 max_wallclock="${assignment#MAX_WALLCLOCK_SECONDS=}"
@@ -443,7 +454,7 @@ run_trainer_smoke() {
 
     echo
     echo "### HGDN trainer smoke"
-    echo "run_id=${run_id} arch_list=${torch_arch_list} core=${use_core} megakernel=${use_megakernel} rec_chunk_t=${runtime_rec_chunk_t}"
+    echo "run_id=${run_id} arch_list=${torch_arch_list} core=${use_core} megakernel=${use_megakernel} rec_chunk_t=${runtime_rec_chunk_t} packed_custom_bwd=${packed_custom_backward}"
     echo "output_log=${logfile}"
     run_cmd "${logfile}" env \
         GDN_MEGAKERNEL_ALLOW_JIT_BUILD=0 \
@@ -456,11 +467,11 @@ run_trainer_smoke() {
         WANDB_WATCH="${WANDB_WATCH:-none}" \
         GDN_USE_CUDA_COREKERNEL="${use_core}" \
         GDN_USE_CUDA_MEGAKERNEL="${use_megakernel}" \
-        GDN_MEGAKERNEL_REC_CHUNK_T="${runtime_rec_chunk_t}" \
+        GDN_COREKERNEL_REC_CHUNK_T="${runtime_rec_chunk_t}" \
         GDN_CONTROL_PROJ_FP32=0 \
         GDN_USE_PACKED_QKV_CONV=1 \
         GDN_USE_PACKED_QKV_PROJ=1 \
-        GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=0 \
+        GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD="${packed_custom_backward}" \
         GDN_CONV_OUTPUT_CONTIGUOUS=1 \
         NUM_LAYERS="${NUM_LAYERS:-14}" \
         MODEL_DIM="${MODEL_DIM:-384}" \

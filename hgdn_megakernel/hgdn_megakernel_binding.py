@@ -1,4 +1,4 @@
-"""Python wrapper for the optional HGDN megakernel extension."""
+"""Python wrapper for the optional HGDN CUDA extension."""
 
 from __future__ import annotations
 
@@ -18,6 +18,8 @@ _REC_CHUNK_T_DEFAULT = 8
 _CACHED_EXTENSION: Any | None = None
 _EXTENSION_LOAD_ATTEMPTED = False
 _REC_CHUNK_T_MAX_CACHE: int | None = None
+_MEGAKERNEL_REC_CHUNK_T_ENV = "GDN_MEGAKERNEL_REC_CHUNK_T"
+_COREKERNEL_REC_CHUNK_T_ENV = "GDN_COREKERNEL_REC_CHUNK_T"
 
 
 def _warn_once(key: str, message: str) -> None:
@@ -187,30 +189,73 @@ def rec_chunk_t_max() -> int:
     return _REC_CHUNK_T_MAX_CACHE
 
 
-def _resolve_rec_chunk_t(module: torch.nn.Module | None = None) -> int:
-    """Return the runtime checkpoint cadence for the megakernel path.
+def resolve_runtime_rec_chunk_t(
+    module: torch.nn.Module | None = None,
+    *,
+    prefer_corekernel: bool = False,
+) -> int:
+    """Return the runtime checkpoint cadence for an owned HGDN CUDA path.
 
     Resolution order:
 
+    Megakernel path:
+
     1. `module.megakernel_rec_chunk_t` when present.
-    2. `GDN_MEGAKERNEL_REC_CHUNK_T` environment variable.
+    2. `GDN_MEGAKERNEL_REC_CHUNK_T`.
     3. Current default cadence.
+
+    Core-kernel path:
+
+    1. `module.corekernel_rec_chunk_t` when present.
+    2. `module.megakernel_rec_chunk_t` when present.
+    3. `GDN_COREKERNEL_REC_CHUNK_T`.
+    4. `GDN_MEGAKERNEL_REC_CHUNK_T`.
+    5. Current default cadence.
+
+    :param torch.nn.Module | None module: Optional HGDN module, defaults to `None`.
+    :param bool prefer_corekernel: Whether to prefer the core-kernel alias and
+        module attribute, defaults to False.
+    :raises ValueError: If the requested cadence is not positive.
+    :return int: Runtime checkpoint cadence.
+    """
+    if (
+        module is not None
+        and prefer_corekernel
+        and hasattr(module, "corekernel_rec_chunk_t")
+    ):
+        value = int(getattr(module, "corekernel_rec_chunk_t"))
+    elif module is not None and hasattr(module, "megakernel_rec_chunk_t"):
+        value = int(getattr(module, "megakernel_rec_chunk_t"))
+    elif prefer_corekernel and _COREKERNEL_REC_CHUNK_T_ENV in os.environ:
+        value = int(os.environ[_COREKERNEL_REC_CHUNK_T_ENV])
+    elif _MEGAKERNEL_REC_CHUNK_T_ENV in os.environ:
+        value = int(os.environ[_MEGAKERNEL_REC_CHUNK_T_ENV])
+    else:
+        value = _REC_CHUNK_T_DEFAULT
+    if value <= 0:
+        env_name = (
+            _COREKERNEL_REC_CHUNK_T_ENV
+            if prefer_corekernel
+            else _MEGAKERNEL_REC_CHUNK_T_ENV
+        )
+        fallback = (
+            f" (fallback {_MEGAKERNEL_REC_CHUNK_T_ENV})" if prefer_corekernel else ""
+        )
+        raise ValueError(
+            f"HGDN {'core kernel' if prefer_corekernel else 'megakernel'} requires "
+            f"{env_name} > 0{fallback}, got {value}."
+        )
+    return value
+
+
+def _resolve_rec_chunk_t(module: torch.nn.Module | None = None) -> int:
+    """Return the runtime checkpoint cadence for the megakernel path.
 
     :param torch.nn.Module | None module: Optional HGDN module, defaults to `None`.
     :raises ValueError: If the requested cadence is not positive.
     :return int: Runtime checkpoint cadence.
     """
-    if module is not None and hasattr(module, "megakernel_rec_chunk_t"):
-        value = int(getattr(module, "megakernel_rec_chunk_t"))
-    else:
-        value = int(
-            os.environ.get("GDN_MEGAKERNEL_REC_CHUNK_T", str(_REC_CHUNK_T_DEFAULT))
-        )
-    if value <= 0:
-        raise ValueError(
-            f"HGDN megakernel requires GDN_MEGAKERNEL_REC_CHUNK_T > 0, got {value}."
-        )
-    return value
+    return resolve_runtime_rec_chunk_t(module, prefer_corekernel=False)
 
 
 def _require_cuda_tensor(
@@ -1905,7 +1950,9 @@ def hgdn_corekernel(
     :return Tensor: HGDN core output shaped `(batch, seq, heads, d_v)`.
     """
     rec_chunk_t = (
-        _resolve_rec_chunk_t(None) if rec_chunk_t is None else int(rec_chunk_t)
+        resolve_runtime_rec_chunk_t(None, prefer_corekernel=True)
+        if rec_chunk_t is None
+        else int(rec_chunk_t)
     )
     z, *_saved = torch.ops.hgdn_corekernel_v1.run(
         qkv,
@@ -1979,7 +2026,7 @@ def run_core_from_gated_delta_net(
         module.qkv_conv.conv.weight.shape[0],
         module.qkv_conv.conv.weight.shape[-1],
     )
-    rec_chunk_t = _resolve_rec_chunk_t(module)
+    rec_chunk_t = resolve_runtime_rec_chunk_t(module, prefer_corekernel=True)
     max_chunk_t = rec_chunk_t_max()
     if rec_chunk_t > max_chunk_t:
         raise ValueError(

@@ -1,4 +1,4 @@
-"""Repo-backed HGDN megakernel helpers."""
+"""Repo-backed HGDN CUDA kernel helpers."""
 
 from .hgdn_megakernel_binding import (
     device_report,
@@ -7,6 +7,7 @@ from .hgdn_megakernel_binding import (
     hgdn_corekernel,
     hgdn_megakernel,
     rec_chunk_t_max,
+    resolve_runtime_rec_chunk_t,
     run_core_from_gated_delta_net,
     run_from_gated_delta_net,
 )
@@ -18,6 +19,7 @@ __all__ = [
     "hgdn_corekernel",
     "hgdn_megakernel",
     "rec_chunk_t_max",
+    "resolve_runtime_rec_chunk_t",
     "run_core_from_gated_delta_net",
     "run_from_gated_delta_net",
 ]
