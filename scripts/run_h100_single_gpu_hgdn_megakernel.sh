@@ -105,7 +105,8 @@ Environment overrides:
   MK_ARCHIVE_OUTPUT         Defaults to <MK_OUTPUT_DIR>.7z.
   RUN_PREFIX                Base prefix for trainer smoke run ids.
   RUN_ID                    Explicit trainer smoke run id.
-  TORCH_LOGS                Defaults to graph_breaks,recompiles.
+  TORCH_LOGS                Optional torch.compile diagnostics. Unset by default;
+                            set explicitly for graph-break / recompile debugging.
   TORCHINDUCTOR_CACHE_DIR   Defaults to /tmp/<run-id>_inductor.
   ITERATIONS                Defaults to 5 for trainer-smoke.
   COMPILE_WARMUP_STEPS      Defaults to 2 for trainer-smoke.
@@ -148,6 +149,7 @@ resolve_python_cmd() {
 read -r -a python_cmd <<<"$(resolve_python_cmd)"
 python_cmd_rendered="$(printf '%q ' "${python_cmd[@]}")"
 torch_arch_list="${TORCH_CUDA_ARCH_LIST:-9.0}"
+torch_logs="${TORCH_LOGS-}"
 rec_chunk_t="${GDN_MEGAKERNEL_REC_CHUNK_T:-8}"
 timing_repeats="${MK_TIMING_REPEATS:-3}"
 cases_dir="${MK_CASES_DIR:-hgdn_megakernel/cases}"
@@ -475,7 +477,7 @@ build_bundle() {
         --archive-output "${archive_output}" \
         --commands-file "${commands_file}" \
         --metadata-path "${metadata_file}" \
-        --torch-logs "${TORCH_LOGS:-graph_breaks,recompiles}" \
+        --torch-logs "${torch_logs}" \
         --iterations "${ITERATIONS:-5}" \
         --compile-warmup-steps "${COMPILE_WARMUP_STEPS:-2}" \
         --train-seq-len "${TRAIN_SEQ_LEN:-2048}" \
@@ -526,35 +528,41 @@ run_trainer_smoke() {
     echo "### HGDN megakernel trainer smoke"
     echo "run_id=${trainer_run_id} arch_list=${torch_arch_list} rec_chunk_t=${rec_chunk_t}"
     echo "output_dir=${output_dir}"
-    run_cmd "${output_dir}/trainer_smoke.log" env \
-        GDN_MEGAKERNEL_ALLOW_JIT_BUILD=0 \
-        TORCH_CUDA_ARCH_LIST="${torch_arch_list}" \
-        TORCHINDUCTOR_CACHE_DIR="${trainer_cache_dir}" \
-        TORCH_LOGS="${TORCH_LOGS:-graph_breaks,recompiles}" \
-        RUN_ID="${trainer_run_id}" \
-        USE_WANDB="${USE_WANDB:-0}" \
-        WANDB_MODE="${WANDB_MODE:-offline}" \
-        WANDB_WATCH="${WANDB_WATCH:-none}" \
-        GDN_USE_CUDA_MEGAKERNEL=1 \
-        GDN_MEGAKERNEL_REC_CHUNK_T="${rec_chunk_t}" \
-        GDN_CONTROL_PROJ_FP32=0 \
-        GDN_USE_PACKED_QKV_CONV=1 \
-        GDN_USE_PACKED_QKV_PROJ=1 \
-        GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=0 \
-        GDN_CONV_OUTPUT_CONTIGUOUS=1 \
-        NUM_LAYERS="${NUM_LAYERS:-14}" \
-        MODEL_DIM="${MODEL_DIM:-384}" \
-        MLP_MULT="${MLP_MULT:-3.25}" \
-        GDN_RATIO="${GDN_RATIO:-1}" \
-        TRAIN_SEQ_LEN="${TRAIN_SEQ_LEN:-2048}" \
-        TRAIN_BATCH_TOKENS="${TRAIN_BATCH_TOKENS:-524288}" \
-        ITERATIONS="${ITERATIONS:-5}" \
-        VAL_LOSS_EVERY="${VAL_LOSS_EVERY:-0}" \
-        TRAIN_LOG_EVERY="${TRAIN_LOG_EVERY:-1}" \
-        PERF_SKIP_FINAL_EVAL="${PERF_SKIP_FINAL_EVAL:-1}" \
-        COMPILE="${COMPILE:-1}" \
-        COMPILE_STRATEGY="${COMPILE_STRATEGY:-hybrid}" \
-        COMPILE_WARMUP_STEPS="${COMPILE_WARMUP_STEPS:-2}" \
+    local -a train_env
+    train_env=(
+        env
+        GDN_MEGAKERNEL_ALLOW_JIT_BUILD=0
+        TORCH_CUDA_ARCH_LIST="${torch_arch_list}"
+        TORCHINDUCTOR_CACHE_DIR="${trainer_cache_dir}"
+        RUN_ID="${trainer_run_id}"
+        USE_WANDB="${USE_WANDB:-0}"
+        WANDB_MODE="${WANDB_MODE:-offline}"
+        WANDB_WATCH="${WANDB_WATCH:-none}"
+        GDN_USE_CUDA_MEGAKERNEL=1
+        GDN_MEGAKERNEL_REC_CHUNK_T="${rec_chunk_t}"
+        GDN_CONTROL_PROJ_FP32=0
+        GDN_USE_PACKED_QKV_CONV=1
+        GDN_USE_PACKED_QKV_PROJ=1
+        GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=0
+        GDN_CONV_OUTPUT_CONTIGUOUS=1
+        NUM_LAYERS="${NUM_LAYERS:-14}"
+        MODEL_DIM="${MODEL_DIM:-384}"
+        MLP_MULT="${MLP_MULT:-3.25}"
+        GDN_RATIO="${GDN_RATIO:-1}"
+        TRAIN_SEQ_LEN="${TRAIN_SEQ_LEN:-2048}"
+        TRAIN_BATCH_TOKENS="${TRAIN_BATCH_TOKENS:-524288}"
+        ITERATIONS="${ITERATIONS:-5}"
+        VAL_LOSS_EVERY="${VAL_LOSS_EVERY:-0}"
+        TRAIN_LOG_EVERY="${TRAIN_LOG_EVERY:-1}"
+        PERF_SKIP_FINAL_EVAL="${PERF_SKIP_FINAL_EVAL:-1}"
+        COMPILE="${COMPILE:-1}"
+        COMPILE_STRATEGY="${COMPILE_STRATEGY:-hybrid}"
+        COMPILE_WARMUP_STEPS="${COMPILE_WARMUP_STEPS:-2}"
+    )
+    if [[ -n "${TORCH_LOGS+x}" ]]; then
+        train_env+=(TORCH_LOGS="${TORCH_LOGS}")
+    fi
+    run_cmd "${output_dir}/trainer_smoke.log" "${train_env[@]}" \
         "${python_cmd[@]}" -m torch.distributed.run --standalone --nproc_per_node=1 \
         train_gpt_hybrid.py
 }

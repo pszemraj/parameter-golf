@@ -84,7 +84,8 @@ Environment overrides:
                             core_rc8:GDN_USE_CUDA_COREKERNEL=1,GDN_USE_CUDA_MEGAKERNEL=0,GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=0,GDN_COREKERNEL_REC_CHUNK_T=8
   RUN_PREFIX                Base prefix for trainer smoke run ids.
   RUN_ID                    Explicit trainer smoke run id.
-  TORCH_LOGS                Defaults to graph_breaks,recompiles.
+  TORCH_LOGS                Optional torch.compile diagnostics. Unset by default;
+                            set explicitly for graph-break / recompile debugging.
   HK_TRAINER_LAUNCHER_MODE  Trainer launcher mode: `plain` or `torchrun`,
                             defaults to `plain`.
   TORCHINDUCTOR_CACHE_DIR   Defaults to /tmp/<run-id>_inductor.
@@ -131,6 +132,7 @@ resolve_python_cmd() {
 read -r -a python_cmd <<<"$(resolve_python_cmd)"
 python_cmd_rendered="$(printf '%q ' "${python_cmd[@]}")"
 torch_arch_list="${TORCH_CUDA_ARCH_LIST:-9.0}"
+torch_logs="${TORCH_LOGS-}"
 rec_chunk_t="${GDN_COREKERNEL_REC_CHUNK_T:-${GDN_MEGAKERNEL_REC_CHUNK_T:-8}}"
 timing_repeats="${HK_TIMING_REPEATS:-3}"
 default_launcher_mode="${HK_TRAINER_LAUNCHER_MODE:-plain}"
@@ -268,7 +270,7 @@ build_bundle() {
         --archive-output "${archive_output}" \
         --commands-file "${commands_file}" \
         --metadata-path "${metadata_file}" \
-        --torch-logs "${TORCH_LOGS:-graph_breaks,recompiles}" \
+        --torch-logs "${torch_logs}" \
         --iterations "${ITERATIONS:-5}" \
         --compile-warmup-steps "${COMPILE_WARMUP_STEPS:-2}" \
         --train-seq-len "${TRAIN_SEQ_LEN:-2048}" \
@@ -325,11 +327,22 @@ run_trainer_smoke() {
     local use_megakernel="${GDN_USE_CUDA_MEGAKERNEL:-0}"
     local runtime_rec_chunk_t="${GDN_COREKERNEL_REC_CHUNK_T:-${GDN_MEGAKERNEL_REC_CHUNK_T:-${rec_chunk_t}}}"
     local max_wallclock="${MAX_WALLCLOCK_SECONDS:-0}"
+    local iterations="${ITERATIONS:-5}"
+    local compile_warmup_steps="${COMPILE_WARMUP_STEPS:-2}"
+    local train_log_every="${TRAIN_LOG_EVERY:-1}"
     local packed_custom_backward="${GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD:-0}"
     local launcher_mode="${HK_TRAINER_LAUNCHER_MODE:-plain}"
     local compile_strategy="${COMPILE_STRATEGY:-selective}"
+    local include_torch_logs=0
+    local torch_logs_value=""
     local -a train_env
     local -a train_cmd
+    local -a passthrough_env
+
+    if [[ -n "${TORCH_LOGS+x}" ]]; then
+        include_torch_logs=1
+        torch_logs_value="${TORCH_LOGS}"
+    fi
 
     for assignment in "${extra_env[@]}"; do
         case "${assignment}" in
@@ -360,8 +373,24 @@ run_trainer_smoke() {
             COMPILE_STRATEGY=*)
                 compile_strategy="${assignment#COMPILE_STRATEGY=}"
                 ;;
+            TORCH_LOGS=*)
+                include_torch_logs=1
+                torch_logs_value="${assignment#TORCH_LOGS=}"
+                ;;
             MAX_WALLCLOCK_SECONDS=*)
                 max_wallclock="${assignment#MAX_WALLCLOCK_SECONDS=}"
+                ;;
+            ITERATIONS=*)
+                iterations="${assignment#ITERATIONS=}"
+                ;;
+            COMPILE_WARMUP_STEPS=*)
+                compile_warmup_steps="${assignment#COMPILE_WARMUP_STEPS=}"
+                ;;
+            TRAIN_LOG_EVERY=*)
+                train_log_every="${assignment#TRAIN_LOG_EVERY=}"
+                ;;
+            *)
+                passthrough_env+=("${assignment}")
                 ;;
         esac
     done
@@ -382,7 +411,6 @@ run_trainer_smoke() {
         GDN_MEGAKERNEL_ALLOW_JIT_BUILD=0
         TORCH_CUDA_ARCH_LIST="${torch_arch_list}"
         TORCHINDUCTOR_CACHE_DIR="${cache_dir}"
-        TORCH_LOGS="${TORCH_LOGS:-graph_breaks,recompiles}"
         RUN_ID="${run_id}"
         USE_WANDB="${USE_WANDB:-0}"
         WANDB_MODE="${WANDB_MODE:-offline}"
@@ -401,15 +429,18 @@ run_trainer_smoke() {
         GDN_RATIO="${GDN_RATIO:-1}"
         TRAIN_SEQ_LEN="${TRAIN_SEQ_LEN:-2048}"
         TRAIN_BATCH_TOKENS="${TRAIN_BATCH_TOKENS:-524288}"
-        ITERATIONS="${ITERATIONS:-5}"
+        ITERATIONS="${iterations}"
         MAX_WALLCLOCK_SECONDS="${max_wallclock}"
         VAL_LOSS_EVERY="${VAL_LOSS_EVERY:-0}"
-        TRAIN_LOG_EVERY="${TRAIN_LOG_EVERY:-1}"
+        TRAIN_LOG_EVERY="${train_log_every}"
         PERF_SKIP_FINAL_EVAL="${PERF_SKIP_FINAL_EVAL:-1}"
         COMPILE="${COMPILE:-1}"
         COMPILE_STRATEGY="${compile_strategy}"
-        COMPILE_WARMUP_STEPS="${COMPILE_WARMUP_STEPS:-2}"
+        COMPILE_WARMUP_STEPS="${compile_warmup_steps}"
     )
+    if [[ "${include_torch_logs}" == "1" ]]; then
+        train_env+=(TORCH_LOGS="${torch_logs_value}")
+    fi
     if [[ "${launcher_mode}" == "plain" ]]; then
         train_cmd=("${python_cmd[@]}" train_gpt_hybrid.py)
     else
@@ -422,7 +453,7 @@ run_trainer_smoke() {
             train_gpt_hybrid.py
         )
     fi
-    run_cmd "${logfile}" "${train_env[@]}" "${extra_env[@]}" "${train_cmd[@]}"
+    run_cmd "${logfile}" "${train_env[@]}" "${passthrough_env[@]}" "${train_cmd[@]}"
 }
 
 run_compare100() {
