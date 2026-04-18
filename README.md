@@ -1,3 +1,56 @@
+# Core/Amplifier fork note
+
+This fork's **root training path** now targets the Core/Amplifier language model rather than the original simple transformer baseline.
+
+Root-level changes:
+- `train_gpt.py` now launches the **frozen-amplifier + parallel recurrent controller** path.
+- `train_gpt_transformer_baseline.py` preserves the original upstream root transformer script for reference.
+- new root code lives in:
+  - `core_amplifier_lm/`
+  - `inspect_model.py`
+  - `train_core_amplifier.py`
+  - `scripts/sweep_controller.sh`
+  - `scripts/sweep_structure.sh`
+  - `tools/parquet_tokens_to_bin.py`
+  - `tools/rebuild_summary.py`
+  - `tools/estimate_artifact_bytes.py`
+  - `tests/test_core_amplifier.py`
+
+Recommended root workflow:
+
+```bash
+python inspect_model.py init core_amp_run   --data ./data/datasets/fineweb10B_sp1024   --storage-dtype uint16   --vocab-size 1024   --core-dim 48   --branch-lags 1,2,3,4,6,8,12,16,24,32,48,64   --num-blocks 9   --fixed-dtype bfloat16   --embedding-init spectral   --spectral-neighbors 64   --spec-strategy auto   --spec-workers -1   --core-layers 5   --core-expansion 2.0   --residual-core 1
+```
+
+```bash
+python train_core_amplifier.py core_amp_run   --data ./data/datasets/fineweb10B_sp1024   --seq-len 512 --batch-size 256 --num-steps 7000   --learning-rate 3e-3 --warmup-steps 100 --lr-hold-steps 1500 --min-lr 3e-4   --weight-decay 1e-3 --hard-loss-gamma 0.5 --hard-loss-cap 5.0   --core-layers 5 --core-expansion 2.0 --residual-core 1   --carry-chunks 16 --bptt-chunks 2   --compile --compile-after 200 --compile-mode reduce-overhead --compile-base-path
+```
+
+Or use the new root wrapper:
+
+```bash
+DATA_PATH=./data/datasets/fineweb10B_sp1024 python train_gpt.py
+```
+
+Quick local sweeps:
+
+```bash
+bash scripts/sweep_controller.sh
+bash scripts/sweep_structure.sh
+```
+
+Developer sanity checks:
+
+```bash
+ruff check .
+python -m py_compile train_gpt.py inspect_model.py train_core_amplifier.py core_amplifier_lm/*.py tools/*.py tests/*.py
+pytest -q tests/test_core_amplifier.py
+```
+
+`pyproject.toml` excludes `records/**` from Ruff because those historical challenge submissions are intentionally preserved as-is and are not part of the maintained root code path.
+
+---
+
 <img width="3840" height="1280" alt="1920x640-discord" src="https://github.com/user-attachments/assets/90607b26-171f-476a-90ae-69b9dbb7cb30" />
 
 <br>

@@ -31,7 +31,9 @@ DATAFILE_VERSION = 1
 DEFAULT_REPO_ID = os.environ.get("MATCHED_FINEWEB_REPO_ID", "willdepueoai/parameter-golf")
 DEFAULT_REMOTE_ROOT = os.environ.get("MATCHED_FINEWEB_REMOTE_ROOT_PREFIX", "datasets")
 DEFAULT_CONFIG = Path(__file__).with_name("tokenizer_specs.json")
-TOKENIZER_THREADS = max(1, int(os.environ.get("MATCHED_FINEWEB_TOKENIZER_THREADS", str(os.cpu_count() or 8))))
+TOKENIZER_THREADS = max(
+    1, int(os.environ.get("MATCHED_FINEWEB_TOKENIZER_THREADS", str(os.cpu_count() or 8)))
+)
 SP_BATCH_SIZE = max(1, int(os.environ.get("MATCHED_FINEWEB_SP_BATCH_SIZE", "1024")))
 
 
@@ -91,7 +93,9 @@ def copy_from_hf_cache(*, repo_id: str, remote_root: str, filename: str, destina
             hf_hub_download(
                 repo_id=repo_id,
                 filename=remote_path.name,
-                subfolder=remote_path.parent.as_posix() if remote_path.parent != Path(".") else None,
+                subfolder=remote_path.parent.as_posix()
+                if remote_path.parent != Path(".")
+                else None,
                 repo_type="dataset",
             )
         )
@@ -227,7 +231,9 @@ def _iter_sentencepiece_text(docs_jsonl: Path, *, max_docs: int | None = None):
                 yield text
 
 
-def build_pure_byte_tokenizer(*, spec: dict[str, Any], docs_jsonl: Path, tokenizers_dir: Path) -> dict[str, Any]:
+def build_pure_byte_tokenizer(
+    *, spec: dict[str, Any], docs_jsonl: Path, tokenizers_dir: Path
+) -> dict[str, Any]:
     del docs_jsonl
     tok = default_pure_byte_tokenizer()
     path = tokenizers_dir / spec.get("filename", "fineweb_pure_byte_260.json")
@@ -245,7 +251,9 @@ def build_pure_byte_tokenizer(*, spec: dict[str, Any], docs_jsonl: Path, tokeniz
     }
 
 
-def build_sentencepiece_tokenizer(*, spec: dict[str, Any], docs_jsonl: Path, tokenizers_dir: Path) -> dict[str, Any]:
+def build_sentencepiece_tokenizer(
+    *, spec: dict[str, Any], docs_jsonl: Path, tokenizers_dir: Path
+) -> dict[str, Any]:
     try:
         import sentencepiece as spm
     except ImportError as exc:
@@ -273,7 +281,9 @@ def build_sentencepiece_tokenizer(*, spec: dict[str, Any], docs_jsonl: Path, tok
         kwargs = {
             "sentence_iterator": _iter_sentencepiece_text(
                 docs_jsonl,
-                max_docs=None if spec.get("tokenizer_train_docs") is None else int(spec["tokenizer_train_docs"]),
+                max_docs=None
+                if spec.get("tokenizer_train_docs") is None
+                else int(spec["tokenizer_train_docs"]),
             ),
             "model_prefix": str(prefix),
             "model_type": "bpe",
@@ -301,7 +311,9 @@ def build_sentencepiece_tokenizer(*, spec: dict[str, Any], docs_jsonl: Path, tok
         "bos_id": int(tok.bos_id()),
         "eos_id": int(tok.eos_id()),
         "encode": lambda text, tok=tok: tok.encode(text, out_type=int),
-        "encode_batch": lambda texts, tok=tok: tok.encode(texts, out_type=int, num_threads=TOKENIZER_THREADS),
+        "encode_batch": lambda texts, tok=tok: tok.encode(
+            texts, out_type=int, num_threads=TOKENIZER_THREADS
+        ),
         "manifest": {"model_path": str(model_path), "vocab_path": str(vocab_path)},
     }
 
@@ -353,7 +365,11 @@ def export_shards(
     batch_encode = tok.get("encode_batch")
     batch_size = SP_BATCH_SIZE if callable(batch_encode) else 1
     for texts in batched_docs_jsonl(docs_jsonl, batch_size):
-        encoded_docs = batch_encode(texts) if callable(batch_encode) else [tok["encode"](text) for text in texts]
+        encoded_docs = (
+            batch_encode(texts)
+            if callable(batch_encode)
+            else [tok["encode"](text) for text in texts]
+        )
         for text, encoded in zip(texts, encoded_docs, strict=True):
             del text
             split_for_doc = "val" if stats["docs_total"] < num_val_docs else "train"
@@ -423,9 +439,13 @@ def build_tokenizers(
 
         selected_specs.append(spec)
         built = (
-            build_pure_byte_tokenizer(spec=spec, docs_jsonl=docs_jsonl, tokenizers_dir=tokenizers_dir)
+            build_pure_byte_tokenizer(
+                spec=spec, docs_jsonl=docs_jsonl, tokenizers_dir=tokenizers_dir
+            )
             if kind == "byte"
-            else build_sentencepiece_tokenizer(spec=spec, docs_jsonl=docs_jsonl, tokenizers_dir=tokenizers_dir)
+            else build_sentencepiece_tokenizer(
+                spec=spec, docs_jsonl=docs_jsonl, tokenizers_dir=tokenizers_dir
+            )
         )
         name = str(built["name"])
         dataset_suffix = built.get("dataset_suffix")
@@ -482,7 +502,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_REMOTE_ROOT,
         help="Optional subdirectory inside the dataset repo that contains docs_selected.jsonl",
     )
-    parser.add_argument("--output-root", required=True, help="Directory where docs, tokenizers, shards, and manifest are written")
+    parser.add_argument(
+        "--output-root",
+        required=True,
+        help="Directory where docs, tokenizers, shards, and manifest are written",
+    )
     parser.add_argument(
         "--tokenizer-config",
         default=str(DEFAULT_CONFIG),
@@ -494,7 +518,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Validation document count. Defaults to the downloaded sidecar when present, otherwise 50000.",
     )
-    parser.add_argument("--chunk-tokens", type=int, default=SHARD_SIZE, help="Shard size in tokens.")
+    parser.add_argument(
+        "--chunk-tokens", type=int, default=SHARD_SIZE, help="Shard size in tokens."
+    )
     parser.add_argument(
         "--tokenizer-train-docs",
         type=int,
@@ -543,7 +569,11 @@ def main() -> None:
         sidecar.unlink(missing_ok=True)
 
     docs_sidecar = maybe_load_docs_sidecar_meta(docs_jsonl)
-    docs_total = int(docs_sidecar["num_docs"]) if docs_sidecar is not None and docs_sidecar.get("num_docs") is not None else count_docs(docs_jsonl)
+    docs_total = (
+        int(docs_sidecar["num_docs"])
+        if docs_sidecar is not None and docs_sidecar.get("num_docs") is not None
+        else count_docs(docs_jsonl)
+    )
     if args.num_val_docs is not None:
         num_val_docs = int(args.num_val_docs)
     elif docs_sidecar is not None and docs_sidecar.get("docs_val") is not None:

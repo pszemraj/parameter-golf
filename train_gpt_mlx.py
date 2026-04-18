@@ -4,6 +4,7 @@ The `train_gpt.py` and `train_gpt_mlx.py` scripts are intended as good launching
 
 Hard stop: To keep readable for newcomers, let's make sure `train_gpt.py` and `train_gpt_mlx.py` never are longer than 1500 lines.
 """
+
 from __future__ import annotations
 
 import glob
@@ -32,6 +33,7 @@ from mlx.utils import tree_flatten, tree_unflatten
 
 COMPUTE_DTYPE = mx.bfloat16
 
+
 # ==============================================================================
 # HYPERPARAMETERS
 # ==============================================================================
@@ -43,7 +45,9 @@ COMPUTE_DTYPE = mx.bfloat16
 class Hyperparameters:
     # Data / tokenizer.
     data_path: str = os.environ.get("DATA_PATH", "./data/datasets/fineweb10B_sp1024")
-    tokenizer_path: str = os.environ.get("TOKENIZER_PATH", "./data/tokenizers/fineweb_1024_bpe.model")
+    tokenizer_path: str = os.environ.get(
+        "TOKENIZER_PATH", "./data/tokenizers/fineweb_1024_bpe.model"
+    )
     run_id: str = os.environ.get("RUN_ID", str(uuid.uuid4()))
     seed: int = int(os.environ.get("SEED", 1337))
 
@@ -55,7 +59,9 @@ class Hyperparameters:
     train_log_every: int = int(os.environ.get("TRAIN_LOG_EVERY", 200))
     train_batch_tokens: int = int(os.environ.get("TRAIN_BATCH_TOKENS", 524_288))
     grad_accum_steps: int = int(os.environ.get("GRAD_ACCUM_STEPS", 8))
-    train_seq_len: int = int(os.environ.get("TRAIN_SEQ_LEN", os.environ.get("TRAIN_MAX_SEQ_LEN", 1024)))
+    train_seq_len: int = int(
+        os.environ.get("TRAIN_SEQ_LEN", os.environ.get("TRAIN_MAX_SEQ_LEN", 1024))
+    )
     # Chunk each logical MLX microbatch into smaller sub-batches to reduce peak
     # memory pressure without changing the effective optimizer batch.
     mlx_max_microbatch_tokens: int = int(os.environ.get("MLX_MAX_MICROBATCH_TOKENS", 8_192))
@@ -113,7 +119,11 @@ class Hyperparameters:
             return 1.0
         if self.max_wallclock_seconds <= 0:
             warmdown_start = max(self.iterations - self.warmdown_iters, 0)
-            return max((self.iterations - step) / max(self.warmdown_iters, 1), 0.0) if warmdown_start <= step < self.iterations else 1.0
+            return (
+                max((self.iterations - step) / max(self.warmdown_iters, 1), 0.0)
+                if warmdown_start <= step < self.iterations
+                else 1.0
+            )
         step_ms = elapsed_ms / max(step, 1)
         warmdown_ms = self.warmdown_iters * step_ms
         remaining_ms = max(1000.0 * self.max_wallclock_seconds - elapsed_ms, 0.0)
@@ -168,6 +178,7 @@ def accumulate_flat_grads(
 # ==============================================================================
 # MATH HELPERS
 # ==============================================================================
+
 
 def rms_norm(x: mx.array, eps: float = 1e-6) -> mx.array:
     return (x * mx.rsqrt(mx.mean(x * x, axis=-1, keepdims=True) + eps)).astype(x.dtype)
@@ -277,6 +288,7 @@ class TokenLoader:
 # MODEL BLOCKS
 # ==============================================================================
 
+
 class CastedLinear(nn.Module):
     def __init__(self, in_dim: int, out_dim: int):
         super().__init__()
@@ -322,7 +334,7 @@ class CausalSelfAttention(nn.Module):
         self.proj = CastedLinear(dim, dim)
         self.q_gain = mx.ones((num_heads,), dtype=mx.float32) * qk_gain_init
         self.rope = nn.RoPE(self.head_dim, traditional=False, base=rope_base)
-        self.scale = self.head_dim ** -0.5
+        self.scale = self.head_dim**-0.5
 
     def __call__(self, x: mx.array) -> mx.array:
         bsz, seqlen, dim = x.shape
@@ -368,7 +380,9 @@ class Block(nn.Module):
         self.mlp = MLP(dim, mlp_mult)
         self.attn_scale = mx.ones((dim,), dtype=mx.float32)
         self.mlp_scale = mx.ones((dim,), dtype=mx.float32)
-        self.resid_mix = mx.array(np.stack((np.ones((dim,), dtype=np.float32), np.zeros((dim,), dtype=np.float32))))
+        self.resid_mix = mx.array(
+            np.stack((np.ones((dim,), dtype=np.float32), np.zeros((dim,), dtype=np.float32)))
+        )
 
     def __call__(self, x: mx.array, x0: mx.array) -> mx.array:
         mix = self.resid_mix.astype(x.dtype)
@@ -384,9 +398,20 @@ class GPT(nn.Module):
     # - encoder half accumulates skip tensors
     # - decoder half consumes reversed skips with learned skip_weights
     # - tied embeddings for the LM head (the baseline default setup)
-    def __init__(self, vocab_size: int, num_layers: int, dim: int, num_heads: int, num_kv_heads: int, mlp_mult: int,
-                 logit_chunk_tokens: int, logit_softcap: float, rope_base: float, tied_embed_init_std: float,
-                 qk_gain_init: float):
+    def __init__(
+        self,
+        vocab_size: int,
+        num_layers: int,
+        dim: int,
+        num_heads: int,
+        num_kv_heads: int,
+        mlp_mult: int,
+        logit_chunk_tokens: int,
+        logit_softcap: float,
+        rope_base: float,
+        tied_embed_init_std: float,
+        qk_gain_init: float,
+    ):
         super().__init__()
         if logit_softcap <= 0.0:
             raise ValueError(f"logit_softcap must be positive, got {logit_softcap}")
@@ -448,8 +473,11 @@ class GPT(nn.Module):
             e = min(s + self.logit_chunk_tokens, n)
             logits_proj = x[s:e] @ self.tok_emb.weight.astype(x.dtype).T
             logits = self.softcap(logits_proj)
-            loss_sum = loss_sum + nn.losses.cross_entropy(logits.astype(mx.float32), y[s:e], reduction="sum")
+            loss_sum = loss_sum + nn.losses.cross_entropy(
+                logits.astype(mx.float32), y[s:e], reduction="sum"
+            )
         return loss_sum / float(n)
+
 
 # ==============================================================================
 # OPTIMIZERS (MUON + ADAM SPLIT)
@@ -462,10 +490,14 @@ class Muon:
         self.args = args
         self.buffers = {k: mx.zeros_like(params[k]) for k in keys}
 
-    def step(self, params: dict[str, mx.array], grads: dict[str, mx.array], step: int, lr_mul: float) -> dict[str, mx.array]:
+    def step(
+        self, params: dict[str, mx.array], grads: dict[str, mx.array], step: int, lr_mul: float
+    ) -> dict[str, mx.array]:
         if self.args.muon_momentum_warmup_steps:
             t = min(step / self.args.muon_momentum_warmup_steps, 1.0)
-            momentum = (1.0 - t) * self.args.muon_momentum_warmup_start + t * self.args.muon_momentum
+            momentum = (
+                1.0 - t
+            ) * self.args.muon_momentum_warmup_start + t * self.args.muon_momentum
         else:
             momentum = self.args.muon_momentum
         lr = self.args.matrix_lr * lr_mul
@@ -494,12 +526,18 @@ class SplitOptimizers:
         self.matrix_keys = [
             k
             for k, p in params.items()
-            if k.startswith("blocks.") and p.ndim == 2 and not any(pattern in k for pattern in CONTROL_TENSOR_NAME_PATTERNS)
+            if k.startswith("blocks.")
+            and p.ndim == 2
+            and not any(pattern in k for pattern in CONTROL_TENSOR_NAME_PATTERNS)
         ]
         self.scalar_keys = [
             k
             for k, p in params.items()
-            if k == "skip_weights" or (k.startswith("blocks.") and (p.ndim < 2 or any(pattern in k for pattern in CONTROL_TENSOR_NAME_PATTERNS)))
+            if k == "skip_weights"
+            or (
+                k.startswith("blocks.")
+                and (p.ndim < 2 or any(pattern in k for pattern in CONTROL_TENSOR_NAME_PATTERNS))
+            )
         ]
 
         self.muon = Muon(self.matrix_keys, params, args)
@@ -538,6 +576,7 @@ class SplitOptimizers:
 
         model.update(tree_unflatten(list(updated.items())))
 
+
 # ==============================================================================
 # QUANTIZATION (INT8 + ZLIB)
 # ==============================================================================
@@ -563,12 +602,16 @@ def _np_float32(arr: mx.array) -> np.ndarray:
     return np.array(arr.astype(mx.float32), dtype=np.float32, copy=False)
 
 
-def keep_float_array(name: str, arr: mx.array, passthrough_orig_dtypes: dict[str, str]) -> np.ndarray:
+def keep_float_array(
+    name: str, arr: mx.array, passthrough_orig_dtypes: dict[str, str]
+) -> np.ndarray:
     if any(pattern in name for pattern in INT8_KEEP_FLOAT_FP32_NAME_PATTERNS):
         return np.ascontiguousarray(_np_float32(arr))
     if arr.dtype in {mx.float32, mx.bfloat16}:
         passthrough_orig_dtypes[name] = str(arr.dtype).split(".")[-1]
-        return np.ascontiguousarray(np.array(arr.astype(mx.float16), dtype=INT8_KEEP_FLOAT_STORE_DTYPE, copy=False))
+        return np.ascontiguousarray(
+            np.array(arr.astype(mx.float16), dtype=INT8_KEEP_FLOAT_STORE_DTYPE, copy=False)
+        )
     return np.ascontiguousarray(np.array(arr, copy=True))
 
 
@@ -577,20 +620,30 @@ def quantize_float_array(arr: mx.array) -> tuple[np.ndarray, np.ndarray]:
     if f32.ndim == 2:
         # Matrices get one scale per row, which usually tracks output-channel
         # ranges much better than a single tensor-wide scale.
-        clip_abs = np.quantile(np.abs(f32), INT8_CLIP_Q, axis=1) if f32.size else np.empty((f32.shape[0],), dtype=np.float32)
+        clip_abs = (
+            np.quantile(np.abs(f32), INT8_CLIP_Q, axis=1)
+            if f32.size
+            else np.empty((f32.shape[0],), dtype=np.float32)
+        )
         clipped = np.clip(f32, -clip_abs[:, None], clip_abs[:, None])
         scale = np.maximum(clip_abs / 127.0, 1.0 / 127.0).astype(np.float32, copy=False)
         q = np.clip(np.round(clipped / scale[:, None]), -127, 127).astype(np.int8, copy=False)
-        return np.ascontiguousarray(q), np.ascontiguousarray(scale.astype(INT8_PER_ROW_SCALE_DTYPE, copy=False))
+        return np.ascontiguousarray(q), np.ascontiguousarray(
+            scale.astype(INT8_PER_ROW_SCALE_DTYPE, copy=False)
+        )
 
     # Vectors / scalars use a simpler per-tensor scale.
     clip_abs = float(np.quantile(np.abs(f32).reshape(-1), INT8_CLIP_Q)) if f32.size else 0.0
     scale = np.array(clip_abs / 127.0 if clip_abs > 0.0 else 1.0, dtype=np.float32)
-    q = np.clip(np.round(np.clip(f32, -clip_abs, clip_abs) / scale), -127, 127).astype(np.int8, copy=False)
+    q = np.clip(np.round(np.clip(f32, -clip_abs, clip_abs) / scale), -127, 127).astype(
+        np.int8, copy=False
+    )
     return np.ascontiguousarray(q), scale
 
 
-def quantize_state_dict_int8(flat_state: dict[str, mx.array]) -> tuple[dict[str, object], dict[str, int]]:
+def quantize_state_dict_int8(
+    flat_state: dict[str, mx.array],
+) -> tuple[dict[str, object], dict[str, int]]:
     quantized: dict[str, np.ndarray] = {}
     scales: dict[str, np.ndarray] = {}
     dtypes: dict[str, str] = {}
@@ -598,7 +651,14 @@ def quantize_state_dict_int8(flat_state: dict[str, mx.array]) -> tuple[dict[str,
     passthrough_orig_dtypes: dict[str, str] = {}
     qmeta: dict[str, dict[str, object]] = {}
     stats = dict.fromkeys(
-        ("param_count", "num_tensors", "num_float_tensors", "num_nonfloat_tensors", "baseline_tensor_bytes", "int8_payload_bytes"),
+        (
+            "param_count",
+            "num_tensors",
+            "num_float_tensors",
+            "num_nonfloat_tensors",
+            "baseline_tensor_bytes",
+            "int8_payload_bytes",
+        ),
         0,
     )
     for name, arr in flat_state.items():
@@ -651,7 +711,9 @@ def dequantize_state_dict_int8(quant_obj: dict[str, object]) -> dict[str, mx.arr
         scale = np.asarray(quant_obj["scales"][name], dtype=np.float32)
         if qmeta.get(name, {}).get("scheme") == "per_row" or scale.ndim > 0:
             # Broadcast the saved row scale back across trailing dimensions.
-            out_arr = q_np.astype(np.float32) * scale.reshape((q_np.shape[0],) + (1,) * (q_np.ndim - 1))
+            out_arr = q_np.astype(np.float32) * scale.reshape(
+                (q_np.shape[0],) + (1,) * (q_np.ndim - 1)
+            )
         else:
             out_arr = q_np.astype(np.float32) * float(scale)
         out[name] = mx.array(out_arr, dtype=MX_DTYPE_FROM_NAME[dtype_name])
@@ -689,7 +751,9 @@ def build_sentencepiece_luts(
     return base_bytes_lut, has_leading_space_lut, is_boundary_token_lut
 
 
-def validate_dataset_tokenizer_pair(data_path: str, tokenizer_path: str) -> tuple[str, int, int | None]:
+def validate_dataset_tokenizer_pair(
+    data_path: str, tokenizer_path: str
+) -> tuple[str, int, int | None]:
     # The shard directory and tokenizer are coupled: val_bpb is only meaningful if we
     # decode bytes with the exact tokenizer that produced the shards. The manifest
     # lets the training script fail fast on accidental dataset/tokenizer mismatches.
@@ -702,7 +766,9 @@ def validate_dataset_tokenizer_pair(data_path: str, tokenizer_path: str) -> tupl
         return dataset_dir.name, actual_train_files, None
 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    dataset_entry = next((x for x in manifest.get("datasets", []) if x.get("name") == dataset_dir.name), None)
+    dataset_entry = next(
+        (x for x in manifest.get("datasets", []) if x.get("name") == dataset_dir.name), None
+    )
     if dataset_entry is None:
         return dataset_dir.name, actual_train_files, None
 
@@ -712,9 +778,13 @@ def validate_dataset_tokenizer_pair(data_path: str, tokenizer_path: str) -> tupl
         if tokenizer_name
         else None
     )
-    expected_name = Path((tokenizer_entry or {}).get("model_path") or (tokenizer_entry or {}).get("path") or "").name
+    expected_name = Path(
+        (tokenizer_entry or {}).get("model_path") or (tokenizer_entry or {}).get("path") or ""
+    ).name
     if expected_name and Path(tokenizer_path).name != expected_name:
-        raise ValueError(f"{dataset_dir.name} expects tokenizer {expected_name}, got {Path(tokenizer_path).name}")
+        raise ValueError(
+            f"{dataset_dir.name} expects tokenizer {expected_name}, got {Path(tokenizer_path).name}"
+        )
     expected_train_files = (dataset_entry.get("stats") or {}).get("files_train")
     if expected_train_files is not None:
         expected_train_files = int(expected_train_files)
@@ -743,7 +813,9 @@ def loss_and_grad_chunked(
     train_loader: TokenLoader,
     compiled_loss_and_grad,
 ) -> tuple[mx.array, dict]:
-    chunk_sizes = token_chunks(args.microbatch_tokens, args.train_seq_len, args.mlx_max_microbatch_tokens)
+    chunk_sizes = token_chunks(
+        args.microbatch_tokens, args.train_seq_len, args.mlx_max_microbatch_tokens
+    )
     total_tokens = float(sum(chunk_sizes))
     loss_value = mx.array(0.0, dtype=mx.float32)
     grad_accum: dict[str, mx.array] | None = None
@@ -799,13 +871,15 @@ def eval_val(
         prev_ids = x_np.reshape(-1)
         tgt_ids = y_np.reshape(-1)
         bytes_np = base_bytes_lut[tgt_ids].astype(np.int16, copy=True)
-        bytes_np += (
-            has_leading_space_lut[tgt_ids] & ~is_boundary_token_lut[prev_ids]
-        ).astype(np.int16, copy=False)
+        bytes_np += (has_leading_space_lut[tgt_ids] & ~is_boundary_token_lut[prev_ids]).astype(
+            np.int16, copy=False
+        )
         total_tokens += chunk_token_count
         total_bytes += float(bytes_np.astype(np.float64).sum())
-        if log_fn is not None and total_batches > 1 and (
-            batch_idx == 1 or batch_idx == total_batches or batch_idx % 25 == 0
+        if (
+            log_fn is not None
+            and total_batches > 1
+            and (batch_idx == 1 or batch_idx == total_batches or batch_idx % 25 == 0)
         ):
             log_fn(f"val_progress:{batch_idx}/{total_batches}")
     val_loss = total_loss_sum / total_tokens
@@ -813,9 +887,11 @@ def eval_val(
     val_bpb = bits_per_token * (total_tokens / total_bytes)
     return val_loss, val_bpb
 
+
 # -----------------------------
 # TRAINING
 # -----------------------------
+
 
 def clip_grad_tree(grads_tree: dict, max_norm: float) -> dict:
     if max_norm <= 0:
@@ -859,7 +935,9 @@ def main() -> None:
     if not args.tie_embeddings:
         raise NotImplementedError("train_gpt_mlx.py only supports tied embeddings")
     if not args.tokenizer_path.endswith(".model"):
-        raise ValueError(f"TOKENIZER_PATH must point to a SentencePiece .model file: {args.tokenizer_path}")
+        raise ValueError(
+            f"TOKENIZER_PATH must point to a SentencePiece .model file: {args.tokenizer_path}"
+        )
     sp = spm.SentencePieceProcessor(model_file=args.tokenizer_path)
     if int(sp.vocab_size()) != args.vocab_size:
         raise ValueError(
@@ -907,7 +985,9 @@ def main() -> None:
     # inside RoPE modules), so compiling only against trainable parameters throws "uncaptured inputs".
     # Compiling the model-bound functions and capturing the full model state fixes that while still
     # returning gradients only for trainable parameters via nn.value_and_grad(...).
-    compiled_loss = mx.compile(lambda x, y: model.loss(x, y), inputs=model.state, outputs=model.state)
+    compiled_loss = mx.compile(
+        lambda x, y: model.loss(x, y), inputs=model.state, outputs=model.state
+    )
     compiled_loss_and_grad = mx.compile(
         nn.value_and_grad(model, lambda x, y: model.loss(x, y)),
         inputs=model.state,
@@ -929,7 +1009,9 @@ def main() -> None:
             f"new epochs will arrive sooner than the full dataset"
         )
     else:
-        log(f"train_loader:dataset:{dataset_name} train_shards:{actual_train_files}/{expected_train_files}")
+        log(
+            f"train_loader:dataset:{dataset_name} train_shards:{actual_train_files}/{expected_train_files}"
+        )
     log(f"tokenizer_path:{args.tokenizer_path}")
     log(
         f"model_params:{n_params} vocab_size:{args.vocab_size} layers:{args.num_layers} "
@@ -970,11 +1052,17 @@ def main() -> None:
             warmup_loss = mx.array(0.0, dtype=mx.float32)
             grad_scale = 1.0 / args.grad_accum_steps
             for _ in range(args.grad_accum_steps):
-                warmup_loss, grads = loss_and_grad_chunked(args, train_loader, compiled_loss_and_grad)
+                warmup_loss, grads = loss_and_grad_chunked(
+                    args, train_loader, compiled_loss_and_grad
+                )
                 accum = accumulate_flat_grads(accum, grads, grad_scale)
             mx.eval(warmup_loss, accum)
             mx.synchronize()
-            if args.warmup_steps <= 20 or (warmup_step + 1) % 10 == 0 or warmup_step + 1 == args.warmup_steps:
+            if (
+                args.warmup_steps <= 20
+                or (warmup_step + 1) % 10 == 0
+                or warmup_step + 1 == args.warmup_steps
+            ):
                 log(f"warmup_step:{warmup_step + 1}/{args.warmup_steps}")
 
         # Prime the standalone eval graph once too. It is compiled separately from value_and_grad.
@@ -985,7 +1073,9 @@ def main() -> None:
                 f"got VAL_BATCH_SIZE={args.val_batch_size}, GRAD_ACCUM_STEPS={args.grad_accum_steps}, "
                 f"TRAIN_SEQ_LEN={args.train_seq_len}"
             )
-        warm_val_seqs = min(val_batch_tokens // args.train_seq_len, (val_tokens.size - 1) // args.train_seq_len)
+        warm_val_seqs = min(
+            val_batch_tokens // args.train_seq_len, (val_tokens.size - 1) // args.train_seq_len
+        )
         warm_chunk = val_tokens[: warm_val_seqs * args.train_seq_len + 1]
         x_val = mx.array(warm_chunk[:-1].reshape(-1, args.train_seq_len), dtype=mx.int32)
         y_val = mx.array(warm_chunk[1:].reshape(-1, args.train_seq_len), dtype=mx.int32)
@@ -996,12 +1086,16 @@ def main() -> None:
         train_loader = TokenLoader(args.train_files, log_fn=log, dataset_name=dataset_name)
 
     train_time_ms = 0.0
-    max_wallclock_ms = 1000.0 * args.max_wallclock_seconds if args.max_wallclock_seconds > 0 else None
+    max_wallclock_ms = (
+        1000.0 * args.max_wallclock_seconds if args.max_wallclock_seconds > 0 else None
+    )
     stop_after_step: int | None = None
     t0 = time.perf_counter()
     step = 0
     while True:
-        last_step = step == args.iterations or (stop_after_step is not None and step >= stop_after_step)
+        last_step = step == args.iterations or (
+            stop_after_step is not None and step >= stop_after_step
+        )
         if last_step or (args.val_loss_every > 0 and step % args.val_loss_every == 0):
             train_time_ms += 1000.0 * (time.perf_counter() - t0)
             # Validation always scans the same fixed full validation split.
@@ -1022,7 +1116,9 @@ def main() -> None:
             t0 = time.perf_counter()
         if last_step:
             if stop_after_step is not None and step < args.iterations:
-                log(f"stopping_early: wallclock_cap train_time:{train_time_ms:.0f}ms step:{step}/{args.iterations}")
+                log(
+                    f"stopping_early: wallclock_cap train_time:{train_time_ms:.0f}ms step:{step}/{args.iterations}"
+                )
             break
 
         lr_mul = args.lr_mul(step, train_time_ms + 1000.0 * (time.perf_counter() - t0))
@@ -1048,12 +1144,18 @@ def main() -> None:
         approx_train_time_ms = train_time_ms + 1000.0 * (time.perf_counter() - t0)
         tok_s = args.train_batch_tokens / (step_ms / 1000.0)
         step += 1
-        if args.train_log_every > 0 and (step <= 10 or step % args.train_log_every == 0 or stop_after_step is not None):
+        if args.train_log_every > 0 and (
+            step <= 10 or step % args.train_log_every == 0 or stop_after_step is not None
+        ):
             log(
                 f"step:{step}/{args.iterations} train_loss:{train_loss_value:.4f} "
                 f"train_time:{approx_train_time_ms:.0f}ms step_avg:{approx_train_time_ms / step:.2f}ms tok_s:{tok_s:.0f}"
             )
-        if max_wallclock_ms is not None and stop_after_step is None and approx_train_time_ms >= max_wallclock_ms:
+        if (
+            max_wallclock_ms is not None
+            and stop_after_step is None
+            and approx_train_time_ms >= max_wallclock_ms
+        ):
             stop_after_step = step
 
     # ==============================================================================
@@ -1096,7 +1198,9 @@ def main() -> None:
         log_fn=log,
     )
     q_eval_ms = 1000.0 * (time.perf_counter() - q_t0)
-    log(f"final_int8_zlib_roundtrip val_loss:{q_val_loss:.4f} val_bpb:{q_val_bpb:.4f} eval_time:{q_eval_ms:.0f}ms")
+    log(
+        f"final_int8_zlib_roundtrip val_loss:{q_val_loss:.4f} val_bpb:{q_val_bpb:.4f} eval_time:{q_eval_ms:.0f}ms"
+    )
     log(f"final_int8_zlib_roundtrip_exact val_loss:{q_val_loss:.8f} val_bpb:{q_val_bpb:.8f}")
 
 

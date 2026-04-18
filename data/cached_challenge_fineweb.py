@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parent
 DATASETS_DIR = ROOT / "datasets"
 TOKENIZERS_DIR = ROOT / "tokenizers"
 
+
 def dataset_dir_for_variant(name: str) -> str:
     if name == "byte260":
         return "fineweb10B_byte260"
@@ -85,7 +86,9 @@ def artifact_paths_for_tokenizer(tokenizer_entry: dict) -> list[str]:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Download challenge FineWeb shards from Hugging Face")
+    parser = argparse.ArgumentParser(
+        description="Download challenge FineWeb shards from Hugging Face"
+    )
     parser.add_argument(
         "train_shards_positional",
         nargs="?",
@@ -120,12 +123,18 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = build_parser().parse_args()
     dataset_dir = dataset_dir_for_variant(args.variant)
-    train_shards = args.train_shards_positional if args.train_shards_positional is not None else args.train_shards
+    train_shards = (
+        args.train_shards_positional
+        if args.train_shards_positional is not None
+        else args.train_shards
+    )
     if train_shards < 0:
         raise ValueError("train_shards must be non-negative")
 
     manifest = load_manifest(skip_manifest_download=args.skip_manifest)
-    dataset_entry = next((x for x in manifest.get("datasets", []) if x.get("name") == dataset_dir), None)
+    dataset_entry = next(
+        (x for x in manifest.get("datasets", []) if x.get("name") == dataset_dir), None
+    )
     if dataset_entry is None:
         raise ValueError(f"dataset {dataset_dir} not found in {REMOTE_ROOT_PREFIX}/manifest.json")
     max_train_shards = int((dataset_entry.get("stats") or {}).get("files_train"))
@@ -135,9 +144,13 @@ def main() -> None:
             f"{args.variant} only has {max_train_shards} training shards on {REPO_ID}, requested {train_shards}"
         )
     tokenizer_name = dataset_entry.get("tokenizer_name")
-    tokenizer_entry = next((x for x in manifest.get("tokenizers", []) if x.get("name") == tokenizer_name), None)
+    tokenizer_entry = next(
+        (x for x in manifest.get("tokenizers", []) if x.get("name") == tokenizer_name), None
+    )
     if tokenizer_entry is None:
-        raise ValueError(f"tokenizer {tokenizer_name} not found in {REMOTE_ROOT_PREFIX}/manifest.json")
+        raise ValueError(
+            f"tokenizer {tokenizer_name} not found in {REMOTE_ROOT_PREFIX}/manifest.json"
+        )
 
     if args.with_docs:
         get(f"{REMOTE_ROOT_PREFIX}/docs_selected.jsonl")
