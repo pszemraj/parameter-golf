@@ -24,21 +24,35 @@ CUDA = ROOT / "hgdn_megakernel" / "hgdn_megakernel.cu"
 SETUP = ROOT / "setup_hgdn_megakernel.py"
 TRAINER = ROOT / "train_gpt_hybrid.py"
 TEST_HARNESS = ROOT / "hgdn_megakernel" / "test_megakernel.py"
+TEST_CORE_HARNESS = ROOT / "hgdn_megakernel" / "test_corekernel.py"
 
 
 def read(path: Path) -> str:
+    """Read one repository file as UTF-8 text.
+
+    :param Path path: File path to inspect.
+    :return str: File contents, or an empty string when the file is absent.
+    """
     if not path.exists():
         return ""
     return path.read_text(encoding="utf-8")
 
 
 def check(name: str, ok: bool, detail: str) -> bool:
+    """Print one audit check result and return the boolean outcome.
+
+    :param str name: Human-readable check label.
+    :param bool ok: Whether the check passed.
+    :param str detail: Short detail string describing the expectation.
+    :return bool: The original `ok` value.
+    """
     status = "PASS" if ok else "FAIL"
     print(f"[{status}] {name}: {detail}")
     return ok
 
 
 def main() -> None:
+    """Run the static HGDN kernel-contract audit from the repo root."""
     model = read(MODEL)
     hgdn_utils = read(HGDN_UTILS)
     binding = read(BINDING)
@@ -46,6 +60,7 @@ def main() -> None:
     setup = read(SETUP)
     trainer = read(TRAINER)
     test_harness = read(TEST_HARNESS)
+    test_core_harness = read(TEST_CORE_HARNESS)
 
     failures = 0
 
@@ -53,6 +68,12 @@ def main() -> None:
         "megakernel flag exists",
         "use_cuda_megakernel" in model and "GDN_USE_CUDA_MEGAKERNEL" in trainer,
         "model/trainer expose the megakernel runtime flag",
+    )
+
+    failures += not check(
+        "corekernel flag exists",
+        "use_cuda_corekernel" in model and "GDN_USE_CUDA_COREKERNEL" in trainer,
+        "model/trainer expose the core-kernel runtime flag",
     )
 
     sidecar_guard = (
@@ -98,6 +119,42 @@ def main() -> None:
         "megakernel mode should hard-fail on CUDA activations that are not bf16",
     )
 
+    core_dtype_guard = bool(
+        re.search(
+            r"self\.use_cuda_corekernel\s+and\s+x\.is_cuda[\s\S]{0,200}x\.dtype\s*!=\s*torch\.bfloat16[\s\S]{0,160}RuntimeError",
+            model,
+        )
+    )
+    failures += not check(
+        "cuda bf16 corekernel dtype guard",
+        core_dtype_guard,
+        "core-kernel mode should hard-fail on CUDA activations that are not bf16",
+    )
+
+    core_forward_start = model.find("if self.use_cuda_corekernel and x.is_cuda:")
+    core_forward_end = model.find("if self.use_cuda_megakernel and x.is_cuda:")
+    core_forward_block = (
+        model[core_forward_start:core_forward_end]
+        if core_forward_start != -1 and core_forward_end != -1
+        else ""
+    )
+    core_boundary = all(
+        token in core_forward_block
+        for token in (
+            "qkv = self.w_qkv.forward_packed(x)",
+            "g_pre = self.w_a(x)",
+            "beta_pre = self.w_b(x)",
+            "g_out = self.w_g(x).view(B, T, H, Dv)",
+            "z = run_core_from_gated_delta_net(",
+            "return self.w_out(z.reshape(B, T, -1))",
+        )
+    )
+    failures += not check(
+        "corekernel dense-outside boundary",
+        core_boundary,
+        "core-kernel mode should keep W_qkv/W_a/W_b/W_g/W_out outside the owned CUDA op",
+    )
+
     hidden_forward_copy = any(
         token in binding
         for token in (
@@ -133,6 +190,48 @@ def main() -> None:
         "compile-visible custom-op boundary",
         custom_op_contract,
         "binding should expose the megakernel through a torch.library op instead of an eager-only autograd.Function island",
+    )
+
+    core_custom_op_contract = all(
+        token in binding
+        for token in (
+            'torch.library.Library("hgdn_corekernel_v1", "DEF")',
+            '@torch.library.register_fake("hgdn_corekernel_v1::run")',
+            'torch.library.register_autograd(\n    "hgdn_corekernel_v1::run"',
+        )
+    )
+    failures += not check(
+        "compile-visible core custom-op boundary",
+        core_custom_op_contract,
+        "binding should expose the HGDN core kernel through a torch.library op",
+    )
+
+    core_binding_contract = (
+        "def hgdn_corekernel(" in binding
+        and "qkv: Tensor," in binding
+        and "g_pre: Tensor," in binding
+        and "beta_pre: Tensor," in binding
+        and "g_out: Tensor," in binding
+        and "conv_w: Tensor," in binding
+        and "A_log: Tensor," in binding
+        and "dt_bias: Tensor," in binding
+        and "w_qkv"
+        not in binding[
+            binding.find("def hgdn_corekernel(") : binding.find(
+                "def run_core_from_gated_delta_net("
+            )
+        ]
+        and "w_out"
+        not in binding[
+            binding.find("def hgdn_corekernel(") : binding.find(
+                "def run_core_from_gated_delta_net("
+            )
+        ]
+    )
+    failures += not check(
+        "corekernel forward input contract",
+        core_binding_contract,
+        "core-kernel binding should consume projected tensors plus conv/gate state, not dense weights",
     )
 
     binding_output_contract = (
@@ -314,43 +413,44 @@ def main() -> None:
 
     control_guard = (
         "gdn_use_cuda_megakernel" in trainer
+        and "gdn_use_cuda_corekernel" in trainer
         and "gdn_control_proj_fp32" in trainer
-        and "GDN_USE_CUDA_MEGAKERNEL=1 requires GDN_CONTROL_PROJ_FP32=0" in trainer
+        and "requires GDN_CONTROL_PROJ_FP32=0" in trainer
         and re.search(
-            r"if args\.gdn_use_cuda_megakernel:[\s\S]{0,1200}if args\.gdn_control_proj_fp32:[\s\S]{0,240}raise RuntimeError",
+            r"if args\.gdn_use_cuda_corekernel or args\.gdn_use_cuda_megakernel:[\s\S]{0,1200}if args\.gdn_control_proj_fp32:[\s\S]{0,320}raise RuntimeError",
             trainer,
         )
     )
     failures += not check(
         "control projection dtype preflight",
         bool(control_guard),
-        "trainer should reject GDN_USE_CUDA_MEGAKERNEL=1 with GDN_CONTROL_PROJ_FP32=1",
+        "trainer should reject an owned HGDN CUDA kernel path with GDN_CONTROL_PROJ_FP32=1",
     )
 
     status_guard = (
-        "hgdn_megakernel_preflight" in trainer
+        'f"hgdn_{mode_name}_preflight:' in trainer
         and "hgdn_megakernel_extension_status" in trainer
         and re.search(
-            r"gdn_use_cuda_megakernel[\s\S]{0,600}hgdn_megakernel_preflight[\s\S]{0,600}loaded",
+            r"if args\.gdn_use_cuda_corekernel or args\.gdn_use_cuda_megakernel:[\s\S]{0,1400}mode_name\s*=\s*[\"']corekernel[\"'] if args\.gdn_use_cuda_corekernel else [\"']megakernel[\"'][\s\S]{0,1400}loaded",
             trainer,
         )
     )
     failures += not check(
         "trainer extension preflight",
         bool(status_guard),
-        "trainer should log extension status and fail before training when megakernel mode is unavailable",
+        "trainer should log extension status and fail before training when an owned HGDN CUDA kernel path is unavailable",
     )
 
     compile_guard = bool(
         re.search(
-            r"use_megakernel\s*=\s*bool\([\s\S]{0,200}use_cuda_megakernel[\s\S]{0,400}if not use_megakernel:[\s\S]{0,300}maybe_disable_compile[\s\S]{0,300}else:[\s\S]{0,200}gdn_megakernel_left_enabled",
+            r"use_corekernel\s*=\s*bool\([\s\S]{0,200}use_cuda_corekernel[\s\S]{0,200}use_megakernel\s*=\s*bool\([\s\S]{0,200}use_cuda_megakernel[\s\S]{0,500}if not use_corekernel and not use_megakernel:[\s\S]{0,300}maybe_disable_compile[\s\S]{0,400}else:[\s\S]{0,300}gdn_(corekernel|megakernel)_left_enabled",
             hgdn_utils,
         )
     )
     failures += not check(
         "megakernel compile integration",
         compile_guard,
-        "prepare_hybrid_compile should leave megakernel GDN blocks compile-eligible instead of forcing eager disable",
+        "prepare_hybrid_compile should leave owned HGDN CUDA-kernel blocks compile-eligible instead of forcing eager disable",
     )
 
     medium_parity = all(
@@ -380,6 +480,55 @@ def main() -> None:
         "optional B1,T2048 coverage",
         t2048_flag,
         "test harness should expose an optional B=1,T=2048 parity case for the H100 gate",
+    )
+
+    core_medium_parity = all(
+        token in test_core_harness
+        for token in (
+            "B1_T128",
+            "B1_T512",
+            "core_forward_ms",
+            "eager_forward_ms",
+            'f"{reference_name}/{label}"',
+        )
+    )
+    failures += not check(
+        "corekernel medium parity coverage",
+        core_medium_parity,
+        "core-kernel harness should cover B=1,T=128 and B=1,T=512 with eager-control timing",
+    )
+
+    core_optional_b2 = (
+        "--include-b2-t512" in test_core_harness and "B2_T512" in test_core_harness
+    )
+    failures += not check(
+        "corekernel optional B2,T512 coverage",
+        core_optional_b2,
+        "core-kernel harness should expose an optional B=2,T=512 parity case",
+    )
+
+    core_t2048_flag = (
+        "--include-b1-t2048" in test_core_harness and "B1_T2048" in test_core_harness
+    )
+    failures += not check(
+        "corekernel optional B1,T2048 coverage",
+        core_t2048_flag,
+        "core-kernel harness should expose an optional B=1,T=2048 parity case for the H100 gate",
+    )
+
+    core_launch_check = all(
+        token in test_core_harness
+        for token in (
+            "hgdn_core_forward_bf16_kernel",
+            "hgdn_core_backward_bf16_kernel",
+            "core_forward_launch_count",
+            "core_backward_launch_count",
+        )
+    )
+    failures += not check(
+        "corekernel owned-launch check",
+        core_launch_check,
+        "core-kernel harness should prove one owned forward + one owned backward launch",
     )
 
     print()

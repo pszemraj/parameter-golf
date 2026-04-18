@@ -116,6 +116,27 @@ Branch: `exp/hgdn`
 - Do not reopen the closed front-end seam for more ownership or packing tweaks unless the decomposition changes materially.
 - Do not keep paying for matched attention-only baseline reruns now that the exact bridge has already answered the keep/kill question.
 
+## Kernel boundary status
+
+- The repo-backed full-block HGDN megakernel is now **research-only**.
+- The matched `1xH100` `compare100` runs showed the right modeling contract but
+  the wrong systems boundary:
+  - full-block `rc4_v8` still landed around `8.21 s/step`
+  - the live packed HGDN reference at the same contract is about `0.915 s/step`
+- Interpretation:
+  - this is not a “tune `rec_chunk_t` a bit more” problem
+  - the full-block path swallowed the dense GEMMs that H100 already handles
+    better through the vendor/compiler stack
+- Active kernel direction on `exp/hgdn-k-core`:
+  - keep dense `W_qkv`, `W_a`, `W_b`, `W_g`, and `W_out` outside the owned CUDA path
+  - build an **HGDN core kernel** for conv + gate math + recurrence + output gate
+- Keep/kill gate for the new boundary:
+  - if the core-kernel path cannot get within roughly `20-30%` of the packed
+    HGDN control on the matched `1xH100` fixed-step contract, stop and keep the
+    packed winner path as the mainline
+- The active implementation checklist lives in
+  [HGDN_CORE_KERNEL_PLAN.md](HGDN_CORE_KERNEL_PLAN.md).
+
 ## Current compile state
 
 - The hot HGDN recurrence no longer graph-breaks the compiled block loop on the
@@ -163,6 +184,7 @@ Data / setup helpers:
 
 - [`../scripts/run_h100_single_gpu_hgdn.sh`](../scripts/run_h100_single_gpu_hgdn.sh)
 - [`../scripts/run_h100_single_gpu_hgdn_profile.sh`](../scripts/run_h100_single_gpu_hgdn_profile.sh)
+- [`../scripts/run_h100_single_gpu_hgdn_corekernel.sh`](../scripts/run_h100_single_gpu_hgdn_corekernel.sh)
 - [`../scripts/hgdn_cuda_preflight.py`](../scripts/hgdn_cuda_preflight.py)
 
 ## Related docs
@@ -170,6 +192,7 @@ Data / setup helpers:
 - W&B schema and project rules: [WANDB_SCHEMA.md](WANDB_SCHEMA.md)
 - local/H100 transfer limits: [HARDWARE_TRANSFER.md](HARDWARE_TRANSFER.md)
 - CUDA extension build/runtime notes: [HGDN_CUDA_FUSED.md](HGDN_CUDA_FUSED.md)
+- core-kernel pivot plan: [HGDN_CORE_KERNEL_PLAN.md](HGDN_CORE_KERNEL_PLAN.md)
 - profiling chronology and scoreboards: [PROFILING_LOG.md](PROFILING_LOG.md)
 - active next steps: [TODO.md](TODO.md)
 - cleanup targets: [REDUNDANCY_AUDIT.md](REDUNDANCY_AUDIT.md)

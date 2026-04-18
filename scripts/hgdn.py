@@ -321,6 +321,7 @@ def parse_args() -> argparse.Namespace:
             "  python scripts/hgdn.py h100-megakernel all --offline --set GDN_MEGAKERNEL_REC_CHUNK_T=8\n"
             "  python scripts/hgdn.py h100-megakernel matrix --offline\n"
             "  python scripts/hgdn.py h100-megakernel compare100 --offline\n"
+            "  python scripts/hgdn.py h100-corekernel compare100 --offline\n"
             "  python scripts/hgdn.py local-phase1 --preset winner-20260405-19-single-contig --run-prefix rtx4070_singlecontig\n"
             "  python scripts/hgdn.py local-phase1 --preset winner-20260405-19-split-copy --run-prefix rtx4070_splitcopy\n"
             "  python scripts/hgdn.py arch-size-screen --config configs/hgdn/winner_20260405_11_retune.toml\n"
@@ -492,6 +493,36 @@ def parse_args() -> argparse.Namespace:
         choices=(0, 1),
         help="Set MK_MATRIX_CONTINUE_ON_ERROR for matrix mode.",
     )
+
+    h100_corekernel = subparsers.add_parser(
+        "h100-corekernel",
+        help="Run the bounded 1xH100 HGDN core-kernel validation helper.",
+    )
+    add_common_args(h100_corekernel)
+    h100_corekernel.add_argument(
+        "mode",
+        nargs="?",
+        default="all",
+        choices=("parity", "trainer-smoke", "all", "compare100"),
+        help="Backend mode for scripts/run_h100_single_gpu_hgdn_corekernel.sh.",
+    )
+    h100_corekernel.add_argument(
+        "--hk-output-dir",
+        type=Path,
+        help="Set HK_OUTPUT_DIR for the core-kernel helper bundle stage directory.",
+    )
+    h100_corekernel.add_argument(
+        "--hk-archive-output",
+        type=Path,
+        help="Set HK_ARCHIVE_OUTPUT for the core-kernel helper .7z bundle.",
+    )
+    h100_corekernel.add_argument(
+        "--hk-candidate-specs",
+        help=(
+            "Set HK_CANDIDATE_SPECS for compare100 mode. Format: "
+            "label:KEY=VALUE[,KEY=VALUE][;...]"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -568,6 +599,15 @@ def build_env(args: argparse.Namespace) -> dict[str, str]:
     mk_matrix_continue_on_error = getattr(args, "mk_matrix_continue_on_error", None)
     if mk_matrix_continue_on_error is not None:
         env["MK_MATRIX_CONTINUE_ON_ERROR"] = str(mk_matrix_continue_on_error)
+    hk_output_dir = getattr(args, "hk_output_dir", None)
+    if hk_output_dir is not None:
+        env["HK_OUTPUT_DIR"] = str(hk_output_dir)
+    hk_archive_output = getattr(args, "hk_archive_output", None)
+    if hk_archive_output is not None:
+        env["HK_ARCHIVE_OUTPUT"] = str(hk_archive_output)
+    hk_candidate_specs = getattr(args, "hk_candidate_specs", None)
+    if hk_candidate_specs is not None:
+        env["HK_CANDIDATE_SPECS"] = hk_candidate_specs
 
     for raw in args.set:
         key, value = parse_kv_assignment(raw)
@@ -637,6 +677,12 @@ def command_for_args(args: argparse.Namespace) -> list[str]:
         return [
             "bash",
             str(REPO_ROOT / "scripts" / "run_h100_single_gpu_hgdn_megakernel.sh"),
+            args.mode,
+        ]
+    if args.command == "h100-corekernel":
+        return [
+            "bash",
+            str(REPO_ROOT / "scripts" / "run_h100_single_gpu_hgdn_corekernel.sh"),
             args.mode,
         ]
     raise ValueError(f"Unsupported command: {args.command}")

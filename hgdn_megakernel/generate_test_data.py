@@ -27,6 +27,8 @@ def make_module(
     expand_v: float,
     conv_size: int,
     use_fla: bool,
+    use_cuda_corekernel: bool = False,
+    use_cuda_megakernel: bool = False,
 ) -> GatedDeltaNet:
     """Build the live packed HGDN contract used by the megakernel harness.
 
@@ -36,6 +38,11 @@ def make_module(
     :param float expand_v: Value expansion factor.
     :param int conv_size: Packed depthwise conv width.
     :param bool use_fla: Whether to route the recurrence through the live FLA path.
+    :param bool use_cuda_corekernel: Whether to route the HGDN-specific core
+        through the owned CUDA core kernel while keeping dense projections
+        outside, defaults to False.
+    :param bool use_cuda_megakernel: Whether to route the entire HGDN block
+        through the research full-block megakernel, defaults to False.
     :return GatedDeltaNet: Prepared eager reference module.
     """
     module = (
@@ -52,12 +59,69 @@ def make_module(
             conv_output_contiguous=True,
             gates_fp32=True,
             output_norm_fp32=True,
+            use_cuda_corekernel=use_cuda_corekernel,
+            use_cuda_megakernel=use_cuda_megakernel,
         )
         .cuda()
         .bfloat16()
     )
     restore_low_dim_params_to_fp32(module, gdn_control_proj_fp32=False)
     return module
+
+
+def hydrate_module_from_inputs(
+    module: GatedDeltaNet,
+    inputs: dict[str, torch.Tensor],
+) -> None:
+    """Copy one serialized HGDN case payload into a live module in place.
+
+    :param GatedDeltaNet module: Live HGDN module to populate.
+    :param dict[str, torch.Tensor] inputs: Serialized case inputs from one
+        generated payload.
+    """
+    with torch.no_grad():
+        module.w_qkv.weight.copy_(
+            inputs["w_qkv"].to(
+                device=module.w_qkv.weight.device, dtype=module.w_qkv.weight.dtype
+            )
+        )
+        module.w_a.weight.copy_(
+            inputs["w_a"].to(
+                device=module.w_a.weight.device, dtype=module.w_a.weight.dtype
+            )
+        )
+        module.w_b.weight.copy_(
+            inputs["w_b"].to(
+                device=module.w_b.weight.device, dtype=module.w_b.weight.dtype
+            )
+        )
+        module.w_g.weight.copy_(
+            inputs["w_g"].to(
+                device=module.w_g.weight.device, dtype=module.w_g.weight.dtype
+            )
+        )
+        module.w_out.weight.copy_(
+            inputs["w_out"].to(
+                device=module.w_out.weight.device, dtype=module.w_out.weight.dtype
+            )
+        )
+        module.qkv_conv.conv.weight.copy_(
+            inputs["conv_w"]
+            .to(
+                device=module.qkv_conv.conv.weight.device,
+                dtype=module.qkv_conv.conv.weight.dtype,
+            )
+            .view_as(module.qkv_conv.conv.weight)
+        )
+        module.A_log.copy_(
+            inputs["A_log"].to(device=module.A_log.device, dtype=module.A_log.dtype)
+        )
+        module.dt_bias.copy_(
+            inputs["dt_bias"].to(
+                device=module.dt_bias.device,
+                dtype=module.dt_bias.dtype,
+            )
+        )
 
 
 def _capture_reference(

@@ -802,3 +802,104 @@ Next real-validation step:
   - bounded speed candidate `rec_chunk_t=4`
 - do not turn that into an H100 timing claim until the H100 compile/parity gate
   is clean and the result reproduces there
+
+## Full-block verdict after `compare100`
+
+The fixed-100-step `1xH100` trainer compare answered the main question for the
+current full-block ownership model.
+
+Matched contract:
+
+- `TRAIN_BATCH_TOKENS=524288`
+- `TRAIN_SEQ_LEN=2048`
+- `grad_accum_steps=8`
+- `local_batch_size=32`
+- `MAX_WALLCLOCK_SECONDS=0`
+
+Observed step averages:
+
+- full-block `base_rc8_v8`: about `8765.65 ms`
+- full-block `rc6_v8`: about `8464.21 ms`
+- full-block `rc4_v8`: about `8205.93 ms`
+- live packed HGDN reference: about `915.10 ms`
+
+Interpretation:
+
+- the full-block kernel preserved the right HGDN math and the right launch
+  honesty
+- it still failed the challenge objective because it owns the wrong computation
+  boundary
+- the dense projection and dense weight-gradient phases dominate too much of the
+  block for the current cooperative WMMA path to compete with the vendor stack
+- this is a structural loss, not a `rec_chunk_t` tuning miss
+
+Branch decision from this result:
+
+- keep the full-block path as research/archeology only
+- stop treating it as the active finalist-training kernel direction
+- pivot active kernel work to an **HGDN core kernel** that leaves dense
+  `W_qkv`, `W_a`, `W_b`, `W_g`, and `W_out` outside the owned CUDA path
+
+The active implementation checklist now lives in
+[`../docs/HGDN_CORE_KERNEL_PLAN.md`](../docs/HGDN_CORE_KERNEL_PLAN.md).
+
+## Local core-kernel checkpoint (`2026-04-18`)
+
+The branch now has a first repo-backed **HGDN core-kernel** checkpoint in
+addition to the archived full-block path.
+
+Owned boundary:
+
+- dense `W_qkv`, `W_a`, `W_b`, `W_g`, and `W_out` stay outside the owned CUDA op
+- the owned CUDA core now covers:
+  - packed depthwise QKV conv
+  - post-conv SiLU
+  - q/k normalization
+  - gate pointwise math
+  - beta-write recurrence
+  - output RMSNorm + SiLU gate
+
+Current local validation on `sm_89` (`NVIDIA GeForce RTX 4070 Laptop GPU`):
+
+- static audit passes with both full-block and core-kernel boundary checks
+- isolated core-kernel parity passed for:
+  - `B=1,T=8`
+  - `B=1,T=32`
+  - `B=1,T=128`
+  - `B=1,T=512`
+  - `B=2,T=512`
+- the owned core path now proves exactly:
+  - one `hgdn_core_forward_bf16_kernel`
+  - one `hgdn_core_backward_bf16_kernel`
+  inside the profiled region
+- local isolated event timings from
+  [`test_corekernel.py`](test_corekernel.py) are directionally encouraging, but
+  they compare against the **eager** HGDN control, not the packed trainer
+  control
+- do not treat those local micro timings as evidence that the branch beats the
+  live packed HGDN stack on H100
+
+Tiny compiled trainer smoke also passed locally:
+
+- command shape:
+  - `GDN_USE_CUDA_COREKERNEL=1`
+  - `TRAIN_SEQ_LEN=128`
+  - `TRAIN_BATCH_TOKENS=8192`
+  - `ITERATIONS=1`
+  - `COMPILE=1`
+- observed trainer signals:
+  - `compile_plan: ... gdn_corekernel_left_enabled:7 ...`
+  - first real step completed cleanly
+  - step time about `450 ms`
+
+New bounded `1xH100` helper for the active direction:
+
+- direct shell helper:
+  `scripts/run_h100_single_gpu_hgdn_corekernel.sh compare100`
+- structured launcher equivalent:
+  `python scripts/hgdn.py h100-corekernel compare100 --offline`
+- default fixed-step compare there is now:
+  - packed control
+  - core-kernel `rec_chunk_t=8`
+- the research full-block path can still be compared only by explicit candidate
+  override in `HK_CANDIDATE_SPECS`
