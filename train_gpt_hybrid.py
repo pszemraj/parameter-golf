@@ -206,6 +206,7 @@ class Hyperparameters:
     gdn_use_cuda_fused_output = bool(
         int(os.environ.get("GDN_USE_CUDA_FUSED_OUTPUT", "0"))
     )
+    gdn_use_cuda_corekernel = bool(int(os.environ.get("GDN_USE_CUDA_COREKERNEL", "0")))
     gdn_use_cuda_megakernel = bool(int(os.environ.get("GDN_USE_CUDA_MEGAKERNEL", "0")))
     gdn_use_cuda_split_norm = bool(int(os.environ.get("GDN_USE_CUDA_SPLIT_NORM", "0")))
     gdn_use_cuda_split_norm_lib = bool(
@@ -305,6 +306,9 @@ def build_wandb_config(
         "COMPILE": args.compile,
         "COMPILE_STRATEGY": args.compile_strategy,
         "COMPILE_GDN_DISABLED": compile_stats["gdn_disabled"],
+        "COMPILE_GDN_COREKERNEL_LEFT_ENABLED": compile_stats[
+            "gdn_corekernel_left_enabled"
+        ],
         "COMPILE_GDN_MEGAKERNEL_LEFT_ENABLED": compile_stats[
             "gdn_megakernel_left_enabled"
         ],
@@ -347,6 +351,7 @@ def build_wandb_config(
         "GDN_USE_CUDA_FUSED_FRONTEND": args.gdn_use_cuda_fused_frontend,
         "GDN_USE_CUDA_FUSED_FRONTEND_LIB": args.gdn_use_cuda_fused_frontend_lib,
         "GDN_USE_CUDA_FUSED_OUTPUT": args.gdn_use_cuda_fused_output,
+        "GDN_USE_CUDA_COREKERNEL": args.gdn_use_cuda_corekernel,
         "GDN_USE_CUDA_MEGAKERNEL": args.gdn_use_cuda_megakernel,
         "GDN_USE_CUDA_SPLIT_NORM": args.gdn_use_cuda_split_norm,
         "GDN_USE_CUDA_SPLIT_NORM_LIB": args.gdn_use_cuda_split_norm_lib,
@@ -978,25 +983,31 @@ def main() -> None:
     log0(code, console=False)
     log0(f"Python {sys.version}", console=False)
     log0(f"PyTorch {torch.__version__}", console=False)
-    if args.gdn_use_cuda_megakernel:
+    if args.gdn_use_cuda_corekernel and args.gdn_use_cuda_megakernel:
+        raise RuntimeError(
+            "GDN_USE_CUDA_COREKERNEL=1 is incompatible with GDN_USE_CUDA_MEGAKERNEL=1."
+        )
+    if args.gdn_use_cuda_corekernel or args.gdn_use_cuda_megakernel:
         megakernel_status = hgdn_megakernel_extension_status()
         megakernel_rec_chunk_t = int(os.environ.get("GDN_MEGAKERNEL_REC_CHUNK_T", "8"))
+        mode_name = "corekernel" if args.gdn_use_cuda_corekernel else "megakernel"
         log0(
-            f"hgdn_megakernel_preflight:{json.dumps(megakernel_status, sort_keys=True)}"
+            f"hgdn_{mode_name}_preflight:{json.dumps(megakernel_status, sort_keys=True)}"
         )
-        log0(f"hgdn_megakernel_rec_chunk_t:{megakernel_rec_chunk_t}")
+        log0(f"hgdn_{mode_name}_rec_chunk_t:{megakernel_rec_chunk_t}")
         if args.gdn_control_proj_fp32:
             raise RuntimeError(
-                "GDN_USE_CUDA_MEGAKERNEL=1 requires GDN_CONTROL_PROJ_FP32=0 "
-                "because the megakernel expects bf16 w_a/w_b/w_g weights."
+                f"GDN_USE_CUDA_{mode_name.upper()}=1 requires GDN_CONTROL_PROJ_FP32=0 "
+                "because the owned CUDA path expects bf16 w_a/w_b/w_g weights."
             )
         if megakernel_rec_chunk_t <= 0:
             raise RuntimeError(
-                "GDN_MEGAKERNEL_REC_CHUNK_T must be > 0 when GDN_USE_CUDA_MEGAKERNEL=1."
+                "GDN_MEGAKERNEL_REC_CHUNK_T must be > 0 when an owned HGDN CUDA "
+                "kernel path is enabled."
             )
         if not megakernel_status["loaded"]:
             raise RuntimeError(
-                "GDN_USE_CUDA_MEGAKERNEL=1 but the HGDN megakernel extension is "
+                "An owned HGDN CUDA kernel path is enabled but the HGDN kernel extension is "
                 "unavailable. Build it before training with "
                 "`python setup_hgdn_megakernel.py build_ext --inplace` or explicitly enable "
                 "`GDN_MEGAKERNEL_ALLOW_JIT_BUILD=1`."
@@ -1038,6 +1049,7 @@ def main() -> None:
         f"cuda_fused_frontend={int(args.gdn_use_cuda_fused_frontend)} "
         f"cuda_fused_frontend_lib={int(args.gdn_use_cuda_fused_frontend_lib)} "
         f"cuda_fused_output={int(args.gdn_use_cuda_fused_output)} "
+        f"cuda_corekernel={int(args.gdn_use_cuda_corekernel)} "
         f"cuda_megakernel={int(args.gdn_use_cuda_megakernel)} "
         f"cuda_split_norm={int(args.gdn_use_cuda_split_norm)} "
         f"cuda_split_norm_lib={int(args.gdn_use_cuda_split_norm_lib)}",
@@ -1136,6 +1148,7 @@ def main() -> None:
             gdn_use_cuda_fused_frontend=args.gdn_use_cuda_fused_frontend,
             gdn_use_cuda_fused_frontend_lib=args.gdn_use_cuda_fused_frontend_lib,
             gdn_use_cuda_fused_output=args.gdn_use_cuda_fused_output,
+            gdn_use_cuda_corekernel=args.gdn_use_cuda_corekernel,
             gdn_use_cuda_megakernel=args.gdn_use_cuda_megakernel,
             gdn_use_cuda_split_norm=args.gdn_use_cuda_split_norm,
             gdn_use_cuda_split_norm_lib=args.gdn_use_cuda_split_norm_lib,
@@ -1187,6 +1200,7 @@ def main() -> None:
         "compile_plan:"
         f"strategy:{compile_stats['strategy']} "
         f"gdn_disabled:{compile_stats['gdn_disabled']} "
+        f"gdn_corekernel_left_enabled:{compile_stats['gdn_corekernel_left_enabled']} "
         f"gdn_megakernel_left_enabled:{compile_stats['gdn_megakernel_left_enabled']} "
         f"gdn_mlps_compiled:{compile_stats['gdn_mlps_compiled']} "
         f"attn_blocks_compiled:{compile_stats['attn_blocks_compiled']} "

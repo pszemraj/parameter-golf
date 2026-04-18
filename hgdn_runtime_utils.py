@@ -277,6 +277,7 @@ def prepare_hybrid_compile(
     compile_stats: dict[str, int | str] = {
         "strategy": "off" if not enabled else strategy,
         "gdn_disabled": 0,
+        "gdn_corekernel_left_enabled": 0,
         "gdn_megakernel_left_enabled": 0,
         "gdn_mlps_compiled": 0,
         "attn_blocks_compiled": 0,
@@ -294,8 +295,9 @@ def prepare_hybrid_compile(
         for idx, block_type in enumerate(model.block_types):
             block = model.blocks[idx]
             if block_type == "gdn" and hasattr(block, "gdn") and hasattr(block, "mlp"):
+                use_corekernel = bool(getattr(block.gdn, "use_cuda_corekernel", False))
                 use_megakernel = bool(getattr(block.gdn, "use_cuda_megakernel", False))
-                if not use_megakernel:
+                if not use_corekernel and not use_megakernel:
                     block.gdn = maybe_disable_compile(
                         block.gdn,
                         enabled=True,
@@ -303,7 +305,10 @@ def prepare_hybrid_compile(
                     )
                     compile_stats["gdn_disabled"] += 1
                 else:
-                    compile_stats["gdn_megakernel_left_enabled"] += 1
+                    if use_corekernel:
+                        compile_stats["gdn_corekernel_left_enabled"] += 1
+                    if use_megakernel:
+                        compile_stats["gdn_megakernel_left_enabled"] += 1
                 block.mlp = maybe_compile(
                     block.mlp, enabled=True, dynamic=False, fullgraph=True
                 )

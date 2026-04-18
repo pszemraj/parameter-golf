@@ -280,6 +280,35 @@ def _validate_forward_inputs(
     _require_cuda_tensor("dt_bias", dt_bias, dtype=torch.float32, device=device)
 
 
+def _validate_core_forward_inputs(
+    qkv: Tensor,
+    g_pre: Tensor,
+    beta_pre: Tensor,
+    g_out: Tensor,
+    conv_w: Tensor,
+    A_log: Tensor,
+    dt_bias: Tensor,
+) -> None:
+    """Validate the HGDN core-kernel tensor contract without hidden kernels.
+
+    :param Tensor qkv: Packed qkv activations.
+    :param Tensor g_pre: Decay preactivations.
+    :param Tensor beta_pre: Beta preactivations.
+    :param Tensor g_out: Output-gate preactivations.
+    :param Tensor conv_w: Packed depthwise conv weights.
+    :param Tensor A_log: Learnable decay magnitudes.
+    :param Tensor dt_bias: Learnable decay biases.
+    """
+    device = qkv.device
+    _require_cuda_tensor("qkv", qkv, dtype=torch.bfloat16)
+    _require_cuda_tensor("g_pre", g_pre, dtype=torch.bfloat16, device=device)
+    _require_cuda_tensor("beta_pre", beta_pre, dtype=torch.bfloat16, device=device)
+    _require_cuda_tensor("g_out", g_out, dtype=torch.bfloat16, device=device)
+    _require_cuda_tensor("conv_w", conv_w, dtype=torch.bfloat16, device=device)
+    _require_cuda_tensor("A_log", A_log, dtype=torch.float32, device=device)
+    _require_cuda_tensor("dt_bias", dt_bias, dtype=torch.float32, device=device)
+
+
 def _meta_empty(
     example: Tensor,
     shape: tuple[int, ...],
@@ -1207,6 +1236,762 @@ def run_from_gated_delta_net(module: torch.nn.Module, x: Tensor) -> Tensor:
         module.w_b.weight,
         module.w_g.weight,
         module.w_out.weight,
+        conv_w,
+        module.A_log,
+        module.dt_bias,
+        n_heads=int(module.n_heads),
+        head_k_dim=int(module.head_k_dim),
+        head_v_dim=int(module.head_v_dim),
+        conv_size=int(conv_w.shape[-1]),
+        rec_chunk_t=rec_chunk_t,
+        allow_neg_eigval=bool(module.allow_neg_eigval),
+    )
+
+
+_HGDN_COREKERNEL_V1_LIB = torch.library.Library("hgdn_corekernel_v1", "DEF")
+_HGDN_COREKERNEL_V1_LIB.define(
+    "run("
+    "Tensor qkv, Tensor g_pre, Tensor beta_pre, Tensor g_out, Tensor conv_w, "
+    "Tensor A_log, Tensor dt_bias, int n_heads, int head_k_dim, int head_v_dim, "
+    "int conv_size, int rec_chunk_t, bool allow_neg_eigval"
+    ") -> ("
+    "Tensor z, Tensor g_log, Tensor beta, Tensor o_raw, Tensor state_ckpt)"
+)
+_HGDN_COREKERNEL_V1_LIB.define(
+    "run_backward("
+    "Tensor grad_z, Tensor qkv, Tensor g_pre, Tensor beta_pre, Tensor g_out, "
+    "Tensor conv_w, Tensor A_log, Tensor dt_bias, Tensor g_log, Tensor beta, "
+    "Tensor o_raw, Tensor state_ckpt, int n_heads, int head_k_dim, int head_v_dim, "
+    "int conv_size, int rec_chunk_t, bool allow_neg_eigval"
+    ") -> ("
+    "Tensor dqkv, Tensor dg_pre, Tensor dbeta_pre, Tensor dg_out, Tensor dconv_w, "
+    "Tensor dA_log, Tensor ddt_bias)"
+)
+
+
+def _run_corekernel_forward(
+    qkv: Tensor,
+    g_pre: Tensor,
+    beta_pre: Tensor,
+    g_out: Tensor,
+    conv_w: Tensor,
+    A_log: Tensor,
+    dt_bias: Tensor,
+    n_heads: int,
+    head_k_dim: int,
+    head_v_dim: int,
+    conv_size: int,
+    rec_chunk_t: int,
+    allow_neg_eigval: bool,
+) -> tuple[Tensor, ...]:
+    """Run the owned HGDN core-kernel forward implementation.
+
+    :param Tensor qkv: Packed qkv activations.
+    :param Tensor g_pre: Decay preactivations.
+    :param Tensor beta_pre: Beta preactivations.
+    :param Tensor g_out: Output-gate preactivations.
+    :param Tensor conv_w: Packed depthwise conv weights.
+    :param Tensor A_log: Decay magnitude parameter.
+    :param Tensor dt_bias: Decay bias parameter.
+    :param int n_heads: Number of HGDN heads.
+    :param int head_k_dim: Per-head key width.
+    :param int head_v_dim: Per-head value width.
+    :param int conv_size: Causal conv width.
+    :param int rec_chunk_t: Runtime checkpoint cadence.
+    :param bool allow_neg_eigval: Whether beta is scaled by `2.0`.
+    :return tuple[Tensor, ...]: Core output plus saved activations.
+    """
+    ext = _require_loaded_extension()
+    max_chunk_t = rec_chunk_t_max()
+    if rec_chunk_t > max_chunk_t:
+        raise RuntimeError(
+            "HGDN core kernel rec_chunk_t exceeds the compiled maximum: "
+            f"got {rec_chunk_t}, max {max_chunk_t}."
+        )
+    _validate_core_forward_inputs(qkv, g_pre, beta_pre, g_out, conv_w, A_log, dt_bias)
+    return tuple(
+        ext.core_forward(
+            qkv,
+            g_pre,
+            beta_pre,
+            g_out,
+            conv_w,
+            A_log,
+            dt_bias,
+            int(n_heads),
+            int(head_k_dim),
+            int(head_v_dim),
+            int(conv_size),
+            int(rec_chunk_t),
+            bool(allow_neg_eigval),
+        )
+    )
+
+
+def _run_corekernel_backward(
+    grad_z: Tensor,
+    qkv: Tensor,
+    g_pre: Tensor,
+    beta_pre: Tensor,
+    g_out: Tensor,
+    conv_w: Tensor,
+    A_log: Tensor,
+    dt_bias: Tensor,
+    g_log: Tensor,
+    beta: Tensor,
+    o_raw: Tensor,
+    state_ckpt: Tensor,
+    n_heads: int,
+    head_k_dim: int,
+    head_v_dim: int,
+    conv_size: int,
+    rec_chunk_t: int,
+    allow_neg_eigval: bool,
+) -> tuple[Tensor, ...]:
+    """Run the owned HGDN core-kernel backward implementation.
+
+    :param Tensor grad_z: Gradient for the core output.
+    :param Tensor qkv: Packed qkv activations.
+    :param Tensor g_pre: Saved decay preactivations.
+    :param Tensor beta_pre: Saved beta preactivations.
+    :param Tensor g_out: Saved output-gate preactivations.
+    :param Tensor conv_w: Packed depthwise conv weights.
+    :param Tensor A_log: Decay magnitude parameter.
+    :param Tensor dt_bias: Decay bias parameter.
+    :param Tensor g_log: Saved log-decay value.
+    :param Tensor beta: Saved beta value.
+    :param Tensor o_raw: Saved recurrent readout before output RMSNorm.
+    :param Tensor state_ckpt: Saved chunk-start recurrent checkpoints.
+    :param int n_heads: Number of HGDN heads.
+    :param int head_k_dim: Per-head key width.
+    :param int head_v_dim: Per-head value width.
+    :param int conv_size: Causal conv width.
+    :param int rec_chunk_t: Runtime checkpoint cadence.
+    :param bool allow_neg_eigval: Whether beta is scaled by `2.0`.
+    :return tuple[Tensor, ...]: Gradients for the differentiable inputs.
+    """
+    ext = _require_loaded_extension()
+    max_chunk_t = rec_chunk_t_max()
+    if rec_chunk_t > max_chunk_t:
+        raise RuntimeError(
+            "HGDN core kernel rec_chunk_t exceeds the compiled maximum: "
+            f"got {rec_chunk_t}, max {max_chunk_t}."
+        )
+    _require_cuda_tensor("grad_z", grad_z, dtype=torch.bfloat16, device=qkv.device)
+    return tuple(
+        ext.core_backward(
+            grad_z,
+            qkv,
+            g_pre,
+            beta_pre,
+            g_out,
+            conv_w,
+            A_log,
+            dt_bias,
+            g_log,
+            beta,
+            o_raw,
+            state_ckpt,
+            int(n_heads),
+            int(head_k_dim),
+            int(head_v_dim),
+            int(conv_size),
+            int(rec_chunk_t),
+            bool(allow_neg_eigval),
+        )
+    )
+
+
+@torch.library.impl("hgdn_corekernel_v1::run", "CPU")
+def _hgdn_corekernel_run_cpu(
+    qkv: Tensor,
+    g_pre: Tensor,
+    beta_pre: Tensor,
+    g_out: Tensor,
+    conv_w: Tensor,
+    A_log: Tensor,
+    dt_bias: Tensor,
+    n_heads: int,
+    head_k_dim: int,
+    head_v_dim: int,
+    conv_size: int,
+    rec_chunk_t: int,
+    allow_neg_eigval: bool,
+) -> tuple[Tensor, ...]:
+    """CPU stub for the compile-visible HGDN core-kernel op.
+
+    :param Tensor qkv: Packed qkv activations.
+    :param Tensor g_pre: Decay preactivations.
+    :param Tensor beta_pre: Beta preactivations.
+    :param Tensor g_out: Output-gate preactivations.
+    :param Tensor conv_w: Packed depthwise conv weights.
+    :param Tensor A_log: Learnable decay magnitudes.
+    :param Tensor dt_bias: Learnable decay biases.
+    :param int n_heads: Number of HGDN heads.
+    :param int head_k_dim: Per-head key width.
+    :param int head_v_dim: Per-head value width.
+    :param int conv_size: Packed depthwise conv width.
+    :param int rec_chunk_t: Runtime checkpoint cadence.
+    :param bool allow_neg_eigval: Whether beta is scaled by `2.0`.
+    :raises RuntimeError: Always, because the core kernel is CUDA-only.
+    :return tuple[Tensor, ...]: Never returns.
+    """
+    del (
+        qkv,
+        g_pre,
+        beta_pre,
+        g_out,
+        conv_w,
+        A_log,
+        dt_bias,
+        n_heads,
+        head_k_dim,
+        head_v_dim,
+        conv_size,
+        rec_chunk_t,
+        allow_neg_eigval,
+    )
+    raise RuntimeError("HGDN core kernel only supports CUDA execution")
+
+
+@torch.library.impl("hgdn_corekernel_v1::run", "CUDA")
+def _hgdn_corekernel_run_cuda(
+    qkv: Tensor,
+    g_pre: Tensor,
+    beta_pre: Tensor,
+    g_out: Tensor,
+    conv_w: Tensor,
+    A_log: Tensor,
+    dt_bias: Tensor,
+    n_heads: int,
+    head_k_dim: int,
+    head_v_dim: int,
+    conv_size: int,
+    rec_chunk_t: int,
+    allow_neg_eigval: bool,
+) -> tuple[Tensor, ...]:
+    """CUDA implementation for the compile-visible HGDN core-kernel op.
+
+    :param Tensor qkv: Packed qkv activations.
+    :param Tensor g_pre: Decay preactivations.
+    :param Tensor beta_pre: Beta preactivations.
+    :param Tensor g_out: Output-gate preactivations.
+    :param Tensor conv_w: Packed depthwise conv weights.
+    :param Tensor A_log: Learnable decay magnitudes.
+    :param Tensor dt_bias: Learnable decay biases.
+    :param int n_heads: Number of HGDN heads.
+    :param int head_k_dim: Per-head key width.
+    :param int head_v_dim: Per-head value width.
+    :param int conv_size: Packed depthwise conv width.
+    :param int rec_chunk_t: Runtime checkpoint cadence.
+    :param bool allow_neg_eigval: Whether beta is scaled by `2.0`.
+    :return tuple[Tensor, ...]: Forward output plus saved tensors for the
+        registered autograd formula.
+    """
+    return _run_corekernel_forward(
+        qkv,
+        g_pre,
+        beta_pre,
+        g_out,
+        conv_w,
+        A_log,
+        dt_bias,
+        n_heads,
+        head_k_dim,
+        head_v_dim,
+        conv_size,
+        rec_chunk_t,
+        allow_neg_eigval,
+    )
+
+
+@torch.library.impl("hgdn_corekernel_v1::run_backward", "CPU")
+def _hgdn_corekernel_run_backward_cpu(
+    grad_z: Tensor,
+    qkv: Tensor,
+    g_pre: Tensor,
+    beta_pre: Tensor,
+    g_out: Tensor,
+    conv_w: Tensor,
+    A_log: Tensor,
+    dt_bias: Tensor,
+    g_log: Tensor,
+    beta: Tensor,
+    o_raw: Tensor,
+    state_ckpt: Tensor,
+    n_heads: int,
+    head_k_dim: int,
+    head_v_dim: int,
+    conv_size: int,
+    rec_chunk_t: int,
+    allow_neg_eigval: bool,
+) -> tuple[Tensor, ...]:
+    """CPU stub for the compile-visible HGDN core-kernel backward op.
+
+    :param Tensor grad_z: Upstream gradient for the core output.
+    :param Tensor qkv: Packed qkv activations.
+    :param Tensor g_pre: Decay preactivations.
+    :param Tensor beta_pre: Beta preactivations.
+    :param Tensor g_out: Output-gate preactivations.
+    :param Tensor conv_w: Packed depthwise conv weights.
+    :param Tensor A_log: Learnable decay magnitudes.
+    :param Tensor dt_bias: Learnable decay biases.
+    :param Tensor g_log: Log-decay activations saved from forward.
+    :param Tensor beta: Beta activations saved from forward.
+    :param Tensor o_raw: Raw recurrence output saved from forward.
+    :param Tensor state_ckpt: Recurrence checkpoints saved from forward.
+    :param int n_heads: Number of HGDN heads.
+    :param int head_k_dim: Per-head key width.
+    :param int head_v_dim: Per-head value width.
+    :param int conv_size: Packed depthwise conv width.
+    :param int rec_chunk_t: Runtime checkpoint cadence.
+    :param bool allow_neg_eigval: Whether beta is scaled by `2.0`.
+    :raises RuntimeError: Always, because the core kernel is CUDA-only.
+    :return tuple[Tensor, ...]: Never returns.
+    """
+    del (
+        grad_z,
+        qkv,
+        g_pre,
+        beta_pre,
+        g_out,
+        conv_w,
+        A_log,
+        dt_bias,
+        g_log,
+        beta,
+        o_raw,
+        state_ckpt,
+        n_heads,
+        head_k_dim,
+        head_v_dim,
+        conv_size,
+        rec_chunk_t,
+        allow_neg_eigval,
+    )
+    raise RuntimeError("HGDN core kernel only supports CUDA execution")
+
+
+@torch.library.impl("hgdn_corekernel_v1::run_backward", "CUDA")
+def _hgdn_corekernel_run_backward_cuda(
+    grad_z: Tensor,
+    qkv: Tensor,
+    g_pre: Tensor,
+    beta_pre: Tensor,
+    g_out: Tensor,
+    conv_w: Tensor,
+    A_log: Tensor,
+    dt_bias: Tensor,
+    g_log: Tensor,
+    beta: Tensor,
+    o_raw: Tensor,
+    state_ckpt: Tensor,
+    n_heads: int,
+    head_k_dim: int,
+    head_v_dim: int,
+    conv_size: int,
+    rec_chunk_t: int,
+    allow_neg_eigval: bool,
+) -> tuple[Tensor, ...]:
+    """CUDA implementation for the compile-visible HGDN core-kernel backward op.
+
+    :param Tensor grad_z: Upstream gradient for the core output.
+    :param Tensor qkv: Packed qkv activations.
+    :param Tensor g_pre: Decay preactivations.
+    :param Tensor beta_pre: Beta preactivations.
+    :param Tensor g_out: Output-gate preactivations.
+    :param Tensor conv_w: Packed depthwise conv weights.
+    :param Tensor A_log: Learnable decay magnitudes.
+    :param Tensor dt_bias: Learnable decay biases.
+    :param Tensor g_log: Log-decay activations saved from forward.
+    :param Tensor beta: Beta activations saved from forward.
+    :param Tensor o_raw: Raw recurrence output saved from forward.
+    :param Tensor state_ckpt: Recurrence checkpoints saved from forward.
+    :param int n_heads: Number of HGDN heads.
+    :param int head_k_dim: Per-head key width.
+    :param int head_v_dim: Per-head value width.
+    :param int conv_size: Packed depthwise conv width.
+    :param int rec_chunk_t: Runtime checkpoint cadence.
+    :param bool allow_neg_eigval: Whether beta is scaled by `2.0`.
+    :return tuple[Tensor, ...]: Gradients for the tensors owned by the core
+        kernel contract.
+    """
+    return _run_corekernel_backward(
+        grad_z,
+        qkv,
+        g_pre,
+        beta_pre,
+        g_out,
+        conv_w,
+        A_log,
+        dt_bias,
+        g_log,
+        beta,
+        o_raw,
+        state_ckpt,
+        n_heads,
+        head_k_dim,
+        head_v_dim,
+        conv_size,
+        rec_chunk_t,
+        allow_neg_eigval,
+    )
+
+
+@torch.library.register_fake("hgdn_corekernel_v1::run")
+def _hgdn_corekernel_run_fake(
+    qkv: Tensor,
+    g_pre: Tensor,
+    beta_pre: Tensor,
+    g_out: Tensor,
+    conv_w: Tensor,
+    A_log: Tensor,
+    dt_bias: Tensor,
+    n_heads: int,
+    head_k_dim: int,
+    head_v_dim: int,
+    conv_size: int,
+    rec_chunk_t: int,
+    allow_neg_eigval: bool,
+) -> tuple[Tensor, ...]:
+    """Meta kernel for the compile-visible HGDN core-kernel forward op.
+
+    :param Tensor qkv: Packed qkv activations.
+    :param Tensor g_pre: Decay preactivations.
+    :param Tensor beta_pre: Beta preactivations.
+    :param Tensor g_out: Output-gate preactivations.
+    :param Tensor conv_w: Packed depthwise conv weights.
+    :param Tensor A_log: Learnable decay magnitudes.
+    :param Tensor dt_bias: Learnable decay biases.
+    :param int n_heads: Number of HGDN heads.
+    :param int head_k_dim: Per-head key width.
+    :param int head_v_dim: Per-head value width.
+    :param int conv_size: Packed depthwise conv width.
+    :param int rec_chunk_t: Runtime checkpoint cadence.
+    :param bool allow_neg_eigval: Whether beta is scaled by `2.0`.
+    :return tuple[Tensor, ...]: Fake forward outputs matching the real CUDA
+        contract.
+    """
+    del conv_w, A_log, dt_bias, conv_size, allow_neg_eigval, g_pre, beta_pre, g_out
+    batch, seq, _channels = qkv.shape
+    heads = int(n_heads)
+    dv = int(head_v_dim)
+    n_chunks = (seq + int(rec_chunk_t) - 1) // int(rec_chunk_t)
+    return (
+        _meta_empty(qkv, (batch, seq, heads, dv)),
+        _meta_empty(qkv, (batch, seq, heads)),
+        _meta_empty(qkv, (batch, seq, heads)),
+        _meta_empty(qkv, (batch, seq, heads, dv)),
+        _meta_empty(
+            qkv,
+            (batch, n_chunks, heads, int(head_k_dim), dv),
+            dtype=torch.float32,
+        ),
+    )
+
+
+@torch.library.register_fake("hgdn_corekernel_v1::run_backward")
+def _hgdn_corekernel_run_backward_fake(
+    grad_z: Tensor,
+    qkv: Tensor,
+    g_pre: Tensor,
+    beta_pre: Tensor,
+    g_out: Tensor,
+    conv_w: Tensor,
+    A_log: Tensor,
+    dt_bias: Tensor,
+    g_log: Tensor,
+    beta: Tensor,
+    o_raw: Tensor,
+    state_ckpt: Tensor,
+    n_heads: int,
+    head_k_dim: int,
+    head_v_dim: int,
+    conv_size: int,
+    rec_chunk_t: int,
+    allow_neg_eigval: bool,
+) -> tuple[Tensor, ...]:
+    """Meta kernel for the compile-visible HGDN core-kernel backward op.
+
+    :param Tensor grad_z: Upstream gradient for the core output.
+    :param Tensor qkv: Packed qkv activations.
+    :param Tensor g_pre: Decay preactivations.
+    :param Tensor beta_pre: Beta preactivations.
+    :param Tensor g_out: Output-gate preactivations.
+    :param Tensor conv_w: Packed depthwise conv weights.
+    :param Tensor A_log: Learnable decay magnitudes.
+    :param Tensor dt_bias: Learnable decay biases.
+    :param Tensor g_log: Log-decay activations saved from forward.
+    :param Tensor beta: Beta activations saved from forward.
+    :param Tensor o_raw: Raw recurrence output saved from forward.
+    :param Tensor state_ckpt: Recurrence checkpoints saved from forward.
+    :param int n_heads: Number of HGDN heads.
+    :param int head_k_dim: Per-head key width.
+    :param int head_v_dim: Per-head value width.
+    :param int conv_size: Packed depthwise conv width.
+    :param int rec_chunk_t: Runtime checkpoint cadence.
+    :param bool allow_neg_eigval: Whether beta is scaled by `2.0`.
+    :return tuple[Tensor, ...]: Fake gradients matching the real CUDA contract.
+    """
+    del (
+        grad_z,
+        g_log,
+        beta,
+        o_raw,
+        state_ckpt,
+        n_heads,
+        head_k_dim,
+        head_v_dim,
+        conv_size,
+        rec_chunk_t,
+        allow_neg_eigval,
+    )
+    return (
+        _meta_empty(qkv, tuple(qkv.shape)),
+        _meta_empty(g_pre, tuple(g_pre.shape)),
+        _meta_empty(beta_pre, tuple(beta_pre.shape)),
+        _meta_empty(g_out, tuple(g_out.shape)),
+        _meta_empty(conv_w, tuple(conv_w.shape)),
+        _meta_empty(A_log, tuple(A_log.shape)),
+        _meta_empty(dt_bias, tuple(dt_bias.shape)),
+    )
+
+
+def _setup_hgdn_corekernel_context(
+    ctx: Any,
+    inputs: tuple[Tensor, ...],
+    output: tuple[Tensor, ...],
+) -> None:
+    """Save tensors needed by the registered core-kernel backward formula.
+
+    :param Any ctx: Autograd context to populate.
+    :param tuple[Tensor, ...] inputs: Original forward inputs.
+    :param tuple[Tensor, ...] output: Forward outputs plus saved tensors.
+    """
+    (
+        qkv,
+        g_pre,
+        beta_pre,
+        g_out,
+        conv_w,
+        A_log,
+        dt_bias,
+        n_heads,
+        head_k_dim,
+        head_v_dim,
+        conv_size,
+        rec_chunk_t,
+        allow_neg_eigval,
+    ) = inputs
+    (_z, g_log, beta, o_raw, state_ckpt) = output
+    ctx.set_materialize_grads(False)
+    ctx.save_for_backward(
+        qkv,
+        g_pre,
+        beta_pre,
+        g_out,
+        conv_w,
+        A_log,
+        dt_bias,
+        g_log,
+        beta,
+        o_raw,
+        state_ckpt,
+    )
+    ctx.n_heads = int(n_heads)
+    ctx.head_k_dim = int(head_k_dim)
+    ctx.head_v_dim = int(head_v_dim)
+    ctx.conv_size = int(conv_size)
+    ctx.rec_chunk_t = int(rec_chunk_t)
+    ctx.allow_neg_eigval = bool(allow_neg_eigval)
+
+
+def _hgdn_corekernel_backward_formula(
+    ctx: Any,
+    grad_z: Tensor | None,
+    _grad_g_log: Tensor | None,
+    _grad_beta: Tensor | None,
+    _grad_o_raw: Tensor | None,
+    _grad_state_ckpt: Tensor | None,
+) -> tuple[Tensor | None, ...]:
+    """Backward formula for the compile-visible HGDN core-kernel op.
+
+    :param Any ctx: Autograd context populated during forward.
+    :param Tensor | None grad_z: Upstream gradient for the core output.
+    :param Tensor | None _grad_g_log: Unused gradient placeholder.
+    :param Tensor | None _grad_beta: Unused gradient placeholder.
+    :param Tensor | None _grad_o_raw: Unused gradient placeholder.
+    :param Tensor | None _grad_state_ckpt: Unused gradient placeholder.
+    :return tuple[Tensor | None, ...]: Gradients for the registered forward
+        inputs plus trailing `None` entries for non-tensor metadata.
+    """
+    del _grad_g_log, _grad_beta, _grad_o_raw, _grad_state_ckpt
+    if grad_z is None:
+        return (None,) * 13
+    (
+        qkv,
+        g_pre,
+        beta_pre,
+        g_out,
+        conv_w,
+        A_log,
+        dt_bias,
+        g_log,
+        beta,
+        o_raw,
+        state_ckpt,
+    ) = ctx.saved_tensors
+    grads = torch.ops.hgdn_corekernel_v1.run_backward(
+        grad_z,
+        qkv,
+        g_pre,
+        beta_pre,
+        g_out,
+        conv_w,
+        A_log,
+        dt_bias,
+        g_log,
+        beta,
+        o_raw,
+        state_ckpt,
+        int(ctx.n_heads),
+        int(ctx.head_k_dim),
+        int(ctx.head_v_dim),
+        int(ctx.conv_size),
+        int(ctx.rec_chunk_t),
+        bool(ctx.allow_neg_eigval),
+    )
+    return (*grads, None, None, None, None, None, None)
+
+
+torch.library.register_autograd(
+    "hgdn_corekernel_v1::run",
+    _hgdn_corekernel_backward_formula,
+    setup_context=_setup_hgdn_corekernel_context,
+)
+
+
+def hgdn_corekernel(
+    qkv: Tensor,
+    g_pre: Tensor,
+    beta_pre: Tensor,
+    g_out: Tensor,
+    conv_w: Tensor,
+    A_log: Tensor,
+    dt_bias: Tensor,
+    *,
+    n_heads: int,
+    head_k_dim: int,
+    head_v_dim: int,
+    conv_size: int,
+    rec_chunk_t: int | None = None,
+    allow_neg_eigval: bool = True,
+) -> Tensor:
+    """Run the HGDN core kernel through the compile-visible custom-op path.
+
+    :param Tensor qkv: Packed qkv activations shaped `(batch, seq, channels)`.
+    :param Tensor g_pre: Decay preactivations shaped `(batch, seq, heads)`.
+    :param Tensor beta_pre: Beta preactivations shaped `(batch, seq, heads)`.
+    :param Tensor g_out: Output-gate preactivations shaped `(batch, seq, heads, d_v)`.
+    :param Tensor conv_w: Packed depthwise conv weights shaped `(channels, kernel)`.
+    :param Tensor A_log: Learnable decay magnitudes shaped `(heads,)`.
+    :param Tensor dt_bias: Learnable decay biases shaped `(heads,)`.
+    :param int n_heads: Number of HGDN heads.
+    :param int head_k_dim: Per-head key width.
+    :param int head_v_dim: Per-head value width.
+    :param int conv_size: Causal conv width.
+    :param int | None rec_chunk_t: Runtime checkpoint cadence, defaults to `None`.
+    :param bool allow_neg_eigval: Whether to scale beta by `2.0`, defaults to True.
+    :return Tensor: HGDN core output shaped `(batch, seq, heads, d_v)`.
+    """
+    rec_chunk_t = (
+        _resolve_rec_chunk_t(None) if rec_chunk_t is None else int(rec_chunk_t)
+    )
+    z, *_saved = torch.ops.hgdn_corekernel_v1.run(
+        qkv,
+        g_pre,
+        beta_pre,
+        g_out,
+        conv_w,
+        A_log,
+        dt_bias,
+        int(n_heads),
+        int(head_k_dim),
+        int(head_v_dim),
+        int(conv_size),
+        int(rec_chunk_t),
+        bool(allow_neg_eigval),
+    )
+    return z
+
+
+def run_core_from_gated_delta_net(
+    module: torch.nn.Module,
+    qkv: Tensor,
+    g_pre: Tensor,
+    beta_pre: Tensor,
+    g_out: Tensor,
+) -> Tensor:
+    """Run the HGDN core kernel from a configured `GatedDeltaNet` module.
+
+    :param torch.nn.Module module: Configured packed HGDN module.
+    :param Tensor qkv: Packed qkv activations.
+    :param Tensor g_pre: Decay preactivations.
+    :param Tensor beta_pre: Beta preactivations.
+    :param Tensor g_out: Output-gate preactivations.
+    :raises ValueError: If the module config is incompatible with the core kernel.
+    :return Tensor: Core HGDN output before dense `W_out`.
+    """
+    if not bool(getattr(module, "use_packed_qkv_proj", False)):
+        raise ValueError("HGDN core kernel requires use_packed_qkv_proj=True")
+    if not bool(getattr(module, "use_packed_qkv_conv", False)):
+        raise ValueError("HGDN core kernel requires use_packed_qkv_conv=True")
+    if not bool(getattr(module, "gates_fp32", True)):
+        raise ValueError("HGDN core kernel requires gates_fp32=True")
+    if not bool(getattr(module, "output_norm_fp32", True)):
+        raise ValueError("HGDN core kernel requires output_norm_fp32=True")
+    if bool(getattr(module, "use_cuda_fused_frontend", False)):
+        raise ValueError(
+            "HGDN core kernel is incompatible with use_cuda_fused_frontend"
+        )
+    if bool(getattr(module, "use_cuda_fused_frontend_lib", False)):
+        raise ValueError(
+            "HGDN core kernel is incompatible with use_cuda_fused_frontend_lib"
+        )
+    if bool(getattr(module, "use_cuda_fused_output", False)):
+        raise ValueError("HGDN core kernel is incompatible with use_cuda_fused_output")
+    if bool(getattr(module, "use_cuda_packed_conv", False)):
+        raise ValueError("HGDN core kernel is incompatible with use_cuda_packed_conv")
+    if bool(getattr(module, "use_cuda_packed_conv_aten_backward", False)):
+        raise ValueError(
+            "HGDN core kernel is incompatible with use_cuda_packed_conv_aten_backward"
+        )
+    if bool(getattr(module, "use_cuda_packed_conv_aten_weight_backward", False)):
+        raise ValueError(
+            "HGDN core kernel is incompatible with "
+            "use_cuda_packed_conv_aten_weight_backward"
+        )
+    if bool(getattr(module, "use_cuda_megakernel", False)):
+        raise ValueError("HGDN core kernel is incompatible with use_cuda_megakernel")
+    if getattr(module, "qkv_conv", None) is None:
+        raise ValueError("HGDN core kernel requires an active packed qkv conv module")
+    conv_w = module.qkv_conv.conv.weight.view(
+        module.qkv_conv.conv.weight.shape[0],
+        module.qkv_conv.conv.weight.shape[-1],
+    )
+    rec_chunk_t = _resolve_rec_chunk_t(module)
+    max_chunk_t = rec_chunk_t_max()
+    if rec_chunk_t > max_chunk_t:
+        raise ValueError(
+            "HGDN core kernel rec_chunk_t exceeds the compiled maximum: "
+            f"got {rec_chunk_t}, max {max_chunk_t}. "
+            "Rebuild the extension with a larger HGDN_REC_CHUNK_T if needed."
+        )
+    return hgdn_corekernel(
+        qkv,
+        g_pre,
+        beta_pre,
+        g_out,
         conv_w,
         module.A_log,
         module.dt_bias,
