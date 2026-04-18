@@ -226,7 +226,8 @@ def _assert_bf16_packed_recurrence_inputs_contiguous(
     print(success_message)
 
 
-def test_recurrence():
+def test_recurrence() -> None:
+    """Smoke-test the reference recurrence helper."""
     B, T, H, Dk, Dv = 2, 16, 4, 8, 16
     torch.manual_seed(42)
     q = l2_norm(torch.randn(B, T, H, Dk))
@@ -240,7 +241,7 @@ def test_recurrence():
     print("  ✓ recurrence OK")
 
 
-def test_owned_fla_recurrence_matches_upstream():
+def test_owned_fla_recurrence_matches_upstream() -> None:
     """Check that the owned compile-visible recurrence matches upstream FLA on CUDA."""
 
     if not torch.cuda.is_available():
@@ -311,7 +312,7 @@ def test_owned_fla_recurrence_matches_upstream():
     print("  ✓ owned FLA recurrence matches upstream")
 
 
-def test_gdn_split_projections():
+def test_gdn_split_projections() -> None:
     """Verify projections are separate (not fused) and correctly typed."""
     B, T, D = 2, 16, 64
     torch.manual_seed(42)
@@ -339,7 +340,7 @@ def test_gdn_split_projections():
     )
 
 
-def test_gdn_recurrence_input_dtypes():
+def test_gdn_recurrence_input_dtypes() -> None:
     """Keep recurrence inputs aligned with activation dtype for FLA kernels."""
     layer = _make_bf16_gdn()
     x = torch.randn(2, 16, 64, dtype=torch.bfloat16)
@@ -352,7 +353,7 @@ def test_gdn_recurrence_input_dtypes():
     print(f"  ✓ recurrence input dtypes OK ({q.dtype})")
 
 
-def test_muon_routing():
+def test_muon_routing() -> None:
     """Verify SCALAR_PARAM_PATTERNS correctly tags w_a/w_b/w_g for Adam."""
     model = HybridGPT(
         vocab_size=16,
@@ -386,7 +387,8 @@ def test_muon_routing():
     print(f"  ✓ Muon routing OK ({len(muon_params)} Muon, {len(adam_params)} Adam)")
 
 
-def test_causal_conv():
+def test_causal_conv() -> None:
+    """Check causal convolution only depends on the prefix."""
     conv = CausalConv1d(32, 4)
     x1 = torch.randn(2, 16, 32)
     x2 = x1.clone()
@@ -395,7 +397,7 @@ def test_causal_conv():
     print("  ✓ causal conv OK")
 
 
-def test_causal_conv_output_contiguous():
+def test_causal_conv_output_contiguous() -> None:
     """Optional contiguous conv materialization should preserve values and improve layout."""
     torch.manual_seed(42)
     conv = CausalConv1d(32, 4)
@@ -410,7 +412,7 @@ def test_causal_conv_output_contiguous():
     print("  ✓ causal conv contiguous output OK")
 
 
-def test_causal_conv_disable():
+def test_causal_conv_disable() -> None:
     """Disabling the causal conv should become an exact identity."""
     conv = CausalConv1d(32, 4, enabled=False)
     x = torch.randn(2, 16, 32)
@@ -418,7 +420,7 @@ def test_causal_conv_disable():
     print("  ✓ causal conv disable OK")
 
 
-def test_gdn_conv_toggles():
+def test_gdn_conv_toggles() -> None:
     """Allow v-path ablations without breaking the HGDN forward path."""
     layer = GatedDeltaNet(
         64,
@@ -437,7 +439,7 @@ def test_gdn_conv_toggles():
     print("  ✓ GDN conv toggles OK")
 
 
-def test_gdn_packed_qkv_conv_matches_separate_path():
+def test_gdn_packed_qkv_conv_matches_separate_path() -> None:
     """Packed q/k/v conv should match the separate conv path with copied weights."""
     torch.manual_seed(42)
     kwargs = dict(
@@ -486,7 +488,7 @@ def test_gdn_packed_qkv_conv_requires_aligned_settings() -> None:
     print("  ✓ packed qkv conv rejects incompatible settings")
 
 
-def test_gdn_packed_qkv_proj_conv_matches_separate_path():
+def test_gdn_packed_qkv_proj_conv_matches_separate_path() -> None:
     """Packed qkv projection+conv should match the separate path with copied weights."""
     torch.manual_seed(42)
     kwargs = dict(
@@ -514,7 +516,7 @@ def test_gdn_packed_qkv_proj_conv_matches_separate_path():
     print("  ✓ packed qkv projection+conv matches separate path")
 
 
-def test_gdn_packed_qkv_custom_backward_matches_default_path():
+def test_gdn_packed_qkv_custom_backward_matches_default_path() -> None:
     """Packed qkv custom backward should preserve forward and gradient parity."""
     torch.manual_seed(42)
     kwargs = dict(
@@ -765,7 +767,7 @@ def test_gdn_packed_qkv_split_copy_validation() -> None:
     print("  ✓ packed qkv split-copy validates requirements")
 
 
-def test_packed_qkv_split_l2norm_reference_matches_eager_ops():
+def test_packed_qkv_split_l2norm_reference_matches_eager_ops() -> None:
     """Reference packed split+l2norm should match eager split plus q/k normalization."""
     torch.manual_seed(42)
     packed = torch.randn(2, 32, 96, requires_grad=True)
@@ -802,7 +804,7 @@ def test_packed_qkv_split_l2norm_reference_matches_eager_ops():
     print("  ✓ packed split+l2norm reference matches eager ops")
 
 
-def test_preact_silu_split_l2norm_nct_reference_matches_eager_ops():
+def test_preact_silu_split_l2norm_nct_reference_matches_eager_ops() -> None:
     """Reference NCT frontend op should match eager SiLU+split+q/k normalization."""
     torch.manual_seed(42)
     preact = torch.randn(2, 96, 32, requires_grad=True)
@@ -855,7 +857,7 @@ def test_preact_silu_split_l2norm_nct_reference_matches_eager_ops():
     print("  ✓ NCT preact frontend reference matches eager ops")
 
 
-def test_packed_qkv_conv_reference_matches_eager_ops():
+def test_packed_qkv_conv_reference_matches_eager_ops() -> None:
     """Reference packed causal depthwise conv should match eager packed conv ops."""
     torch.manual_seed(42)
     layer = PackedCausalConv1d((32, 32, 32), kernel_size=4, output_contiguous=True)
@@ -1154,7 +1156,7 @@ def test_gdn_cuda_split_norm_lib_validation() -> None:
     print("  ✓ CUDA split+l2norm lib validates requirements")
 
 
-def test_packed_qkv_frontend_reference_matches_eager_ops():
+def test_packed_qkv_frontend_reference_matches_eager_ops() -> None:
     """Reference packed front-end should match the eager packed conv + q/k norm path."""
     torch.manual_seed(42)
     layer = GatedDeltaNet(
@@ -1192,7 +1194,7 @@ def test_packed_qkv_frontend_reference_matches_eager_ops():
     print("  ✓ packed qkv frontend reference matches eager ops")
 
 
-def test_rmsnorm_silu_gate_reference_matches_eager_ops():
+def test_rmsnorm_silu_gate_reference_matches_eager_ops() -> None:
     """Reference output fuse should match RMSNorm(o) * SiLU(gate)."""
     torch.manual_seed(42)
     o = torch.randn(2, 16, 4, 8, requires_grad=True)
@@ -1328,7 +1330,7 @@ def test_gdn_cuda_fused_frontend_lib_cpu_fallback_matches_packed_path() -> None:
     )
 
 
-def test_gdn_conv_output_contiguous():
+def test_gdn_conv_output_contiguous() -> None:
     """Contiguous conv outputs should produce contiguous recurrence inputs."""
     layer = _make_bf16_gdn(conv_output_contiguous=True)
     x = torch.randn(2, 16, 64, dtype=torch.bfloat16)
@@ -1341,7 +1343,7 @@ def test_gdn_conv_output_contiguous():
     print("  ✓ GDN contiguous recurrence inputs OK")
 
 
-def test_gdn_qk_only_contiguous():
+def test_gdn_qk_only_contiguous() -> None:
     """Allow selecting contiguous conv outputs per HGDN path."""
     layer = _make_bf16_gdn(
         conv_output_contiguous=False,
@@ -1357,7 +1359,7 @@ def test_gdn_qk_only_contiguous():
     print("  ✓ GDN q/k-only contiguous outputs OK")
 
 
-def test_gdn_gate_and_output_precision_toggles():
+def test_gdn_gate_and_output_precision_toggles() -> None:
     """Precision toggles should preserve HGDN forward/backward viability."""
     layer = _make_bf16_gdn(
         gates_fp32=False,
@@ -1371,7 +1373,7 @@ def test_gdn_gate_and_output_precision_toggles():
     print("  ✓ GDN precision toggles OK")
 
 
-def test_restore_low_dim_params_to_fp32_gdn_control_override():
+def test_restore_low_dim_params_to_fp32_gdn_control_override() -> None:
     """Allow HGDN control projections to remain bf16 while scalars stay fp32."""
     layer = GatedDeltaNet(
         64, n_heads=4, head_k_dim=8, expand_v=2.0, use_fla=False
@@ -1385,7 +1387,7 @@ def test_restore_low_dim_params_to_fp32_gdn_control_override():
     print("  ✓ GDN control projection fp32 override OK")
 
 
-def test_restore_low_dim_params_to_fp32_default_restores_gdn_control():
+def test_restore_low_dim_params_to_fp32_default_restores_gdn_control() -> None:
     """Keep the default fp32 restore behavior for HGDN control projections."""
     layer = GatedDeltaNet(
         64, n_heads=4, head_k_dim=8, expand_v=2.0, use_fla=False
@@ -1397,7 +1399,8 @@ def test_restore_low_dim_params_to_fp32_default_restores_gdn_control():
     print("  ✓ default GDN control projection fp32 restore OK")
 
 
-def test_hybrid_fwd_bwd():
+def test_hybrid_fwd_bwd() -> None:
+    """Smoke-test end-to-end hybrid forward and backward."""
     torch.manual_seed(42)
     m = HybridGPT(
         vocab_size=32,
@@ -1425,7 +1428,7 @@ def test_hybrid_fwd_bwd():
     print(f"  ✓ fwd/bwd OK  loss={loss.item():.4f}")
 
 
-def test_norm_styles():
+def test_norm_styles() -> None:
     """Exercise pre/post/KEEL block variants on a tiny hybrid stack."""
     torch.manual_seed(42)
     ids = torch.randint(0, 32, (2, 24))
@@ -1457,7 +1460,7 @@ def test_norm_styles():
     print("  ✓ norm styles OK (pre/post/keel)")
 
 
-def test_invalid_norm_style():
+def test_invalid_norm_style() -> None:
     """Reject unsupported normalization styles."""
     try:
         validate_norm_style("weird")
@@ -1467,7 +1470,7 @@ def test_invalid_norm_style():
     raise AssertionError("validate_norm_style should reject unknown styles")
 
 
-def test_wandb_watch_mode():
+def test_wandb_watch_mode() -> None:
     """Normalize supported W&B watch modes and reject unknown values."""
     assert normalize_wandb_watch_mode("none") == "none"
     assert normalize_wandb_watch_mode("false") == "none"
@@ -1481,7 +1484,8 @@ def test_wandb_watch_mode():
     raise AssertionError("normalize_wandb_watch_mode should reject unknown values")
 
 
-def test_block_types():
+def test_block_types() -> None:
+    """Check that block ratio settings produce the expected architecture mix."""
     for ratio, expected in [
         (0, ["attn"] * 4),
         (1, ["gdn", "attn"] * 2),
@@ -1504,7 +1508,7 @@ def test_block_types():
     print("  ✓ block types OK")
 
 
-def test_artifact_audit():
+def test_artifact_audit() -> None:
     """Verify the real quantized artifact audit behaves monotonically."""
     for label, m in [
         ("hybrid_tight  (8h Dk48 Dv48 mlp3.0)", make_hybrid_tight()),
@@ -1528,10 +1532,21 @@ def test_artifact_audit():
     print("  ✓ artifact audit OK")
 
 
-def test_state_tracking():
+def test_state_tracking() -> None:
+    """Check that the hybrid model beats attention-only on a toy state task."""
     V, B, T = 32, 4, 48
 
-    def make_data(B, T, V, seed):
+    def make_data(
+        B: int, T: int, V: int, seed: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Build a toy register-tracking sequence and target pair.
+
+        :param int B: Batch size.
+        :param int T: Sequence length.
+        :param int V: Vocabulary size.
+        :param int seed: RNG seed for the synthetic data.
+        :return tuple[torch.Tensor, torch.Tensor]: Token ids and targets.
+        """
         torch.manual_seed(seed)
         ids_l, tgt_l = [], []
         for _ in range(B):
@@ -1588,7 +1603,8 @@ def test_state_tracking():
     print("  ✓ hybrid beats attn on state tracking")
 
 
-def test_convergence():
+def test_convergence() -> None:
+    """Check that a tiny hybrid model learns a simple next-token task."""
     torch.manual_seed(42)
     m = HybridGPT(
         vocab_size=32,
@@ -1616,7 +1632,7 @@ def test_convergence():
     print(f"  ✓ converges: {losses[0]:.3f} → {losses[-1]:.3f}")
 
 
-def test_profile_report_json_roundtrip():
+def test_profile_report_json_roundtrip() -> None:
     """Write and reload a structured profiler report without txt artifacts."""
     with torch.profiler.profile(
         activities=[torch.profiler.ProfilerActivity.CPU]
@@ -1640,7 +1656,7 @@ def test_profile_report_json_roundtrip():
     print("  ✓ profiler report json/csv roundtrip OK")
 
 
-def test_profile_report_coalesces_duplicate_names():
+def test_profile_report_coalesces_duplicate_names() -> None:
     """Merge duplicate profiler names instead of keeping zero-time duplicates."""
     rows = [
         ProfileRow(

@@ -118,6 +118,11 @@ def _chunk_gated_delta_rule_fwd_h_equal_length(
     v_new = torch.empty_like(u) if save_new_value else None
 
     def grid(meta: dict[str, int]) -> tuple[int, int]:
+        """Return the Triton launch grid for the equal-length state kernel.
+
+        :param dict[str, int] meta: Triton compile-time launch metadata.
+        :return tuple[int, int]: Launch grid over value tiles and batch-head rows.
+        """
         return (triton.cdiv(V, meta["BV"]), B * H)
 
     chunk_gated_delta_rule_fwd_kernel_h_blockdim64[grid](

@@ -42,6 +42,8 @@ COMPUTE_DTYPE = mx.bfloat16
 # - vocab size 1024, sequence length 1024, tied embeddings
 # - 524,288 train tokens per step for 20,000 iterations with a ~10 minute cap
 class Hyperparameters:
+    """Runtime hyperparameters for the MLX GPT trainer."""
+
     # Data / tokenizer.
     data_path: str = os.environ.get("DATA_PATH", "./data/datasets/fineweb10B_sp1024")
     tokenizer_path: str = os.environ.get(
@@ -109,17 +111,35 @@ class Hyperparameters:
 
     @property
     def train_files(self) -> str:
+        """Return the glob for training shards.
+
+        :return str: Glob for training shards.
+        """
         return f"{self.data_path}/fineweb_train_*.bin"
 
     @property
     def val_files(self) -> str:
+        """Return the glob for validation shards.
+
+        :return str: Glob for validation shards.
+        """
         return f"{self.data_path}/fineweb_val_*.bin"
 
     @property
     def microbatch_tokens(self) -> int:
+        """Return the token budget per optimizer microbatch.
+
+        :return int: Tokens per optimizer microbatch.
+        """
         return self.train_batch_tokens // self.grad_accum_steps
 
     def lr_mul(self, step: int, elapsed_ms: float) -> float:
+        """Return the learning-rate multiplier for the current step.
+
+        :param int step: Current optimizer step.
+        :param float elapsed_ms: Elapsed measured training time in milliseconds.
+        :return float: Learning-rate multiplier for the step.
+        """
         if self.warmdown_iters <= 0:
             return 1.0
         if self.max_wallclock_seconds <= 0:
@@ -158,6 +178,13 @@ INT8_KEEP_FLOAT_FP32_NAME_PATTERNS = tuple(
 
 
 def token_chunks(total_tokens: int, seq_len: int, max_chunk_tokens: int) -> list[int]:
+    """Split a token budget into contiguous sequence-aligned chunks.
+
+    :param int total_tokens: Total token budget to divide.
+    :param int seq_len: Sequence length for each training example.
+    :param int max_chunk_tokens: Maximum tokens per chunk.
+    :return list[int]: Sequence-aligned chunk sizes.
+    """
     usable_total = (total_tokens // seq_len) * seq_len
     if usable_total <= 0:
         raise ValueError(f"token budget too small for seq_len={seq_len}")
@@ -176,6 +203,13 @@ def accumulate_flat_grads(
     grads_tree: dict,
     scale: float,
 ) -> dict[str, mx.array]:
+    """Accumulate a flattened gradient tree into the running buffer.
+
+    :param dict[str, mx.array] | None accum: Existing flattened accumulator or ``None``.
+    :param dict grads_tree: Gradient tree to flatten and add.
+    :param float scale: Scale factor applied to each gradient contribution.
+    :return dict[str, mx.array]: Updated flattened accumulator.
+    """
     flat = dict(tree_flatten(grads_tree))
     if accum is None:
         return {k: g * scale for k, g in flat.items()}
@@ -190,10 +224,23 @@ def accumulate_flat_grads(
 
 
 def rms_norm(x: mx.array, eps: float = 1e-6) -> mx.array:
+    """Apply RMS normalization without learnable weights.
+
+    :param mx.array x: Input tensor.
+    :param float eps: Numerical epsilon.
+    :return mx.array: Normalized tensor.
+    """
     return (x * mx.rsqrt(mx.mean(x * x, axis=-1, keepdims=True) + eps)).astype(x.dtype)
 
 
 def zeropower_newtonschulz5(g: mx.array, steps: int, eps: float = 1e-7) -> mx.array:
+    """Orthogonalize a matrix gradient with a short Newton-Schulz iteration.
+
+    :param mx.array g: Gradient matrix to orthogonalize.
+    :param int steps: Number of Newton-Schulz iterations.
+    :param float eps: Numerical epsilon.
+    :return mx.array: Orthogonalized update matrix.
+    """
     # Orthogonalize a 2D update matrix with a fast Newton-Schulz iteration.
     # Muon uses this to normalize matrix-shaped gradients before applying them.
     # Background on Muon: https://kellerjordan.github.io/posts/muon/
@@ -213,6 +260,11 @@ def zeropower_newtonschulz5(g: mx.array, steps: int, eps: float = 1e-7) -> mx.ar
 
 
 def load_data_shard(path: Path) -> np.ndarray:
+    """Load one binary token shard from disk.
+
+    :param pathlib.Path path: Shard path on disk.
+    :return numpy.ndarray: Token array loaded from the shard.
+    """
     header_bytes = 256 * np.dtype("<i4").itemsize
     token_bytes = np.dtype("<u2").itemsize
     header = np.fromfile(path, dtype="<i4", count=256)
@@ -233,12 +285,20 @@ def load_data_shard(path: Path) -> np.ndarray:
 
 
 class TokenStream:
+    """Stream shard tokens in order and wrap across epochs."""
+
     def __init__(
         self,
         pattern: str,
         log_fn: Callable[[str], None] | None = None,
         dataset_name: str = "",
     ):
+        """Create a shard-backed token stream.
+
+        :param str pattern: Glob pattern for shard files.
+        :param Callable[[str], None] | None log_fn: Optional logging callback.
+        :param str dataset_name: Human-readable dataset name for logs.
+        """
         self.files = [Path(p) for p in sorted(glob.glob(pattern))]
         if not self.files:
             raise FileNotFoundError(f"No files found for pattern: {pattern}")
@@ -250,6 +310,7 @@ class TokenStream:
         self.pos = 0
 
     def next_file(self) -> None:
+        """Advance to the next shard, wrapping to a new epoch if needed."""
         self.file_idx = (self.file_idx + 1) % len(self.files)
         if self.file_idx == 0:
             self.epoch += 1
@@ -262,6 +323,11 @@ class TokenStream:
         self.pos = 0
 
     def take(self, n: int) -> np.ndarray:
+        """Return the next `n` tokens from the stream.
+
+        :param int n: Number of tokens to read.
+        :return numpy.ndarray: Contiguous token array.
+        """
         chunks: list[np.ndarray] = []
         left = n
         while left > 0:
@@ -275,15 +341,29 @@ class TokenStream:
 
 
 class TokenLoader:
+    """Build contiguous next-token batches from a token stream."""
+
     def __init__(
         self,
         pattern: str,
         log_fn: Callable[[str], None] | None = None,
         dataset_name: str = "",
     ):
+        """Create a batch loader over shard tokens.
+
+        :param str pattern: Glob pattern for shard files.
+        :param Callable[[str], None] | None log_fn: Optional logging callback.
+        :param str dataset_name: Human-readable dataset name for logs.
+        """
         self.stream = TokenStream(pattern, log_fn=log_fn, dataset_name=dataset_name)
 
     def next_batch(self, batch_tokens: int, seq_len: int) -> tuple[mx.array, mx.array]:
+        """Return an `(x, y)` next-token batch.
+
+        :param int batch_tokens: Token budget for the batch.
+        :param int seq_len: Sequence length for each example.
+        :return tuple[mx.array, mx.array]: Input and target token arrays.
+        """
         usable = (batch_tokens // seq_len) * seq_len
         if usable <= 0:
             raise ValueError(f"token budget too small for seq_len={seq_len}")
@@ -299,21 +379,34 @@ class TokenLoader:
 
 
 class CastedLinear(nn.Module):
+    """Linear layer that stores weights in float32 and casts on use."""
+
     def __init__(self, in_dim: int, out_dim: int):
+        """Initialize the projection weight.
+
+        :param int in_dim: Input dimensionality.
+        :param int out_dim: Output dimensionality.
+        """
         super().__init__()
         self.weight = nn.Linear(in_dim, out_dim, bias=False).weight.astype(mx.float32)
 
     def __call__(self, x: mx.array) -> mx.array:
+        """Apply the projection in the input dtype."""
         return x @ self.weight.astype(x.dtype).T
 
 
 class RMSNormNoWeight(nn.Module):
+    """RMSNorm wrapper without a learnable weight."""
+
     # MLX module wrapper around the functional RMSNorm helper so it composes nicely in blocks.
     def __call__(self, x: mx.array) -> mx.array:
+        """Normalize the last dimension with RMS normalization."""
         return rms_norm(x)
 
 
 class CausalSelfAttention(nn.Module):
+    """Baseline causal self-attention block."""
+
     # - separate q/k/v projections
     # - RMSNorm on q and k before attention
     # - RoPE on q and k
@@ -326,6 +419,14 @@ class CausalSelfAttention(nn.Module):
         rope_base: float,
         qk_gain_init: float,
     ):
+        """Initialize projections, RoPE, and head scaling.
+
+        :param int dim: Model width.
+        :param int num_heads: Number of query heads.
+        :param int num_kv_heads: Number of key/value heads.
+        :param float rope_base: RoPE base frequency.
+        :param float qk_gain_init: Initial q-k gain.
+        """
         super().__init__()
         if dim % num_heads != 0:
             raise ValueError("model_dim must be divisible by num_heads")
@@ -346,6 +447,7 @@ class CausalSelfAttention(nn.Module):
         self.scale = self.head_dim**-0.5
 
     def __call__(self, x: mx.array) -> mx.array:
+        """Run causal self-attention over a batch of sequences."""
         bsz, seqlen, dim = x.shape
         q = (
             self.c_q(x)
@@ -374,19 +476,29 @@ class CausalSelfAttention(nn.Module):
 
 
 class MLP(nn.Module):
+    """Baseline feed-forward block with relu-squared activation."""
+
     # Baseline MLP uses relu^2 instead of GELU/SiLU. It is cheap and works well in this setup.
     def __init__(self, dim: int, mlp_mult: int):
+        """Initialize the hidden and output projections.
+
+        :param int dim: Model width.
+        :param int mlp_mult: Hidden expansion multiplier.
+        """
         super().__init__()
         hidden = dim * mlp_mult
         self.fc = CastedLinear(dim, hidden)
         self.proj = CastedLinear(hidden, dim)
 
     def __call__(self, x: mx.array) -> mx.array:
+        """Apply the MLP projection stack."""
         x = nn.relu(self.fc(x))
         return self.proj(x * x)
 
 
 class Block(nn.Module):
+    """Transformer block with residual mixing, attention, and MLP."""
+
     def __init__(
         self,
         dim: int,
@@ -396,6 +508,15 @@ class Block(nn.Module):
         rope_base: float,
         qk_gain_init: float,
     ):
+        """Initialize the residual block and its learned scales.
+
+        :param int dim: Model width.
+        :param int num_heads: Number of query heads.
+        :param int num_kv_heads: Number of key/value heads.
+        :param int mlp_mult: Hidden expansion multiplier.
+        :param float rope_base: RoPE base frequency.
+        :param float qk_gain_init: Initial q-k gain.
+        """
         super().__init__()
         self.attn_norm = RMSNormNoWeight()
         self.mlp_norm = RMSNormNoWeight()
@@ -412,6 +533,7 @@ class Block(nn.Module):
         )
 
     def __call__(self, x: mx.array, x0: mx.array) -> mx.array:
+        """Apply residual mixing, attention, and MLP updates."""
         mix = self.resid_mix.astype(x.dtype)
         x = mix[0][None, None, :] * x + mix[1][None, None, :] * x0
         attn_out = self.attn(self.attn_norm(x))
@@ -423,6 +545,8 @@ class Block(nn.Module):
 
 
 class GPT(nn.Module):
+    """Hybrid GPT-style encoder/decoder model with tied embeddings."""
+
     # - token embedding + RMSNorm
     # - encoder half accumulates skip tensors
     # - decoder half consumes reversed skips with learned skip_weights
@@ -441,6 +565,20 @@ class GPT(nn.Module):
         tied_embed_init_std: float,
         qk_gain_init: float,
     ):
+        """Initialize embeddings, blocks, and the tied LM head.
+
+        :param int vocab_size: Vocabulary size.
+        :param int num_layers: Total number of transformer blocks.
+        :param int dim: Model width.
+        :param int num_heads: Number of query heads.
+        :param int num_kv_heads: Number of key/value heads.
+        :param int mlp_mult: Hidden expansion multiplier.
+        :param int logit_chunk_tokens: Optional chunk size for logits.
+        :param float logit_softcap: Softcap applied to logits.
+        :param float rope_base: RoPE base frequency.
+        :param float tied_embed_init_std: Tied embedding initialization scale.
+        :param float qk_gain_init: Initial q-k gain.
+        """
         super().__init__()
         if logit_softcap <= 0.0:
             raise ValueError(f"logit_softcap must be positive, got {logit_softcap}")
@@ -467,10 +605,16 @@ class GPT(nn.Module):
         ).astype(COMPUTE_DTYPE)
 
     def softcap(self, logits: mx.array) -> mx.array:
+        """Apply the logit softcap used by the baseline.
+
+        :param mx.array logits: Raw logits.
+        :return mx.array: Softcapped logits.
+        """
         c = self.logit_softcap
         return c * mx.tanh(logits / c)
 
     def __call__(self, input_ids: mx.array) -> mx.array:
+        """Run the full model forward pass."""
         x = rms_norm(self.tok_emb(input_ids).astype(COMPUTE_DTYPE))
         x0 = x
         skips: list[mx.array] = []
@@ -491,6 +635,12 @@ class GPT(nn.Module):
         return self.final_norm(x)
 
     def loss(self, input_ids: mx.array, target_ids: mx.array) -> mx.array:
+        """Compute next-token cross-entropy loss.
+
+        :param mx.array input_ids: Input token IDs.
+        :param mx.array target_ids: Target token IDs.
+        :return mx.array: Mean cross-entropy loss.
+        """
         # Cross-entropy over flattened tokens. We keep optional logit chunking because it is a useful
         # memory knob on Macs, but the common path is chunk_tokens=0 (single matmul + CE).
         x = self(input_ids).reshape(-1, self.tok_emb.weight.shape[1])
@@ -518,11 +668,19 @@ class GPT(nn.Module):
 # OPTIMIZERS (MUON + ADAM SPLIT)
 # ==============================================================================
 class Muon:
+    """Muon optimizer for matrix-shaped parameters."""
+
     # Muon applies SGD-momentum to matrix gradients, then orthogonalizes the result before the
     # parameter update.
     def __init__(
         self, keys: list[str], params: dict[str, mx.array], args: Hyperparameters
     ):
+        """Initialize Muon state for the selected parameter keys.
+
+        :param list[str] keys: Parameter keys handled by Muon.
+        :param dict[str, mx.array] params: Current parameter values.
+        :param Hyperparameters args: Training hyperparameters.
+        """
         self.keys = keys
         self.args = args
         self.buffers = {k: mx.zeros_like(params[k]) for k in keys}
@@ -534,6 +692,14 @@ class Muon:
         step: int,
         lr_mul: float,
     ) -> dict[str, mx.array]:
+        """Return Muon-updated parameter values.
+
+        :param dict[str, mx.array] params: Current parameter values.
+        :param dict[str, mx.array] grads: Gradient values.
+        :param int step: Current optimizer step.
+        :param float lr_mul: Learning-rate multiplier.
+        :return dict[str, mx.array]: Updated parameter values.
+        """
         if self.args.muon_momentum_warmup_steps:
             t = min(step / self.args.muon_momentum_warmup_steps, 1.0)
             momentum = (
@@ -556,11 +722,18 @@ class Muon:
 
 
 class SplitOptimizers:
+    """Partition model parameters across Muon and Adam optimizers."""
+
     # - embeddings: Adam with the tied-embedding LR
     # - block matrices (2D): Muon
     # - block scalars + skip weights: Adam
     # This preserves the high-level optimization behavior even though MLX internals differ.
     def __init__(self, model: GPT, args: Hyperparameters):
+        """Split model parameters into matrix and scalar optimizer groups.
+
+        :param GPT model: Model whose parameters are being partitioned.
+        :param Hyperparameters args: Training hyperparameters.
+        """
         self.args = args
         params = dict(tree_flatten(model.parameters()))
         self.embed_key = "tok_emb.weight"
@@ -599,6 +772,13 @@ class SplitOptimizers:
         )
 
     def step(self, model: GPT, grads_tree: dict, step: int, lr_mul: float) -> None:
+        """Apply one optimization step to the model.
+
+        :param GPT model: Model to update.
+        :param dict grads_tree: Nested gradient tree matching the model state.
+        :param int step: Current optimizer step.
+        :param float lr_mul: Learning-rate multiplier.
+        """
         params = dict(tree_flatten(model.parameters()))
         grads = dict(tree_flatten(grads_tree))
         updated = dict(params)
@@ -643,12 +823,24 @@ INT8_CLIP_Q = INT8_CLIP_PERCENTILE / 100.0
 
 
 def _np_float32(arr: mx.array) -> np.ndarray:
+    """Convert an MLX array to a NumPy float32 array view.
+
+    :param mx.array arr: Input array.
+    :return numpy.ndarray: Float32 NumPy array.
+    """
     return np.array(arr.astype(mx.float32), dtype=np.float32, copy=False)
 
 
 def keep_float_array(
     name: str, arr: mx.array, passthrough_orig_dtypes: dict[str, str]
 ) -> np.ndarray:
+    """Store a float tensor losslessly or with a small fp16 passthrough.
+
+    :param str name: Tensor name.
+    :param mx.array arr: Tensor value.
+    :param dict[str, str] passthrough_orig_dtypes: Map of passthrough tensor dtypes.
+    :return numpy.ndarray: Stored array payload.
+    """
     if any(pattern in name for pattern in INT8_KEEP_FLOAT_FP32_NAME_PATTERNS):
         return np.ascontiguousarray(_np_float32(arr))
     if arr.dtype in {mx.float32, mx.bfloat16}:
@@ -662,6 +854,11 @@ def keep_float_array(
 
 
 def quantize_float_array(arr: mx.array) -> tuple[np.ndarray, np.ndarray]:
+    """Quantize a float tensor to int8 with per-row or per-tensor scales.
+
+    :param mx.array arr: Float tensor to quantize.
+    :return tuple[numpy.ndarray, numpy.ndarray]: Quantized values and scales.
+    """
     f32 = _np_float32(arr)
     if f32.ndim == 2:
         # Matrices get one scale per row, which usually tracks output-channel
@@ -694,6 +891,11 @@ def quantize_float_array(arr: mx.array) -> tuple[np.ndarray, np.ndarray]:
 def quantize_state_dict_int8(
     flat_state: dict[str, mx.array],
 ) -> tuple[dict[str, object], dict[str, int]]:
+    """Quantize a flat state dict and collect size statistics.
+
+    :param dict[str, mx.array] flat_state: Flat parameter/state mapping.
+    :return tuple[dict[str, object], dict[str, int]]: Quantized payload and summary stats.
+    """
     quantized: dict[str, np.ndarray] = {}
     scales: dict[str, np.ndarray] = {}
     dtypes: dict[str, str] = {}
@@ -752,6 +954,11 @@ def quantize_state_dict_int8(
 
 
 def dequantize_state_dict_int8(quant_obj: dict[str, object]) -> dict[str, mx.array]:
+    """Restore a quantized state dict into MLX arrays.
+
+    :param dict[str, object] quant_obj: Quantized payload produced by this module.
+    :return dict[str, mx.array]: Dequantized state mapping.
+    """
     out: dict[str, mx.array] = {}
     qmeta = quant_obj.get("qmeta", {})
     passthrough_orig_dtypes = quant_obj.get("passthrough_orig_dtypes", {})
@@ -781,6 +988,12 @@ def dequantize_state_dict_int8(quant_obj: dict[str, object]) -> dict[str, mx.arr
 def build_sentencepiece_luts(
     sp: spm.SentencePieceProcessor, vocab_size: int
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Build byte-length and token-boundary lookup tables for bpb.
+
+    :param sentencepiece.SentencePieceProcessor sp: Tokenizer to inspect.
+    :param int vocab_size: Target vocabulary size.
+    :return tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray]: Byte-length, leading-space, and boundary lookup tables.
+    """
     sp_vocab_size = int(sp.vocab_size())
     table_size = max(sp_vocab_size, vocab_size)
     base_bytes_lut = np.zeros((table_size,), dtype=np.int16)
@@ -804,6 +1017,12 @@ def build_sentencepiece_luts(
 def validate_dataset_tokenizer_pair(
     data_path: str, tokenizer_path: str
 ) -> tuple[str, int, int | None]:
+    """Validate that the shard directory matches the tokenizer manifest.
+
+    :param str data_path: Dataset directory path.
+    :param str tokenizer_path: SentencePiece model path.
+    :return tuple[str, int, int | None]: Dataset name, found train shards, and expected train shards if known.
+    """
     # The shard directory and tokenizer are coupled: val_bpb is only meaningful if we
     # decode bytes with the exact tokenizer that produced the shards. The manifest
     # lets the training script fail fast on accidental dataset/tokenizer mismatches.
@@ -857,6 +1076,12 @@ def validate_dataset_tokenizer_pair(
 
 
 def load_validation_tokens(pattern: str, seq_len: int) -> np.ndarray:
+    """Load and truncate the fixed validation token stream.
+
+    :param str pattern: Glob pattern for validation shards.
+    :param int seq_len: Sequence length to align to.
+    :return numpy.ndarray: Concatenated validation tokens.
+    """
     files = [Path(p) for p in sorted(glob.glob(pattern))]
     if not files:
         raise FileNotFoundError(f"No files found for pattern: {pattern}")
@@ -873,8 +1098,15 @@ def load_validation_tokens(pattern: str, seq_len: int) -> np.ndarray:
 def loss_and_grad_chunked(
     args: Hyperparameters,
     train_loader: TokenLoader,
-    compiled_loss_and_grad,
+    compiled_loss_and_grad: Callable[[mx.array, mx.array], tuple[mx.array, dict]],
 ) -> tuple[mx.array, dict]:
+    """Run a chunked forward/backward pass and accumulate gradients.
+
+    :param Hyperparameters args: Training hyperparameters.
+    :param TokenLoader train_loader: Loader that yields token batches.
+    :param Callable[[mx.array, mx.array], tuple[mx.array, dict]] compiled_loss_and_grad: Compiled loss-and-gradient function.
+    :return tuple[mx.array, dict]: Weighted loss and accumulated gradients.
+    """
     chunk_sizes = token_chunks(
         args.microbatch_tokens, args.train_seq_len, args.mlx_max_microbatch_tokens
     )
@@ -894,13 +1126,24 @@ def loss_and_grad_chunked(
 
 def eval_val(
     args: Hyperparameters,
-    compiled_loss,
+    compiled_loss: Callable[[mx.array, mx.array], mx.array],
     val_tokens: np.ndarray,
     base_bytes_lut: np.ndarray,
     has_leading_space_lut: np.ndarray,
     is_boundary_token_lut: np.ndarray,
     log_fn: Callable[[str], None] | None = None,
 ) -> tuple[float, float]:
+    """Evaluate validation loss and bits-per-byte.
+
+    :param Hyperparameters args: Training hyperparameters.
+    :param Callable[[mx.array, mx.array], mx.array] compiled_loss: Compiled loss function.
+    :param numpy.ndarray val_tokens: Validation token stream.
+    :param numpy.ndarray base_bytes_lut: Token byte-length lookup table.
+    :param numpy.ndarray has_leading_space_lut: Token leading-space lookup table.
+    :param numpy.ndarray is_boundary_token_lut: Token boundary lookup table.
+    :param Callable[[str], None] | None log_fn: Optional logger.
+    :return tuple[float, float]: Validation loss and bits-per-byte.
+    """
     # Validation computes two metrics:
     # - val_loss: token cross-entropy (natural log)
     # - val_bpb: tokenizer-agnostic compression metric used by the challenge
@@ -958,6 +1201,12 @@ def eval_val(
 
 
 def clip_grad_tree(grads_tree: dict, max_norm: float) -> dict:
+    """Clip a nested gradient tree to a global norm.
+
+    :param dict grads_tree: Nested gradient tree.
+    :param float max_norm: Maximum allowed global norm.
+    :return dict: Clipped gradient tree.
+    """
     if max_norm <= 0:
         return grads_tree
     flat = dict(tree_flatten(grads_tree))
@@ -974,6 +1223,10 @@ def clip_grad_tree(grads_tree: dict, max_norm: float) -> dict:
 
 
 def main() -> None:
+    """Run training, evaluation, and artifact serialization.
+
+    :return None: This function drives the full training script.
+    """
     # ==============================================================================
     # TOKENIZER + VALIDATION METRIC SETUP
     # ==============================================================================
@@ -984,6 +1237,12 @@ def main() -> None:
     print(logfile)
 
     def log(msg: str, console: bool = True) -> None:
+        """Write one log line to stdout and the run logfile.
+
+        :param str msg: Message to log.
+        :param bool console: Whether to mirror the message to stdout.
+        :return None: The message is written for its side effects.
+        """
         if console:
             print(msg)
         with logfile.open("a", encoding="utf-8") as f:

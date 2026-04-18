@@ -18,7 +18,7 @@ import time
 import uuid
 import zlib
 from pathlib import Path
-from typing import Literal
+from typing import Callable, Iterable, Literal
 
 import numpy as np
 import sentencepiece as spm
@@ -39,6 +39,8 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 
 class Hyperparameters:
+    """Runtime knobs for data, model, optimizer, and training length."""
+
     # Data paths are shard globs produced by the existing preprocessing pipeline.
     data_path = os.environ.get("DATA_PATH", "./data/datasets/fineweb10B_sp1024")
     train_files = os.path.join(data_path, "fineweb_train_*.bin")
@@ -112,6 +114,14 @@ class Hyperparameters:
 def zeropower_via_newtonschulz5(
     G: Tensor, steps: int = 10, eps: float = 1e-7
 ) -> Tensor:
+    """Orthogonalize a matrix gradient with a short Newton-Schulz iteration.
+
+    :param Tensor G: Input 2D gradient matrix.
+    :param int steps: Number of Newton-Schulz iterations to run.
+    :param float eps: Small norm floor for numerical stability.
+    :return Tensor: Orthogonalized update matrix.
+    """
+
     # Orthogonalize a 2D update matrix with a fast Newton-Schulz iteration.
     # Muon uses this to normalize matrix-shaped gradients before applying them.
     a, b, c = (3.4445, -4.7750, 2.0315)
@@ -128,14 +138,25 @@ def zeropower_via_newtonschulz5(
 
 
 class Muon(torch.optim.Optimizer):
+    """Muon optimizer for matrix-shaped parameters."""
+
     def __init__(
         self,
-        params,
+        params: Iterable[Tensor],
         lr: float,
         momentum: float,
         backend_steps: int,
         nesterov: bool = True,
     ):
+        """Initialize Muon with the reference hyperparameters.
+
+        :param Iterable[Tensor] params: Parameter iterable to optimize.
+        :param float lr: Learning rate.
+        :param float momentum: Momentum coefficient.
+        :param int backend_steps: Newton-Schulz steps for the matrix backend.
+        :param bool nesterov: Whether to use Nesterov momentum.
+        """
+
         super().__init__(
             params,
             dict(
@@ -144,7 +165,13 @@ class Muon(torch.optim.Optimizer):
         )
 
     @torch.no_grad()
-    def step(self, closure=None):
+    def step(self, closure: Callable[[], Tensor] | None = None) -> Tensor | None:
+        """Apply one Muon update step.
+
+        :param Callable[[], Tensor] | None closure: Optional reevaluation closure.
+        :return Tensor | None: The closure loss, if one was provided.
+        """
+
         loss = None
         if closure is not None:
             with torch.enable_grad():
@@ -210,6 +237,14 @@ class Muon(torch.optim.Optimizer):
 def build_sentencepiece_luts(
     sp: spm.SentencePieceProcessor, vocab_size: int, device: torch.device
 ) -> tuple[Tensor, Tensor, Tensor]:
+    """Build lookup tables used for tokenizer-agnostic byte accounting.
+
+    :param spm.SentencePieceProcessor sp: SentencePiece tokenizer processor.
+    :param int vocab_size: Model vocabulary size.
+    :param torch.device device: Target device for the lookup tables.
+    :return tuple[Tensor, Tensor, Tensor]: Byte, leading-space, and boundary LUTs.
+    """
+
     sp_vocab_size = int(sp.vocab_size())
     table_size = max(sp_vocab_size, vocab_size)
     base_bytes_np = np.zeros((table_size,), dtype=np.int16)
@@ -235,6 +270,13 @@ def build_sentencepiece_luts(
 
 
 def load_validation_tokens(pattern: str, seq_len: int) -> Tensor:
+    """Load and trim the validation shard tokens to a whole-number sequence span.
+
+    :param str pattern: Glob pattern for validation shards.
+    :param int seq_len: Sequence length used to truncate the validation stream.
+    :return Tensor: Validation tokens with one extra token for next-token targets.
+    """
+
     files = [Path(p) for p in sorted(glob.glob(pattern))]
     if not files:
         raise FileNotFoundError(f"No files found for pattern: {pattern}")
@@ -258,6 +300,21 @@ def eval_val(
     has_leading_space_lut: Tensor,
     is_boundary_token_lut: Tensor,
 ) -> tuple[float, float]:
+    """Run validation and return token loss plus bits per byte.
+
+    :param Hyperparameters args: Runtime hyperparameters.
+    :param nn.Module model: Model under evaluation.
+    :param int rank: Distributed rank.
+    :param int world_size: Distributed world size.
+    :param torch.device device: CUDA device used for evaluation.
+    :param int grad_accum_steps: Gradient accumulation steps.
+    :param Tensor val_tokens: Validation token stream.
+    :param Tensor base_bytes_lut: Per-token byte counts.
+    :param Tensor has_leading_space_lut: Leading-space flags per token.
+    :param Tensor is_boundary_token_lut: Boundary-token flags per token.
+    :return tuple[float, float]: Validation loss and bits-per-byte.
+    """
+
     # Validation computes two metrics:
     # - val_loss: token cross-entropy (natural log)
     # - val_bpb: tokenizer-agnostic compression metric used by the challenge
@@ -344,12 +401,26 @@ INT8_CLIP_Q = INT8_CLIP_PERCENTILE / 100.0
 
 
 def tensor_nbytes(t: Tensor) -> int:
+    """Return the number of bytes occupied by a tensor.
+
+    :param Tensor t: Tensor to measure.
+    :return int: Tensor storage size in bytes.
+    """
+
     return int(t.numel()) * int(t.element_size())
 
 
 def keep_float_tensor(
     name: str, t: Tensor, passthrough_orig_dtypes: dict[str, str]
 ) -> Tensor:
+    """Keep selected float tensors in a smaller passthrough form for export.
+
+    :param str name: Parameter name.
+    :param Tensor t: Tensor to export.
+    :param dict[str, str] passthrough_orig_dtypes: Original dtype registry.
+    :return Tensor: Tensor to retain in the export payload.
+    """
+
     if any(pattern in name for pattern in INT8_KEEP_FLOAT_FP32_NAME_PATTERNS):
         return t.float().contiguous()
     if t.dtype in {torch.float32, torch.bfloat16}:
@@ -359,6 +430,12 @@ def keep_float_tensor(
 
 
 def quantize_float_tensor(t: Tensor) -> tuple[Tensor, Tensor]:
+    """Quantize a float tensor to int8 with a matching scale tensor.
+
+    :param Tensor t: Float tensor to quantize.
+    :return tuple[Tensor, Tensor]: Quantized tensor and scale tensor.
+    """
+
     t32 = t.float()
     if t32.ndim == 2:
         # Matrices get one scale per row, which usually tracks output-channel
@@ -396,7 +473,15 @@ def quantize_float_tensor(t: Tensor) -> tuple[Tensor, Tensor]:
     return q, scale
 
 
-def quantize_state_dict_int8(state_dict: dict[str, Tensor]):
+def quantize_state_dict_int8(
+    state_dict: dict[str, Tensor],
+) -> tuple[dict[str, object], dict[str, int]]:
+    """Quantize a state dict into the clean int8 export bundle format.
+
+    :param dict[str, Tensor] state_dict: Model state dict to compress.
+    :return tuple[dict[str, object], dict[str, int]]: Bundle object and summary stats.
+    """
+
     # Single supported clean-script export format:
     # - per-row int8 for 2D float tensors
     # - per-tensor int8 for other float tensors
@@ -464,6 +549,12 @@ def quantize_state_dict_int8(state_dict: dict[str, Tensor]):
 
 
 def dequantize_state_dict_int8(obj: dict[str, object]) -> dict[str, Tensor]:
+    """Reconstruct float tensors from a clean int8 export bundle.
+
+    :param dict[str, object] obj: Serialized int8 export bundle.
+    :return dict[str, Tensor]: Reconstructed float state dict.
+    """
+
     out: dict[str, Tensor] = {}
     qmeta = obj.get("qmeta", {})
     passthrough_orig_dtypes = obj.get("passthrough_orig_dtypes", {})
@@ -497,6 +588,12 @@ def dequantize_state_dict_int8(obj: dict[str, object]) -> dict[str, Tensor]:
 
 
 def load_data_shard(file: Path) -> Tensor:
+    """Load one binary token shard from disk.
+
+    :param Path file: Shard path.
+    :return Tensor: Token tensor loaded from the shard.
+    """
+
     header_bytes = 256 * np.dtype("<i4").itemsize
     token_bytes = np.dtype("<u2").itemsize
     header = np.fromfile(file, dtype="<i4", count=256)
@@ -516,9 +613,16 @@ def load_data_shard(file: Path) -> Tensor:
 
 
 class TokenStream:
+    """Sequentially stream token shards and wrap around forever."""
+
     # Reads shards sequentially and wraps around forever. The training loop therefore
     # has deterministic, simple streaming behavior with no sampling or workers.
     def __init__(self, pattern: str):
+        """Initialize the stream from a shard glob.
+
+        :param str pattern: Glob pattern for token shards.
+        """
+
         self.files = [Path(p) for p in sorted(glob.glob(pattern))]
         if not self.files:
             raise FileNotFoundError(f"No files found for pattern: {pattern}")
@@ -527,11 +631,19 @@ class TokenStream:
         self.pos = 0
 
     def _advance_file(self) -> None:
+        """Advance to the next shard and reset the local position."""
+
         self.file_idx = (self.file_idx + 1) % len(self.files)
         self.tokens = load_data_shard(self.files[self.file_idx])
         self.pos = 0
 
     def take(self, n: int) -> Tensor:
+        """Take ``n`` tokens from the stream, spanning shards if needed.
+
+        :param int n: Number of tokens to consume.
+        :return Tensor: Concatenated token span.
+        """
+
         chunks: list[Tensor] = []
         remaining = n
         while remaining > 0:
@@ -547,9 +659,19 @@ class TokenStream:
 
 
 class DistributedTokenLoader:
+    """Split a shared token stream into per-rank batches."""
+
     # Each call consumes a contiguous chunk from the shared token stream, then slices out
     # one disjoint span per rank. The extra "+1" token lets us build (x, y) by shifting.
     def __init__(self, pattern: str, rank: int, world_size: int, device: torch.device):
+        """Create a distributed loader for one rank.
+
+        :param str pattern: Glob pattern for token shards.
+        :param int rank: Distributed rank.
+        :param int world_size: Distributed world size.
+        :param torch.device device: Target CUDA device.
+        """
+
         self.rank = rank
         self.world_size = world_size
         self.device = device
@@ -558,6 +680,14 @@ class DistributedTokenLoader:
     def next_batch(
         self, global_tokens: int, seq_len: int, grad_accum_steps: int
     ) -> tuple[Tensor, Tensor]:
+        """Return the next rank-local ``(x, y)`` training batch.
+
+        :param int global_tokens: Global token budget per optimizer step.
+        :param int seq_len: Sequence length.
+        :param int grad_accum_steps: Gradient accumulation steps.
+        :return tuple[Tensor, Tensor]: Input and target batches on device.
+        """
+
         local_tokens = global_tokens // (self.world_size * grad_accum_steps)
         per_rank_span = local_tokens + 1
         chunk = self.stream.take(per_rank_span * self.world_size)
@@ -579,6 +709,12 @@ NormKind = Literal["rms", "layer"]
 
 
 def validate_norm_style(norm_style: str) -> NormStyle:
+    """Validate and normalize the residual norm placement.
+
+    :param str norm_style: Norm-style string to validate.
+    :return NormStyle: Normalized norm-style value.
+    """
+
     normalized = norm_style.lower()
     if normalized not in {"pre", "post", "keel"}:
         raise ValueError(
@@ -588,6 +724,12 @@ def validate_norm_style(norm_style: str) -> NormStyle:
 
 
 def validate_norm_kind(norm_kind: str) -> NormKind:
+    """Validate and normalize the normalization family.
+
+    :param str norm_kind: Norm-kind string to validate.
+    :return NormKind: Normalized norm-kind value.
+    """
+
     normalized = norm_kind.lower()
     if normalized not in {"rms", "layer"}:
         raise ValueError(f"NORM_KIND must be 'rms' or 'layer', got {norm_kind!r}")
@@ -595,15 +737,36 @@ def validate_norm_kind(norm_kind: str) -> NormKind:
 
 
 class RMSNorm(nn.Module):
+    """RMSNorm wrapper that keeps the epsilon configurable."""
+
     def __init__(self, eps: float | None = None):
+        """Create an RMSNorm module.
+
+        :param float | None eps: Normalization epsilon.
+        """
+
         super().__init__()
         self.eps = eps
 
     def forward(self, x: Tensor) -> Tensor:
+        """Normalize the last dimension of ``x`` with RMS scaling.
+
+        :param Tensor x: Input tensor.
+        :return Tensor: RMS-normalized tensor.
+        """
+
         return F.rms_norm(x, (x.size(-1),), eps=self.eps)
 
 
 def build_norm(kind: NormKind, dim: int, eps: float = 1e-6) -> nn.Module:
+    """Construct the configured normalization module.
+
+    :param NormKind kind: Normalization family.
+    :param int dim: Hidden dimension.
+    :param float eps: Normalization epsilon.
+    :return nn.Module: Requested normalization module.
+    """
+
     kind = validate_norm_kind(kind)
     if kind == "rms":
         return RMSNorm(eps)
@@ -611,13 +774,26 @@ def build_norm(kind: NormKind, dim: int, eps: float = 1e-6) -> nn.Module:
 
 
 class CastedLinear(nn.Linear):
+    """Linear layer that stores weights in fp32 and casts at compute time."""
+
     # Keep weights in fp32 for optimizer/state quality, cast at matmul time for bf16 compute.
     def forward(self, x: Tensor) -> Tensor:
+        """Apply a linear projection in the input dtype.
+
+        :param Tensor x: Input tensor.
+        :return Tensor: Linear projection output.
+        """
+
         bias = self.bias.to(x.dtype) if self.bias is not None else None
         return F.linear(x, self.weight.to(x.dtype), bias)
 
 
 def restore_low_dim_params_to_fp32(module: nn.Module) -> None:
+    """Restore control and low-rank parameters to fp32 storage.
+
+    :param nn.Module module: Module to normalize in-place.
+    """
+
     # Keep small/control parameters in fp32 even when the model body runs in bf16.
     with torch.no_grad():
         for name, param in module.named_parameters():
@@ -629,8 +805,16 @@ def restore_low_dim_params_to_fp32(module: nn.Module) -> None:
 
 
 class Rotary(nn.Module):
+    """Cache RoPE cos/sin tables for a given sequence length."""
+
     # Caches cos/sin tables per sequence length on the current device.
     def __init__(self, dim: int, base: float = 10000.0):
+        """Create the rotary embedding cache.
+
+        :param int dim: Head dimension.
+        :param float base: RoPE base frequency.
+        """
+
         super().__init__()
         inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
@@ -641,6 +825,14 @@ class Rotary(nn.Module):
     def forward(
         self, seq_len: int, device: torch.device, dtype: torch.dtype
     ) -> tuple[Tensor, Tensor]:
+        """Return cached RoPE tables in the requested dtype.
+
+        :param int seq_len: Sequence length.
+        :param torch.device device: Target device.
+        :param torch.dtype dtype: Requested output dtype.
+        :return tuple[Tensor, Tensor]: Cosine and sine RoPE tables.
+        """
+
         if (
             self._cos_cached is None
             or self._sin_cached is None
@@ -656,12 +848,22 @@ class Rotary(nn.Module):
 
 
 def apply_rotary_emb(x: Tensor, cos: Tensor, sin: Tensor) -> Tensor:
+    """Apply rotary position embeddings to a head dimension.
+
+    :param Tensor x: Head tensor to rotate.
+    :param Tensor cos: Cached cosine table.
+    :param Tensor sin: Cached sine table.
+    :return Tensor: Rotary-embedded tensor.
+    """
+
     half = x.size(-1) // 2
     x1, x2 = x[..., :half], x[..., half:]
     return torch.cat((x1 * cos + x2 * sin, x1 * (-sin) + x2 * cos), dim=-1)
 
 
 class CausalSelfAttention(nn.Module):
+    """GQA attention block with RMS-normalized RoPE projections."""
+
     def __init__(
         self,
         dim: int,
@@ -670,6 +872,15 @@ class CausalSelfAttention(nn.Module):
         rope_base: float,
         qk_gain_init: float,
     ):
+        """Initialize the attention block.
+
+        :param int dim: Model width.
+        :param int num_heads: Number of query heads.
+        :param int num_kv_heads: Number of key/value heads.
+        :param float rope_base: RoPE base frequency.
+        :param float qk_gain_init: Initial query gain.
+        """
+
         super().__init__()
         if dim % num_heads != 0:
             raise ValueError("model_dim must be divisible by num_heads")
@@ -692,6 +903,12 @@ class CausalSelfAttention(nn.Module):
         self.rotary = Rotary(self.head_dim, base=rope_base)
 
     def forward(self, x: Tensor) -> Tensor:
+        """Run causal attention over a ``[B, T, D]`` input tensor.
+
+        :param Tensor x: Input activations.
+        :return Tensor: Attention output.
+        """
+
         bsz, seqlen, dim = x.shape
         q = (
             self.c_q(x)
@@ -727,8 +944,16 @@ class CausalSelfAttention(nn.Module):
 
 
 class MLP(nn.Module):
+    """ReLU-squared MLP block from the baseline transformer."""
+
     # relu^2 MLP from the original modded-nanogpt setup
     def __init__(self, dim: int, mlp_mult: int):
+        """Initialize the feed-forward block.
+
+        :param int dim: Model width.
+        :param int mlp_mult: Hidden width multiplier.
+        """
+
         super().__init__()
         hidden = mlp_mult * dim
         self.fc = CastedLinear(dim, hidden, bias=False)
@@ -736,11 +961,19 @@ class MLP(nn.Module):
         self.proj._zero_init = True
 
     def forward(self, x: Tensor) -> Tensor:
+        """Apply the MLP nonlinearity and output projection.
+
+        :param Tensor x: Input activations.
+        :return Tensor: MLP output.
+        """
+
         x = torch.relu(self.fc(x))
         return self.proj(x.square())
 
 
 class Block(nn.Module):
+    """Transformer block that alternates residual-attention and MLP updates."""
+
     def __init__(
         self,
         dim: int,
@@ -755,6 +988,21 @@ class Block(nn.Module):
         use_residual_mix: bool = True,
         is_first_block: bool = False,
     ):
+        """Initialize a transformer block.
+
+        :param int dim: Model width.
+        :param int num_heads: Attention head count.
+        :param int num_kv_heads: Key/value head count.
+        :param int mlp_mult: MLP width multiplier.
+        :param float rope_base: RoPE base frequency.
+        :param float qk_gain_init: Initial query gain.
+        :param NormKind norm_kind: Normalization family.
+        :param NormStyle norm_style: Residual norm placement.
+        :param float residual_alpha: Residual blend coefficient.
+        :param bool use_residual_mix: Whether to use residual mixing.
+        :param bool is_first_block: Whether this is the first block.
+        """
+
         super().__init__()
         self.norm_style = validate_norm_style(norm_style)
         self.residual_alpha = residual_alpha
@@ -778,6 +1026,13 @@ class Block(nn.Module):
             self.register_parameter("resid_mix", None)
 
     def forward(self, x: Tensor, x0: Tensor) -> Tensor:
+        """Apply the block in the configured norm style.
+
+        :param Tensor x: Current hidden state.
+        :param Tensor x0: Initial hidden state.
+        :return Tensor: Updated hidden state.
+        """
+
         if self.resid_mix is not None:
             mix = self.resid_mix.to(dtype=x.dtype)
             x = mix[0][None, None, :] * x + mix[1][None, None, :] * x0
@@ -805,6 +1060,8 @@ class Block(nn.Module):
 
 
 class GPT(nn.Module):
+    """Baseline GPT model used by the reference trainer."""
+
     def __init__(
         self,
         vocab_size: int,
@@ -826,6 +1083,28 @@ class GPT(nn.Module):
         use_residual_mix: bool = True,
         use_skip_weights: bool = True,
     ):
+        """Build the GPT stack, embeddings, and output head.
+
+        :param int vocab_size: Vocabulary size.
+        :param int num_layers: Number of transformer blocks.
+        :param int model_dim: Model width.
+        :param int num_heads: Attention head count.
+        :param int num_kv_heads: Key/value head count.
+        :param int mlp_mult: MLP width multiplier.
+        :param bool tie_embeddings: Whether to tie input and output embeddings.
+        :param float tied_embed_init_std: Stddev for tied embeddings.
+        :param float logit_softcap: Logit softcap value.
+        :param float rope_base: RoPE base frequency.
+        :param float qk_gain_init: Initial query gain.
+        :param NormKind norm_kind: Normalization family.
+        :param NormStyle norm_style: Residual norm placement.
+        :param float | None residual_alpha: Residual blend coefficient.
+        :param bool use_input_norm: Whether to normalize inputs.
+        :param bool use_final_norm: Whether to normalize the final hidden state.
+        :param bool use_residual_mix: Whether to use residual mixing.
+        :param bool use_skip_weights: Whether to use skip connections.
+        """
+
         super().__init__()
         if logit_softcap <= 0.0:
             raise ValueError(f"logit_softcap must be positive, got {logit_softcap}")
@@ -889,6 +1168,8 @@ class GPT(nn.Module):
         self._init_weights()
 
     def _init_weights(self) -> None:
+        """Initialize tied embeddings and zero-init marked projections."""
+
         if self.tie_embeddings:
             nn.init.normal_(self.tok_emb.weight, mean=0.0, std=self.tied_embed_init_std)
         for module in self.modules():
@@ -896,6 +1177,13 @@ class GPT(nn.Module):
                 nn.init.zeros_(module.weight)
 
     def forward(self, input_ids: Tensor, target_ids: Tensor) -> Tensor:
+        """Compute the training loss for a batch of token ids.
+
+        :param Tensor input_ids: Input token ids.
+        :param Tensor target_ids: Next-token targets.
+        :return Tensor: Mean cross-entropy loss.
+        """
+
         x = self.tok_emb(input_ids)
         x = self.input_norm(x)
         x0 = x
@@ -933,6 +1221,8 @@ class GPT(nn.Module):
 
 
 def main() -> None:
+    """Run training, validation, logging, and checkpoint/export plumbing."""
+
     global zeropower_via_newtonschulz5
 
     code = Path(__file__).read_text(encoding="utf-8")
@@ -999,6 +1289,12 @@ def main() -> None:
         print(logfile)
 
     def log0(msg: str, console: bool = True) -> None:
+        """Log from rank zero to stdout and the run logfile.
+
+        :param str msg: Message to log.
+        :param bool console: Whether to print to stdout.
+        """
+
         if not master_process:
             return
         if console:
@@ -1189,6 +1485,8 @@ def main() -> None:
     train_loader = DistributedTokenLoader(args.train_files, rank, world_size, device)
 
     def zero_grad_all() -> None:
+        """Zero all optimizer gradients with ``set_to_none=True``."""
+
         for opt in optimizers:
             opt.zero_grad(set_to_none=True)
 
@@ -1197,6 +1495,13 @@ def main() -> None:
     )
 
     def lr_mul(step: int, elapsed_ms: float) -> float:
+        """Compute the warmdown multiplier for the current step.
+
+        :param int step: Current optimization step.
+        :param float elapsed_ms: Elapsed training milliseconds.
+        :return float: Learning-rate multiplier.
+        """
+
         if args.warmdown_iters <= 0:
             return 1.0
         if max_wallclock_ms is None:
