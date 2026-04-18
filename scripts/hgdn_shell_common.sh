@@ -44,12 +44,7 @@ hgdn_run_with_env() {
 hgdn_python_has_module() {
     local python_bin="${1:?python binary required}"
     local module_name="${2:?module name required}"
-    "${python_bin}" - "${module_name}" <<'PY' >/dev/null 2>&1
-import importlib.util
-import sys
-
-raise SystemExit(0 if importlib.util.find_spec(sys.argv[1]) is not None else 1)
-PY
+    "${python_bin}" scripts/hgdn_helper_cli.py module-exists --module "${module_name}" >/dev/null 2>&1
 }
 
 hgdn_ensure_python_module() {
@@ -71,18 +66,9 @@ hgdn_create_7z_archive() {
     hgdn_ensure_python_module "${python_bin}" py7zr py7zr
     rm -f "${archive_output}"
     mkdir -p "$(dirname "${archive_output}")"
-    "${python_bin}" - "${archive_output}" "${source_path}" <<'PY'
-from pathlib import Path
-import sys
-
-import py7zr
-
-archive_output = Path(sys.argv[1])
-source_path = Path(sys.argv[2])
-
-with py7zr.SevenZipFile(archive_output, "w") as archive:
-    archive.writeall(source_path, arcname=source_path.name)
-PY
+    "${python_bin}" scripts/hgdn_helper_cli.py create-7z \
+        --archive-output "${archive_output}" \
+        --source-path "${source_path}"
 }
 
 hgdn_append_command() {

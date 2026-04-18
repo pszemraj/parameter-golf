@@ -67,33 +67,7 @@ esac
 
 load_config_env() {
     mapfile -t config_env < <(
-        "${python_bin}" - "$@" <<'PY'
-from pathlib import Path
-import sys
-import tomllib
-
-
-def load_env(path: Path) -> dict[str, str]:
-    data = tomllib.loads(path.read_text(encoding="utf-8"))
-    alias = data.get("alias")
-    if alias is not None:
-        return load_env((path.parent / alias).resolve())
-    env = data.get("env", data)
-    merged = {}
-    for key, value in env.items():
-        if isinstance(value, bool):
-            value = "1" if value else "0"
-        merged[str(key)] = str(value)
-    return merged
-
-
-merged: dict[str, str] = {}
-for raw_path in sys.argv[1:]:
-    merged.update(load_env(Path(raw_path)))
-
-for key, value in merged.items():
-    print(f"{key}={value}")
-PY
+        "${python_bin}" scripts/hgdn_helper_cli.py load-env --alias-aware --path "$@"
     )
 }
 
@@ -362,146 +336,39 @@ build_bundle() {
         fi
     done
 
-    "${python_bin}" - \
-        "${bundle_stage_dir}" \
-        "${run_prefix_base}" \
-        "${wandb_project}" \
-        "${wandb_mode}" \
-        "${archive_output}" \
-        "${matched_logs}" \
-        "${command_log}" \
-        "${torch_logs}" \
-        "${torch_trace}" \
-        "${omp_num_threads}" \
-        "${mkl_num_threads}" \
-        "${openblas_num_threads}" \
-        "${numexpr_num_threads}" \
-        "${ngpu}" \
-        "${iterations}" \
-        "${train_batch_tokens}" \
-        "${train_seq_len}" \
-        "${val_loss_every}" \
-        "${train_log_every}" \
-        "${val_batch_size}" \
-        "${max_wallclock_seconds}" \
-        "${compile}" \
-        "${compile_strategy}" \
-        "${weight_decay}" \
-        "${gpt_naive_run_id}" \
-        "${hgdn_config}" \
-        "${hgdn_kernel_config}" \
-        "${hgdn_run_id}" \
-        "${attn_run_id}" \
-        "${naive_reference_name}" \
-        "${naive_reference_roundtrip_bpb}" \
-        "${naive_reference_stop_bpb}" <<'PY'
-from pathlib import Path
-import json
-import sys
-
-bundle_dir = Path(sys.argv[1])
-run_prefix_base = sys.argv[2]
-wandb_project = sys.argv[3]
-wandb_mode = sys.argv[4]
-archive_output = sys.argv[5]
-matched_logs = bool(int(sys.argv[6]))
-command_log = sys.argv[7]
-torch_logs = sys.argv[8]
-torch_trace = sys.argv[9]
-omp_num_threads = int(sys.argv[10])
-mkl_num_threads = int(sys.argv[11])
-openblas_num_threads = int(sys.argv[12])
-numexpr_num_threads = int(sys.argv[13])
-ngpu = int(sys.argv[14])
-iterations = int(sys.argv[15])
-train_batch_tokens = int(sys.argv[16])
-train_seq_len = int(sys.argv[17])
-val_loss_every = int(sys.argv[18])
-train_log_every = int(sys.argv[19])
-val_batch_size = int(sys.argv[20])
-max_wallclock_seconds = float(sys.argv[21])
-compile_enabled = bool(int(sys.argv[22]))
-compile_strategy = sys.argv[23]
-weight_decay = float(sys.argv[24])
-gpt_naive_run_id = sys.argv[25]
-hgdn_config = sys.argv[26]
-hgdn_kernel_config = sys.argv[27]
-hgdn_run_id = sys.argv[28]
-attn_run_id = sys.argv[29]
-naive_reference_name = sys.argv[30]
-naive_reference_roundtrip_bpb = float(sys.argv[31])
-naive_reference_stop_bpb = float(sys.argv[32])
-
-manifest = {
-    "run_prefix_base": run_prefix_base,
-    "wandb_project": wandb_project,
-    "wandb_mode": wandb_mode,
-    "archive_output": archive_output,
-    "command_log": command_log,
-    "matched_logs": matched_logs,
-    "contract": {
-        "ngpu": ngpu,
-        "iterations": iterations,
-        "train_batch_tokens": train_batch_tokens,
-        "train_seq_len": train_seq_len,
-        "val_loss_every": val_loss_every,
-        "train_log_every": train_log_every,
-        "val_batch_size": val_batch_size,
-        "max_wallclock_seconds": max_wallclock_seconds,
-        "compile": compile_enabled,
-        "compile_strategy": compile_strategy,
-        "weight_decay": weight_decay,
-        "torch_logs": torch_logs or None,
-        "torch_trace": torch_trace or None,
-        "omp_num_threads": omp_num_threads,
-        "mkl_num_threads": mkl_num_threads,
-        "openblas_num_threads": openblas_num_threads,
-        "numexpr_num_threads": numexpr_num_threads,
-    },
-    "reference_record": {
-        "name": naive_reference_name,
-        "stop_step_bpb": naive_reference_stop_bpb,
-        "roundtrip_bpb": naive_reference_roundtrip_bpb,
-    },
-    "runs": [
-        {
-            "label": "exact repo naive baseline on naive-baseline contract",
-            "trainer": "train_gpt.py",
-            "mode": "direct",
-            "run_id": gpt_naive_run_id,
-            "num_layers": 9,
-            "model_dim": 512,
-            "num_heads": 8,
-            "num_kv_heads": 4,
-            "mlp_mult": 2,
-        },
-        {
-            "label": "HGDN finalist on naive-baseline contract",
-            "trainer": "train_gpt_hybrid.py",
-            "mode": "single",
-            "run_id": hgdn_run_id,
-            "config": hgdn_config,
-            "kernel_config": hgdn_kernel_config,
-        },
-        {
-            "label": "attention-only control on naive-baseline contract",
-            "trainer": "train_gpt_hybrid.py",
-            "mode": "depth",
-            "run_id": attn_run_id,
-            "num_layers": 9,
-            "model_dim": 512,
-            "num_heads": 8,
-            "num_kv_heads": 4,
-            "gdn_ratio": 0,
-            "mlp_mult": 2,
-        },
-    ],
-}
-(bundle_dir / "bundle_manifest.json").write_text(
-    json.dumps(manifest, indent=2, sort_keys=True) + "\n",
-    encoding="utf-8",
-)
-PY
+    "${python_bin}" scripts/hgdn_helper_cli.py write-h100-naive-contract-manifest \
+        --output "${bundle_stage_dir}/bundle_manifest.json" \
+        --run-prefix-base "${run_prefix_base}" \
+        --wandb-project "${wandb_project}" \
+        --wandb-mode "${wandb_mode}" \
+        --archive-output "${archive_output}" \
+        --matched-logs "${matched_logs}" \
+        --command-log "${command_log}" \
+        --torch-logs "${torch_logs}" \
+        --torch-trace "${torch_trace}" \
+        --omp-num-threads "${omp_num_threads}" \
+        --mkl-num-threads "${mkl_num_threads}" \
+        --openblas-num-threads "${openblas_num_threads}" \
+        --numexpr-num-threads "${numexpr_num_threads}" \
+        --ngpu "${ngpu}" \
+        --iterations "${iterations}" \
+        --train-batch-tokens "${train_batch_tokens}" \
+        --train-seq-len "${train_seq_len}" \
+        --val-loss-every "${val_loss_every}" \
+        --train-log-every "${train_log_every}" \
+        --val-batch-size "${val_batch_size}" \
+        --max-wallclock-seconds "${max_wallclock_seconds}" \
+        --compile-enabled "${compile}" \
+        --compile-strategy "${compile_strategy}" \
+        --weight-decay "${weight_decay}" \
+        --gpt-naive-run-id "${gpt_naive_run_id}" \
+        --hgdn-config "${hgdn_config}" \
+        --hgdn-kernel-config "${hgdn_kernel_config}" \
+        --hgdn-run-id "${hgdn_run_id}" \
+        --attn-run-id "${attn_run_id}" \
+        --naive-reference-name "${naive_reference_name}" \
+        --naive-reference-roundtrip-bpb "${naive_reference_roundtrip_bpb}" \
+        --naive-reference-stop-bpb "${naive_reference_stop_bpb}"
 
     hgdn_create_7z_archive "${python_bin}" "${archive_output}" "${bundle_stage_dir}"
     echo "bundle_archive=${archive_output}"

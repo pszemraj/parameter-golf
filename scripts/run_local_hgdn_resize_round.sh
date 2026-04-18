@@ -93,18 +93,7 @@ resolved_run_ids=()
 load_config_env() {
     local config_path="$1"
     mapfile -t config_env < <(
-        "${python_bin}" - "${config_path}" <<'PY'
-from pathlib import Path
-import sys
-import tomllib
-
-path = Path(sys.argv[1])
-data = tomllib.loads(path.read_text(encoding="utf-8"))
-for key, value in data.get("env", {}).items():
-    if isinstance(value, bool):
-        value = "1" if value else "0"
-    print(f"{key}={value}")
-PY
+        "${python_bin}" scripts/hgdn_helper_cli.py load-env --path "${config_path}"
     )
 }
 
@@ -242,77 +231,33 @@ build_bundle() {
         fi
     done
 
-    "${python_bin}" - \
-        "${bundle_stage_dir}" \
-        "${run_prefix_base}" \
-        "${wandb_project}" \
-        "${wandb_mode}" \
-        "${archive_output}" \
-        "${matched_logs}" \
-        "${torch_logs}" \
-        "${torch_trace}" \
-        "${torchinductor_max_autotune}" \
-        "${torchinductor_max_autotune_gemm}" \
-        "${iterations}" \
-        "${train_batch_tokens}" \
-        "${train_seq_len}" \
-        "${val_loss_every}" \
-        "${train_log_every}" \
-        "${val_batch_size}" \
-        "${compile}" \
-        "${compile_strategy}" \
-        "${resolved_run_ids[@]}" <<'PY'
-from pathlib import Path
-import json
-import sys
-
-bundle_dir = Path(sys.argv[1])
-run_prefix_base = sys.argv[2]
-wandb_project = sys.argv[3]
-wandb_mode = sys.argv[4]
-archive_output = sys.argv[5]
-matched_logs = bool(int(sys.argv[6]))
-torch_logs = sys.argv[7]
-torch_trace = sys.argv[8]
-torchinductor_max_autotune = int(sys.argv[9])
-torchinductor_max_autotune_gemm = int(sys.argv[10])
-iterations = int(sys.argv[11])
-train_batch_tokens = int(sys.argv[12])
-train_seq_len = int(sys.argv[13])
-val_loss_every = int(sys.argv[14])
-train_log_every = int(sys.argv[15])
-val_batch_size = int(sys.argv[16])
-compile_enabled = bool(int(sys.argv[17]))
-compile_strategy = sys.argv[18]
-run_ids = sys.argv[19:]
-
-manifest = {
-    "run_prefix_base": run_prefix_base,
-    "wandb_project": wandb_project,
-    "wandb_mode": wandb_mode,
-    "archive_output": archive_output,
-    "matched_logs": matched_logs,
-    "contract": {
-        "torch_logs": torch_logs or None,
-        "torch_trace": torch_trace or None,
-        "torchinductor_max_autotune": torchinductor_max_autotune,
-        "torchinductor_max_autotune_gemm": torchinductor_max_autotune_gemm,
-        "iterations": iterations,
-        "train_batch_tokens": train_batch_tokens,
-        "train_seq_len": train_seq_len,
-        "val_loss_every": val_loss_every,
-        "train_log_every": train_log_every,
-        "val_batch_size": val_batch_size,
-        "compile": compile_enabled,
-        "compile_strategy": compile_strategy,
-    },
-    "run_ids": run_ids,
-}
-(bundle_dir / "bundle_manifest.json").write_text(
-    json.dumps(manifest, indent=2, sort_keys=True) + "\n",
-    encoding="utf-8",
-)
-PY
+    local -a local_resize_manifest_cmd
+    local_resize_manifest_cmd=(
+        "${python_bin}" scripts/hgdn_helper_cli.py write-local-resize-manifest
+        --output "${bundle_stage_dir}/bundle_manifest.json"
+        --run-prefix-base "${run_prefix_base}"
+        --wandb-project "${wandb_project}"
+        --wandb-mode "${wandb_mode}"
+        --archive-output "${archive_output}"
+        --matched-logs "${matched_logs}"
+        --torch-logs "${torch_logs}"
+        --torch-trace "${torch_trace}"
+        --torchinductor-max-autotune "${torchinductor_max_autotune}"
+        --torchinductor-max-autotune-gemm "${torchinductor_max_autotune_gemm}"
+        --iterations "${iterations}"
+        --train-batch-tokens "${train_batch_tokens}"
+        --train-seq-len "${train_seq_len}"
+        --val-loss-every "${val_loss_every}"
+        --train-log-every "${train_log_every}"
+        --val-batch-size "${val_batch_size}"
+        --compile-enabled "${compile}"
+        --compile-strategy "${compile_strategy}"
+    )
+    local run_id
+    for run_id in "${resolved_run_ids[@]}"; do
+        local_resize_manifest_cmd+=(--run-id "${run_id}")
+    done
+    "${local_resize_manifest_cmd[@]}"
 
     hgdn_create_7z_archive "${python_bin}" "${archive_output}" "${bundle_stage_dir}"
     echo "bundle_archive=${archive_output}"

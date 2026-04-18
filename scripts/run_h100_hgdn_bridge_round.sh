@@ -62,33 +62,7 @@ esac
 
 load_config_env() {
     mapfile -t config_env < <(
-        "${python_bin}" - "$@" <<'PY'
-from pathlib import Path
-import sys
-import tomllib
-
-
-def load_env(path: Path) -> dict[str, str]:
-    data = tomllib.loads(path.read_text(encoding="utf-8"))
-    alias = data.get("alias")
-    if alias is not None:
-        return load_env((path.parent / alias).resolve())
-    env = data.get("env", data)
-    merged = {}
-    for key, value in env.items():
-        if isinstance(value, bool):
-            value = "1" if value else "0"
-        merged[str(key)] = str(value)
-    return merged
-
-
-merged: dict[str, str] = {}
-for raw_path in sys.argv[1:]:
-    merged.update(load_env(Path(raw_path)))
-
-for key, value in merged.items():
-    print(f"{key}={value}")
-PY
+        "${python_bin}" scripts/hgdn_helper_cli.py load-env --alias-aware --path "$@"
     )
 }
 
@@ -296,114 +270,35 @@ build_bundle() {
         fi
     done
 
-    "${python_bin}" - \
-        "${bundle_stage_dir}" \
-        "${run_prefix_base}" \
-        "${wandb_project}" \
-        "${wandb_mode}" \
-        "${archive_output}" \
-        "${matched_logs}" \
-        "${command_log}" \
-        "${torch_logs}" \
-        "${torch_trace}" \
-        "${omp_num_threads}" \
-        "${mkl_num_threads}" \
-        "${openblas_num_threads}" \
-        "${numexpr_num_threads}" \
-        "${ngpu}" \
-        "${iterations}" \
-        "${train_batch_tokens}" \
-        "${train_seq_len}" \
-        "${val_loss_every}" \
-        "${train_log_every}" \
-        "${val_batch_size}" \
-        "${max_wallclock_seconds}" \
-        "${compile}" \
-        "${compile_strategy}" \
-        "${depth_mlp_mult}" \
-        "${hgdn_config}" \
-        "${hgdn_kernel_config}" \
-        "${hgdn_run_id}" \
-        "${attn_run_id}" <<'PY'
-from pathlib import Path
-import json
-import sys
-
-bundle_dir = Path(sys.argv[1])
-run_prefix_base = sys.argv[2]
-wandb_project = sys.argv[3]
-wandb_mode = sys.argv[4]
-archive_output = sys.argv[5]
-matched_logs = bool(int(sys.argv[6]))
-command_log = sys.argv[7]
-torch_logs = sys.argv[8]
-torch_trace = sys.argv[9]
-omp_num_threads = int(sys.argv[10])
-mkl_num_threads = int(sys.argv[11])
-openblas_num_threads = int(sys.argv[12])
-numexpr_num_threads = int(sys.argv[13])
-ngpu = int(sys.argv[14])
-iterations = int(sys.argv[15])
-train_batch_tokens = int(sys.argv[16])
-train_seq_len = int(sys.argv[17])
-val_loss_every = int(sys.argv[18])
-train_log_every = int(sys.argv[19])
-val_batch_size = int(sys.argv[20])
-max_wallclock_seconds = float(sys.argv[21])
-compile_enabled = bool(int(sys.argv[22]))
-compile_strategy = sys.argv[23]
-depth_mlp_mult = float(sys.argv[24])
-hgdn_config = sys.argv[25]
-hgdn_kernel_config = sys.argv[26]
-hgdn_run_id = sys.argv[27]
-attn_run_id = sys.argv[28]
-
-manifest = {
-    "run_prefix_base": run_prefix_base,
-    "wandb_project": wandb_project,
-    "wandb_mode": wandb_mode,
-    "archive_output": archive_output,
-    "command_log": command_log,
-    "matched_logs": matched_logs,
-    "contract": {
-        "ngpu": ngpu,
-        "iterations": iterations,
-        "train_batch_tokens": train_batch_tokens,
-        "train_seq_len": train_seq_len,
-        "val_loss_every": val_loss_every,
-        "train_log_every": train_log_every,
-        "val_batch_size": val_batch_size,
-        "max_wallclock_seconds": max_wallclock_seconds,
-        "compile": compile_enabled,
-        "compile_strategy": compile_strategy,
-        "torch_logs": torch_logs or None,
-        "torch_trace": torch_trace or None,
-        "omp_num_threads": omp_num_threads,
-        "mkl_num_threads": mkl_num_threads,
-        "openblas_num_threads": openblas_num_threads,
-        "numexpr_num_threads": numexpr_num_threads,
-    },
-    "runs": [
-        {
-            "label": "HGDN finalist",
-            "mode": "single",
-            "run_id": hgdn_run_id,
-            "config": hgdn_config,
-            "kernel_config": hgdn_kernel_config,
-        },
-        {
-            "label": "attention-only baseline",
-            "mode": "depth",
-            "run_id": attn_run_id,
-            "mlp_mult": depth_mlp_mult,
-        },
-    ],
-}
-(bundle_dir / "bundle_manifest.json").write_text(
-    json.dumps(manifest, indent=2, sort_keys=True) + "\n",
-    encoding="utf-8",
-)
-PY
+    "${python_bin}" scripts/hgdn_helper_cli.py write-h100-bridge-manifest \
+        --output "${bundle_stage_dir}/bundle_manifest.json" \
+        --run-prefix-base "${run_prefix_base}" \
+        --wandb-project "${wandb_project}" \
+        --wandb-mode "${wandb_mode}" \
+        --archive-output "${archive_output}" \
+        --matched-logs "${matched_logs}" \
+        --command-log "${command_log}" \
+        --torch-logs "${torch_logs}" \
+        --torch-trace "${torch_trace}" \
+        --omp-num-threads "${omp_num_threads}" \
+        --mkl-num-threads "${mkl_num_threads}" \
+        --openblas-num-threads "${openblas_num_threads}" \
+        --numexpr-num-threads "${numexpr_num_threads}" \
+        --ngpu "${ngpu}" \
+        --iterations "${iterations}" \
+        --train-batch-tokens "${train_batch_tokens}" \
+        --train-seq-len "${train_seq_len}" \
+        --val-loss-every "${val_loss_every}" \
+        --train-log-every "${train_log_every}" \
+        --val-batch-size "${val_batch_size}" \
+        --max-wallclock-seconds "${max_wallclock_seconds}" \
+        --compile-enabled "${compile}" \
+        --compile-strategy "${compile_strategy}" \
+        --depth-mlp-mult "${depth_mlp_mult}" \
+        --hgdn-config "${hgdn_config}" \
+        --hgdn-kernel-config "${hgdn_kernel_config}" \
+        --hgdn-run-id "${hgdn_run_id}" \
+        --attn-run-id "${attn_run_id}"
 
     hgdn_create_7z_archive "${python_bin}" "${archive_output}" "${bundle_stage_dir}"
     echo "bundle_archive=${archive_output}"

@@ -269,105 +269,45 @@ build_bundle() {
         done
     done
 
-    "${python_bin}" - \
-        "${bundle_stage_dir}" \
-        "${run_prefix_base}" \
-        "${compare_reference}" \
-        "${compare_reference_entity}" \
-        "${compare_reference_project:-${wandb_project}}" \
-        "${archive_output}" \
-        "${matched_logs}" \
-        "${torch_logs}" \
-        "${torch_trace}" \
-        "${command_log}" \
-        "${fixed2k_iterations}" \
-        "${fixed2k_train_batch_tokens_override}" \
-        "${fixed2k_seq_len}" \
-        "${fixed2k_val_loss_every}" \
-        "${fixed2k_train_log_every}" \
-        "${configs[*]}" \
-        "$(IFS='|'; echo "${labels[*]}")" \
-        "${batch_tokens[*]}" \
-        "${grad_accum_steps_matrix[*]}" \
-        "${run_prefixes[@]}" <<'PY'
-import json
-import os
-import sys
-from pathlib import Path
-
-bundle_dir = Path(sys.argv[1])
-run_prefix_base = sys.argv[2]
-compare_reference = sys.argv[3]
-compare_reference_entity = sys.argv[4]
-compare_reference_project = sys.argv[5]
-archive_output = sys.argv[6]
-matched_logs = bool(int(sys.argv[7]))
-torch_logs = sys.argv[8]
-torch_trace = sys.argv[9]
-command_log = sys.argv[10]
-fixed2k_iterations = int(sys.argv[11])
-fixed2k_train_batch_tokens_override = sys.argv[12]
-fixed2k_seq_len = int(sys.argv[13])
-fixed2k_val_loss_every = int(sys.argv[14])
-fixed2k_train_log_every = int(sys.argv[15])
-configs = sys.argv[16].split()
-labels = sys.argv[17].split("|") if "|" in sys.argv[17] else sys.argv[17].split()
-batch_tokens = [int(value) for value in sys.argv[18].split()]
-grad_accum_steps_matrix = [int(value) for value in sys.argv[19].split()]
-run_prefixes = sys.argv[20:]
-
-plan = []
-for prefix, config, label, train_batch_tokens, grad_accum_steps in zip(
-    run_prefixes, configs, labels, batch_tokens, grad_accum_steps_matrix, strict=True
-):
-    plan.append(
-        {
-            "run_prefix": prefix,
-            "config": config,
-            "label": label,
-            "train_batch_tokens": train_batch_tokens,
-            "grad_accum_steps": grad_accum_steps,
-            "local_batch_size": train_batch_tokens
-            // (grad_accum_steps * fixed2k_seq_len),
-        }
+    local -a resize_manifest_cmd
+    resize_manifest_cmd=(
+        "${python_bin}" scripts/hgdn_helper_cli.py write-h100-resize-manifest
+        --output "${bundle_stage_dir}/bundle_manifest.json"
+        --run-prefix-base "${run_prefix_base}"
+        --compare-reference "${compare_reference}"
+        --compare-reference-entity "${compare_reference_entity}"
+        --compare-reference-project "${compare_reference_project:-${wandb_project}}"
+        --archive-output "${archive_output}"
+        --matched-logs "${matched_logs}"
+        --torch-logs "${torch_logs}"
+        --torch-trace "${torch_trace}"
+        --command-log "${command_log}"
+        --fixed2k-iterations "${fixed2k_iterations}"
+        --fixed2k-seq-len "${fixed2k_seq_len}"
+        --fixed2k-val-loss-every "${fixed2k_val_loss_every}"
+        --fixed2k-train-log-every "${fixed2k_train_log_every}"
     )
-
-manifest = {
-    "run_prefix_base": run_prefix_base,
-    "run_prefixes": run_prefixes,
-    "configs": configs,
-    "labels": labels,
-    "plan": plan,
-    "compare_reference": compare_reference,
-    "compare_reference_entity": compare_reference_entity,
-    "compare_reference_project": compare_reference_project,
-    "archive_output": archive_output,
-    "command_log": command_log,
-    "matched_logs": matched_logs,
-    "torch_logs": torch_logs or None,
-    "torch_trace": torch_trace or None,
-    "contract": {
-        "fixed2k_iterations": fixed2k_iterations,
-        "train_batch_tokens_override": (
-            int(fixed2k_train_batch_tokens_override)
-            if fixed2k_train_batch_tokens_override
-            else None
-        ),
-        "fixed2k_seq_len": fixed2k_seq_len,
-        "fixed2k_val_loss_every": fixed2k_val_loss_every,
-        "fixed2k_train_log_every": fixed2k_train_log_every,
-        "grad_accum_steps_override": (
-            int(os.environ["GRAD_ACCUM_STEPS_OVERRIDE"])
-            if "GRAD_ACCUM_STEPS_OVERRIDE" in os.environ
-            else None
-        ),
-    },
-}
-(bundle_dir / "bundle_manifest.json").write_text(
-    json.dumps(manifest, indent=2, sort_keys=True) + "\n",
-    encoding="utf-8",
-)
-PY
+    if [[ -n "${fixed2k_train_batch_tokens_override}" ]]; then
+        resize_manifest_cmd+=(
+            --fixed2k-train-batch-tokens-override "${fixed2k_train_batch_tokens_override}"
+        )
+    fi
+    if [[ -n "${GRAD_ACCUM_STEPS_OVERRIDE:-}" ]]; then
+        resize_manifest_cmd+=(
+            --grad-accum-steps-override "${GRAD_ACCUM_STEPS_OVERRIDE}"
+        )
+    fi
+    local idx
+    for idx in "${!configs[@]}"; do
+        resize_manifest_cmd+=(
+            --config "${configs[idx]}"
+            --label "${labels[idx]}"
+            --batch-token "${batch_tokens[idx]}"
+            --grad-accum-steps "${grad_accum_steps_matrix[idx]}"
+            --run-prefix "${run_prefixes[idx]}"
+        )
+    done
+    "${resize_manifest_cmd[@]}"
 
     hgdn_create_7z_archive "${python_bin}" "${archive_output}" "${bundle_stage_dir}"
     echo "bundle_archive=${archive_output}"

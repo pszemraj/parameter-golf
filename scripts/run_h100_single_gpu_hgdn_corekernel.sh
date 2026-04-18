@@ -185,12 +185,7 @@ EOF
 
 python_has_module() {
     local module_name="${1:?module name required}"
-    "${python_cmd[@]}" - "${module_name}" <<'PY' >/dev/null 2>&1
-import importlib.util
-import sys
-
-raise SystemExit(0 if importlib.util.find_spec(sys.argv[1]) is not None else 1)
-PY
+    "${python_cmd[@]}" scripts/hgdn_helper_cli.py module-exists --module "${module_name}" >/dev/null 2>&1
 }
 
 ensure_python_module() {
@@ -209,18 +204,9 @@ create_7z_archive() {
     local source_path="${2:?source path required}"
     rm -f "${archive_path}"
     mkdir -p "$(dirname "${archive_path}")"
-    "${python_cmd[@]}" - "${archive_path}" "${source_path}" <<'PY'
-from pathlib import Path
-import sys
-
-import py7zr
-
-archive_output = Path(sys.argv[1])
-source_path = Path(sys.argv[2])
-
-with py7zr.SevenZipFile(archive_output, "w") as archive:
-    archive.writeall(source_path, arcname=source_path.name)
-PY
+    "${python_cmd[@]}" scripts/hgdn_helper_cli.py create-7z \
+        --archive-output "${archive_path}" \
+        --source-path "${source_path}"
 }
 
 json_escape() {
@@ -267,129 +253,33 @@ build_bundle() {
         return 0
     fi
 
-    "${python_cmd[@]}" - \
-        "${output_dir}" \
-        "${mode}" \
-        "${run_prefix}" \
-        "${trainer_run_id}" \
-        "${torch_arch_list}" \
-        "${rec_chunk_t}" \
-        "${timing_repeats}" \
-        "${default_launcher_mode}" \
-        "${default_compile_strategy}" \
-        "${cases_dir}" \
-        "${trainer_cache_dir}" \
-        "${archive_output}" \
-        "${commands_file}" \
-        "${metadata_file}" \
-        "${TORCH_LOGS:-graph_breaks,recompiles}" \
-        "${ITERATIONS:-5}" \
-        "${COMPILE_WARMUP_STEPS:-2}" \
-        "${TRAIN_SEQ_LEN:-2048}" \
-        "${TRAIN_BATCH_TOKENS:-524288}" \
-        "${VAL_LOSS_EVERY:-0}" \
-        "${TRAIN_LOG_EVERY:-1}" \
-        "${git_commit}" \
-        "${git_branch}" \
-        "${host_name}" \
-        "${timestamp_utc}" \
-        "${_hk_exit_status}" <<'PY'
-from __future__ import annotations
-
-import json
-import sys
-from pathlib import Path
-
-bundle_dir = Path(sys.argv[1])
-mode = sys.argv[2]
-run_prefix = sys.argv[3]
-trainer_run_id = sys.argv[4]
-torch_cuda_arch_list = sys.argv[5]
-rec_chunk_t = int(sys.argv[6])
-timing_repeats = int(sys.argv[7])
-launcher_mode = sys.argv[8]
-compile_strategy_default = sys.argv[9]
-cases_dir = sys.argv[10]
-trainer_cache_dir = sys.argv[11]
-archive_output = sys.argv[12]
-commands_file = Path(sys.argv[13]).name
-metadata_path = Path(sys.argv[14])
-metadata_file = metadata_path.name
-torch_logs = sys.argv[15]
-iterations = int(sys.argv[16])
-compile_warmup_steps = int(sys.argv[17])
-train_seq_len = int(sys.argv[18])
-train_batch_tokens = int(sys.argv[19])
-val_loss_every = int(sys.argv[20])
-train_log_every = int(sys.argv[21])
-git_commit = sys.argv[22]
-git_branch = sys.argv[23]
-host_name = sys.argv[24]
-timestamp_utc = sys.argv[25]
-exit_status = int(sys.argv[26])
-
-logs = sorted(
-    str(path.relative_to(bundle_dir))
-    for path in bundle_dir.rglob("*.log")
-    if path.is_file()
-)
-extension_status = None
-try:
-    from hgdn_megakernel import extension_status as get_extension_status
-
-    extension_status = get_extension_status()
-except Exception as exc:  # pragma: no cover - best-effort bundle metadata
-    extension_status = {"error": str(exc), "loaded": False}
-
-with metadata_path.open("a", encoding="utf-8") as fh:
-    fh.write(f"bundle_exit_status={exit_status}\n")
-    if extension_status is not None:
-        fh.write(
-            "extension_status_json="
-            + json.dumps(extension_status, sort_keys=True)
-            + "\n"
-        )
-
-manifest = {
-    "mode": mode,
-    "run_prefix": run_prefix,
-    "trainer_run_id": trainer_run_id,
-    "archive_output": archive_output,
-    "exit_status": exit_status,
-    "paths": {
-        "commands": commands_file,
-        "metadata": metadata_file,
-        "logs": logs,
-    },
-    "contract": {
-        "torch_cuda_arch_list": torch_cuda_arch_list,
-        "gdn_corekernel_rec_chunk_t": rec_chunk_t,
-        "hk_timing_repeats": timing_repeats,
-        "hk_trainer_launcher_mode": launcher_mode,
-        "compile_strategy_default": compile_strategy_default,
-        "hk_cases_dir": cases_dir,
-        "torchinductor_cache_dir": trainer_cache_dir,
-        "torch_logs": torch_logs or None,
-        "iterations": iterations,
-        "compile_warmup_steps": compile_warmup_steps,
-        "train_seq_len": train_seq_len,
-        "train_batch_tokens": train_batch_tokens,
-        "val_loss_every": val_loss_every,
-        "train_log_every": train_log_every,
-    },
-    "extension_status": extension_status,
-    "provenance": {
-        "git_commit": git_commit,
-        "git_branch": git_branch,
-        "host_name": host_name,
-        "timestamp_utc": timestamp_utc,
-    },
-}
-(bundle_dir / "bundle_manifest.json").write_text(
-    json.dumps(manifest, indent=2, sort_keys=True) + "\n",
-    encoding="utf-8",
-)
-PY
+    "${python_cmd[@]}" scripts/hgdn_helper_cli.py write-corekernel-bundle \
+        --bundle-dir "${output_dir}" \
+        --mode "${mode}" \
+        --run-prefix "${run_prefix}" \
+        --trainer-run-id "${trainer_run_id}" \
+        --torch-cuda-arch-list "${torch_arch_list}" \
+        --rec-chunk-t "${rec_chunk_t}" \
+        --timing-repeats "${timing_repeats}" \
+        --launcher-mode "${default_launcher_mode}" \
+        --compile-strategy-default "${default_compile_strategy}" \
+        --cases-dir "${cases_dir}" \
+        --trainer-cache-dir "${trainer_cache_dir}" \
+        --archive-output "${archive_output}" \
+        --commands-file "${commands_file}" \
+        --metadata-path "${metadata_file}" \
+        --torch-logs "${TORCH_LOGS:-graph_breaks,recompiles}" \
+        --iterations "${ITERATIONS:-5}" \
+        --compile-warmup-steps "${COMPILE_WARMUP_STEPS:-2}" \
+        --train-seq-len "${TRAIN_SEQ_LEN:-2048}" \
+        --train-batch-tokens "${TRAIN_BATCH_TOKENS:-524288}" \
+        --val-loss-every "${VAL_LOSS_EVERY:-0}" \
+        --train-log-every "${TRAIN_LOG_EVERY:-1}" \
+        --git-commit "${git_commit}" \
+        --git-branch "${git_branch}" \
+        --host-name "${host_name}" \
+        --timestamp-utc "${timestamp_utc}" \
+        --exit-status "${_hk_exit_status}"
 
     create_7z_archive "${archive_output}" "${output_dir}"
     echo
