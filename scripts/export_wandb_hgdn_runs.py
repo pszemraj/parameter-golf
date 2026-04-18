@@ -10,11 +10,9 @@ from typing import Any
 
 import wandb
 
-import sys
+from _repo_bootstrap import ensure_repo_root_on_sys_path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+REPO_ROOT = ensure_repo_root_on_sys_path()
 
 from hgdn_wandb_utils import (  # noqa: E402
     DEFAULT_PROJECT,

@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
 
 import torch
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+from _repo_bootstrap import ensure_repo_root_on_sys_path
+
+REPO_ROOT = ensure_repo_root_on_sys_path()
 
 from hgdn_runtime_utils import restore_low_dim_params_to_fp32  # noqa: E402
 from model import GatedDeltaNet, _HAS_FLA  # noqa: E402

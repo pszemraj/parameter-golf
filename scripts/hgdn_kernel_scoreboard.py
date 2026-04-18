@@ -19,14 +19,15 @@ import json
 import re
 import shutil
 import statistics
-import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from _repo_bootstrap import ensure_repo_root_on_sys_path
 
-from profiler_report import load_profile_report
+REPO_ROOT = ensure_repo_root_on_sys_path()
+
+from profiler_report import load_profile_report  # noqa: E402
 
 PERF_RE = re.compile(
     r"perf_summary ignore_steps:\d+ measured_steps:\d+ step_ms:([0-9.]+) tokens_per_s:([0-9.]+)"

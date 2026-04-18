@@ -8,16 +8,15 @@
 from __future__ import annotations
 
 import argparse
-import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import wandb
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+from _repo_bootstrap import ensure_repo_root_on_sys_path
+
+REPO_ROOT = ensure_repo_root_on_sys_path()
 
 from hgdn_wandb_utils import DEFAULT_PROJECT, flatten_config, matches  # noqa: E402
 from profiler_report import write_json, write_rows_csv  # noqa: E402
@@ -78,9 +77,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def fetch_exact_run(
-    api: Any, entity: str, project: str, run_name: str
-) -> Any | None:
+def fetch_exact_run(api: Any, entity: str, project: str, run_name: str) -> Any | None:
     """Fetch one exact-display-name W&B run from a project.
 
     :param Any api: W&B API client.

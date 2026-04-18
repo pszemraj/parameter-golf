@@ -8,15 +8,13 @@ Usage:
 from __future__ import annotations
 
 import os
-import sys
 from collections.abc import Callable
-from pathlib import Path
 
 import torch
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+from _repo_bootstrap import ensure_repo_root_on_sys_path
+
+REPO_ROOT = ensure_repo_root_on_sys_path()
 
 from hgdn_cuda import (  # noqa: E402
     extension_status,

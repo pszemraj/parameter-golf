@@ -16,7 +16,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-ROOT = Path.cwd()
+ROOT = Path(__file__).resolve().parents[1]
 MODEL = ROOT / "model.py"
 HGDN_UTILS = ROOT / "hgdn_runtime_utils.py"
 BINDING = ROOT / "hgdn_megakernel" / "hgdn_megakernel_binding.py"

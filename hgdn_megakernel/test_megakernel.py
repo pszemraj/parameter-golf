@@ -5,14 +5,13 @@ from __future__ import annotations
 import argparse
 import json
 import statistics
-import sys
 from pathlib import Path
 
 import torch
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+from _repo_bootstrap import ensure_repo_root_on_sys_path
+
+REPO_ROOT = ensure_repo_root_on_sys_path()
 
 from hgdn_megakernel import device_report, extension_status, hgdn_megakernel  # noqa: E402
 from hgdn_megakernel.generate_test_data import (  # noqa: E402

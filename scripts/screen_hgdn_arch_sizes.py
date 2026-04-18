@@ -12,7 +12,6 @@ import argparse
 import csv
 import io
 import json
-import sys
 import tomllib
 from functools import lru_cache
 from pathlib import Path
@@ -20,9 +19,9 @@ from typing import Any
 
 import torch
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+from _repo_bootstrap import ensure_repo_root_on_sys_path
+
+REPO_ROOT = ensure_repo_root_on_sys_path()
 
 from hgdn_runtime_utils import (  # noqa: E402
     restore_low_dim_params_to_fp32,
@@ -76,15 +75,12 @@ ALLOWED_CONFIG_KEYS = set(DEFAULT_MODEL_KWARGS) | {
 
 @lru_cache(maxsize=1)
 def load_project_bindings() -> tuple[Any, Any, Any]:
-    """Load repo-local modules after fixing `sys.path`.
+    """Load repo-local modules after bootstrapping repo imports.
 
     :return tuple[Any, Any, Any]: `HybridGPT`,
         `restore_low_dim_params_to_fp32`, and
         `serialize_quantized_state_dict_int8`.
     """
-
-    if str(REPO_ROOT) not in sys.path:
-        sys.path.insert(0, str(REPO_ROOT))
     from model import HybridGPT
 
     return (
