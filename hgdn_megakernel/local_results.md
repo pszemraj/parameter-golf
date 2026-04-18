@@ -1,5 +1,13 @@
 # HGDN Megakernel Local Results
 
+> Active-path note (`2026-04-18`): the early sections in this file are
+> archived full-block megakernel research history. The active mainline is the
+> HGDN core-kernel path in
+> [`../docs/HGDN_CORE_KERNEL_PLAN.md`](../docs/HGDN_CORE_KERNEL_PLAN.md) and
+> [`../scripts/run_h100_single_gpu_hgdn_corekernel.sh`](../scripts/run_h100_single_gpu_hgdn_corekernel.sh).
+> A later cleanup should physically split archived full-block notes from active
+> core-kernel notes; until then this file intentionally carries both.
+
 ## Environment
 
 - Date: 2026-04-16
@@ -899,7 +907,10 @@ New bounded `1xH100` helper for the active direction:
 - structured launcher equivalent:
   `python scripts/hgdn.py h100-corekernel compare100 --offline`
 - default fixed-step compare there is now:
-  - packed control
-  - core-kernel `rec_chunk_t=8`
+  - packed control with `GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=1`
+  - core-kernel with `GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=0` and
+    `GDN_COREKERNEL_REC_CHUNK_T=8`
+- the active core helper now prefers `GDN_COREKERNEL_REC_CHUNK_T` and still
+  accepts `GDN_MEGAKERNEL_REC_CHUNK_T` as a legacy fallback
 - the research full-block path can still be compared only by explicit candidate
   override in `HK_CANDIDATE_SPECS`

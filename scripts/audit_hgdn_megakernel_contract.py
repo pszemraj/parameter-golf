@@ -25,6 +25,7 @@ SETUP = ROOT / "setup_hgdn_megakernel.py"
 TRAINER = ROOT / "train_gpt_hybrid.py"
 TEST_HARNESS = ROOT / "hgdn_megakernel" / "test_megakernel.py"
 TEST_CORE_HARNESS = ROOT / "hgdn_megakernel" / "test_corekernel.py"
+CORE_HELPER = ROOT / "scripts" / "run_h100_single_gpu_hgdn_corekernel.sh"
 
 
 def read(path: Path) -> str:
@@ -61,6 +62,7 @@ def main() -> None:
     trainer = read(TRAINER)
     test_harness = read(TEST_HARNESS)
     test_core_harness = read(TEST_CORE_HARNESS)
+    core_helper = read(CORE_HELPER)
 
     failures = 0
 
@@ -322,6 +324,20 @@ def main() -> None:
         "megakernel path should accept a runtime rec_chunk_t bounded by the compiled REC_CHUNK_T max and preflight it in the trainer",
     )
 
+    core_chunk_alias = (
+        "def resolve_runtime_rec_chunk_t(" in binding
+        and "prefer_corekernel=True" in binding
+        and "GDN_COREKERNEL_REC_CHUNK_T" in binding
+        and "hgdn_resolve_runtime_rec_chunk_t" in trainer
+        and "GDN_COREKERNEL_REC_CHUNK_T" in trainer
+        and "GDN_COREKERNEL_REC_CHUNK_T" in core_helper
+    )
+    failures += not check(
+        "corekernel runtime chunk alias",
+        core_chunk_alias,
+        "core-kernel path should prefer GDN_COREKERNEL_REC_CHUNK_T while accepting the legacy megakernel fallback",
+    )
+
     tiled_dot_helper = all(
         token in cuda
         for token in (
@@ -451,6 +467,18 @@ def main() -> None:
         "megakernel compile integration",
         compile_guard,
         "prepare_hybrid_compile should leave owned HGDN CUDA-kernel blocks compile-eligible instead of forcing eager disable",
+    )
+
+    honest_core_compare_helper = bool(
+        re.search(
+            r"default_compare100_candidate_specs=.*packed_control:GDN_USE_CUDA_COREKERNEL=0,GDN_USE_CUDA_MEGAKERNEL=0,GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=1;core_rc8:GDN_USE_CUDA_COREKERNEL=1,GDN_USE_CUDA_MEGAKERNEL=0,GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=0,GDN_COREKERNEL_REC_CHUNK_T=8",
+            core_helper,
+        )
+    )
+    failures += not check(
+        "corekernel compare100 control contract",
+        honest_core_compare_helper,
+        "core-kernel compare helper should default to the live packed control and the preferred core chunk knob",
     )
 
     medium_parity = all(

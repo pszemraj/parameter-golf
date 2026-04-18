@@ -146,6 +146,18 @@ cleanly, stop and keep the packed winner path as the mainline.
   - the real keep/kill measurement is the new bounded `1xH100` `compare100`
     helper below
 
+## Contract hygiene
+
+- The active H100 core helper should default to the live packed control, which
+  means `GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=1` for `packed_control`.
+- The active core path should prefer `GDN_COREKERNEL_REC_CHUNK_T`; the legacy
+  `GDN_MEGAKERNEL_REC_CHUNK_T` name remains a fallback until the archived
+  full-block docs and helpers are physically split out.
+- Follow-up cleanup, after the first honest H100 compare:
+  - physically split archived full-block notes from active core-kernel notes in
+    `hgdn_megakernel/local_results.md` and
+    `hgdn_megakernel/h100_resource_report.md`
+
 ## Immediate implementation order
 
 1. run one bounded `1xH100` compile/parity smoke through the new helper
