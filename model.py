@@ -35,7 +35,7 @@ from hgdn_cuda import (
     packed_qkv_frontend_compile_visible,
     packed_qkv_split_l2norm_compile_visible,
 )
-from hgdn_megakernel import run_core_from_gated_delta_net, run_from_gated_delta_net
+from hgdn_megakernel import run_from_gated_delta_net
 
 _HAS_FLA = HAS_FLA_GATED_DELTA_RULE
 
@@ -1222,6 +1222,8 @@ class GatedDeltaNet(nn.Module):
         self.dt_bias = nn.Parameter(torch.zeros(n_heads))
 
         # Short causal convolutions
+        self.conv_size = int(conv_size)
+        self.corekernel_rec_chunk_t = 8
         if self.use_packed_qkv_conv:
             self.qkv_conv = PackedCausalConv1d(
                 dims=(total_qk, total_qk, total_v),
@@ -1600,12 +1602,21 @@ class GatedDeltaNet(nn.Module):
                 with profile_range("gdn.output_gate_proj"):
                     g_out = self.w_g(x).view(B, T, H, Dv)
                 with profile_range("gdn.corekernel"):
-                    z = run_core_from_gated_delta_net(
-                        self,
+                    conv_w = self.qkv_conv.conv.weight.flatten(1)
+                    z, *_saved = torch.ops.hgdn_corekernel_v1.run(
                         qkv,
                         g_pre,
                         beta_pre,
                         g_out,
+                        conv_w,
+                        self.A_log,
+                        self.dt_bias,
+                        int(self.n_heads),
+                        int(self.head_k_dim),
+                        int(self.head_v_dim),
+                        int(self.conv_size),
+                        int(self.corekernel_rec_chunk_t),
+                        bool(self.allow_neg_eigval),
                     )
                 with profile_range("gdn.output_proj"):
                     return self.w_out(z.reshape(B, T, -1))

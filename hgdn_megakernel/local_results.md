@@ -914,3 +914,46 @@ New bounded `1xH100` helper for the active direction:
   accepts `GDN_MEGAKERNEL_REC_CHUNK_T` as a legacy fallback
 - the research full-block path can still be compared only by explicit candidate
   override in `HK_CANDIDATE_SPECS`
+
+## Core-kernel compile-plumbing cleanup (`2026-04-18`)
+
+The first `compare100` core-kernel H100 run after the boundary pivot was useful,
+but not fully fair. The kernel boundary was correct; the compile plumbing
+around it was not.
+
+Problems fixed at current HEAD:
+
+- the `1xH100` helper now defaults to `HK_TRAINER_LAUNCHER_MODE=plain` instead
+  of launching `torch.distributed.run --nproc_per_node=1`
+- the helper now defaults to `COMPILE_STRATEGY=selective` for the core-kernel
+  trainer path
+- `GatedDeltaNet.forward` now calls `torch.ops.hgdn_corekernel_v1.run(...)`
+  directly instead of routing the traced hot path through
+  `run_core_from_gated_delta_net(...)`
+- trainer preflight resolves `corekernel_rec_chunk_t` once, stores it on the
+  built GDN modules, and `prepare_hybrid_compile()` now compiles owned GDN
+  blocks separately
+- distributed runs now skip top-level compile before DDP wrapping; the top
+  wrapper is compiled only after DDP when that mode is explicitly requested
+
+Local validation after those fixes on `sm_89`:
+
+- static audit passes
+- helper dry-run now renders:
+  - plain Python trainer launch
+  - `COMPILE_STRATEGY=selective`
+  - honest packed control
+- tiny compiled trainer smoke passed with:
+  - `GDN_USE_CUDA_COREKERNEL=1`
+  - `COMPILE_STRATEGY=selective`
+  - `TRAIN_SEQ_LEN=128`
+  - `TRAIN_BATCH_TOKENS=8192`
+  - `ITERATIONS=1`
+  - `compile_plan: ... gdn_blocks_compiled:7 ... model_compiled:0`
+  - `step_avg:504.43ms`
+
+Implication:
+
+- rerun the bounded `1xH100` core-kernel compare after this checkpoint
+- treat older core-kernel compare logs as pre-cleanup evidence, not the final
+  fair comparison

@@ -153,6 +153,18 @@ cleanly, stop and keep the packed winner path as the mainline.
 - The active core path should prefer `GDN_COREKERNEL_REC_CHUNK_T`; the legacy
   `GDN_MEGAKERNEL_REC_CHUNK_T` name remains a fallback until the archived
   full-block docs and helpers are physically split out.
+- The active `1xH100` core helper should default to:
+  - `HK_TRAINER_LAUNCHER_MODE=plain`
+  - `COMPILE_STRATEGY=selective`
+  so the validation path does not add single-rank DDP wrapper noise or an
+  unnecessary top-level compile shell.
+- The active `GatedDeltaNet.forward` core path should call
+  `torch.ops.hgdn_corekernel_v1.run(...)` directly. Runtime cadence resolution,
+  compatibility checks, and tensor-shape-to-Python-int conversions do not
+  belong in the traced hot path.
+- Trainer preflight should pin `corekernel_rec_chunk_t` onto the built GDN
+  modules once, and owned GDN blocks should be compiled as submodules rather
+  than merely "left enabled".
 - Follow-up cleanup, after the first honest H100 compare:
   - physically split archived full-block notes from active core-kernel notes in
     `hgdn_megakernel/local_results.md` and

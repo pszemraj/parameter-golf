@@ -85,9 +85,12 @@ Environment overrides:
   RUN_PREFIX                Base prefix for trainer smoke run ids.
   RUN_ID                    Explicit trainer smoke run id.
   TORCH_LOGS                Defaults to graph_breaks,recompiles.
+  HK_TRAINER_LAUNCHER_MODE  Trainer launcher mode: `plain` or `torchrun`,
+                            defaults to `plain`.
   TORCHINDUCTOR_CACHE_DIR   Defaults to /tmp/<run-id>_inductor.
   ITERATIONS                Defaults to 5 for trainer-smoke, 100 for compare100.
   COMPILE_WARMUP_STEPS      Defaults to 2 for trainer-smoke, 20 for compare100.
+  COMPILE_STRATEGY          Defaults to `selective` for this helper.
   TRAIN_LOG_EVERY           Defaults to 1 for trainer-smoke, 25 for compare100.
   MAX_WALLCLOCK_SECONDS     Defaults to 0 for compare100.
   USE_WANDB                 Defaults to 0.
@@ -101,6 +104,7 @@ Examples:
   TORCH_CUDA_ARCH_LIST=8.9 scripts/run_h100_single_gpu_hgdn_corekernel.sh parity
   PYTHON_BIN=python3 scripts/run_h100_single_gpu_hgdn_corekernel.sh all
   GDN_COREKERNEL_REC_CHUNK_T=4 scripts/run_h100_single_gpu_hgdn_corekernel.sh trainer-smoke
+  HK_TRAINER_LAUNCHER_MODE=torchrun scripts/run_h100_single_gpu_hgdn_corekernel.sh trainer-smoke
   HK_CANDIDATE_SPECS='packed_control:GDN_USE_CUDA_COREKERNEL=0,GDN_USE_CUDA_MEGAKERNEL=0,GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=1;core_rc4:GDN_USE_CUDA_COREKERNEL=1,GDN_USE_CUDA_MEGAKERNEL=0,GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=0,GDN_COREKERNEL_REC_CHUNK_T=4' scripts/run_h100_single_gpu_hgdn_corekernel.sh compare100
   HK_OUTPUT_DIR=/tmp/h100core_case HK_ARCHIVE_OUTPUT=/tmp/h100core_case.7z scripts/run_h100_single_gpu_hgdn_corekernel.sh compare100
   DRY_RUN=1 scripts/run_h100_single_gpu_hgdn_corekernel.sh compare100
@@ -129,6 +133,8 @@ python_cmd_rendered="$(printf '%q ' "${python_cmd[@]}")"
 torch_arch_list="${TORCH_CUDA_ARCH_LIST:-9.0}"
 rec_chunk_t="${GDN_COREKERNEL_REC_CHUNK_T:-${GDN_MEGAKERNEL_REC_CHUNK_T:-8}}"
 timing_repeats="${HK_TIMING_REPEATS:-3}"
+default_launcher_mode="${HK_TRAINER_LAUNCHER_MODE:-plain}"
+default_compile_strategy="${COMPILE_STRATEGY:-selective}"
 cases_dir="${HK_CASES_DIR:-hgdn_megakernel/cases}"
 run_stamp="$(date +%Y%m%d_%H%M%S)"
 run_prefix="${RUN_PREFIX:-h100core_${run_stamp}}"
@@ -164,6 +170,8 @@ trainer_run_id=${trainer_run_id}
 torch_cuda_arch_list=${torch_arch_list}
 gdn_corekernel_rec_chunk_t=${rec_chunk_t}
 hk_timing_repeats=${timing_repeats}
+hk_trainer_launcher_mode=${default_launcher_mode}
+compile_strategy_default=${default_compile_strategy}
 hk_cases_dir=${cases_dir}
 torchinductor_cache_dir=${trainer_cache_dir}
 hk_archive_output=${archive_output}
@@ -267,6 +275,8 @@ build_bundle() {
         "${torch_arch_list}" \
         "${rec_chunk_t}" \
         "${timing_repeats}" \
+        "${default_launcher_mode}" \
+        "${default_compile_strategy}" \
         "${cases_dir}" \
         "${trainer_cache_dir}" \
         "${archive_output}" \
@@ -297,24 +307,26 @@ trainer_run_id = sys.argv[4]
 torch_cuda_arch_list = sys.argv[5]
 rec_chunk_t = int(sys.argv[6])
 timing_repeats = int(sys.argv[7])
-cases_dir = sys.argv[8]
-trainer_cache_dir = sys.argv[9]
-archive_output = sys.argv[10]
-commands_file = Path(sys.argv[11]).name
-metadata_path = Path(sys.argv[12])
+launcher_mode = sys.argv[8]
+compile_strategy_default = sys.argv[9]
+cases_dir = sys.argv[10]
+trainer_cache_dir = sys.argv[11]
+archive_output = sys.argv[12]
+commands_file = Path(sys.argv[13]).name
+metadata_path = Path(sys.argv[14])
 metadata_file = metadata_path.name
-torch_logs = sys.argv[13]
-iterations = int(sys.argv[14])
-compile_warmup_steps = int(sys.argv[15])
-train_seq_len = int(sys.argv[16])
-train_batch_tokens = int(sys.argv[17])
-val_loss_every = int(sys.argv[18])
-train_log_every = int(sys.argv[19])
-git_commit = sys.argv[20]
-git_branch = sys.argv[21]
-host_name = sys.argv[22]
-timestamp_utc = sys.argv[23]
-exit_status = int(sys.argv[24])
+torch_logs = sys.argv[15]
+iterations = int(sys.argv[16])
+compile_warmup_steps = int(sys.argv[17])
+train_seq_len = int(sys.argv[18])
+train_batch_tokens = int(sys.argv[19])
+val_loss_every = int(sys.argv[20])
+train_log_every = int(sys.argv[21])
+git_commit = sys.argv[22]
+git_branch = sys.argv[23]
+host_name = sys.argv[24]
+timestamp_utc = sys.argv[25]
+exit_status = int(sys.argv[26])
 
 logs = sorted(
     str(path.relative_to(bundle_dir))
@@ -353,6 +365,8 @@ manifest = {
         "torch_cuda_arch_list": torch_cuda_arch_list,
         "gdn_corekernel_rec_chunk_t": rec_chunk_t,
         "hk_timing_repeats": timing_repeats,
+        "hk_trainer_launcher_mode": launcher_mode,
+        "compile_strategy_default": compile_strategy_default,
         "hk_cases_dir": cases_dir,
         "torchinductor_cache_dir": trainer_cache_dir,
         "torch_logs": torch_logs or None,
@@ -422,6 +436,10 @@ run_trainer_smoke() {
     local runtime_rec_chunk_t="${GDN_COREKERNEL_REC_CHUNK_T:-${GDN_MEGAKERNEL_REC_CHUNK_T:-${rec_chunk_t}}}"
     local max_wallclock="${MAX_WALLCLOCK_SECONDS:-0}"
     local packed_custom_backward="${GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD:-0}"
+    local launcher_mode="${HK_TRAINER_LAUNCHER_MODE:-plain}"
+    local compile_strategy="${COMPILE_STRATEGY:-selective}"
+    local -a train_env
+    local -a train_cmd
 
     for assignment in "${extra_env[@]}"; do
         case "${assignment}" in
@@ -446,50 +464,75 @@ run_trainer_smoke() {
             GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=*)
                 packed_custom_backward="${assignment#GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=}"
                 ;;
+            HK_TRAINER_LAUNCHER_MODE=*)
+                launcher_mode="${assignment#HK_TRAINER_LAUNCHER_MODE=}"
+                ;;
+            COMPILE_STRATEGY=*)
+                compile_strategy="${assignment#COMPILE_STRATEGY=}"
+                ;;
             MAX_WALLCLOCK_SECONDS=*)
                 max_wallclock="${assignment#MAX_WALLCLOCK_SECONDS=}"
                 ;;
         esac
     done
+    if [[ "${launcher_mode}" != "plain" && "${launcher_mode}" != "torchrun" ]]; then
+        echo "Unsupported HK_TRAINER_LAUNCHER_MODE=${launcher_mode}; expected plain or torchrun" >&2
+        return 2
+    fi
 
     echo
     echo "### HGDN trainer smoke"
-    echo "run_id=${run_id} arch_list=${torch_arch_list} core=${use_core} megakernel=${use_megakernel} rec_chunk_t=${runtime_rec_chunk_t} packed_custom_bwd=${packed_custom_backward}"
+    echo "run_id=${run_id} arch_list=${torch_arch_list} core=${use_core} megakernel=${use_megakernel} rec_chunk_t=${runtime_rec_chunk_t} packed_custom_bwd=${packed_custom_backward} launcher=${launcher_mode} compile_strategy=${compile_strategy}"
     echo "output_log=${logfile}"
-    run_cmd "${logfile}" env \
-        GDN_MEGAKERNEL_ALLOW_JIT_BUILD=0 \
-        TORCH_CUDA_ARCH_LIST="${torch_arch_list}" \
-        TORCHINDUCTOR_CACHE_DIR="${cache_dir}" \
-        TORCH_LOGS="${TORCH_LOGS:-graph_breaks,recompiles}" \
-        RUN_ID="${run_id}" \
-        USE_WANDB="${USE_WANDB:-0}" \
-        WANDB_MODE="${WANDB_MODE:-offline}" \
-        WANDB_WATCH="${WANDB_WATCH:-none}" \
-        GDN_USE_CUDA_COREKERNEL="${use_core}" \
-        GDN_USE_CUDA_MEGAKERNEL="${use_megakernel}" \
-        GDN_COREKERNEL_REC_CHUNK_T="${runtime_rec_chunk_t}" \
-        GDN_CONTROL_PROJ_FP32=0 \
-        GDN_USE_PACKED_QKV_CONV=1 \
-        GDN_USE_PACKED_QKV_PROJ=1 \
-        GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD="${packed_custom_backward}" \
-        GDN_CONV_OUTPUT_CONTIGUOUS=1 \
-        NUM_LAYERS="${NUM_LAYERS:-14}" \
-        MODEL_DIM="${MODEL_DIM:-384}" \
-        MLP_MULT="${MLP_MULT:-3.25}" \
-        GDN_RATIO="${GDN_RATIO:-1}" \
-        TRAIN_SEQ_LEN="${TRAIN_SEQ_LEN:-2048}" \
-        TRAIN_BATCH_TOKENS="${TRAIN_BATCH_TOKENS:-524288}" \
-        ITERATIONS="${ITERATIONS:-5}" \
-        MAX_WALLCLOCK_SECONDS="${max_wallclock}" \
-        VAL_LOSS_EVERY="${VAL_LOSS_EVERY:-0}" \
-        TRAIN_LOG_EVERY="${TRAIN_LOG_EVERY:-1}" \
-        PERF_SKIP_FINAL_EVAL="${PERF_SKIP_FINAL_EVAL:-1}" \
-        COMPILE="${COMPILE:-1}" \
-        COMPILE_STRATEGY="${COMPILE_STRATEGY:-hybrid}" \
-        COMPILE_WARMUP_STEPS="${COMPILE_WARMUP_STEPS:-2}" \
-        "${extra_env[@]}" \
-        "${python_cmd[@]}" -m torch.distributed.run --standalone --nproc_per_node=1 \
-        train_gpt_hybrid.py
+    train_env=(env)
+    if [[ "${launcher_mode}" == "plain" ]]; then
+        train_env+=(-u RANK -u WORLD_SIZE -u LOCAL_RANK -u MASTER_ADDR -u MASTER_PORT)
+    fi
+    train_env+=(
+        GDN_MEGAKERNEL_ALLOW_JIT_BUILD=0
+        TORCH_CUDA_ARCH_LIST="${torch_arch_list}"
+        TORCHINDUCTOR_CACHE_DIR="${cache_dir}"
+        TORCH_LOGS="${TORCH_LOGS:-graph_breaks,recompiles}"
+        RUN_ID="${run_id}"
+        USE_WANDB="${USE_WANDB:-0}"
+        WANDB_MODE="${WANDB_MODE:-offline}"
+        WANDB_WATCH="${WANDB_WATCH:-none}"
+        GDN_USE_CUDA_COREKERNEL="${use_core}"
+        GDN_USE_CUDA_MEGAKERNEL="${use_megakernel}"
+        GDN_COREKERNEL_REC_CHUNK_T="${runtime_rec_chunk_t}"
+        GDN_CONTROL_PROJ_FP32=0
+        GDN_USE_PACKED_QKV_CONV=1
+        GDN_USE_PACKED_QKV_PROJ=1
+        GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD="${packed_custom_backward}"
+        GDN_CONV_OUTPUT_CONTIGUOUS=1
+        NUM_LAYERS="${NUM_LAYERS:-14}"
+        MODEL_DIM="${MODEL_DIM:-384}"
+        MLP_MULT="${MLP_MULT:-3.25}"
+        GDN_RATIO="${GDN_RATIO:-1}"
+        TRAIN_SEQ_LEN="${TRAIN_SEQ_LEN:-2048}"
+        TRAIN_BATCH_TOKENS="${TRAIN_BATCH_TOKENS:-524288}"
+        ITERATIONS="${ITERATIONS:-5}"
+        MAX_WALLCLOCK_SECONDS="${max_wallclock}"
+        VAL_LOSS_EVERY="${VAL_LOSS_EVERY:-0}"
+        TRAIN_LOG_EVERY="${TRAIN_LOG_EVERY:-1}"
+        PERF_SKIP_FINAL_EVAL="${PERF_SKIP_FINAL_EVAL:-1}"
+        COMPILE="${COMPILE:-1}"
+        COMPILE_STRATEGY="${compile_strategy}"
+        COMPILE_WARMUP_STEPS="${COMPILE_WARMUP_STEPS:-2}"
+    )
+    if [[ "${launcher_mode}" == "plain" ]]; then
+        train_cmd=("${python_cmd[@]}" train_gpt_hybrid.py)
+    else
+        train_cmd=(
+            "${python_cmd[@]}"
+            -m
+            torch.distributed.run
+            --standalone
+            --nproc_per_node=1
+            train_gpt_hybrid.py
+        )
+    fi
+    run_cmd "${logfile}" "${train_env[@]}" "${extra_env[@]}" "${train_cmd[@]}"
 }
 
 run_compare100() {

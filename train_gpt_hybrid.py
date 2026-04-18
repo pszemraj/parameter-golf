@@ -990,6 +990,7 @@ def main() -> None:
         raise RuntimeError(
             "GDN_USE_CUDA_COREKERNEL=1 is incompatible with GDN_USE_CUDA_MEGAKERNEL=1."
         )
+    owned_runtime_rec_chunk_t: int | None = None
     if args.gdn_use_cuda_corekernel or args.gdn_use_cuda_megakernel:
         megakernel_status = hgdn_megakernel_extension_status()
         mode_name = "corekernel" if args.gdn_use_cuda_corekernel else "megakernel"
@@ -1187,6 +1188,11 @@ def main() -> None:
     restore_low_dim_params_to_fp32(
         base_model, gdn_control_proj_fp32=args.gdn_control_proj_fp32
     )
+    if args.gdn_use_cuda_corekernel and owned_runtime_rec_chunk_t is not None:
+        for block in base_model.blocks:
+            gdn = getattr(block, "gdn", None)
+            if gdn is not None and bool(getattr(gdn, "use_cuda_corekernel", False)):
+                gdn.corekernel_rec_chunk_t = int(owned_runtime_rec_chunk_t)
     rotary_prewarm_count = 0
     if args.compile:
         rotary_prewarm_count = prewarm_rotary_caches(
@@ -1195,13 +1201,19 @@ def main() -> None:
             dtype=torch.bfloat16,
         )
     compiled_model, compile_stats = prepare_hybrid_compile(
-        base_model, enabled=args.compile, strategy=args.compile_strategy
+        base_model,
+        enabled=args.compile,
+        strategy=args.compile_strategy,
+        compile_top_level=not distributed,
     )
     model = (
         DDP(compiled_model, device_ids=[local_rank], broadcast_buffers=False)
         if distributed
         else compiled_model
     )
+    if distributed and args.compile and args.compile_strategy in {"model", "hybrid"}:
+        model = maybe_compile(model, enabled=True, dynamic=False, fullgraph=False)
+        compile_stats["model_compiled"] = 1
 
     n_params = sum(p.numel() for p in base_model.parameters())
     n_gdn = sum(1 for t in base_model.block_types if t == "gdn")
@@ -1214,6 +1226,7 @@ def main() -> None:
         "compile_plan:"
         f"strategy:{compile_stats['strategy']} "
         f"gdn_disabled:{compile_stats['gdn_disabled']} "
+        f"gdn_blocks_compiled:{compile_stats['gdn_blocks_compiled']} "
         f"gdn_corekernel_left_enabled:{compile_stats['gdn_corekernel_left_enabled']} "
         f"gdn_megakernel_left_enabled:{compile_stats['gdn_megakernel_left_enabled']} "
         f"gdn_mlps_compiled:{compile_stats['gdn_mlps_compiled']} "

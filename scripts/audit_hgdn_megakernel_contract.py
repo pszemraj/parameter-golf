@@ -147,7 +147,10 @@ def main() -> None:
             "g_pre = self.w_a(x)",
             "beta_pre = self.w_b(x)",
             "g_out = self.w_g(x).view(B, T, H, Dv)",
-            "z = run_core_from_gated_delta_net(",
+            "conv_w = self.qkv_conv.conv.weight.flatten(1)",
+            "torch.ops.hgdn_corekernel_v1.run(",
+            "int(self.conv_size)",
+            "int(self.corekernel_rec_chunk_t)",
             "return self.w_out(z.reshape(B, T, -1))",
         )
     )
@@ -458,15 +461,15 @@ def main() -> None:
     )
 
     compile_guard = bool(
-        re.search(
-            r"use_corekernel\s*=\s*bool\([\s\S]{0,200}use_cuda_corekernel[\s\S]{0,200}use_megakernel\s*=\s*bool\([\s\S]{0,200}use_cuda_megakernel[\s\S]{0,500}if not use_corekernel and not use_megakernel:[\s\S]{0,300}maybe_disable_compile[\s\S]{0,400}else:[\s\S]{0,300}gdn_(corekernel|megakernel)_left_enabled",
-            hgdn_utils,
-        )
+        "compile_top_level: bool = True" in hgdn_utils
+        and '"gdn_blocks_compiled": 0' in hgdn_utils
+        and "block.gdn = maybe_compile(" in hgdn_utils
+        and "gdn_blocks_compiled" in trainer
     )
     failures += not check(
         "megakernel compile integration",
         compile_guard,
-        "prepare_hybrid_compile should leave owned HGDN CUDA-kernel blocks compile-eligible instead of forcing eager disable",
+        "prepare_hybrid_compile should compile owned HGDN CUDA-kernel blocks separately and support top-level compile ordering",
     )
 
     honest_core_compare_helper = bool(
@@ -479,6 +482,19 @@ def main() -> None:
         "corekernel compare100 control contract",
         honest_core_compare_helper,
         "core-kernel compare helper should default to the live packed control and the preferred core chunk knob",
+    )
+
+    core_helper_launcher = (
+        'local launcher_mode="${HK_TRAINER_LAUNCHER_MODE:-plain}"' in core_helper
+        and 'COMPILE_STRATEGY="${compile_strategy}"' in core_helper
+        and "-u RANK -u WORLD_SIZE -u LOCAL_RANK -u MASTER_ADDR -u MASTER_PORT"
+        in core_helper
+        and '"${python_cmd[@]}" train_gpt_hybrid.py' in core_helper
+    )
+    failures += not check(
+        "corekernel 1x helper launcher contract",
+        core_helper_launcher,
+        "the 1x core-kernel helper should default to a plain single-process launcher and selective compile strategy",
     )
 
     medium_parity = all(

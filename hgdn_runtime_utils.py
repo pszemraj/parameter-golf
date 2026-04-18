@@ -264,13 +264,19 @@ def maybe_disable_compile(obj: Any, *, enabled: bool, reason: str | None = None)
 
 
 def prepare_hybrid_compile(
-    model: nn.Module, *, enabled: bool, strategy: str
+    model: nn.Module,
+    *,
+    enabled: bool,
+    strategy: str,
+    compile_top_level: bool = True,
 ) -> tuple[nn.Module, dict[str, int | str]]:
     """Apply selective compile boundaries for the hybrid stack.
 
     :param nn.Module model: Hybrid language model to prepare.
     :param bool enabled: Whether compilation is enabled.
     :param str strategy: One of `model`, `selective`, or `hybrid`.
+    :param bool compile_top_level: Whether to compile the top-level model object
+        in addition to selective submodules, defaults to True.
     :raises ValueError: If `strategy` is not recognized.
     :return tuple[nn.Module, dict[str, int | str]]: Prepared model and compile stats.
     """
@@ -279,6 +285,7 @@ def prepare_hybrid_compile(
         "gdn_disabled": 0,
         "gdn_corekernel_left_enabled": 0,
         "gdn_megakernel_left_enabled": 0,
+        "gdn_blocks_compiled": 0,
         "gdn_mlps_compiled": 0,
         "attn_blocks_compiled": 0,
         "model_compiled": 0,
@@ -305,6 +312,13 @@ def prepare_hybrid_compile(
                     )
                     compile_stats["gdn_disabled"] += 1
                 else:
+                    block.gdn = maybe_compile(
+                        block.gdn,
+                        enabled=True,
+                        dynamic=False,
+                        fullgraph=False,
+                    )
+                    compile_stats["gdn_blocks_compiled"] += 1
                     if use_corekernel:
                         compile_stats["gdn_corekernel_left_enabled"] += 1
                     if use_megakernel:
@@ -319,7 +333,7 @@ def prepare_hybrid_compile(
                 )
                 compile_stats["attn_blocks_compiled"] += 1
 
-    if strategy in {"model", "hybrid"}:
+    if strategy in {"model", "hybrid"} and compile_top_level:
         model = maybe_compile(model, enabled=True, dynamic=False, fullgraph=False)
         compile_stats["model_compiled"] = 1
 
