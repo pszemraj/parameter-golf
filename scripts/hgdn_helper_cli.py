@@ -15,6 +15,10 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
+from _repo_bootstrap import ensure_repo_root_on_sys_path
+
+ensure_repo_root_on_sys_path()
+
 
 def parse_bool_flag(value: str) -> bool:
     """Parse a shell-style boolean flag.
