@@ -168,6 +168,31 @@ Do not reopen the current post-conv front-end seam for more ownership or packing
 
 See [REDUNDANCY_AUDIT.md](REDUNDANCY_AUDIT.md) for the concrete code targets.
 
+## 8. Record the 2026-04-19 local runtime-cleanup checkpoint
+
+- Base commit before the cleanup pass: `f00e9b4a`.
+- Scope of the validated must-have cleanup:
+  - `train_gpt.py` and `train_gpt_hybrid.py` now use current-stream CUDA event
+    waits around timed boundaries instead of repeated device-wide
+    `torch.cuda.synchronize()` calls.
+  - `train_gpt_hybrid.py` now uses CUDA events for `PERF_TIMING` and final
+    roundtrip-eval timing on CUDA instead of host timers plus broad
+    synchronization.
+  - `model.py` now uses `match_reference_tensor(...)` on the hot HGDN/attention
+    path to avoid redundant `.to(...)` casts when the tensor already matches the
+    reference dtype/device.
+  - The temporary shared `_NoOpContext` optimization was reverted after it
+    caused a real Dynamo failure in a selective-compile hybrid smoke.
+    Use `nullcontext()` for disabled profile scopes on compiled paths unless a
+    future replacement is proven compile-safe.
+- Validation artifacts from this checkpoint:
+  - synthetic shards: `local-scratch/smoke_data/fineweb_train_000000.bin`,
+    `local-scratch/smoke_data/fineweb_val_000000.bin`
+  - baseline trainer smoke: `local-scratch/smoke_train_gpt.log`
+  - hybrid trainer smoke: `local-scratch/smoke_train_gpt_hybrid.log`
+- Keep this checkpoint as the minimum local proof before asking for another
+  H100 rerun on the packed path.
+
 ## Stop rules
 
 - The current post-conv front-end seam is closed after `h100k20`.

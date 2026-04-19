@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import os
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -64,23 +64,6 @@ _GDN_AUDIT_CALL_INDEX = 0
 _HAS_SPLIT_WITH_SIZES_COPY = hasattr(torch.ops.aten, "split_with_sizes_copy")
 
 
-class _NoOpContext(AbstractContextManager[None]):
-    """Shared no-op context manager for disabled profiling paths."""
-
-    def __enter__(self) -> None:
-        """Enter the no-op context."""
-
-        return None
-
-    def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
-        """Leave the no-op context without suppressing exceptions."""
-
-        return False
-
-
-_NO_OP_CONTEXT = _NoOpContext()
-
-
 def profile_range(name: str) -> AbstractContextManager[None]:
     """Return a profiling context manager when range capture is enabled.
 
@@ -89,7 +72,7 @@ def profile_range(name: str) -> AbstractContextManager[None]:
     """
     if _PROFILE_RANGES:
         return torch.autograd.profiler.record_function(name)
-    return _NO_OP_CONTEXT
+    return nullcontext()
 
 
 def _tensor_layout_summary(name: str, tensor: Tensor) -> str:
@@ -220,6 +203,19 @@ def l2_norm(x: Tensor, eps: float = 1e-6) -> Tensor:
     :return Tensor: Unit-normalized activations.
     """
     return F.normalize(x, p=2, dim=-1, eps=eps)
+
+
+def match_reference_tensor(tensor: Tensor, ref: Tensor) -> Tensor:
+    """Match a tensor to a reference tensor's device and dtype only when needed.
+
+    :param Tensor tensor: Source tensor to align.
+    :param Tensor ref: Reference tensor providing target device and dtype.
+    :return Tensor: `tensor` on the same device and dtype as `ref`.
+    """
+
+    if tensor.device == ref.device and tensor.dtype == ref.dtype:
+        return tensor
+    return tensor.to(device=ref.device, dtype=ref.dtype)
 
 
 class CastedLinear(nn.Linear):
@@ -1499,15 +1495,15 @@ class GatedDeltaNet(nn.Module):
                     # Keep the recurrence inputs on one activation dtype across PyTorch /
                     # platform variants. Some stacks promote F.normalize to fp32 here.
                     with profile_range("gdn.q_norm"):
-                        q = l2_norm(q.view(B, T, H, Dk)).to(dtype=x.dtype)
+                        q = match_reference_tensor(l2_norm(q.view(B, T, H, Dk)), x)
                     with profile_range("gdn.k_norm"):
-                        k = l2_norm(k.view(B, T, H, Dk)).to(dtype=x.dtype)
+                        k = match_reference_tensor(l2_norm(k.view(B, T, H, Dk)), x)
                     with profile_range("gdn.v_reshape"):
                         v = v.view(B, T, H, Dv)
                         if self.use_packed_qkv_single_contig and not v.is_contiguous():
                             with profile_range("gdn.v_contiguous"):
                                 v = v.contiguous()
-                        v = v.to(dtype=x.dtype)
+                        v = match_reference_tensor(v, x)
                 audit_gdn_boundary(
                     "norm_qkv",
                     audit_call_index,
@@ -1530,11 +1526,11 @@ class GatedDeltaNet(nn.Module):
             )
             with profile_range("gdn.norm_qkv"):
                 with profile_range("gdn.q_norm"):
-                    q = l2_norm(q.view(B, T, H, Dk)).to(dtype=x.dtype)
+                    q = match_reference_tensor(l2_norm(q.view(B, T, H, Dk)), x)
                 with profile_range("gdn.k_norm"):
-                    k = l2_norm(k.view(B, T, H, Dk)).to(dtype=x.dtype)
+                    k = match_reference_tensor(l2_norm(k.view(B, T, H, Dk)), x)
                 with profile_range("gdn.v_reshape"):
-                    v = v.view(B, T, H, Dv).to(dtype=x.dtype)
+                    v = match_reference_tensor(v.view(B, T, H, Dv), x)
             audit_gdn_boundary(
                 "norm_qkv",
                 audit_call_index,
@@ -1547,9 +1543,9 @@ class GatedDeltaNet(nn.Module):
             or self.use_cuda_split_norm
             or self.use_cuda_split_norm_lib
         ) and audit_call_index is None:
-            q = q.to(dtype=x.dtype)
-            k = k.to(dtype=x.dtype)
-            v = v.to(dtype=x.dtype)
+            q = match_reference_tensor(q, x)
+            k = match_reference_tensor(k, x)
+            v = match_reference_tensor(v, x)
             audit_gdn_boundary(
                 "norm_qkv",
                 audit_call_index,
@@ -1663,9 +1659,9 @@ class GatedDeltaNet(nn.Module):
                 if self.use_cuda_fused_output:
                     if audit_call_index is not None:
                         if self.output_norm_fp32:
-                            audit_o = rms_norm(o.float()).to(x.dtype)
+                            audit_o = match_reference_tensor(rms_norm(o.float()), x)
                         else:
-                            audit_o = rms_norm(o).to(dtype=x.dtype)
+                            audit_o = match_reference_tensor(rms_norm(o), x)
                         audit_gdn_boundary(
                             "output_gate_inputs",
                             audit_call_index,
@@ -1683,9 +1679,9 @@ class GatedDeltaNet(nn.Module):
                 else:
                     with profile_range("gdn.output_norm"):
                         if self.output_norm_fp32:
-                            o = rms_norm(o.float()).to(x.dtype)
+                            o = match_reference_tensor(rms_norm(o.float()), x)
                         else:
-                            o = rms_norm(o).to(dtype=x.dtype)
+                            o = match_reference_tensor(rms_norm(o), x)
                     audit_gdn_boundary(
                         "output_gate_inputs", audit_call_index, o=o, g_out=g_out
                     )
@@ -1820,7 +1816,8 @@ class CausalSelfAttention(nn.Module):
                 q, k = F.rms_norm(q, (q.size(-1),)), F.rms_norm(k, (k.size(-1),))
                 cos, sin = self.rotary(T, x.device, q.dtype)
                 q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin)
-                q = q * self.q_gain.to(dtype=q.dtype)[None, :, None, None]
+                q_gain = match_reference_tensor(self.q_gain, q)[None, :, None, None]
+                q = q * q_gain
 
             with profile_range("attn.sdpa"):
                 y = F.scaled_dot_product_attention(
@@ -2004,10 +2001,10 @@ class GDNBlock(nn.Module):
         :return Tensor: Updated activations.
         """
         with profile_range("block.gdn"):
-            mix = self.resid_mix.to(dtype=x.dtype)
+            mix = match_reference_tensor(self.resid_mix, x)
             x = mix[0][None, None, :] * x + mix[1][None, None, :] * x0
-            attn_scale = self.attn_scale.to(dtype=x.dtype)[None, None, :]
-            mlp_scale = self.mlp_scale.to(dtype=x.dtype)[None, None, :]
+            attn_scale = match_reference_tensor(self.attn_scale, x)[None, None, :]
+            mlp_scale = match_reference_tensor(self.mlp_scale, x)[None, None, :]
             if self.norm_style == "pre":
                 x = x + attn_scale * self.gdn(self.attn_in_norm(x))
                 x = x + mlp_scale * self.mlp(self.mlp_in_norm(x))
@@ -2082,10 +2079,10 @@ class AttnBlock(nn.Module):
         :return Tensor: Updated activations.
         """
         with profile_range("block.attn"):
-            mix = self.resid_mix.to(dtype=x.dtype)
+            mix = match_reference_tensor(self.resid_mix, x)
             x = mix[0][None, None, :] * x + mix[1][None, None, :] * x0
-            attn_scale = self.attn_scale.to(dtype=x.dtype)[None, None, :]
-            mlp_scale = self.mlp_scale.to(dtype=x.dtype)[None, None, :]
+            attn_scale = match_reference_tensor(self.attn_scale, x)[None, None, :]
+            mlp_scale = match_reference_tensor(self.mlp_scale, x)[None, None, :]
             if self.norm_style == "pre":
                 x = x + attn_scale * self.attn(self.attn_in_norm(x))
                 x = x + mlp_scale * self.mlp(self.mlp_in_norm(x))
@@ -2326,11 +2323,8 @@ class HybridGPT(nn.Module):
             skips.append(x)
         for i in range(self.num_decoder_layers):
             if skips:
-                x = (
-                    x
-                    + self.skip_weights[i].to(dtype=x.dtype)[None, None, :]
-                    * skips.pop()
-                )
+                skip_weight = match_reference_tensor(self.skip_weights[i], x)
+                x = x + skip_weight[None, None, :] * skips.pop()
             x = self.blocks[self.num_encoder_layers + i](x, x0)
         x = self.final_norm(x).reshape(-1, x.size(-1))
         logits = (

@@ -28,6 +28,7 @@ import time
 import uuid
 import zlib
 import atexit
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Callable
 
@@ -64,23 +65,6 @@ try:
 except ImportError:
     _USE_WANDB = False
     wandb = None
-
-
-class _NoOpContext:
-    """Shared no-op context manager for disabled profiling ranges."""
-
-    def __enter__(self) -> None:
-        """Enter the no-op context."""
-
-        return None
-
-    def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
-        """Leave the no-op context without suppressing exceptions."""
-
-        return False
-
-
-_NO_OP_CONTEXT = _NoOpContext()
 
 
 # =====================================================================
@@ -937,6 +921,30 @@ def eval_val(
     return float(val_loss.item()), float(bpt * tpb)
 
 
+def make_stream_sync_event(device: torch.device) -> torch.cuda.Event | None:
+    """Create a reusable current-stream sync event for CUDA timing boundaries.
+
+    :param torch.device device: Active execution device.
+    :return torch.cuda.Event | None: Reusable CUDA event, or `None` for non-CUDA devices.
+    """
+
+    if device.type != "cuda":
+        return None
+    return torch.cuda.Event()
+
+
+def wait_current_stream(event: torch.cuda.Event | None) -> None:
+    """Wait for work already queued on the current CUDA stream.
+
+    :param torch.cuda.Event | None event: Reusable CUDA event created by `make_stream_sync_event`.
+    """
+
+    if event is None:
+        return
+    event.record()
+    event.synchronize()
+
+
 # =====================================================================
 # MAIN
 # =====================================================================
@@ -1005,6 +1013,17 @@ def main() -> None:
         dist.init_process_group(backend="nccl", device_id=device)
         dist.barrier()
     master_process = rank == 0
+    stream_sync_event = make_stream_sync_event(device)
+    perf_start_event = (
+        torch.cuda.Event(enable_timing=True)
+        if args.perf_timing and device.type == "cuda"
+        else None
+    )
+    perf_end_event = (
+        torch.cuda.Event(enable_timing=True)
+        if args.perf_timing and device.type == "cuda"
+        else None
+    )
 
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
@@ -1049,7 +1068,7 @@ def main() -> None:
     profile_ctx = (
         torch.autograd.profiler.record_function
         if args.profile
-        else lambda _n: _NO_OP_CONTEXT
+        else lambda _n: nullcontext()
     )
 
     # ── wandb init ────────────────────────────────────────────────────
@@ -1492,7 +1511,7 @@ def main() -> None:
     perf_measured_steps = 0
     stop_after_step = None
     zero_grad_all()
-    torch.cuda.synchronize()
+    wait_current_stream(stream_sync_event)
     t0 = time.perf_counter()
     step = 0
     if profiler is not None:
@@ -1511,7 +1530,7 @@ def main() -> None:
         )
 
         if should_validate:
-            torch.cuda.synchronize()
+            wait_current_stream(stream_sync_event)
             training_time_ms += 1000.0 * (time.perf_counter() - t0)
             with profile_ctx("eval.val"):
                 val_loss, val_bpb = eval_val(
@@ -1532,7 +1551,7 @@ def main() -> None:
             )
             if master_process and _USE_WANDB:
                 wandb.log({"eval/loss": val_loss, "eval/bpb": val_bpb}, step=step)
-            torch.cuda.synchronize()
+            wait_current_stream(stream_sync_event)
             t0 = time.perf_counter()
 
         if last_step:
@@ -1545,7 +1564,11 @@ def main() -> None:
         elapsed_ms = training_time_ms + 1000.0 * (time.perf_counter() - t0)
         scale = lr_mul(step, elapsed_ms)
         train_loss = torch.zeros((), device=device)
-        perf_t0 = time.perf_counter() if args.perf_timing else None
+        perf_t0 = (
+            time.perf_counter() if args.perf_timing and device.type != "cuda" else None
+        )
+        if perf_start_event is not None:
+            perf_start_event.record()
 
         with profile_ctx("train.step"):
             for ms in range(grad_accum_steps):
@@ -1588,9 +1611,13 @@ def main() -> None:
         perf_step_ms = float("nan")
         perf_tokens_per_s = float("nan")
         if args.perf_timing:
-            torch.cuda.synchronize()
-            assert perf_t0 is not None
-            measured_ms = 1000.0 * (time.perf_counter() - perf_t0)
+            if perf_start_event is not None and perf_end_event is not None:
+                perf_end_event.record()
+                perf_end_event.synchronize()
+                measured_ms = perf_start_event.elapsed_time(perf_end_event)
+            else:
+                assert perf_t0 is not None
+                measured_ms = 1000.0 * (time.perf_counter() - perf_t0)
             if step > args.perf_ignore_steps:
                 perf_time_ms += measured_ms
                 perf_measured_steps += 1
@@ -1740,22 +1767,40 @@ def main() -> None:
     quant_state = torch.load(io.BytesIO(zlib.decompress(blob_disk)), map_location="cpu")
     base_model.load_state_dict(dequantize_state_dict_int8(quant_state), strict=True)
 
-    torch.cuda.synchronize()
-    t_q = time.perf_counter()
-    q_val_loss, q_val_bpb = eval_val(
-        args,
-        model,
-        rank,
-        world_size,
-        device,
-        grad_accum_steps,
-        val_tokens,
-        base_bytes_lut,
-        has_ls_lut,
-        is_bnd_lut,
-    )
-    torch.cuda.synchronize()
-    q_eval_ms = 1000 * (time.perf_counter() - t_q)
+    if device.type == "cuda":
+        q_eval_start = torch.cuda.Event(enable_timing=True)
+        q_eval_end = torch.cuda.Event(enable_timing=True)
+        q_eval_start.record()
+        q_val_loss, q_val_bpb = eval_val(
+            args,
+            model,
+            rank,
+            world_size,
+            device,
+            grad_accum_steps,
+            val_tokens,
+            base_bytes_lut,
+            has_ls_lut,
+            is_bnd_lut,
+        )
+        q_eval_end.record()
+        q_eval_end.synchronize()
+        q_eval_ms = q_eval_start.elapsed_time(q_eval_end)
+    else:
+        t_q = time.perf_counter()
+        q_val_loss, q_val_bpb = eval_val(
+            args,
+            model,
+            rank,
+            world_size,
+            device,
+            grad_accum_steps,
+            val_tokens,
+            base_bytes_lut,
+            has_ls_lut,
+            is_bnd_lut,
+        )
+        q_eval_ms = 1000 * (time.perf_counter() - t_q)
     log0(
         f"final_int8_zlib_roundtrip val_loss:{q_val_loss:.4f} val_bpb:{q_val_bpb:.4f} "
         f"eval_time:{q_eval_ms:.0f}ms"

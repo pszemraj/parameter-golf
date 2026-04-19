@@ -413,6 +413,30 @@ def eval_val(
     return float(val_loss.item()), float(bits_per_token * tokens_per_byte)
 
 
+def make_stream_sync_event(device: torch.device) -> torch.cuda.Event | None:
+    """Create a reusable current-stream sync event for CUDA timing boundaries.
+
+    :param torch.device device: Active execution device.
+    :return torch.cuda.Event | None: Reusable CUDA event, or `None` for non-CUDA devices.
+    """
+
+    if device.type != "cuda":
+        return None
+    return torch.cuda.Event()
+
+
+def wait_current_stream(event: torch.cuda.Event | None) -> None:
+    """Wait for work already queued on the current CUDA stream.
+
+    :param torch.cuda.Event | None event: Reusable CUDA event created by `make_stream_sync_event`.
+    """
+
+    if event is None:
+        return
+    event.record()
+    event.synchronize()
+
+
 # -----------------------------
 # POST-TRAINING QUANTIZATION
 # -----------------------------
@@ -1363,6 +1387,7 @@ def main() -> None:
         dist.init_process_group(backend="nccl", device_id=device)
         dist.barrier()
     master_process = rank == 0
+    stream_sync_event = make_stream_sync_event(device)
 
     # Fast math knobs
     torch.backends.cuda.matmul.allow_tf32 = True
@@ -1678,7 +1703,7 @@ def main() -> None:
     training_time_ms = 0.0
     stop_after_step: int | None = None
     zero_grad_all()
-    torch.cuda.synchronize()
+    wait_current_stream(stream_sync_event)
     t0 = time.perf_counter()
 
     step = 0
@@ -1695,7 +1720,7 @@ def main() -> None:
             )
         )
         if should_validate:
-            torch.cuda.synchronize()
+            wait_current_stream(stream_sync_event)
             training_time_ms += 1000.0 * (time.perf_counter() - t0)
             val_loss, val_bpb = eval_val(
                 args,
@@ -1713,7 +1738,7 @@ def main() -> None:
                 f"step:{step}/{args.iterations} val_loss:{val_loss:.4f} val_bpb:{val_bpb:.4f} "
                 f"train_time:{training_time_ms:.0f}ms step_avg:{training_time_ms / max(step, 1):.2f}ms"
             )
-            torch.cuda.synchronize()
+            wait_current_stream(stream_sync_event)
             t0 = time.perf_counter()
 
         if last_step:
