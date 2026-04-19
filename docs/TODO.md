@@ -1,6 +1,6 @@
 # HGDN Next Steps
 
-Last updated: 2026-04-18 19:15 CDT
+Last updated: 2026-04-18 23:44 CDT
 
 ## 0. Reconcile the packed H100 winner path on the current branch
 
@@ -24,6 +24,9 @@ Last updated: 2026-04-18 19:15 CDT
 - Local packed-path runtime cleanup now landed on this branch:
   - both trainers use reusable pinned `int64` host staging buffers for the
     rank-local token batches instead of pageable CPU widening every step
+  - both trainers now stage validation batches through reusable pinned `int64`
+    host buffers as well, instead of doing pageable eval-batch widening on each
+    validation slice
   - both attention implementations now cache rotary tables by
     `(seq_len, device, dtype)` rather than recasting cached fp32 tables on
     every call

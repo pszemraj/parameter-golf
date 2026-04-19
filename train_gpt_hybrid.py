@@ -805,6 +805,43 @@ def load_validation_tokens(files: list[Path], seq_len: int) -> Tensor:
     return tokens[: usable + 1]
 
 
+def stage_eval_batch_views(
+    x_cpu: Tensor,
+    y_cpu: Tensor,
+    device: torch.device,
+    x_stage: Tensor | None,
+    y_stage: Tensor | None,
+) -> tuple[Tensor, Tensor, Tensor | None, Tensor | None]:
+    """Stage one validation batch pair through reusable pinned host buffers.
+
+    :param Tensor x_cpu: CPU input token ids shaped `(batch, seq)`.
+    :param Tensor y_cpu: CPU target token ids shaped `(batch, seq)`.
+    :param torch.device device: Target device for the staged batch.
+    :param Tensor | None x_stage: Reusable pinned input staging buffer.
+    :param Tensor | None y_stage: Reusable pinned target staging buffer.
+    :return tuple[Tensor, Tensor, Tensor | None, Tensor | None]: Device batches plus updated staging buffers.
+    """
+
+    if device.type != "cuda":
+        return (
+            x_cpu.to(device=device, dtype=torch.int64),
+            y_cpu.to(device=device, dtype=torch.int64),
+            x_stage,
+            y_stage,
+        )
+    if x_stage is None or tuple(x_stage.shape) != tuple(x_cpu.shape):
+        x_stage = torch.empty_like(x_cpu, dtype=torch.int64, pin_memory=True)
+        y_stage = torch.empty_like(y_cpu, dtype=torch.int64, pin_memory=True)
+    x_stage.copy_(x_cpu)
+    y_stage.copy_(y_cpu)
+    return (
+        x_stage.to(device=device, non_blocking=True),
+        y_stage.to(device=device, non_blocking=True),
+        x_stage,
+        y_stage,
+    )
+
+
 def eval_val(
     args: Hyperparameters,
     model: nn.Module,
@@ -846,15 +883,20 @@ def eval_val(
     val_token_count = torch.zeros((), device=device, dtype=torch.float64)
     val_byte_count = torch.zeros((), device=device, dtype=torch.float64)
     model.eval()
+    x_stage: Tensor | None = None
+    y_stage: Tensor | None = None
     with torch.inference_mode():
         for bss in range(seq_start, seq_end, local_batch_seqs):
             bse = min(bss + local_batch_seqs, seq_end)
             rs, re = bss * args.train_seq_len, bse * args.train_seq_len + 1
-            local = val_tokens[rs:re].to(
-                device=device, dtype=torch.int64, non_blocking=True
+            local = val_tokens[rs:re]
+            x, y, x_stage, y_stage = stage_eval_batch_views(
+                local[:-1].reshape(-1, args.train_seq_len),
+                local[1:].reshape(-1, args.train_seq_len),
+                device,
+                x_stage,
+                y_stage,
             )
-            x = local[:-1].reshape(-1, args.train_seq_len)
-            y = local[1:].reshape(-1, args.train_seq_len)
             with torch.autocast(
                 device_type="cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"
             ):
@@ -863,7 +905,7 @@ def eval_val(
             val_loss_sum += bl.to(torch.float64) * btc
             val_token_count += btc
             prev_ids, tgt_ids = x.reshape(-1), y.reshape(-1)
-            tb = base_bytes_lut[tgt_ids].to(torch.int16)
+            tb = base_bytes_lut[tgt_ids]
             tb += (has_leading_space_lut[tgt_ids] & ~is_boundary_lut[prev_ids]).to(
                 torch.int16
             )
