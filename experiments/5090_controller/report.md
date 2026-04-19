@@ -3,11 +3,13 @@
 ## Status
 - Completed the first matched-token controller baseline on the original full frozen structure.
 - Completed a clean controller follow-up on the new structural front-runner, `blocks3`.
+- Completed a four-point controller neighborhood screen on `blocks3`.
 - All completed controller runs in this report used:
   - `compile=0`
   - exact `val_bpb`
   - matched `planned_train_tokens=50,331,648`
   - W&B project `pg-core-amp`
+- A first attempt at the neighborhood screen with `compile=1` was discarded before completion because the shorter runs would not all cross the compile trigger at the same point. That batch is intentionally excluded from the evidence below.
 
 ## Current Evidence
 
@@ -68,46 +70,103 @@ Result on `blocks3`:
 - It ran about `18%` faster.
 - It used about `2.14x` less peak allocated memory.
 
+### `blocks3` controller neighborhood screen
+
+All runs below used the same frozen structure:
+- `12` branches
+- `3` blocks
+- full readout
+- `spec_max_tokens=5,000,000`
+- `carry_chunks=8`
+- `bptt_chunks=1`
+
+Matched run results:
+- `plain3_e25_c8t1`
+  - `core_layers=3`
+  - `core_expansion=2.5`
+  - `residual_core=0`
+  - final `val_bpb = 2.5170427183`
+  - steady `tok/s = 2,052,454`
+  - peak allocated memory `= 6,697 MiB`
+- `plain4_e20_c8t1`
+  - `core_layers=4`
+  - `core_expansion=2.0`
+  - `residual_core=0`
+  - final `val_bpb = 2.5154361649`
+  - steady `tok/s = 2,030,859`
+  - peak allocated memory `= 6,814 MiB`
+- `resid4_e20_c8t1`
+  - `core_layers=4`
+  - `core_expansion=2.0`
+  - `residual_core=1`
+  - final `val_bpb = 2.5133777174`
+  - steady `tok/s = 1,970,720`
+  - peak allocated memory `= 7,104 MiB`
+- `resid4_e25_c8t1`
+  - `core_layers=4`
+  - `core_expansion=2.5`
+  - `residual_core=1`
+  - final `val_bpb = 2.5123951758`
+  - steady `tok/s = 1,820,432`
+  - peak allocated memory `= 7,525 MiB`
+
+Result from the neighborhood screen:
+- `plain4_e20` improved on the previous `plain3_e20` anchor by about `0.00041` bpb.
+- `plain3_e25` was a regression relative to both `plain3_e20` and `plain4_e20`.
+- `resid4_e20` was the first controller point to clearly beat the plain family on the trimmed `blocks3` structure.
+- `resid4_e25` is the current single-seed screening leader, beating `plain4_e20` by about `0.00304` bpb and `resid4_e20` by about `0.00098` bpb.
+- Residual gates stayed in a narrow non-saturated range, roughly `0.119 -> 0.141`, so the residual path is active without collapsing.
+
 ## What This Means
 
 Does more controller depth help?
-- Not in the completed local screens.
-- The deeper residual controller lost on both the full structure and the `blocks3` structure.
+- Yes, but only after trimming the frozen side.
+- On overbuilt `blocks9`, the deeper residual controller package lost.
+- On `blocks3`, moving from `plain3_e20` to `plain4_e20` helped modestly, and moving to `resid4_e20` or `resid4_e25` helped more.
 
 Does more controller width via expansion help?
-- Not answered yet in the cleaned `blocks3` regime.
-- The current evidence is strong enough that wider residual variants should not be promoted by default.
+- Not as a generic knob.
+- `plain3_e25` lost against `plain4_e20`, so width alone is not rescuing the plain family.
+- Inside the residual `4`-layer controller, `expansion=2.5` beat `2.0` by about `0.00098` bpb at the cost of about `8%` throughput.
 
 Is residualization materially improving trainability?
-- Not on the current local budget.
-- The residual path is stable, but the extra controller depth is not translating into better validation loss.
+- On `blocks3`, yes.
+- The residual path is stable and appears to be earning its keep once the frozen stack is not overbuilt.
+- The current best two screening points are both residual controllers.
 
 Is semi-TBPTT helping beyond simple carry?
-- The current evidence says “not enough to justify the extra controller” in the tested `resid5_e20` setup.
-- That does not prove `bptt_chunks=2` is useless in general, only that the current residual controller package is not winning.
+- Still unanswered cleanly.
+- The original `resid5_e20` package with `bptt_chunks=2` lost on both `blocks9` and `blocks3`, but that does not identify whether the loss came from the horizon setting or from the controller choice.
+- The next sweep should isolate `bptt_chunks` directly on the new `blocks3` winners.
 
 ## Best Controller-Only Contender
 
 Current best controller-only contender:
-- `plain3_e20` on the `blocks3` structure
-- final `val_bpb = 2.5158438607`
-- steady `tok/s = 2,191,340`
+- `resid4_e25_c8t1` on the `blocks3` structure
+- final `val_bpb = 2.5123951758`
+- steady `tok/s = 1,820,432`
 - artifact estimate `= 4,195,301`
 
-This is now the strongest local contender seen in the completed runs on disk.
+The strongest simpler anchor remains:
+- `plain4_e20_c8t1` on `blocks3`
+- final `val_bpb = 2.5154361649`
+- steady `tok/s = 2,030,859`
+
+This keeps the controller story honest: a modestly larger recurrent controller is now winning, but the gap to the simpler plain controller is still small enough that confirmation runs matter.
 
 ## Regression-To-Transformer Guardrail
 
-The best local controller result is not coming from “more controller stack.”
-- The winning controller is still a small recurrent policy.
-- The winning frozen structure is smaller than the original one.
-- That is exactly the opposite of regressing toward a deeper transformer-like default.
+The latest winner is a somewhat larger controller, so this guardrail has to stay active.
+- The winning controller is still only `4` minGRU layers, not a deep generic stack.
+- The winning frozen structure is still `blocks3`, not the old `blocks9`.
+- Artifact size is unchanged across these controller screens because the frozen side is still doing the byte-heavy work.
+- That means the project is still in the intended family, but controller creep is now a real thing to watch.
 
 The remaining risk is different:
-- the frozen amplifier side may still be underpowered or misused
-- the controller may be doing most of the real work
+- the frozen amplifier side may still be too static or weakly temporal
+- the controller may start absorbing too much of the modeling burden if we keep adding capacity without proving horizon gains
 
-That is a better failure mode for this project than accidentally rebuilding a transformer, because it points toward making the frozen temporal side more meaningful rather than just adding generic depth.
+That is still a better failure mode than accidentally rebuilding a transformer, because it points toward strengthening the frozen temporal role rather than blindly stacking more trainable depth.
 
 ## Exact Commands
 
@@ -146,15 +205,34 @@ resid5_e20 5 2.0 16 2 1 -2.0 0.003 1500 0.0003 192 256 512' \
 conda run -s --name train python tools/run_core_amp_sweep.py controller
 ```
 
+`blocks3` neighborhood screen:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+TORCH_BLAS_PREFER_CUBLASLT=1 \
+MODEL_ROOT=experiments/5090_controller/wandb_blocks3_neighborhood_v1 \
+NUM_BLOCKS=3 \
+SPEC_MAX_TOKENS=5000000 \
+COMPILE=0 \
+VAL_EVERY=64 \
+VAL_STEPS=8 \
+LOG_EVERY=16 \
+LOG_STATE_EVERY=64 \
+TRAIN_FRAC=0.98 \
+RUN_SPECS=$'plain4_e20_c8t1 4 2.0 8 1 0 -2.0 0.003 1500 0.0003 384 256 512\n\
+plain3_e25_c8t1 3 2.5 8 1 0 -2.0 0.003 1500 0.0003 384 256 512\n\
+resid4_e20_c8t1 4 2.0 8 1 1 -2.0 0.003 1500 0.0003 384 256 512\n\
+resid4_e25_c8t1 4 2.5 8 1 1 -2.0 0.003 1500 0.0003 384 256 512' \
+conda run -s --name train python tools/run_core_amp_sweep.py controller
+```
+
 ## Immediate Next Step
 
-The next controller sweep should be narrow and structured around the new winner, not a blind grid.
+The next controller sweep should isolate horizon rather than add more raw controller capacity.
 - Keep the `blocks3` structure fixed.
-- Keep `plain3_e20` as the anchor.
-- Add only a few nearby controller points:
-  - `plain4_e20`
-  - `plain3_e25`
-  - `resid4_e20`
-  - `resid4_e25`
+- Keep `plain4_e20` as the simple-family anchor.
+- Keep `resid4_e25` as the current pure-quality leader.
+- Sweep `bptt_chunks in {1, 2, 4}` at fixed `carry_chunks=8`.
+- Only after that should `carry_chunks in {8, 16, 32}` be swept on the better family.
 
-That gives a real answer about whether any extra controller capacity helps once the frozen side is no longer overbuilt, without drifting into “just make the controller deeper.”
+That answers whether the current gains are coming from better controller structure or whether longer effective horizon is the real missing ingredient, without drifting into “just make the controller deeper.”

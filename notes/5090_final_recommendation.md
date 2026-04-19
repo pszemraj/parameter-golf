@@ -4,24 +4,26 @@
 - The root Core/Amplifier path now has disciplined local artifacts plus W&B logging to `pg-core-amp`.
 - Exact `val_bpb` is working locally through the official tokenizer path.
 - A completed structural sweep on `1x RTX 5090` narrowed the frozen side.
-- A completed controller follow-up on the new structural winner narrowed the controller side.
+- Two completed controller screens on the new structural winner narrowed the controller side.
+- The committed `docs/5090_log.md` logbook is now tracking timestamps, code commits, and important W&B runs.
 
 ## Top 3 Local Contenders
 
-1. `plain3_e20` on `blocks3`
-   - final `val_bpb = 2.5158438607`
-   - steady `tok/s = 2,191,340`
+1. `resid4_e25_c8t1` on `blocks3`
+   - final `val_bpb = 2.5123951758`
+   - steady `tok/s = 1,820,432`
    - artifact estimate `= 4,195,301`
-2. `plain3_e20` on full `blocks9`
-   - final `val_bpb = 2.5171747775`
-   - steady `tok/s = 1,042,359`
-   - artifact estimate `= 9,229,159`
-3. `resid5_e20` on `blocks3`
-   - final `val_bpb = 2.5175855416`
-   - steady `tok/s = 1,857,335`
+2. `resid4_e20_c8t1` on `blocks3`
+   - final `val_bpb = 2.5133777174`
+   - steady `tok/s = 1,970,720`
+   - artifact estimate `= 4,195,301`
+3. `plain4_e20_c8t1` on `blocks3`
+   - final `val_bpb = 2.5154361649`
+   - steady `tok/s = 2,030,859`
    - artifact estimate `= 4,195,301`
 
-If the goal is pure local screening quality, `plain3_e20 + blocks3` is the current winner.
+If the goal is pure local screening quality, `resid4_e25_c8t1 + blocks3` is the current winner.
+The earlier `plain3_e20 + blocks3` point remains a useful simple reference at `val_bpb = 2.5158438607`.
 
 ## Exact Reproduction Commands
 
@@ -60,6 +62,27 @@ resid5_e20 5 2.0 16 2 1 -2.0 0.003 1500 0.0003 192 256 512' \
 conda run -s --name train python tools/run_core_amp_sweep.py controller
 ```
 
+### Controller neighborhood screen on `blocks3`
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+TORCH_BLAS_PREFER_CUBLASLT=1 \
+MODEL_ROOT=experiments/5090_controller/wandb_blocks3_neighborhood_v1 \
+NUM_BLOCKS=3 \
+SPEC_MAX_TOKENS=5000000 \
+COMPILE=0 \
+VAL_EVERY=64 \
+VAL_STEPS=8 \
+LOG_EVERY=16 \
+LOG_STATE_EVERY=64 \
+TRAIN_FRAC=0.98 \
+RUN_SPECS=$'plain4_e20_c8t1 4 2.0 8 1 0 -2.0 0.003 1500 0.0003 384 256 512\n\
+plain3_e25_c8t1 3 2.5 8 1 0 -2.0 0.003 1500 0.0003 384 256 512\n\
+resid4_e20_c8t1 4 2.0 8 1 1 -2.0 0.003 1500 0.0003 384 256 512\n\
+resid4_e25_c8t1 4 2.5 8 1 1 -2.0 0.003 1500 0.0003 384 256 512' \
+conda run -s --name train python tools/run_core_amp_sweep.py controller
+```
+
 ### Earlier `blocks0` sanity probe
 
 ```bash
@@ -87,18 +110,18 @@ conda run -s --name train python tools/run_core_amp_sweep.py structure
 ## Best Current Calls
 
 Best pure-quality contender:
-- `plain3_e20` on `blocks3`
+- `resid4_e25_c8t1` on `blocks3`
 
 Best quality/speed tradeoff on the 5090:
-- also `plain3_e20` on `blocks3`
-- it is better in quality than every completed alternative and faster than the heavier full-structure points
+- `resid4_e20_c8t1` on `blocks3`
+- it is within about `0.001` bpb of the screening winner while running about `8%` faster and using less memory
 
 Most likely to transfer cleanly to `1x H100`:
-- `plain3_e20` on `blocks3`
+- `resid4_e20_c8t1` on `blocks3`
 - reason:
-  - it wins on quality locally
-  - it is structurally simpler than the old `blocks9` baseline
-  - it still keeps a real frozen amplifier front-end, so it is not collapsing all the way to the `blocks0` edge case
+  - it is close to the pure-quality leader without taking the largest controller point seen so far
+  - it keeps the stronger `blocks3` frozen structure
+  - it looks like a cleaner first H100 confirmation point while the single-seed `resid4_e25` edge is still small enough to warrant reruns
 
 ## Findings Likely To Be 5090-Specific
 
@@ -109,7 +132,8 @@ Most likely to transfer cleanly to `1x H100`:
 
 These are likely not 5090-specific:
 - `blocks3` beating `blocks9`
-- `plain3_e20` beating `resid5_e20` in the completed local screens
+- the old `resid5_e20` package losing on both `blocks9` and `blocks3`
+- the `blocks3` controller neighborhood preferring moderate controller growth over re-expanding the frozen stack
 - `readout256` being much more acceptable than `readout128`
 
 ## Code Improvements Vs Hyperparameter Findings
@@ -127,6 +151,10 @@ Code improvements:
 Pure hyperparameter / architecture findings:
 - `blocks3` is better than the old `blocks9` default locally
 - `plain3_e20` is better than `resid5_e20` on both `blocks9` and `blocks3`
+- on `blocks3`, moderate controller growth helps:
+  - `plain4_e20` beats `plain3_e20`
+  - `resid4_e20` beats the plain family
+  - `resid4_e25` is the current single-seed leader
 - `branches8_pow2` and `readout128` both lose enough quality that they should not become the default
 - `readout256` is the only tested compression point that still looks plausibly useful
 
@@ -134,19 +162,21 @@ Pure hyperparameter / architecture findings:
 
 Current evidence says we are not drifting back into a transformer-shaped local optimum.
 - The winning frozen structure is shallower, not deeper.
-- The winning controller is smaller, not more stacked.
-- The whole picture favors a modest frozen multi-timescale front-end plus a small recurrent controller.
+- The winning controllers are still only `4` recurrent layers, not a deep generic stack.
+- The whole picture still favors a modest frozen multi-timescale front-end plus a modest recurrent controller.
 
 The remaining architectural risk is different:
 - the frozen side may still be too static or too weakly temporal
-- the controller may be carrying too much of the real modeling burden
+- the controller may start carrying too much of the real modeling burden if we keep buying gains with trainable depth alone
 
-That points toward improving the frozen temporal role, not toward adding generic stack depth.
+That still points toward improving the frozen temporal role, not toward adding generic stack depth.
 
 ## Unresolved Questions
 
 - Does `plain3_e20` also win on `blocks0`, or does the modest `blocks3` amplifier remain important there?
-- Can a slightly larger plain controller, such as `plain4_e20` or `plain3_e25`, beat the current winner on `blocks3` without blowing up complexity?
+- How much of the `resid4_e25` edge survives three-seed confirmation?
+- Does `bptt_chunks in {2, 4}` help the current `blocks3` winners, or is `bptt=1` already enough?
+- Does `carry_chunks in {16, 32}` buy anything once the best `bptt` is fixed?
 - Is there a better 8-branch lag set than the power-of-two one tested here?
 - Can we design a more meaningful frozen temporal mixer that stays parallelizable without turning into attention?
 - How much of the current ranking survives on `1x H100` and then on the final `8x H100` regime?
