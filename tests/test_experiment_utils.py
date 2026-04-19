@@ -154,7 +154,13 @@ def test_summarize_run_dir_reads_structured_artifacts(tmp_path: Path):
         run_dir / "run_metadata.json",
         {
             "git_commit": "abc123",
+            "env": {"TORCH_BLAS_PREFER_CUBLASLT": "1"},
             "system": {
+                "torch_version": "2.11.0+cu128",
+                "cuda_version": "12.8",
+                "gpu_name": "NVIDIA GeForce RTX 5090",
+                "driver_version": "580.126.20",
+                "gpu_total_memory_mib": 32109,
                 "tf32_matmul": True,
                 "tf32_cudnn": True,
                 "float32_matmul_precision": "high",
@@ -199,6 +205,12 @@ def test_summarize_run_dir_reads_structured_artifacts(tmp_path: Path):
     assert row["trainable_int8_zlib_bytes"] == "345"
     assert row["warmup_steps"] == "50"
     assert row["lr_hold_steps"] == "750"
+    assert row["torch_version"] == "2.11.0+cu128"
+    assert row["cuda_version"] == "12.8"
+    assert row["gpu_name"] == "NVIDIA GeForce RTX 5090"
+    assert row["driver_version"] == "580.126.20"
+    assert row["gpu_total_memory_mib"] == "32109"
+    assert row["blas_prefer_cublaslt"] == "true"
 
 
 def test_rebuild_summary_cli_writes_tsv_and_markdown(tmp_path: Path):

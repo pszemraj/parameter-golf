@@ -64,9 +64,15 @@ SUMMARY_FIELDS = [
     "compile_after",
     "compile_mode",
     "compile_duration_sec",
+    "torch_version",
+    "cuda_version",
+    "gpu_name",
+    "driver_version",
+    "gpu_total_memory_mib",
     "tf32_matmul",
     "tf32_cudnn",
     "matmul_precision",
+    "blas_prefer_cublaslt",
     "spec_bytes",
     "gzip_spec_bytes",
     "trainable_int8_zlib_bytes",
@@ -325,6 +331,17 @@ def _stringify(value: Any) -> str:
     return str(value)
 
 
+def _parse_env_bool(value: Any) -> Optional[bool]:
+    if value is None:
+        return None
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return None
+
+
 def summarize_run_dir(run_dir: str | Path) -> dict[str, str]:
     """Build one flat summary row from per-run artifacts."""
     root = Path(run_dir)
@@ -340,6 +357,7 @@ def summarize_run_dir(run_dir: str | Path) -> dict[str, str]:
     data = resolved.get("data", {})
     spec = resolved.get("spec", {})
     system = metadata.get("system", {})
+    env = metadata.get("env", {})
     compile_cfg = runtime.get("compile", {})
 
     status = "partial"
@@ -392,9 +410,15 @@ def summarize_run_dir(run_dir: str | Path) -> dict[str, str]:
         "compile_after": _stringify(compile_cfg.get("compile_after")),
         "compile_mode": _stringify(compile_cfg.get("compile_mode")),
         "compile_duration_sec": _stringify(results.get("compile_duration_sec")),
+        "torch_version": _stringify(system.get("torch_version")),
+        "cuda_version": _stringify(system.get("cuda_version")),
+        "gpu_name": _stringify(system.get("gpu_name")),
+        "driver_version": _stringify(system.get("driver_version")),
+        "gpu_total_memory_mib": _stringify(system.get("gpu_total_memory_mib")),
         "tf32_matmul": _stringify(system.get("tf32_matmul")),
         "tf32_cudnn": _stringify(system.get("tf32_cudnn")),
         "matmul_precision": _stringify(system.get("float32_matmul_precision")),
+        "blas_prefer_cublaslt": _stringify(_parse_env_bool(env.get("TORCH_BLAS_PREFER_CUBLASLT"))),
         "spec_bytes": _stringify(results.get("spec_bytes") or spec.get("spec_bytes")),
         "gzip_spec_bytes": _stringify(
             results.get("gzip_spec_bytes") or spec.get("gzip_spec_bytes")
