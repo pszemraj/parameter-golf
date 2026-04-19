@@ -22,7 +22,11 @@
    - steady `tok/s = 2,030,859`
    - artifact estimate `= 4,197,310`
 
-If the goal is pure local screening quality, `resid4_e25_c8t1 + blocks3` is the current winner.
+Carry screening refined the top two points further:
+- `resid4_e20_c16t1`: `2.5123756944`
+- `resid4_e25_c8t1`: `2.5123951758`
+
+Those are effectively tied at the short screening budget.
 The earlier `plain3_e20 + blocks3` point remains a useful simple reference at `val_bpb = 2.5158438607`.
 
 ## Exact Reproduction Commands
@@ -133,18 +137,20 @@ conda run -s --name train python tools/run_core_amp_sweep.py structure
 ## Best Current Calls
 
 Best pure-quality contender:
-- `resid4_e25_c8t1` on `blocks3`
+- `resid4_e20_c16t1` on `blocks3` by a negligible screening margin
+- practical interpretation:
+  - `resid4_e20_c16t1` and `resid4_e25_c8t1` are tied closely enough that longer confirmation is required
 
 Best quality/speed tradeoff on the 5090:
-- `resid4_e20_c8t1` on `blocks3`
-- it is within about `0.001` bpb of the screening winner while running about `8%` faster and using less memory
+- `resid4_e20_c16t1` on `blocks3`
+- it matches the best current screening quality while running about `8%` faster than `resid4_e25_c8t1`
 
 Most likely to transfer cleanly to `1x H100`:
-- `resid4_e20_c8t1` on `blocks3`
+- `resid4_e20_c16t1` on `blocks3`
 - reason:
-  - it is close to the pure-quality leader without taking the largest controller point seen so far
+  - it currently matches the best screening quality without taking the wider residual controller
   - it keeps the stronger `blocks3` frozen structure
-  - it looks like a cleaner first H100 confirmation point while the single-seed `resid4_e25` edge is still small enough to warrant reruns
+  - it looks like the cleaner first long-budget confirmation point while the top two screening candidates remain tied
 
 ## Findings Likely To Be 5090-Specific
 
@@ -179,6 +185,9 @@ Pure hyperparameter / architecture findings:
   - `resid4_e20` beats the plain family
   - `resid4_e25` is the current single-seed leader
 - on the current local screening budget, `bptt=1` beats `bptt=2` and `bptt=4` in both the plain and residual families
+- on the current local screening budget, carry helps only in a narrow way:
+  - `resid4_e20` prefers `carry=16`
+  - `resid4_e25` prefers `carry=8`
 - `branches8_pow2` and `readout128` both lose enough quality that they should not become the default
 - `readout256` is the only tested compression point that still looks plausibly useful
 
@@ -200,8 +209,7 @@ That still points toward improving the frozen temporal role, not toward adding g
 
 - Does `plain3_e20` also win on `blocks0`, or does the modest `blocks3` amplifier remain important there?
 - How much of the `resid4_e25` edge survives three-seed confirmation?
-- Does `carry_chunks in {16, 32}` buy anything once `bptt=1` is fixed?
-- Do the current `bptt=1` rankings survive a longer confirmation budget?
+- Do the current near-tied `bptt=1` leaders stay tied on a much longer confirmation budget?
 - Is there a better 8-branch lag set than the power-of-two one tested here?
 - Can we design a more meaningful frozen temporal mixer that stays parallelizable without turning into attention?
 - How much of the current ranking survives on `1x H100` and then on the final `8x H100` regime?

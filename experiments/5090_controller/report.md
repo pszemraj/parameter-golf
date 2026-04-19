@@ -5,6 +5,7 @@
 - Completed a clean controller follow-up on the new structural front-runner, `blocks3`.
 - Completed a four-point controller neighborhood screen on `blocks3`.
 - Completed a clean matched-token `bptt` sweep on the two best `blocks3` controller families.
+- Completed a clean matched-token `carry` sweep on the two best residual `blocks3` controller families.
 - All completed controller runs in this report used:
   - `compile=0`
   - exact `val_bpb`
@@ -183,6 +184,47 @@ Result from the clean `bptt` sweep:
   - residual family: `7.5 -> 13.5 -> 25.4 GiB`
 - On the current local screening budget, semi-TBPTT is not a quality win.
 
+### `blocks3` `carry` sweep on the best residual families
+
+All runs below used:
+- `12` branches
+- `3` blocks
+- full readout
+- `spec_max_tokens=5,000,000`
+- `bptt_chunks=1`
+
+`resid4_e20` family:
+- `resid4_e20_c8t1`
+  - final `val_bpb = 2.5133777174`
+  - steady `tok/s = 1,971,311`
+- `resid4_e20_c16t1`
+  - final `val_bpb = 2.5123756944`
+  - steady `tok/s = 1,971,871`
+- `resid4_e20_c32t1`
+  - final `val_bpb = 2.5137890659`
+  - steady `tok/s = 1,967,211`
+
+`resid4_e25` family:
+- `resid4_e25_c8t1`
+  - final `val_bpb = 2.5123951758`
+  - steady `tok/s = 1,820,046`
+- `resid4_e25_c16t1`
+  - final `val_bpb = 2.5136024590`
+  - steady `tok/s = 1,819,138`
+- `resid4_e25_c32t1`
+  - final `val_bpb = 2.5141047368`
+  - steady `tok/s = 1,819,390`
+
+Result from the clean `carry` sweep:
+- `carry=16` helped the smaller residual controller by about `0.00100` bpb relative to `carry=8`.
+- `carry=32` regressed for that same controller.
+- For the larger residual controller, both `carry=16` and `carry=32` regressed from `carry=8`.
+- The top two screening points are now effectively tied:
+  - `resid4_e20_c16t1 = 2.5123756944`
+  - `resid4_e25_c8t1 = 2.5123951758`
+- The gap is about `0.00002` bpb, which is far too small to over-interpret at this short budget.
+- That means the right next step is longer confirmation, not more screening knobs.
+
 ## What This Means
 
 Does more controller depth help?
@@ -208,9 +250,9 @@ Is semi-TBPTT helping beyond simple carry?
 ## Best Controller-Only Contender
 
 Current best controller-only contender:
-- `resid4_e25_c8t1` on the `blocks3` structure
-- final `val_bpb = 2.5123951758`
-- steady `tok/s = 1,820,432`
+- `resid4_e20_c16t1` on the `blocks3` structure by a hair in the current screen
+- final `val_bpb = 2.5123756944`
+- steady `tok/s = 1,971,871`
 - artifact estimate `= 4,197,310`
 
 The strongest simpler anchor remains:
@@ -218,7 +260,10 @@ The strongest simpler anchor remains:
 - final `val_bpb = 2.5154361649`
 - steady `tok/s = 2,030,859`
 
-This keeps the controller story honest: a modestly larger recurrent controller is now winning, but the gap to the simpler plain controller is still small enough that confirmation runs matter.
+The real takeaway is stronger than the nominal winner:
+- the best two residual points are essentially tied at the screening budget
+- the gap to the plain anchor is only a few thousandths of a bpb
+- longer confirmation runs are required before making strong ranking claims
 
 ## Regression-To-Transformer Guardrail
 
@@ -226,7 +271,8 @@ The latest winner is a somewhat larger controller, so this guardrail has to stay
 - The winning controller is still only `4` minGRU layers, not a deep generic stack.
 - The winning frozen structure is still `blocks3`, not the old `blocks9`.
 - Artifact size is unchanged across these controller screens because the frozen side is still doing the byte-heavy work.
-- That means the project is still in the intended family, but controller creep is now a real thing to watch.
+- `carry=16` helping `resid4_e20` is a healthier signal than `bptt>1`, because it keeps the controller in the same recurrent family without adding truncated unroll.
+- That means the project is still in the intended family, but controller creep is still a real thing to watch.
 
 The remaining risk is different:
 - the frozen amplifier side may still be too static or weakly temporal
@@ -315,14 +361,37 @@ resid4_e25_c8t4 4 2.5 8 4 1 -2.0 0.003 25 375 0.0003 96 256 512' \
 conda run -s --name train python tools/run_core_amp_sweep.py controller
 ```
 
+Clean `carry` sweep at fixed `bptt=1`:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+TORCH_BLAS_PREFER_CUBLASLT=1 \
+MODEL_ROOT=experiments/5090_controller/wandb_blocks3_carry_v1 \
+NUM_BLOCKS=3 \
+SPEC_MAX_TOKENS=5000000 \
+COMPILE=0 \
+VAL_EVERY=64 \
+VAL_STEPS=8 \
+LOG_EVERY=16 \
+LOG_STATE_EVERY=64 \
+TRAIN_FRAC=0.98 \
+RUN_SPECS=$'resid4_e20_c8t1 4 2.0 8 1 1 -2.0 0.003 100 1500 0.0003 384 256 512\n\
+resid4_e20_c16t1 4 2.0 16 1 1 -2.0 0.003 100 1500 0.0003 384 256 512\n\
+resid4_e20_c32t1 4 2.0 32 1 1 -2.0 0.003 100 1500 0.0003 384 256 512\n\
+resid4_e25_c8t1 4 2.5 8 1 1 -2.0 0.003 100 1500 0.0003 384 256 512\n\
+resid4_e25_c16t1 4 2.5 16 1 1 -2.0 0.003 100 1500 0.0003 384 256 512\n\
+resid4_e25_c32t1 4 2.5 32 1 1 -2.0 0.003 100 1500 0.0003 384 256 512' \
+conda run -s --name train python tools/run_core_amp_sweep.py controller
+```
+
 ## Immediate Next Step
 
-The next controller sweep should isolate carry rather than add more raw controller capacity.
+The next step should be longer confirmation, not more broad screening.
 - Keep the `blocks3` structure fixed.
 - Keep `bptt_chunks=1`.
-- Sweep `carry_chunks in {8, 16, 32}` on:
-  - `resid4_e20`
-  - `resid4_e25`
-- Only after that should three-seed confirmation start on the best `carry` point.
+- Confirm the two near-tied leaders on a much longer token budget:
+  - `resid4_e20_c16t1`
+  - `resid4_e25_c8t1`
+- Only after that should schedule refinement resume.
 
-That tests whether simple longer carried state helps the best local recurrent controllers without reintroducing the `bptt` memory penalty or drifting into “just make the controller deeper.”
+That is the right move because the short screening budget has already done its job: it found the plausible winners, but it is not long enough to separate them cleanly.
