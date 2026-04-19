@@ -23,7 +23,7 @@ python inspect_model.py init core_amp_run   --data ./data/datasets/fineweb10B_sp
 ```
 
 ```bash
-python train_core_amplifier.py core_amp_run   --data ./data/datasets/fineweb10B_sp1024   --seq-len 512 --batch-size 256 --num-steps 7000   --learning-rate 3e-3 --warmup-steps 100 --lr-hold-steps 1500 --min-lr 3e-4   --weight-decay 1e-3 --hard-loss-gamma 0.5 --hard-loss-cap 5.0   --core-layers 5 --core-expansion 2.0 --residual-core 1   --carry-chunks 16 --bptt-chunks 2   --compile --compile-after 200 --compile-mode reduce-overhead --compile-base-path
+python train_core_amplifier.py core_amp_run   --data ./data/datasets/fineweb10B_sp1024   --seq-len 512 --batch-size 256 --num-steps 7000   --learning-rate 3e-3 --warmup-steps 100 --lr-hold-steps 1500 --min-lr 3e-4   --weight-decay 1e-3 --hard-loss-gamma 0.5 --hard-loss-cap 5.0   --core-layers 5 --core-expansion 2.0 --residual-core 1   --carry-chunks 16 --bptt-chunks 2   --compile --compile-after 200 --compile-mode reduce-overhead --compile-base-path   --wandb --wandb-project pg-core-amp
 ```
 
 Or use the new root wrapper:
@@ -38,6 +38,20 @@ Quick local sweeps:
 bash scripts/sweep_controller.sh
 bash scripts/sweep_structure.sh
 ```
+
+W&B notes:
+- the maintained project for this fork is `pg-core-amp`
+- real 5090 sweeps launched through `tools/run_core_amp_sweep.py` log to W&B by default; use `WANDB=0` to disable
+- smoke runs should set `WANDB_MODE=offline` or use `PRESET=cpu_smoke` / `PRESET=cpu_structure`
+- the default structure preset is now `structure_default` for apples-to-apples 5090 ablations; `PRESET=cpu_structure` remains available for cheap CPU smoke tests
+
+Sweep artifacts now rebuild from structured per-run outputs rather than log scraping:
+- `train.log`
+- `metrics.jsonl`
+- `resolved_config.json`
+- `run_metadata.json`
+- `run_results.json`
+- per-sweep `summary.tsv`, `summary.md`, and `commands.txt`
 
 Developer sanity checks:
 
@@ -218,9 +232,7 @@ VOCAB_SIZE=1024 \
 torchrun --standalone --nproc_per_node=1 train_gpt.py
 ```
 
-By default, `train_gpt.py` keeps its ~10 minute wallclock cap. If you want a longer run, override it explicitly, for example `MAX_WALLCLOCK_SECONDS=0`.
-
-By default, this command prints `train_loss` step logs during training and prints `val_loss`, `val_bpb`, and compressed model size in the final `final_int8_zlib_roundtrip` lines at the end. If you want periodic validation logs during the run, set `VAL_LOSS_EVERY`, for example `VAL_LOSS_EVERY=200`. For the baseline config, the final `val_bpb` should land around ~1.2 with a compressed model size under 16MB.
+In this fork, `train_gpt.py` is a wrapper around `inspect_model.py` + `train_core_amplifier.py`. It writes structured run artifacts under `MODEL_DIR` instead of the upstream baseline's `final_int8_zlib_roundtrip` logs. Use `MODEL_DIR=/path/to/run_dir` to control where `metrics.jsonl`, `resolved_config.json`, `run_metadata.json`, and `run_results.json` are written.
 
 For dataset export, tokenizer export, and docs-cache rebuild instructions, see [data/README.md](data/README.md).
 

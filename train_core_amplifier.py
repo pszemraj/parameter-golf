@@ -16,14 +16,14 @@ from __future__ import annotations
 import argparse
 import gzip
 import hashlib
-import json
 import math
 import os
 import random
+import sys
 import time
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import torch
@@ -36,6 +36,24 @@ from core_amplifier_lm import (
     build_amplifier_spec,
     build_spec_optimized,
     load_train_val_int32,
+)
+from core_amplifier_lm.experiment import (
+    ARTIFACT_LIMIT_BYTES,
+    append_jsonl,
+    artifact_estimate_bytes,
+    artifact_headroom_bytes,
+    artifact_status,
+    best_and_last_eval,
+    command_context,
+    compute_steady_state_tokens_per_sec,
+    current_peak_memory_mib,
+    git_commit,
+    nvidia_smi_metadata,
+    read_jsonl,
+    reset_peak_memory,
+    runtime_device_index,
+    spec_size_bytes,
+    write_json,
 )
 
 DTYPE_MAP = {
@@ -1128,6 +1146,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mmap-cache-dir", type=str, default=None)
     parser.add_argument("--no-autocast", action="store_true")
     parser.add_argument("--tokens-on-device", action="store_true")
+    parser.add_argument("--wandb", action="store_true")
+    parser.add_argument("--wandb-project", type=str, default=None)
+    parser.add_argument("--wandb-entity", type=str, default=None)
+    parser.add_argument("--wandb-group", type=str, default=None)
+    parser.add_argument("--wandb-run-name", type=str, default=None)
+    parser.add_argument("--wandb-tags", type=str, default=None)
+    parser.add_argument(
+        "--wandb-watch",
+        type=str,
+        default=None,
+        choices=["off", "gradients", "all"],
+    )
+    parser.add_argument("--wandb-watch-log-freq", type=int, default=None)
 
     return parser.parse_args()
 
@@ -1141,8 +1172,312 @@ def _resolve(cli_val, config_val, default):
     return default
 
 
+def dtype_name(dtype: Optional[torch.dtype]) -> Optional[str]:
+    """Render torch dtypes as short strings."""
+    if dtype is None:
+        return None
+    return str(dtype).replace("torch.", "")
+
+
+def parse_wandb_tags(raw: Optional[str]) -> list[str]:
+    """Parse comma-separated W&B tags into a stable, deduplicated list."""
+    if not raw:
+        return []
+    tags: list[str] = []
+    seen: set[str] = set()
+    for part in raw.split(","):
+        tag = part.strip()
+        if not tag or tag in seen:
+            continue
+        seen.add(tag)
+        tags.append(tag)
+    return tags
+
+
+def build_wandb_config(
+    *,
+    resolved_config: dict[str, Any],
+    run_metadata: dict[str, Any],
+) -> dict[str, Any]:
+    """Build a static W&B config payload from resolved local metadata."""
+    system = run_metadata.get("system", {})
+    env = run_metadata.get("env", {})
+    runtime = resolved_config.get("runtime", {})
+    return {
+        "trainer_family": "core_amplifier",
+        "run_name": resolved_config.get("run_name"),
+        "phase": resolved_config.get("phase"),
+        "seed": resolved_config.get("seed"),
+        "git_commit": run_metadata.get("git_commit"),
+        "model": resolved_config.get("model", {}),
+        "training": resolved_config.get("training", {}),
+        "data": resolved_config.get("data", {}),
+        "runtime": {
+            "device": runtime.get("device"),
+            "device_type": runtime.get("device_type"),
+            "default_amp_dtype": runtime.get("default_amp_dtype"),
+            "amplifier_dtype": runtime.get("amplifier_dtype"),
+            "autocast": runtime.get("autocast"),
+            "exact_val_bpb": runtime.get("exact_val_bpb"),
+            "compile": runtime.get("compile", {}),
+            "wandb": runtime.get("wandb", {}),
+            "float32_matmul_precision": system.get("float32_matmul_precision"),
+            "tf32_matmul": system.get("tf32_matmul"),
+            "tf32_cudnn": system.get("tf32_cudnn"),
+            "torch_blas_prefer_cublaslt": env.get("TORCH_BLAS_PREFER_CUBLASLT"),
+        },
+        "system": {
+            "torch_version": system.get("torch_version"),
+            "cuda_version": system.get("cuda_version"),
+            "cudnn_version": system.get("cudnn_version"),
+            "gpu_name": system.get("gpu_name"),
+            "gpu_capability": system.get("gpu_capability"),
+            "gpu_total_memory_mib": system.get("gpu_total_memory_mib"),
+            "driver_version": system.get("driver_version"),
+        },
+        "spec": {
+            "spec_bytes": resolved_config.get("spec", {}).get("spec_bytes"),
+            "gzip_spec_bytes": resolved_config.get("spec", {}).get("gzip_spec_bytes"),
+            "summary": resolved_config.get("spec", {}).get("summary"),
+        },
+        "tokenizer_path": resolved_config.get("tokenizer_path"),
+        "artifact_limit_bytes": ARTIFACT_LIMIT_BYTES,
+    }
+
+
+def normalize_wandb_run_path(run: Any) -> Optional[str]:
+    """Render a W&B run path consistently for local run metadata."""
+    raw = getattr(run, "path", None)
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        return raw
+    return "/".join(str(part) for part in raw)
+
+
+def build_resolved_config_payload(
+    *,
+    cfg,
+    model_dir: Path,
+    args: argparse.Namespace,
+    data_source: str | Path,
+    train_tokens_count: int,
+    val_tokens_count: int,
+    storage_dtype: str,
+    train_frac: float,
+    data_max_tokens: Optional[int],
+    seq_len: int,
+    batch_size: int,
+    grad_accum: int,
+    carry_chunks: int,
+    bptt_chunks: int,
+    num_steps: int,
+    learning_rate: float,
+    lr_schedule: str,
+    min_lr: float,
+    warmup_steps: int,
+    lr_hold_steps: int,
+    weight_decay: float,
+    hard_loss_gamma: float,
+    hard_loss_cap: float,
+    grad_clip: float,
+    dropout: float,
+    val_every: int,
+    val_steps: int,
+    log_every: int,
+    log_state_every: int,
+    save_every: int,
+    device: torch.device,
+    device_type: str,
+    default_amp_dtype: torch.dtype,
+    runtime_amp_dtype: torch.dtype,
+    use_autocast: bool,
+    spec: AmplifierSpec,
+    core_type: str,
+    core_layers: int,
+    core_expansion: float,
+    residual_core: bool,
+    residual_core_init: float,
+    trainable_parameters: int,
+    fixed_buffer_bytes: int,
+    compile_requested: bool,
+    compile_after: int,
+    compile_mode: Optional[str],
+    compile_base_path: bool,
+    wandb_enabled: bool,
+    wandb_project: str,
+    wandb_entity: Optional[str],
+    wandb_group: Optional[str],
+    wandb_run_name: str,
+    wandb_tags: list[str],
+    wandb_watch: str,
+    wandb_watch_log_freq: int,
+    wandb_mode: Optional[str],
+    tok_path: Optional[Path],
+    byte_count_lut: Optional[torch.Tensor],
+) -> dict[str, Any]:
+    """Build a resolved run snapshot from config, CLI, and runtime decisions."""
+    spec_bytes, gzip_spec_bytes = spec_size_bytes(cfg.spec_path)
+    planned_train_tokens = int(batch_size * seq_len * grad_accum * bptt_chunks * num_steps)
+    run_name = cfg.meta.get("run_name", model_dir.name)
+    phase = cfg.meta.get("phase")
+    readout_rank = spec.metadata.get("readout_rank")
+    if readout_rank in (0, None):
+        readout_rank = None
+
+    return {
+        "run_name": run_name,
+        "phase": phase,
+        "seed": int(args.seed),
+        "model_dir": str(model_dir),
+        "model": {
+            "vocab_size": int(spec.vocab_size),
+            "core_dim": int(spec.metadata.get("requested_core_dim", spec.core_dim)),
+            "branch_lags": list(spec.branch_lags),
+            "num_blocks": int(spec.num_blocks),
+            "readout_rank": readout_rank,
+            "core_type": core_type,
+            "core_layers": int(core_layers),
+            "core_expansion": float(core_expansion),
+            "residual_core": bool(residual_core),
+            "residual_core_init": float(residual_core_init),
+            "trainable_parameters": int(trainable_parameters),
+            "fixed_buffer_bytes": int(fixed_buffer_bytes),
+            "smoothing": spec.metadata.get("smoothing"),
+            "embedding_init": spec.metadata.get("embedding_init"),
+            "spectral_neighbors": spec.metadata.get("spectral_neighbors"),
+            "lag_identity_base": spec.metadata.get("lag_identity_base"),
+            "fixed_dtype": spec.metadata.get("fixed_dtype"),
+        },
+        "training": {
+            "seq_len": int(seq_len),
+            "batch_size": int(batch_size),
+            "grad_accum": int(grad_accum),
+            "carry_chunks": int(carry_chunks),
+            "bptt_chunks": int(bptt_chunks),
+            "num_steps": int(num_steps),
+            "planned_train_tokens": planned_train_tokens,
+            "learning_rate": float(learning_rate),
+            "lr_schedule": lr_schedule,
+            "min_lr": float(min_lr),
+            "warmup_steps": int(warmup_steps),
+            "lr_hold_steps": int(lr_hold_steps),
+            "weight_decay": float(weight_decay),
+            "hard_loss_gamma": float(hard_loss_gamma),
+            "hard_loss_cap": float(hard_loss_cap),
+            "grad_clip": float(grad_clip),
+            "dropout": float(dropout),
+            "val_every": int(val_every),
+            "val_steps": int(val_steps),
+            "log_every": int(log_every),
+            "log_state_every": int(log_state_every),
+            "save_every": int(save_every),
+        },
+        "data": {
+            "source": str(data_source),
+            "storage_dtype": storage_dtype,
+            "train_frac": float(train_frac),
+            "data_max_tokens": None if data_max_tokens is None else int(data_max_tokens),
+            "train_tokens": int(train_tokens_count),
+            "val_tokens": int(val_tokens_count),
+            "train_token_fingerprint": spec.metadata.get("train_token_fingerprint"),
+            "train_token_count": spec.metadata.get("train_token_count"),
+        },
+        "runtime": {
+            "device": str(device),
+            "device_type": device_type,
+            "default_amp_dtype": dtype_name(default_amp_dtype),
+            "amplifier_dtype": dtype_name(runtime_amp_dtype),
+            "autocast": bool(use_autocast),
+            "exact_val_bpb": byte_count_lut is not None,
+            "compile": {
+                "enabled": bool(compile_requested),
+                "compile_after": int(compile_after),
+                "compile_mode": compile_mode or "default",
+                "compile_base_path": bool(compile_base_path),
+            },
+            "wandb": {
+                "enabled": bool(wandb_enabled),
+                "project": wandb_project,
+                "entity": wandb_entity,
+                "group": wandb_group,
+                "run_name": wandb_run_name,
+                "tags": list(wandb_tags),
+                "watch": wandb_watch,
+                "watch_log_freq": int(wandb_watch_log_freq),
+                "mode": wandb_mode,
+            },
+        },
+        "tokenizer_path": None if tok_path is None else str(tok_path),
+        "spec": {
+            "summary": spec.summary(),
+            "spec_path": str(cfg.spec_path),
+            "spec_bytes": spec_bytes,
+            "gzip_spec_bytes": gzip_spec_bytes,
+        },
+        "config_source": {
+            "config_path": str(cfg.config_path),
+            "cli_args": vars(args),
+        },
+    }
+
+
+def build_run_metadata(
+    *,
+    repo_root: Path,
+    args: argparse.Namespace,
+    model_dir: Path,
+    resolved_config: dict[str, Any],
+    device: torch.device,
+) -> dict[str, Any]:
+    """Collect static run metadata used for later audit and summary rebuilds."""
+    device_idx = runtime_device_index(device)
+    system: dict[str, Any] = {
+        "python": sys.version.split()[0],
+        "torch_version": torch.__version__,
+        "cuda_version": torch.version.cuda,
+        "cudnn_version": torch.backends.cudnn.version(),
+        "float32_matmul_precision": torch.get_float32_matmul_precision(),
+        "tf32_matmul": bool(getattr(torch.backends.cuda.matmul, "allow_tf32", False))
+        if torch.cuda.is_available()
+        else None,
+        "tf32_cudnn": bool(getattr(torch.backends.cudnn, "allow_tf32", False))
+        if torch.cuda.is_available()
+        else None,
+        "device_index": device_idx,
+    }
+    if device.type == "cuda" and device_idx is not None:
+        props = torch.cuda.get_device_properties(device_idx)
+        system.update(
+            {
+                "gpu_name": props.name,
+                "gpu_total_memory_mib": int(props.total_memory / (1024 * 1024)),
+                "gpu_capability": f"{props.major}.{props.minor}",
+            }
+        )
+        system.update(nvidia_smi_metadata(device_idx))
+
+    return {
+        "run_name": resolved_config.get("run_name", model_dir.name),
+        "phase": resolved_config.get("phase"),
+        "git_commit": git_commit(repo_root),
+        "command": command_context(Path(__file__), sys.argv[1:]),
+        "system": system,
+        "env": {
+            "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES"),
+            "TORCH_BLAS_PREFER_CUBLASLT": os.environ.get("TORCH_BLAS_PREFER_CUBLASLT"),
+            "PYTHONHASHSEED": os.environ.get("PYTHONHASHSEED"),
+            "WANDB_MODE": os.environ.get("WANDB_MODE"),
+            "WANDB_PROJECT": os.environ.get("WANDB_PROJECT"),
+        },
+        "model_dir": str(model_dir),
+        "started_at_epoch_sec": time.time(),
+    }
+
+
 def main() -> None:
     args = parse_args()
+    repo_root = Path(__file__).resolve().parent
 
     from core_amplifier_lm import AmplifierSpec, CoreAmplifierLM, ModelConfig
     from core_amplifier_lm.config import DEFAULTS
@@ -1218,6 +1553,23 @@ def main() -> None:
             args.residual_core_init, m.get("residual_core_init"), md.get("residual_core_init", -2.0)
         )
     )
+    run_name = str(cfg.meta.get("run_name", model_dir.name))
+    phase = cfg.meta.get("phase")
+    wandb_enabled = bool(args.wandb)
+    wandb_project = args.wandb_project or os.environ.get("WANDB_PROJECT") or "pg-core-amp"
+    wandb_entity = args.wandb_entity or os.environ.get("WANDB_ENTITY")
+    wandb_group = args.wandb_group or phase
+    wandb_run_name = args.wandb_run_name or run_name
+    wandb_tags = parse_wandb_tags(args.wandb_tags or os.environ.get("WANDB_TAGS"))
+    wandb_watch = args.wandb_watch or os.environ.get("WANDB_WATCH") or "gradients"
+    wandb_watch_log_freq = int(
+        _resolve(
+            args.wandb_watch_log_freq,
+            None,
+            int(os.environ.get("WANDB_WATCH_LOG_FREQ", "25")),
+        )
+    )
+    wandb_mode = os.environ.get("WANDB_MODE")
 
     print(f"Model dir: {model_dir}")
     print(f"  data: {data_source}")
@@ -1231,6 +1583,11 @@ def main() -> None:
         f"  controller: type={core_type} layers={core_layers} expansion={core_expansion} "
         f"residual_core={residual_core} bptt_chunks={bptt_chunks} carry_chunks={carry_chunks}"
     )
+    if wandb_enabled:
+        print(
+            f"  wandb: project={wandb_project} group={wandb_group or '-'} "
+            f"run={wandb_run_name} watch={wandb_watch} mode={wandb_mode or 'online'}"
+        )
 
     seed_everything(args.seed)
     torch.set_float32_matmul_precision("high")
@@ -1255,6 +1612,8 @@ def main() -> None:
     train_tokens: Optional[torch.Tensor] = None
     val_tokens: torch.Tensor
     train_batcher: Optional[object] = None
+    train_tokens_count = 0
+    val_tokens_count = 0
 
     train_shards, val_shards = _list_train_val_shards(data_source)
     use_direct_shard_streaming = (
@@ -1286,6 +1645,8 @@ def main() -> None:
             generator=cpu_generator,
         )
         total_train = sum(int(arr.shape[0]) for arr in train_arrays)
+        train_tokens_count = total_train
+        val_tokens_count = int(val_tokens_np.shape[0])
         print(
             f"Direct shard streaming: {len(train_arrays)} train shard views | "
             f"train={total_train:,} | val={val_tokens_np.shape[0]:,}"
@@ -1318,6 +1679,8 @@ def main() -> None:
 
         train_tokens = torch.from_numpy(np.asarray(train_tokens_np))
         val_tokens = torch.from_numpy(np.asarray(val_tokens_np))
+        train_tokens_count = int(train_tokens.shape[0])
+        val_tokens_count = int(val_tokens.shape[0])
         if args.tokens_on_device:
             if not args.no_mmap:
                 print("WARNING: --tokens-on-device copies all tokens to GPU, defeating mmap")
@@ -1351,14 +1714,21 @@ def main() -> None:
         step = int(ckpt.get("step", 0))
         print(f"Resumed from step {step}")
 
+    metrics_path = model_dir / "metrics.jsonl"
+    resolved_config_path = model_dir / "resolved_config.json"
+    run_metadata_path = model_dir / "run_metadata.json"
+    run_results_path = model_dir / "run_results.json"
+    existing_rows = read_jsonl(metrics_path)
+    compile_trigger_step: Optional[int] = None
+    compile_duration_sec = 0.0
     compile_requested = bool(args.compile)
     compile_after = max(0, int(args.compile_after))
     compile_mode = None if args.compile_mode in (None, "default") else args.compile_mode
     compile_base_path = bool(args.compile_base_path or (compile_requested and hard_loss_gamma > 0))
     compiled_models = False
 
-    def _compile_models() -> None:
-        nonlocal model, base_path_model, compiled_models
+    def _compile_models(trigger_step: int) -> None:
+        nonlocal model, base_path_model, compiled_models, compile_duration_sec, compile_trigger_step
         if compiled_models:
             return
         msg = "Compiling model"
@@ -1367,15 +1737,18 @@ def main() -> None:
         if compile_base_path and hard_loss_gamma > 0:
             msg += " + base_path"
         print(msg + "...")
+        started = time.time()
         compile_kwargs = {} if compile_mode is None else {"mode": compile_mode}
         model = torch.compile(model, **compile_kwargs)
         if compile_base_path and hard_loss_gamma > 0:
             base_path_model = torch.compile(base_path_model, **compile_kwargs)
         model.train()
         compiled_models = True
+        compile_duration_sec = time.time() - started
+        compile_trigger_step = int(trigger_step)
 
     if compile_requested and step >= compile_after:
-        _compile_models()
+        _compile_models(step)
     elif compile_requested:
         print(f"Compile delayed until step {compile_after}")
 
@@ -1397,7 +1770,108 @@ def main() -> None:
     else:
         print("WARNING: no tokenizer in model dir — bpb will be approximate")
 
-    metrics_path = model_dir / "metrics.jsonl"
+    resolved_config = build_resolved_config_payload(
+        cfg=cfg,
+        model_dir=model_dir,
+        args=args,
+        data_source=data_source,
+        train_tokens_count=train_tokens_count,
+        val_tokens_count=val_tokens_count,
+        storage_dtype=storage_dtype,
+        train_frac=train_frac,
+        data_max_tokens=data_max_tokens,
+        seq_len=seq_len,
+        batch_size=batch_size,
+        grad_accum=grad_accum,
+        carry_chunks=carry_chunks,
+        bptt_chunks=bptt_chunks,
+        num_steps=num_steps,
+        learning_rate=learning_rate,
+        lr_schedule=lr_schedule,
+        min_lr=min_lr,
+        warmup_steps=warmup_steps,
+        lr_hold_steps=lr_hold_steps,
+        weight_decay=weight_decay,
+        hard_loss_gamma=hard_loss_gamma,
+        hard_loss_cap=hard_loss_cap,
+        grad_clip=grad_clip,
+        dropout=dropout,
+        val_every=val_every,
+        val_steps=val_steps,
+        log_every=log_every,
+        log_state_every=log_state_every,
+        save_every=save_every,
+        device=device,
+        device_type=device_type,
+        default_amp_dtype=default_amp_dtype,
+        runtime_amp_dtype=runtime_amp_dtype,
+        use_autocast=use_autocast,
+        spec=spec,
+        core_type=core_type,
+        core_layers=core_layers,
+        core_expansion=core_expansion,
+        residual_core=residual_core,
+        residual_core_init=residual_core_init,
+        trainable_parameters=core_model.trainable_parameters,
+        fixed_buffer_bytes=core_model.fixed_nbytes,
+        compile_requested=compile_requested,
+        compile_after=compile_after,
+        compile_mode=compile_mode,
+        compile_base_path=compile_base_path,
+        wandb_enabled=wandb_enabled,
+        wandb_project=wandb_project,
+        wandb_entity=wandb_entity,
+        wandb_group=wandb_group,
+        wandb_run_name=wandb_run_name,
+        wandb_tags=wandb_tags,
+        wandb_watch=wandb_watch,
+        wandb_watch_log_freq=wandb_watch_log_freq,
+        wandb_mode=wandb_mode,
+        tok_path=tok_path,
+        byte_count_lut=byte_count_lut,
+    )
+    write_json(resolved_config_path, resolved_config)
+    run_metadata = build_run_metadata(
+        repo_root=repo_root,
+        args=args,
+        model_dir=model_dir,
+        resolved_config=resolved_config,
+        device=device,
+    )
+    write_json(run_metadata_path, run_metadata)
+
+    wandb_run = None
+    if wandb_enabled:
+        try:
+            import wandb
+        except ImportError as exc:
+            raise SystemExit(
+                "W&B logging requested but wandb is not installed in the active environment"
+            ) from exc
+
+        wandb_run = wandb.init(
+            project=wandb_project,
+            entity=wandb_entity,
+            group=wandb_group,
+            job_type=phase or "core_amplifier_train",
+            name=wandb_run_name,
+            tags=wandb_tags,
+            dir=str(model_dir),
+            config=build_wandb_config(
+                resolved_config=resolved_config,
+                run_metadata=run_metadata,
+            ),
+        )
+    wandb_watch_attached = False
+
+    def maybe_attach_wandb_watch() -> None:
+        nonlocal wandb_watch_attached
+        if wandb_run is None or wandb_watch_attached or wandb_watch == "off":
+            return
+        if compile_requested and not compiled_models:
+            return
+        wandb_run.watch(core_model, log=wandb_watch, log_freq=wandb_watch_log_freq)
+        wandb_watch_attached = True
 
     if train_batcher is None:
         assert train_tokens is not None
@@ -1412,21 +1886,33 @@ def main() -> None:
             carry_chunks=carry_chunks,
             generator=generator,
         )
+    maybe_attach_wandb_watch()
 
     def autocast_context():
         if use_autocast and device_type != "cpu":
             return torch.autocast(device_type=device_type, dtype=default_amp_dtype)
         return nullcontext()
 
+    if device.type == "cuda":
+        reset_peak_memory(device)
+
     start_time = time.time()
-    seen_train_tokens = 0
+    train_rows = [row for row in existing_rows if row.get("kind") == "train"]
+    eval_rows = [row for row in existing_rows if row.get("kind") == "eval"]
+    prior_processed_tokens = 0
+    prior_elapsed_sec = 0.0
+    if train_rows:
+        prior_processed_tokens = max(int(row.get("processed_tokens", 0)) for row in train_rows)
+        prior_elapsed_sec = max(float(row.get("elapsed_sec", 0.0)) for row in train_rows)
+    seen_train_tokens = prior_processed_tokens
     train_state: Optional[torch.Tensor] = None
     model.train()
     use_lr_schedule = lr_schedule == "cosine"
 
     while step < num_steps:
         if compile_requested and not compiled_models and step >= compile_after:
-            _compile_models()
+            _compile_models(step)
+            maybe_attach_wandb_watch()
 
         if use_lr_schedule:
             lr = get_lr(
@@ -1439,6 +1925,7 @@ def main() -> None:
             )
             set_lr(optimizer, lr)
 
+        step_started = time.time()
         optimizer.zero_grad(set_to_none=True)
         total_weighted_loss_sum = 0.0
         total_raw_loss_sum = 0.0
@@ -1491,9 +1978,10 @@ def main() -> None:
         if grad_clip is not None and grad_clip > 0:
             torch.nn.utils.clip_grad_norm_(core_model.parameters(), grad_clip)
         optimizer.step()
+        step_elapsed = time.time() - step_started
 
         if step % max(1, log_every) == 0:
-            elapsed = time.time() - start_time
+            elapsed = prior_elapsed_sec + (time.time() - start_time)
             tok_per_sec = seen_train_tokens / max(elapsed, 1e-6)
             current_lr = optimizer.param_groups[0]["lr"]
             train_loss = total_raw_loss_sum / max(1, total_tokens)
@@ -1501,6 +1989,36 @@ def main() -> None:
             train_bpb_approx = train_loss / math.log(2)
             if byte_count_lut is not None:
                 train_bpb_approx /= byte_count_lut.float().mean().item()
+            peak_alloc_mib, peak_reserved_mib = current_peak_memory_mib(device)
+            train_payload = {
+                "kind": "train",
+                "step": step,
+                "elapsed_sec": elapsed,
+                "step_wallclock_sec": step_elapsed,
+                "lr": current_lr,
+                "train_loss": train_loss,
+                "train_bpb_approx": train_bpb_approx,
+                "base_loss": last_stats["base_loss"],
+                "weight_max": last_stats["weight_max"],
+                "tokens_per_sec": tok_per_sec,
+                "processed_tokens": seen_train_tokens,
+                "step_tokens": total_tokens,
+                "peak_mem_alloc_mib": peak_alloc_mib,
+                "peak_mem_reserved_mib": peak_reserved_mib,
+            }
+            append_jsonl(metrics_path, train_payload)
+            train_rows.append(train_payload)
+            if wandb_run is not None:
+                wandb_run.log(
+                    {
+                        "train/loss": train_loss,
+                        "train/lr": current_lr,
+                        "train/lr_scale": current_lr / max(float(learning_rate), 1e-12),
+                        "train/processed_tokens": seen_train_tokens,
+                        "train/tokens_per_s": tok_per_sec,
+                    },
+                    step=step,
+                )
             print(
                 f"step {step:6d} | train_bpb ~{train_bpb_approx:.4f} | train_loss {train_loss:.4f} | "
                 f"base_loss {last_stats['base_loss']:.4f} | w_max {last_stats['weight_max']:.2f} | "
@@ -1516,7 +2034,7 @@ def main() -> None:
                 gate_s = ",".join(f"{x:.3f}" for x in gate_values[:8]) if gate_values else "none"
                 print(f"           state_norms=[{state_s}] residual_gates=[{gate_s}]")
 
-        if val_every > 0 and step % val_every == 0:
+        if val_every > 0 and step > 0 and step % val_every == 0:
             val_loss, val_bpb = evaluate(
                 model,
                 val_tokens,
@@ -1530,18 +2048,29 @@ def main() -> None:
                 byte_count_lut=byte_count_lut,
             )
             payload = {
+                "kind": "eval",
                 "step": step,
                 "val_loss": val_loss,
                 "val_bpb": val_bpb,
                 "train_loss": total_raw_loss_sum / max(1, total_tokens),
-                "elapsed_sec": time.time() - start_time,
+                "elapsed_sec": prior_elapsed_sec + (time.time() - start_time),
                 "lr": optimizer.param_groups[0]["lr"],
                 "bptt_chunks": bptt_chunks,
                 "carry_chunks": carry_chunks,
+                "processed_tokens": seen_train_tokens,
             }
             print(f"step {step:6d} | val_loss {val_loss:.4f} | val_bpb {val_bpb:.4f}")
-            with open(metrics_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(payload) + "\n")
+            append_jsonl(metrics_path, payload)
+            eval_rows.append(payload)
+            if wandb_run is not None and step > 0:
+                wandb_run.log(
+                    {
+                        "eval/loss": val_loss,
+                        "eval/bpb": val_bpb,
+                        "train/processed_tokens": seen_train_tokens,
+                    },
+                    step=step,
+                )
             model.train()
 
         if save_every > 0 and step > 0 and step % save_every == 0:
@@ -1558,6 +2087,51 @@ def main() -> None:
 
         step += 1
 
+    final_eval_step = max(0, step - 1)
+    need_final_eval = val_steps > 0 and (
+        not eval_rows or int(eval_rows[-1].get("step", -1)) != final_eval_step
+    )
+    if need_final_eval:
+        val_loss, val_bpb = evaluate(
+            model,
+            val_tokens,
+            seq_len=seq_len,
+            batch_size=batch_size,
+            device=device,
+            device_type=device_type,
+            amp_dtype=default_amp_dtype,
+            steps=val_steps,
+            use_autocast=use_autocast,
+            byte_count_lut=byte_count_lut,
+        )
+        payload = {
+            "kind": "eval",
+            "eval_name": "final",
+            "step": final_eval_step,
+            "val_loss": val_loss,
+            "val_bpb": val_bpb,
+            "elapsed_sec": prior_elapsed_sec + (time.time() - start_time),
+            "lr": optimizer.param_groups[0]["lr"],
+            "bptt_chunks": bptt_chunks,
+            "carry_chunks": carry_chunks,
+            "processed_tokens": seen_train_tokens,
+        }
+        print(
+            f"final eval @ step {final_eval_step:6d} | val_loss {val_loss:.4f} | val_bpb {val_bpb:.4f}"
+        )
+        append_jsonl(metrics_path, payload)
+        eval_rows.append(payload)
+        if wandb_run is not None and final_eval_step > 0:
+            wandb_run.log(
+                {
+                    "eval/loss": val_loss,
+                    "eval/bpb": val_bpb,
+                    "train/processed_tokens": seen_train_tokens,
+                },
+                step=final_eval_step,
+            )
+        model.train()
+
     final_path = model_dir / "final.pt"
     torch.save(
         {
@@ -1567,6 +2141,68 @@ def main() -> None:
         },
         final_path,
     )
+    elapsed_sec = prior_elapsed_sec + (time.time() - start_time)
+    peak_alloc_mib, peak_reserved_mib = current_peak_memory_mib(device)
+    steady_state_tok_s = compute_steady_state_tokens_per_sec(
+        train_rows, compile_trigger_step=compile_trigger_step
+    )
+    best_eval, last_eval = best_and_last_eval(eval_rows)
+    spec_bytes, gzip_spec_bytes = spec_size_bytes(cfg.spec_path)
+    artifact_bytes = artifact_estimate_bytes(repo_root=repo_root, spec_path=cfg.spec_path)
+    artifact_headroom = artifact_headroom_bytes(artifact_bytes)
+    artifact_budget_status = artifact_status(artifact_bytes)
+    run_results = {
+        "completed": True,
+        "final_step": int(step),
+        "planned_steps": int(num_steps),
+        "seen_train_tokens": int(seen_train_tokens),
+        "elapsed_sec": float(elapsed_sec),
+        "steady_state_tokens_per_sec": steady_state_tok_s,
+        "compile_trigger_step": compile_trigger_step,
+        "compile_duration_sec": float(compile_duration_sec),
+        "peak_mem_alloc_mib": peak_alloc_mib,
+        "peak_mem_reserved_mib": peak_reserved_mib,
+        "best_step": best_eval.get("step"),
+        "best_val_loss": best_eval.get("val_loss"),
+        "best_val_bpb": best_eval.get("val_bpb"),
+        "last_eval_step": last_eval.get("step"),
+        "last_val_loss": last_eval.get("val_loss"),
+        "last_val_bpb": last_eval.get("val_bpb"),
+        "spec_bytes": spec_bytes,
+        "gzip_spec_bytes": gzip_spec_bytes,
+        "artifact_estimate_bytes": artifact_bytes,
+        "artifact_headroom_bytes": artifact_headroom,
+        "artifact_status": artifact_budget_status,
+        "final_checkpoint": str(final_path),
+        "wandb_project": wandb_project if wandb_run is not None else None,
+        "wandb_group": wandb_group if wandb_run is not None else None,
+        "wandb_run_name": wandb_run_name if wandb_run is not None else None,
+        "wandb_run_path": normalize_wandb_run_path(wandb_run) if wandb_run is not None else None,
+        "wandb_url": getattr(wandb_run, "url", None) if wandb_run is not None else None,
+    }
+    write_json(run_results_path, run_results)
+    if wandb_run is not None:
+        summary = wandb_run.summary
+        summary["system/peak_mem_alloc_mib"] = peak_alloc_mib
+        summary["system/peak_mem_reserved_mib"] = peak_reserved_mib
+        summary["runtime/elapsed_sec_final"] = float(elapsed_sec)
+        summary["runtime/seen_train_tokens_final"] = int(seen_train_tokens)
+        summary["throughput/steady_state_tokens_per_s_final"] = steady_state_tok_s
+        summary["compile/trigger_step_final"] = compile_trigger_step
+        summary["compile/duration_sec_final"] = float(compile_duration_sec)
+        summary["eval/best_step"] = best_eval.get("step")
+        summary["eval/best_loss"] = best_eval.get("val_loss")
+        summary["eval/best_bpb"] = best_eval.get("val_bpb")
+        summary["eval/final_step"] = last_eval.get("step")
+        summary["eval/loss_final"] = last_eval.get("val_loss")
+        summary["eval/bpb_final"] = last_eval.get("val_bpb")
+        summary["artifact/spec_bytes_final"] = spec_bytes
+        summary["artifact/gzip_spec_bytes_final"] = gzip_spec_bytes
+        summary["artifact/estimate_bytes_final"] = artifact_bytes
+        summary["artifact/headroom_bytes_final"] = artifact_headroom
+        summary["artifact/status_final"] = artifact_budget_status
+        summary["artifact/limit_bytes"] = ARTIFACT_LIMIT_BYTES
+        wandb_run.finish()
     print(f"Training complete. Final checkpoint: {final_path}")
 
 

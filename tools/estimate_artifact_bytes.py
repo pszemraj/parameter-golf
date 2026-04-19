@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
 """Estimate artifact size for a built Core/Amplifier model."""
 
+# ruff: noqa: E402
+
 from __future__ import annotations
 
 import argparse
 import gzip
+import sys
 from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from core_amplifier_lm import AmplifierSpec
 
@@ -33,7 +40,13 @@ def _code_files(record_dir: Path, mode: str) -> list[Path]:
     if mode == "train_gpt":
         return [record_dir / "train_gpt.py"]
     return [
-        p for p in sorted(record_dir.rglob("*.py")) if p.is_file() and "experiments" not in p.parts
+        p
+        for p in sorted(record_dir.rglob("*.py"))
+        if p.is_file()
+        and "experiments" not in p.parts
+        and "records" not in p.parts
+        and ".git" not in p.parts
+        and "__pycache__" not in p.parts
     ]
 
 

@@ -9,3 +9,21 @@ data/docs_selected.jsonl
 .mypy_cache/
 .venv
 logs/
+
+# Local Core/Amplifier experiment artifacts. Keep committed notes/reports, ignore run payloads.
+experiments/**/_shared_spec/
+experiments/**/config.json
+experiments/**/checkpoint*.pt
+experiments/**/final.pt
+experiments/**/spec.pt
+experiments/**/metrics.jsonl
+experiments/**/resolved_config.json
+experiments/**/run_metadata.json
+experiments/**/run_results.json
+experiments/**/train.log
+experiments/**/summary.tsv
+experiments/**/summary.md
+experiments/**/commands.txt
+experiments/**/*.model
+experiments/**/*.vocab
+experiments/**/wandb/
