@@ -43,6 +43,15 @@ Last updated: 2026-04-18 23:44 CDT
   - both attention implementations now cache rotary tables by
     `(seq_len, device, dtype)` rather than recasting cached fp32 tables on
     every call
+- Local packed frontend probes on `2026-04-18` after `fce8e24`:
+  - on the local `sm_89` helper, `l2_norm` on `bf16` already returns `bf16`, so
+    the current q/k `.to(dtype=x.dtype)` sites are not triggering real cast
+    kernels on this stack
+  - a direct `_project_recurrence_inputs()` microbench at `B=1,T=1024,D=384`
+    did **not** show a win from flipping the packed split path to
+    `use_packed_qkv_single_contig=1` or `use_packed_qkv_split_copy=1`
+  - keep the current packed split default until target-hardware evidence says
+    otherwise
   - these are local/runtime cleanups only until the next bounded H100 compare
     confirms or rejects their end-to-end value
 - Core history and keep/kill notes remain in
