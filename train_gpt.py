@@ -54,6 +54,7 @@ class Hyperparameters:
     # Validation cadence and batch size. Validation always uses the full fineweb_val split.
     val_batch_size = int(os.environ.get("VAL_BATCH_SIZE", 524_288))
     val_loss_every = int(os.environ.get("VAL_LOSS_EVERY", 1000))
+    log_step0_eval = bool(int(os.environ.get("LOG_STEP0_EVAL", "0")))
     train_log_every = int(os.environ.get("TRAIN_LOG_EVERY", 200))
 
     # Training length.
@@ -915,6 +916,33 @@ class Rotary(nn.Module):
         return self._cos_cached, self._sin_cached
 
 
+def prewarm_rotary_caches(
+    module: nn.Module, *, seq_len: int, dtype: torch.dtype
+) -> int:
+    """Populate attention rotary caches before model compilation.
+
+    :param nn.Module module: Module tree containing attention rotary modules.
+    :param int seq_len: Sequence length to materialize.
+    :param torch.dtype dtype: Target cache dtype.
+    :return int: Number of rotary modules prewarmed.
+    """
+
+    try:
+        device = next(module.parameters()).device
+    except StopIteration:
+        return 0
+    count = 0
+    for submodule in module.modules():
+        rotary = getattr(submodule, "rotary", None)
+        if rotary is None or not callable(rotary):
+            continue
+        rotary(seq_len, device, dtype)
+        count += 1
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+    return count
+
+
 def apply_rotary_emb(x: Tensor, cos: Tensor, sin: Tensor) -> Tensor:
     """Apply rotary position embeddings to a head dimension.
 
@@ -1449,6 +1477,11 @@ def main() -> None:
         if isinstance(module, CastedLinear):
             module.float()
     restore_low_dim_params_to_fp32(base_model)
+    rotary_prewarm_count = prewarm_rotary_caches(
+        base_model,
+        seq_len=args.train_seq_len,
+        dtype=torch.bfloat16,
+    )
     compiled_model = torch.compile(base_model, dynamic=False, fullgraph=True)
     model: nn.Module = (
         DDP(compiled_model, device_ids=[local_rank], broadcast_buffers=False)
@@ -1544,6 +1577,8 @@ def main() -> None:
         f"iterations:{args.iterations} warmup_steps:{args.warmup_steps} "
         f"max_wallclock_seconds:{args.max_wallclock_seconds:.3f}"
     )
+    if rotary_prewarm_count > 0:
+        log0(f"compile_prewarm: rotary_modules:{rotary_prewarm_count}")
     log0(f"seed:{args.seed}")
 
     # -----------------------------
@@ -1649,8 +1684,12 @@ def main() -> None:
             stop_after_step is not None and step >= stop_after_step
         )
 
-        should_validate = last_step or (
-            args.val_loss_every > 0 and step % args.val_loss_every == 0
+        should_validate = (
+            last_step
+            or (step == 0 and args.log_step0_eval)
+            or (
+                args.val_loss_every > 0 and step > 0 and step % args.val_loss_every == 0
+            )
         )
         if should_validate:
             torch.cuda.synchronize()

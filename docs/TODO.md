@@ -32,6 +32,10 @@ Last updated: 2026-04-18 23:44 CDT
     warmup state reset
   - both trainers now keep a single `zero_grad(set_to_none=True)` pass per
     optimizer step instead of paying a redundant extra pass at step start
+  - the baseline trainer now prewarms rotary caches before top-level compile,
+    matching the hybrid trainer's cache discipline
+  - the baseline trainer no longer runs step-0 validation by default; it now
+    uses the same explicit `LOG_STEP0_EVAL=1` escape hatch as the hybrid path
   - both attention implementations now cache rotary tables by
     `(seq_len, device, dtype)` rather than recasting cached fp32 tables on
     every call
