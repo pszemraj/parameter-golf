@@ -7,6 +7,8 @@
 - Completed a clean matched-token `bptt` sweep on the two best `blocks3` controller families.
 - Completed a clean matched-token `carry` sweep on the two best residual `blocks3` controller families.
 - Completed the first controller-up/spec-down reallocation screen on `blocks2`.
+- Completed a `1B` confirmation run on the new `blocks2` family.
+- Completed the first radical half-million-parameter recurrent controller screen on `blocks2`.
 - All completed controller runs in this report used:
   - `compile=0`
   - exact `val_bpb`
@@ -283,6 +285,42 @@ Diagnostics from the new frontier:
 - `resid5_e30` did not buy its way onto the frontier despite having trainable size comparable to `resid6_e25`.
 - That means depth is currently buying more than width on the smaller `blocks2` frozen spec.
 
+### `blocks2` longer-budget confirmation and radical scaling
+
+Confirmed longer-budget result:
+- `blocks2_resid6_e25_c8t1_1b`
+  - `core_layers=6`
+  - `core_expansion=2.5`
+  - `residual_core=1`
+  - final `val_bpb = 2.3644974368`
+  - steady `tok/s = 1,861,968`
+  - peak allocated memory `= 7,881 MiB`
+  - trainable int8 zlib payload `= 88,254`
+  - artifact estimate `= 3,465,503`
+
+First radical scale-up result:
+- `blocks2_resid12_e6_c8t1_r3_current_512m`
+  - `core_layers=12`
+  - `core_expansion=6.0`
+  - `residual_core_init=-3.0`
+  - trainable params `= 505,099`
+  - final `val_bpb = 2.3518192702`
+  - steady `tok/s = 560,313`
+  - peak allocated memory `= 20,382 MiB`
+  - trainable int8 zlib payload `= 405,232`
+  - artifact estimate `= 3,782,481`
+
+What changed at the radical scale:
+- The first half-million-parameter controller beat every smaller local point on the same `512M` screening budget.
+- It beat `blocks2_resid6_e25_c8t1_current_512m` by about `0.04062` bpb.
+- It did that without any attention or token-token mixing.
+- The deeper controller needed a more closed residual init to stay in a healthier regime:
+  - early logged residual gates stayed around `0.05-0.06`
+  - the run avoided the immediate top-layer blow-open pattern seen in the smaller `6 x 2.5` controller
+- The cost is real:
+  - throughput dropped to about `30%` of the smaller `blocks2` frontier
+  - peak memory jumped above `20 GiB`
+
 ## What This Means
 
 Does more controller depth help?
@@ -292,6 +330,7 @@ Does more controller depth help?
 - On `blocks2`, depth kept paying:
   - `resid5_e25` beat the old `blocks3` anchor cleanly
   - `resid6_e25` then beat `resid5_e25` by another `0.00620` bpb
+  - `resid12_e6` then beat `resid6_e25` by another `0.04062` bpb on the same `512M` screen
 
 Does more controller width via expansion help?
 - Not as a generic knob.
@@ -314,16 +353,22 @@ Is semi-TBPTT helping beyond simple carry?
 ## Best Controller-Only Contender
 
 Current best controller-only contender:
-- best pure-quality screening point: `blocks2_resid6_e25_c8t1_current_512m`
-- final `val_bpb = 2.3924393341`
-- steady `tok/s = 1,849,000`
-- artifact estimate `= 3,465,660`
+- best pure-quality screening point: `blocks2_resid12_e6_c8t1_r3_current_512m`
+- final `val_bpb = 2.3518192702`
+- steady `tok/s = 560,313`
+- artifact estimate `= 3,782,481`
 
 Best current quality/speed point on the same frontier:
 - `blocks2_resid5_e25_c8t1_current_512m`
 - final `val_bpb = 2.3986403191`
 - steady `tok/s = 2,023,976`
 - artifact estimate `= 3,452,276`
+
+Best confirmed longer-budget point on the new family:
+- `blocks2_resid6_e25_c8t1_1b`
+- final `val_bpb = 2.3644974368`
+- steady `tok/s = 1,861,968`
+- artifact estimate `= 3,465,503`
 
 Best earlier short-budget `blocks3` controller screen:
 - `resid4_e20_c16t1` on `blocks3`
@@ -340,6 +385,7 @@ The real takeaway is stronger than the nominal winner:
 - inside the earlier `blocks3` screen, the best two residual points are essentially tied
 - once we reallocated one frozen block into the recurrent controller, the new `blocks2` frontier separated itself clearly from the old `blocks3` anchor
 - within that new frontier, depth is currently a better spend than width
+- once we allowed a genuinely large recurrent controller, quality improved by a much larger margin than any of the earlier small-controller sweeps
 - longer confirmation runs are still required before making strong transfer claims
 
 ## Regression-To-Transformer Guardrail
@@ -349,6 +395,7 @@ The latest winner is a larger recurrent controller on a smaller frozen spec, so 
 - The winning move was to remove frozen amplifier depth, not to add more frozen blocks.
 - The corrected artifact estimate dropped sharply because the spec got smaller.
 - `carry=16` helping `resid4_e20` and the `blocks2` frontier beating the old anchor are both healthier signals than `bptt>1`, because they stay inside the same recurrent family without adding truncated unroll or token-token mixing.
+- The half-million-parameter controller is still an RNN, but it raises a different risk: controller compute can now dominate enough that we must watch systems cost carefully.
 - That means the project is still in the intended family, but controller creep is still a real thing to watch.
 
 The remaining risk is different:
