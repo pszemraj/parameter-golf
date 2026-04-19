@@ -46,7 +46,7 @@ Status legend:
   - `blocks2_resid5_e30_c8t1_current_512m`
 - `pending` `blocks2_confirm1b`
   - `blocks2_resid6_e25_c8t1_1b`
-- `running` `blocks2_radical`
+- `done` `blocks2_radical`
   - `blocks2_resid12_e6_c8t1_r3_current_512m`
   - `blocks2_resid12_e8_c8t1_r3_current_512m`
 - `pending` `blocks1_radical`
@@ -69,3 +69,5 @@ Status legend:
   - `branches8_pow2`
   - `readout256`
   - `readout128`
+- `running` `blocks0_radical_guardrail`
+  - `blocks0_resid12_e6_c8t1_r3_current_512m`
