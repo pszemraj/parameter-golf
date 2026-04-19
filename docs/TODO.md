@@ -27,6 +27,11 @@ Last updated: 2026-04-18 23:44 CDT
   - both trainers now stage validation batches through reusable pinned `int64`
     host buffers as well, instead of doing pageable eval-batch widening on each
     validation slice
+  - both trainers now reuse one representative warmup batch for compile priming
+    instead of rereading and recopying fresh data that is thrown away after the
+    warmup state reset
+  - both trainers now keep a single `zero_grad(set_to_none=True)` pass per
+    optimizer step instead of paying a redundant extra pass at step start
   - both attention implementations now cache rotary tables by
     `(seq_len, device, dtype)` rather than recasting cached fp32 tables on
     every call

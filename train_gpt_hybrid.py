@@ -1424,16 +1424,16 @@ def main() -> None:
         }
         init_opt = [copy.deepcopy(o.state_dict()) for o in optimizers]
         model.train()
+        zero_grad_all()
+        warmup_x, warmup_y = train_loader.next_batch(
+            args.train_batch_tokens, args.train_seq_len, grad_accum_steps
+        )
         for ws in range(args.warmup_steps):
-            zero_grad_all()
             for ms in range(grad_accum_steps):
                 if distributed:
                     model.require_backward_grad_sync = ms == grad_accum_steps - 1
-                x, y = train_loader.next_batch(
-                    args.train_batch_tokens, args.train_seq_len, grad_accum_steps
-                )
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                    wl = model(x, y)
+                    wl = model(warmup_x, warmup_y)
                 (wl * grad_scale).backward()
             for o in optimizers:
                 o.step()
@@ -1471,6 +1471,7 @@ def main() -> None:
     perf_time_ms = 0.0
     perf_measured_steps = 0
     stop_after_step = None
+    zero_grad_all()
     torch.cuda.synchronize()
     t0 = time.perf_counter()
     step = 0
@@ -1523,7 +1524,6 @@ def main() -> None:
 
         elapsed_ms = training_time_ms + 1000.0 * (time.perf_counter() - t0)
         scale = lr_mul(step, elapsed_ms)
-        zero_grad_all()
         train_loss = torch.zeros((), device=device)
         perf_t0 = time.perf_counter() if args.perf_timing else None
 
