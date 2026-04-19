@@ -2,7 +2,8 @@
 
 ## Status
 - Completed a stronger corrected full-spec `blocks0` radical controller frontier through `12 x 10.0`.
-- Launched a fixed-parameter depth-vs-width follow-up, `blocks0_resid10_e12_c8t1_r3_current_512m`.
+- Completed a fixed-parameter depth-vs-width follow-up, `blocks0_resid10_e12_c8t1_r3_current_512m`.
+- Launched a safer depth-leaning follow-up, `blocks0_resid14_e8_c8t1_r3_current_512m`, after `blocks0_resid16_e8_c8t1_r3_current_512m` hit the local memory wall.
 - Completed the first matched-token controller baseline on the original full frozen structure.
 - Completed a clean controller follow-up on the new structural front-runner, `blocks3`.
 - Completed a four-point controller neighborhood screen on `blocks3`.
@@ -58,15 +59,32 @@ Matched run results:
   - steady `tok/s = 384,214`
   - trainable params `= 839,129`
   - artifact estimate `= 2,936,419`
+- `blocks0_resid10_e12_c8t1_r3_current_512m`
+  - `core_layers=10`
+  - `core_expansion=12.0`
+  - `carry_chunks=8`
+  - `bptt_chunks=1`
+  - final `val_bpb = 2.2794286891`
+  - steady `tok/s = 382,789`
+  - trainable params `= 839,031`
+  - artifact estimate `= 2,921,627`
 
 Current corrected result:
 - controller-only scaling on the `blocks0` structure is still improving quality
 - `12 x 10.0` beat `12 x 8.0` by about `0.00811` bpb on the same `512M`-token screening contract
 - `12 x 10.0` beat `12 x 6.0` by about `0.02014` bpb on the same contract
+- in the fixed-parameter comparison, `12 x 10.0` beat `10 x 12.0` by about `0.00164` bpb
 - the quality gain came with real systems cost:
   - `12 x 10.0` is about `19%` slower than `12 x 8.0`
   - `12 x 10.0` is about `38%` slower than `12 x 6.0`
   - peak allocated memory rose to about `28.75 GiB`
+- `10 x 12.0` shows that the new frontier is not just a raw-parameter story:
+  - it ran at almost the same speed as `12 x 10.0`
+  - it used almost the same memory budget
+  - it still finished slightly worse, so controller geometry matters
+- the next depth jump, `16 x 8.0`, failed with a real local memory limit:
+  - OOM after the first step while trying to allocate another `512 MiB`
+  - about `30.9 GiB` already in use on the 5090
 - the strongest current architectural conclusion is still structural, not transformer-like:
   - we are scaling a parallel minGRU controller, not reintroducing attention
   - the current learned amplifier blocks look weaker than the frozen lag/readout basis plus the recurrent controller

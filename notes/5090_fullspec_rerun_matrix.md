@@ -12,6 +12,7 @@ Status legend:
 - `pending`: not started under the corrected contract
 - `running`: launched under the corrected contract
 - `done`: completed under the corrected contract
+- `failed`: launched under the corrected contract but failed for a real reason worth preserving
 
 ## Controller Families
 
@@ -76,5 +77,10 @@ Status legend:
   - `blocks0_resid12_e8_c8t1_r3_current_512m`
 - `done` `blocks0_controller_v2`
   - `blocks0_resid12_e10_c8t1_r3_current_512m`
-- `running` `blocks0_controller_v3`
+- `done` `blocks0_controller_v3`
   - `blocks0_resid10_e12_c8t1_r3_current_512m`
+- `failed` `blocks0_controller_v4`
+  - `blocks0_resid16_e8_c8t1_r3_current_512m`
+  - `OOM` on the fixed `seq_len=512`, `batch_size=256` contract after the first step
+- `running` `blocks0_controller_v5`
+  - `blocks0_resid14_e8_c8t1_r3_current_512m`
