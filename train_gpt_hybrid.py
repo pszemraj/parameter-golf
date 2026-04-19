@@ -911,7 +911,7 @@ def eval_val(
     model.eval()
     x_stage: Tensor | None = None
     y_stage: Tensor | None = None
-    with torch.inference_mode():
+    with torch.no_grad():
         for bss in range(seq_start, seq_end, local_batch_seqs):
             bse = min(bss + local_batch_seqs, seq_end)
             rs, re = bss * args.train_seq_len, bse * args.train_seq_len + 1
@@ -995,7 +995,7 @@ def prewarm_eval_forward(
     )
     was_training = model.training
     model.eval()
-    with torch.inference_mode():
+    with torch.no_grad():
         with torch.autocast(
             device_type="cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"
         ):

@@ -265,6 +265,27 @@ See [REDUNDANCY_AUDIT.md](REDUNDANCY_AUDIT.md) for the concrete code targets.
   - keep treating this as a packed-HGDN-only runtime cleanup
   - do not mirror it into `train_gpt.py`; the exact repo baseline stays
     baseline
+
+## 12. Record the 2026-04-19 packed eval no-grad follow-up
+
+- Base commit before this follow-up: `d3842b6`.
+- Timestamp: `2026-04-19 12:50 CDT`.
+- Scope:
+  - `train_gpt_hybrid.py` now uses `torch.no_grad()` rather than
+    `torch.inference_mode()` for validation and eval-graph prewarm on the
+    packed HGDN path
+  - this keeps the eval path out of autograd without introducing the extra
+    dispatch-key mismatch that showed up in the first eval-graph prewarm pass
+- Local validation artifact:
+  - `RUN_ID=packed_hgdn_eval_nograd_audit`
+  - the remaining compile log shows only the expected train→eval grad-mode
+    recompile before `step:1`
+  - the earlier extra dispatch-key recompile is gone
+  - tiny local smoke timing moved from about `480/466 ms` (`step1` / `step_avg`
+    after the first prewarm pass) to about `367/379 ms` on the same contract
+- Interpretation:
+  - keep this change HGDN-trainer-local until the next bounded H100 packed rerun
+    confirms whether the cleanup survives at target scale
 - Local proxy evidence:
   - `PYTHONPATH=$PWD conda run -s --name pg python /tmp/bench_token_input_width.py`
     measured:
