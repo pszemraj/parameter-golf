@@ -4,6 +4,7 @@
 - Completed the first matched-token controller baseline on the original full frozen structure.
 - Completed a clean controller follow-up on the new structural front-runner, `blocks3`.
 - Completed a four-point controller neighborhood screen on `blocks3`.
+- Completed a clean matched-token `bptt` sweep on the two best `blocks3` controller families.
 - All completed controller runs in this report used:
   - `compile=0`
   - exact `val_bpb`
@@ -117,6 +118,71 @@ Result from the neighborhood screen:
 - `resid4_e25` is the current single-seed screening leader, beating `plain4_e20` by about `0.00304` bpb and `resid4_e20` by about `0.00098` bpb.
 - Residual gates stayed in a narrow non-saturated range, roughly `0.119 -> 0.141`, so the residual path is active without collapsing.
 
+### `blocks3` `bptt` sweep on the leading families
+
+All runs below used:
+- `12` branches
+- `3` blocks
+- full readout
+- `spec_max_tokens=5,000,000`
+- `carry_chunks=8`
+- explicit per-run warmup/hold scaling so schedule stayed matched in token terms
+
+Plain family:
+- `plain4_e20_c8t1`
+  - `bptt_chunks=1`
+  - `warmup_steps=100`
+  - `lr_hold_steps=1500`
+  - final `val_bpb = 2.5154361649`
+  - steady `tok/s = 2,030,714`
+  - peak allocated memory `= 6,814 MiB`
+- `plain4_e20_c8t2`
+  - `bptt_chunks=2`
+  - `warmup_steps=50`
+  - `lr_hold_steps=750`
+  - final `val_bpb = 2.5199320452`
+  - steady `tok/s = 2,063,541`
+  - peak allocated memory `= 12,064 MiB`
+- `plain4_e20_c8t4`
+  - `bptt_chunks=4`
+  - `warmup_steps=25`
+  - `lr_hold_steps=375`
+  - final `val_bpb = 2.5207602945`
+  - steady `tok/s = 2,078,943`
+  - peak allocated memory `= 22,563 MiB`
+
+Residual family:
+- `resid4_e25_c8t1`
+  - `bptt_chunks=1`
+  - `warmup_steps=100`
+  - `lr_hold_steps=1500`
+  - final `val_bpb = 2.5123951758`
+  - steady `tok/s = 1,820,552`
+  - peak allocated memory `= 7,525 MiB`
+- `resid4_e25_c8t2`
+  - `bptt_chunks=2`
+  - `warmup_steps=50`
+  - `lr_hold_steps=750`
+  - final `val_bpb = 2.5175869540`
+  - steady `tok/s = 1,854,033`
+  - peak allocated memory `= 13,485 MiB`
+- `resid4_e25_c8t4`
+  - `bptt_chunks=4`
+  - `warmup_steps=25`
+  - `lr_hold_steps=375`
+  - final `val_bpb = 2.5193139021`
+  - steady `tok/s = 1,865,468`
+  - peak allocated memory `= 25,405 MiB`
+
+Result from the clean `bptt` sweep:
+- `bptt=1` won clearly in both families.
+- The plain family degraded by about `0.00450` bpb at `bptt=2` and about `0.00532` bpb at `bptt=4`.
+- The residual family degraded by about `0.00519` bpb at `bptt=2` and about `0.00692` bpb at `bptt=4`.
+- Higher `bptt` increased steady `tok/s` slightly because there were fewer optimizer steps, but that came with sharply worse memory:
+  - plain family: `6.8 -> 12.1 -> 22.6 GiB`
+  - residual family: `7.5 -> 13.5 -> 25.4 GiB`
+- On the current local screening budget, semi-TBPTT is not a quality win.
+
 ## What This Means
 
 Does more controller depth help?
@@ -135,9 +201,9 @@ Is residualization materially improving trainability?
 - The current best two screening points are both residual controllers.
 
 Is semi-TBPTT helping beyond simple carry?
-- Still unanswered cleanly.
-- The original `resid5_e20` package with `bptt_chunks=2` lost on both `blocks9` and `blocks3`, but that does not identify whether the loss came from the horizon setting or from the controller choice.
-- The next sweep should isolate `bptt_chunks` directly on the new `blocks3` winners.
+- No, not on the current local budget.
+- A clean matched-token `bptt` sweep showed `bptt=1` beating `2` and `4` in both the plain and residual families.
+- Higher `bptt` also caused large memory inflation without offsetting quality gains.
 
 ## Best Controller-Only Contender
 
@@ -145,7 +211,7 @@ Current best controller-only contender:
 - `resid4_e25_c8t1` on the `blocks3` structure
 - final `val_bpb = 2.5123951758`
 - steady `tok/s = 1,820,432`
-- artifact estimate `= 4,195,301`
+- artifact estimate `= 4,197,310`
 
 The strongest simpler anchor remains:
 - `plain4_e20_c8t1` on `blocks3`
@@ -226,13 +292,37 @@ resid4_e25_c8t1 4 2.5 8 1 1 -2.0 0.003 1500 0.0003 384 256 512' \
 conda run -s --name train python tools/run_core_amp_sweep.py controller
 ```
 
+Clean `bptt` sweep with per-run warmup scaling:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+TORCH_BLAS_PREFER_CUBLASLT=1 \
+MODEL_ROOT=experiments/5090_controller/wandb_blocks3_bptt_v2 \
+NUM_BLOCKS=3 \
+SPEC_MAX_TOKENS=5000000 \
+COMPILE=0 \
+VAL_EVERY=64 \
+VAL_STEPS=8 \
+LOG_EVERY=16 \
+LOG_STATE_EVERY=64 \
+TRAIN_FRAC=0.98 \
+RUN_SPECS=$'plain4_e20_c8t1 4 2.0 8 1 0 -2.0 0.003 100 1500 0.0003 384 256 512\n\
+plain4_e20_c8t2 4 2.0 8 2 0 -2.0 0.003 50 750 0.0003 192 256 512\n\
+plain4_e20_c8t4 4 2.0 8 4 0 -2.0 0.003 25 375 0.0003 96 256 512\n\
+resid4_e25_c8t1 4 2.5 8 1 1 -2.0 0.003 100 1500 0.0003 384 256 512\n\
+resid4_e25_c8t2 4 2.5 8 2 1 -2.0 0.003 50 750 0.0003 192 256 512\n\
+resid4_e25_c8t4 4 2.5 8 4 1 -2.0 0.003 25 375 0.0003 96 256 512' \
+conda run -s --name train python tools/run_core_amp_sweep.py controller
+```
+
 ## Immediate Next Step
 
-The next controller sweep should isolate horizon rather than add more raw controller capacity.
+The next controller sweep should isolate carry rather than add more raw controller capacity.
 - Keep the `blocks3` structure fixed.
-- Keep `plain4_e20` as the simple-family anchor.
-- Keep `resid4_e25` as the current pure-quality leader.
-- Sweep `bptt_chunks in {1, 2, 4}` at fixed `carry_chunks=8`.
-- Only after that should `carry_chunks in {8, 16, 32}` be swept on the better family.
+- Keep `bptt_chunks=1`.
+- Sweep `carry_chunks in {8, 16, 32}` on:
+  - `resid4_e20`
+  - `resid4_e25`
+- Only after that should three-seed confirmation start on the best `carry` point.
 
-That answers whether the current gains are coming from better controller structure or whether longer effective horizon is the real missing ingredient, without drifting into “just make the controller deeper.”
+That tests whether simple longer carried state helps the best local recurrent controllers without reintroducing the `bptt` memory penalty or drifting into “just make the controller deeper.”

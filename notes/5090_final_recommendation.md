@@ -12,15 +12,15 @@
 1. `resid4_e25_c8t1` on `blocks3`
    - final `val_bpb = 2.5123951758`
    - steady `tok/s = 1,820,432`
-   - artifact estimate `= 4,195,301`
+   - artifact estimate `= 4,197,310`
 2. `resid4_e20_c8t1` on `blocks3`
    - final `val_bpb = 2.5133777174`
    - steady `tok/s = 1,970,720`
-   - artifact estimate `= 4,195,301`
+   - artifact estimate `= 4,197,310`
 3. `plain4_e20_c8t1` on `blocks3`
    - final `val_bpb = 2.5154361649`
    - steady `tok/s = 2,030,859`
-   - artifact estimate `= 4,195,301`
+   - artifact estimate `= 4,197,310`
 
 If the goal is pure local screening quality, `resid4_e25_c8t1 + blocks3` is the current winner.
 The earlier `plain3_e20 + blocks3` point remains a useful simple reference at `val_bpb = 2.5158438607`.
@@ -80,6 +80,29 @@ RUN_SPECS=$'plain4_e20_c8t1 4 2.0 8 1 0 -2.0 0.003 1500 0.0003 384 256 512\n\
 plain3_e25_c8t1 3 2.5 8 1 0 -2.0 0.003 1500 0.0003 384 256 512\n\
 resid4_e20_c8t1 4 2.0 8 1 1 -2.0 0.003 1500 0.0003 384 256 512\n\
 resid4_e25_c8t1 4 2.5 8 1 1 -2.0 0.003 1500 0.0003 384 256 512' \
+conda run -s --name train python tools/run_core_amp_sweep.py controller
+```
+
+### Clean `bptt` sweep on `blocks3`
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+TORCH_BLAS_PREFER_CUBLASLT=1 \
+MODEL_ROOT=experiments/5090_controller/wandb_blocks3_bptt_v2 \
+NUM_BLOCKS=3 \
+SPEC_MAX_TOKENS=5000000 \
+COMPILE=0 \
+VAL_EVERY=64 \
+VAL_STEPS=8 \
+LOG_EVERY=16 \
+LOG_STATE_EVERY=64 \
+TRAIN_FRAC=0.98 \
+RUN_SPECS=$'plain4_e20_c8t1 4 2.0 8 1 0 -2.0 0.003 100 1500 0.0003 384 256 512\n\
+plain4_e20_c8t2 4 2.0 8 2 0 -2.0 0.003 50 750 0.0003 192 256 512\n\
+plain4_e20_c8t4 4 2.0 8 4 0 -2.0 0.003 25 375 0.0003 96 256 512\n\
+resid4_e25_c8t1 4 2.5 8 1 1 -2.0 0.003 100 1500 0.0003 384 256 512\n\
+resid4_e25_c8t2 4 2.5 8 2 1 -2.0 0.003 50 750 0.0003 192 256 512\n\
+resid4_e25_c8t4 4 2.5 8 4 1 -2.0 0.003 25 375 0.0003 96 256 512' \
 conda run -s --name train python tools/run_core_amp_sweep.py controller
 ```
 
@@ -155,6 +178,7 @@ Pure hyperparameter / architecture findings:
   - `plain4_e20` beats `plain3_e20`
   - `resid4_e20` beats the plain family
   - `resid4_e25` is the current single-seed leader
+- on the current local screening budget, `bptt=1` beats `bptt=2` and `bptt=4` in both the plain and residual families
 - `branches8_pow2` and `readout128` both lose enough quality that they should not become the default
 - `readout256` is the only tested compression point that still looks plausibly useful
 
@@ -163,6 +187,7 @@ Pure hyperparameter / architecture findings:
 Current evidence says we are not drifting back into a transformer-shaped local optimum.
 - The winning frozen structure is shallower, not deeper.
 - The winning controllers are still only `4` recurrent layers, not a deep generic stack.
+- The clean `bptt` sweep says we do not need more truncated recurrent unroll to get the current best result.
 - The whole picture still favors a modest frozen multi-timescale front-end plus a modest recurrent controller.
 
 The remaining architectural risk is different:
@@ -175,8 +200,8 @@ That still points toward improving the frozen temporal role, not toward adding g
 
 - Does `plain3_e20` also win on `blocks0`, or does the modest `blocks3` amplifier remain important there?
 - How much of the `resid4_e25` edge survives three-seed confirmation?
-- Does `bptt_chunks in {2, 4}` help the current `blocks3` winners, or is `bptt=1` already enough?
-- Does `carry_chunks in {16, 32}` buy anything once the best `bptt` is fixed?
+- Does `carry_chunks in {16, 32}` buy anything once `bptt=1` is fixed?
+- Do the current `bptt=1` rankings survive a longer confirmation budget?
 - Is there a better 8-branch lag set than the power-of-two one tested here?
 - Can we design a more meaningful frozen temporal mixer that stays parallelizable without turning into attention?
 - How much of the current ranking survives on `1x H100` and then on the final `8x H100` regime?
