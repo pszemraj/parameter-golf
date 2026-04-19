@@ -191,8 +191,8 @@ For one-off 1xH100 perf and profile runs, use the structured launcher directly,
 for example:
 
 ```bash
-python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k_example --offline
-python scripts/hgdn.py h100-profile hybrid --preset winner-20260405-19 --run-prefix h100k_profile --offline
+python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-live14 --run-prefix h100k_example --offline
+python scripts/hgdn.py h100-profile hybrid --preset winner-20260405-19-live14 --run-prefix h100k_profile --offline
 ```
 
 For the current branch state, screening protocol, W&B schema, and active

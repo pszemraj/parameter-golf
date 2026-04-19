@@ -46,7 +46,7 @@ compile_strategy="${COMPILE_STRATEGY:-model}"
 weight_decay="${WEIGHT_DECAY:-0}"
 
 hgdn_config="${HGDN_CONFIG:-configs/hgdn/retune_trim_layers_14.toml}"
-hgdn_kernel_config="${HGDN_KERNEL_CONFIG:-configs/hgdn/winner_20260405_19.toml}"
+hgdn_kernel_config="${HGDN_KERNEL_CONFIG:-configs/hgdn/winner_20260405_19_live14.toml}"
 gpt_naive_run_id="${GPT_NAIVE_RUN_ID:-${run_prefix_base}_gpt_naive_baseline_seq${train_seq_len}}"
 hgdn_run_id="${HGDN_RUN_ID:-${run_prefix_base}_hybrid_naive_contract_seq${train_seq_len}}"
 attn_run_id="${ATTN_RUN_ID:-${run_prefix_base}_depth_naive_contract_seq${train_seq_len}}"
@@ -219,11 +219,11 @@ run_round() {
         "TRAIN_LOG_EVERY=${train_log_every}" \
         "VAL_BATCH_SIZE=${val_batch_size}" \
         "${config_env[@]}" \
-        bash scripts/sweep.sh single
+        bash scripts/sweep.sh single-live14
 
     hgdn_run_sweep \
         "naive-contract HGDN finalist" \
-        single \
+        single-live14 \
         "OMP_NUM_THREADS=${omp_num_threads}" \
         "MKL_NUM_THREADS=${mkl_num_threads}" \
         "OPENBLAS_NUM_THREADS=${openblas_num_threads}" \

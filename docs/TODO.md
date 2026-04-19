@@ -1,6 +1,6 @@
 # HGDN Next Steps
 
-Last updated: 2026-04-18 23:44 CDT
+Last updated: 2026-04-19 12:30 CDT
 
 ## 0. Reconcile the packed H100 winner path on the current branch
 
@@ -17,16 +17,22 @@ Last updated: 2026-04-18 23:44 CDT
   - rerun the packed current-winner path on the current branch under the
     historical `COMPILE_STRATEGY=model` contract
   - exact command:
-    `USE_WANDB=0 WANDB_MODE=offline COMPILE_STRATEGY=model RUN_PREFIX=h100packed_recheck python scripts/hgdn.py h100-perf fixed2k-hybrid --preset winner-20260405-19`
+    `USE_WANDB=0 WANDB_MODE=offline COMPILE_STRATEGY=model RUN_PREFIX=h100packed_recheck python scripts/hgdn.py h100-perf fixed2k-hybrid --preset winner-20260405-19-live14`
 - Main question:
   - is the current branch's packed path still near the historical
     `~915 ms/step` H100 reference, or did the packed stack itself drift?
 - Local packed-path runtime cleanup now landed on this branch:
-  - both trainers use reusable pinned `int64` host staging buffers for the
-    rank-local token batches instead of pageable CPU widening every step
-  - both trainers now stage validation batches through reusable pinned `int64`
-    host buffers as well, instead of doing pageable eval-batch widening on each
+  - both trainers use reusable pinned host staging buffers for the rank-local
+    token batches instead of pageable CPU widening every step
+  - both trainers now stage `x` as `int32` and keep `y` as `int64`, reducing
+    H2D token bandwidth on the embedding-input side without changing the loss
+    target contract
+  - both trainers now stage validation batches through reusable pinned host
+    buffers as well, instead of doing pageable eval-batch widening on each
     validation slice
+  - both distributed token loaders now materialize only the local-rank token
+    span and skip the other ranks' spans in-stream instead of reading the full
+    global chunk on every rank and slicing one local view out of it
   - both trainers now reuse one representative warmup batch for compile priming
     instead of rereading and recopying fresh data that is thrown away after the
     warmup state reset
@@ -59,7 +65,7 @@ Last updated: 2026-04-18 23:44 CDT
 
 ## 1. Keep the exact 8x bridge result as the architecture gate
 
-- Keep the active kernel baseline at [`winner_20260405_19.toml`](../configs/hgdn/winner_20260405_19.toml).
+- Keep the active packed finalist replay preset at [`winner_20260405_19_live14.toml`](../configs/hgdn/winner_20260405_19_live14.toml).
 - Keep `h100pack3_b_fixed2k_hybrid_r1_mlp3.25_seq2048` as the live H100 proxy reference that fed the exact bridge.
 - The bounded H100 proxy ladder is done:
   - `local128` improved all three tested families
@@ -212,6 +218,33 @@ See [REDUNDANCY_AUDIT.md](REDUNDANCY_AUDIT.md) for the concrete code targets.
   - `local-scratch/smoke_train_gpt.log` passed again with compile enabled
   - `local-scratch/smoke_train_gpt_hybrid.log` passed again with compile
     enabled
+
+## 10. Record the 2026-04-19 packed-helper fairness fix
+
+- Historical misfire to remember:
+  - the disqualified Colab rerun at commit `5f3a755e` was **not** evidence that
+    the packed `14L x 384d x mlp3.25` finalist itself had drifted into an
+    over-limit architecture
+  - root cause: user-facing helper defaults still routed some packed HGDN calls
+    through the generic `single` sweep preset and the old kernel-only
+    `winner_20260405_19.toml` config, which left a `16L` shell in place unless
+    the caller explicitly overrode both
+- 2026-04-19 12:30 CDT fairness fix scope:
+  - `scripts/run_h100_single_gpu_hgdn.sh` now uses `single-live14` for the
+    packed hybrid leg
+  - `scripts/run_h100_hgdn_bridge_round.sh` now defaults
+    `HGDN_KERNEL_CONFIG` to `configs/hgdn/winner_20260405_19_live14.toml` and
+    launches `single-live14`
+  - `scripts/run_h100_hgdn_naive_contract_round.sh` now defaults
+    `HGDN_KERNEL_CONFIG` to `configs/hgdn/winner_20260405_19_live14.toml` and
+    launches `single-live14`
+  - `scripts/hgdn.py` now aliases `winner-20260405-19` to the live packed
+    replay preset and keeps `winner-20260405-19-kernel-only` as the explicit
+    archaeology name
+- Fairness rule going forward:
+  - if a packed HGDN helper is meant to represent the live finalist, it must
+    resolve to the live14 replay preset by default, not to the old kernel-only
+    config plus a separate architecture shell
 - Local proxy evidence:
   - `PYTHONPATH=$PWD conda run -s --name pg python /tmp/bench_token_input_width.py`
     measured:

@@ -18,7 +18,7 @@ Purpose:
 Modes:
   perf
     Run the current finalist pair with the perf harness:
-    - hybrid: GDN_RATIO=1, MLP_MULT=3.25
+    - hybrid: live packed HGDN `14L x 384d x mlp3.25`
     - attention-only baseline: MLP_MULT=4.0
     Contract:
     - ITERATIONS=50
@@ -42,6 +42,7 @@ Modes:
     Run only the hybrid side of the same fixed-step quality contract.
     Use this for architecture retune candidates after the attention-only
     baseline has already been established separately.
+    The hybrid leg is pinned to the live packed `14L x 384d` shell.
     Contract also forces:
     - PERF_ISOLATE_COMPILE_CACHE=1
 
@@ -110,7 +111,7 @@ run_perf_pair() {
 
     run_sweep \
         "1xH100 perf: hybrid GDN_RATIO=${hybrid_gdn_ratio} MLP_MULT=${hybrid_mlp_mult}" \
-        single \
+        single-live14 \
         "RUN_ID=${prefix}_perf_hybrid_r${hybrid_gdn_ratio}_mlp${hybrid_mlp_mult}_seq${perf_seq_len}" \
         "GDN_RATIO=${hybrid_gdn_ratio}" \
         "MLP_MULT=${hybrid_mlp_mult}" \
@@ -155,7 +156,7 @@ run_fixed2k_pair() {
 
     run_sweep \
         "1xH100 fixed2k: hybrid GDN_RATIO=${hybrid_gdn_ratio} MLP_MULT=${hybrid_mlp_mult}" \
-        single \
+        single-live14 \
         "RUN_ID=${prefix}_fixed2k_hybrid_r${hybrid_gdn_ratio}_mlp${hybrid_mlp_mult}_seq${seq_len}" \
         "GDN_RATIO=${hybrid_gdn_ratio}" \
         "MLP_MULT=${hybrid_mlp_mult}" \
@@ -197,7 +198,7 @@ run_fixed2k_hybrid() {
 
     run_sweep \
         "1xH100 fixed2k: hybrid GDN_RATIO=${hybrid_gdn_ratio} MLP_MULT=${hybrid_mlp_mult}" \
-        single \
+        single-live14 \
         "RUN_ID=${prefix}_fixed2k_hybrid_r${hybrid_gdn_ratio}_mlp${hybrid_mlp_mult}_seq${seq_len}" \
         "GDN_RATIO=${hybrid_gdn_ratio}" \
         "MLP_MULT=${hybrid_mlp_mult}" \

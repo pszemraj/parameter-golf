@@ -6,9 +6,10 @@ Branch: `exp/hgdn`
 
 ## Current state
 
-- Active H100 kernel winner: [`winner_20260405_19.toml`](../configs/hgdn/winner_20260405_19.toml)
-- Exact helper replay preset for the live packed finalist:
+- Active H100 packed finalist replay preset:
   [`winner_20260405_19_live14.toml`](../configs/hgdn/winner_20260405_19_live14.toml)
+- Legacy kernel-only packed preset for archived sidecar/front-end work:
+  [`winner_20260405_19.toml`](../configs/hgdn/winner_20260405_19.toml)
 - Active winner flags:
   - `GDN_CONV_OUTPUT_CONTIGUOUS=1`
   - `GDN_USE_PACKED_QKV_CONV=1`

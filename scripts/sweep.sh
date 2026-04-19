@@ -133,6 +133,39 @@ single)
     export_default TRAIN_LOG_EVERY 200
     launch_train "Hybrid tight (${NUM_LAYERS}Lx${MODEL_DIM}d GDN_RATIO=${GDN_RATIO} ${GDN_N_HEADS}h Dk${GDN_HEAD_K_DIM} mlp${MLP_MULT})" ;;
 
+# ── single_live14: legal packed HGDN replay shell (live 14L x 384d x mlp3.25) ──
+single-live14)
+    export_default RUN_ID "hybrid_live14_${NGPU}gpu_$(date +%Y%m%d_%H%M%S)"
+    export_default NUM_LAYERS 14
+    export_default MODEL_DIM 384
+    export_default NUM_HEADS 8
+    export_default NUM_KV_HEADS 4
+    export_default GDN_N_HEADS 8
+    export_default GDN_HEAD_K_DIM 48
+    export_default GDN_EXPAND_V 1.0
+    export_default GDN_RATIO 1
+    export_default GDN_ALLOW_NEG_EIGVAL 1
+    export_default GDN_CONV_SIZE 4
+    export_default GDN_CONV_OUTPUT_CONTIGUOUS 1
+    export_default GDN_USE_PACKED_QKV_CONV 1
+    export_default GDN_USE_PACKED_QKV_PROJ 1
+    export_default GDN_CONTROL_PROJ_FP32 0
+    export_default GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD 1
+    export_default MLP_MULT 3.25
+    export_default LEAKY_SLOPE 0.5
+    export_default TRAIN_SEQ_LEN 2048
+    export_default MATRIX_LR 0.04
+    export_default SCALAR_LR 0.04
+    export_default TIED_EMBED_LR 0.05
+    export_default MUON_MOMENTUM 0.95
+    export_default WEIGHT_DECAY 0.04
+    export_default WARMDOWN_ITERS 1200
+    export_default TRAIN_BATCH_TOKENS 524288
+    export_default ITERATIONS 20000
+    export_default VAL_LOSS_EVERY 1000
+    export_default TRAIN_LOG_EVERY 200
+    launch_train "Hybrid live14 (${NUM_LAYERS}Lx${MODEL_DIM}d GDN_RATIO=${GDN_RATIO} ${GDN_N_HEADS}h Dk${GDN_HEAD_K_DIM} mlp${MLP_MULT})" ;;
+
 # ── baseline_fill: 11L×512d mlp2.75 attn (15.4MB, 3.2% HR) ──
 baseline)
     export_default RUN_ID "baseline_${NGPU}gpu_$(date +%Y%m%d_%H%M%S)"

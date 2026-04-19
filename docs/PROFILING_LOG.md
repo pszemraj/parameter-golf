@@ -209,13 +209,19 @@ boundary.
 
 Important helper note:
 
-- `scripts/run_h100_single_gpu_hgdn.sh fixed2k-hybrid` by itself uses the
-  generic `single` sweep preset from `scripts/sweep.sh`
-- that is **not** the exact packed winner config
-- `winner-20260405-19` is a kernel-only preset; it does **not** override the
-  helper's default `16L x 384d` architecture shell
-- `winner-20260405-19-live14` is the exact replay preset for the live
-  `14L x 384d x mlp3.25` packed HGDN contract
+- historical note: at this point in the log, `scripts/run_h100_single_gpu_hgdn.sh`
+  still used the generic `single` sweep preset, so the helper alone was **not**
+  the exact packed winner config
+- historical note: at this point in the log, `winner-20260405-19` was only the
+  kernel-only preset and did **not** override the helper's default
+  `16L x 384d` architecture shell
+- current state after the 2026-04-19 helper fix:
+  - `scripts/run_h100_single_gpu_hgdn.sh` uses `single-live14` for the hybrid
+    leg
+  - `winner-20260405-19` in `scripts/hgdn.py` now aliases the exact live packed
+    replay preset
+  - `winner-20260405-19-kernel-only` preserves the old kernel-only preset name
+    for archived research and archaeology
 
 ## 2026-04-13 — Exact 8x bridge kept HGDN as the main record-path family (`h100bridge1`)
 
