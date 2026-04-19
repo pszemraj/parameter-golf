@@ -1,6 +1,8 @@
 # 5090 Controller Report
 
 ## Status
+- Completed a stronger corrected full-spec `blocks0` radical controller frontier through `12 x 10.0`.
+- Launched a fixed-parameter depth-vs-width follow-up, `blocks0_resid10_e12_c8t1_r3_current_512m`.
 - Completed the first matched-token controller baseline on the original full frozen structure.
 - Completed a clean controller follow-up on the new structural front-runner, `blocks3`.
 - Completed a four-point controller neighborhood screen on `blocks3`.
@@ -16,6 +18,59 @@
 - The earlier `blocks9` and `blocks3` controller screens used matched `planned_train_tokens=50,331,648`.
 - The later `blocks2` reallocation screen used matched `planned_train_tokens=536,870,912` inside its own subfamily.
 - A first attempt at the neighborhood screen with `compile=1` was discarded before completion because the shorter runs would not all cross the compile trigger at the same point. That batch is intentionally excluded from the evidence below.
+
+## Current Corrected Source Of Truth
+
+The corrected full-spec `blocks0` radical-controller frontier is now the most relevant controller evidence in this report.
+
+Frozen structure:
+- `12` branches
+- `0` amplifier blocks
+- full readout
+- full available local train-shard set when the shared frozen spec was built
+- `gzip(spec.pt) = 1,830,185`
+
+Matched run results:
+- `blocks0_resid12_e6_c8t1_r3_current_512m`
+  - `core_layers=12`
+  - `core_expansion=6.0`
+  - `carry_chunks=8`
+  - `bptt_chunks=1`
+  - final `val_bpb = 2.2979334823`
+  - steady `tok/s = 616,452`
+  - trainable params `= 505,049`
+  - artifact estimate `= 2,673,848`
+- `blocks0_resid12_e8_c8t1_r3_current_512m`
+  - `core_layers=12`
+  - `core_expansion=8.0`
+  - `carry_chunks=8`
+  - `bptt_chunks=1`
+  - final `val_bpb = 2.2859021694`
+  - steady `tok/s = 474,391`
+  - trainable params `= 672,089`
+  - artifact estimate `= 2,801,887`
+- `blocks0_resid12_e10_c8t1_r3_current_512m`
+  - `core_layers=12`
+  - `core_expansion=10.0`
+  - `carry_chunks=8`
+  - `bptt_chunks=1`
+  - final `val_bpb = 2.2777913795`
+  - steady `tok/s = 384,214`
+  - trainable params `= 839,129`
+  - artifact estimate `= 2,936,419`
+
+Current corrected result:
+- controller-only scaling on the `blocks0` structure is still improving quality
+- `12 x 10.0` beat `12 x 8.0` by about `0.00811` bpb on the same `512M`-token screening contract
+- `12 x 10.0` beat `12 x 6.0` by about `0.02014` bpb on the same contract
+- the quality gain came with real systems cost:
+  - `12 x 10.0` is about `19%` slower than `12 x 8.0`
+  - `12 x 10.0` is about `38%` slower than `12 x 6.0`
+  - peak allocated memory rose to about `28.75 GiB`
+- the strongest current architectural conclusion is still structural, not transformer-like:
+  - we are scaling a parallel minGRU controller, not reintroducing attention
+  - the current learned amplifier blocks look weaker than the frozen lag/readout basis plus the recurrent controller
+  - the real risk is controller dominance over a too-static frozen side, not regression toward a transformer
 
 ## Current Evidence
 

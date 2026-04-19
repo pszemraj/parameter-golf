@@ -74,3 +74,7 @@ Status legend:
   - `blocks0_resid12_e6_c8t1_r3_current_512m`
 - `done` `blocks0_controller_v1`
   - `blocks0_resid12_e8_c8t1_r3_current_512m`
+- `done` `blocks0_controller_v2`
+  - `blocks0_resid12_e10_c8t1_r3_current_512m`
+- `running` `blocks0_controller_v3`
+  - `blocks0_resid10_e12_c8t1_r3_current_512m`
