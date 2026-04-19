@@ -1179,6 +1179,13 @@ def _resolve(cli_val, config_val, default):
     return default
 
 
+def _format_debug_vector(values: list[float], *, precision: int = 3) -> str:
+    """Format per-layer debug values without truncating deeper controllers."""
+    if not values:
+        return "none"
+    return ",".join(f"{float(x):.{precision}f}" for x in values)
+
+
 def dtype_name(dtype: Optional[torch.dtype]) -> Optional[str]:
     """Render torch dtypes as short strings."""
     if dtype is None:
@@ -2059,8 +2066,8 @@ def main() -> None:
                 with torch.no_grad():
                     state_norms = core_model.state_norms(train_state)
                     gate_values = core_model.residual_gate_values()
-                state_s = ",".join(f"{x:.3f}" for x in state_norms[:8])
-                gate_s = ",".join(f"{x:.3f}" for x in gate_values[:8]) if gate_values else "none"
+                state_s = _format_debug_vector(state_norms)
+                gate_s = _format_debug_vector(gate_values)
                 print(f"           state_norms=[{state_s}] residual_gates=[{gate_s}]")
 
         if val_every > 0 and step > 0 and step % val_every == 0:
