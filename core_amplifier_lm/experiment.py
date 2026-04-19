@@ -9,6 +9,7 @@ These helpers keep the local 5090 workflow deterministic and summary-friendly:
 from __future__ import annotations
 
 import gzip
+import io
 import json
 import math
 import os
@@ -64,6 +65,7 @@ SUMMARY_FIELDS = [
     "compile_after",
     "compile_mode",
     "compile_duration_sec",
+    "gradient_checkpointing",
     "torch_version",
     "cuda_version",
     "gpu_name",
@@ -73,6 +75,7 @@ SUMMARY_FIELDS = [
     "tf32_cudnn",
     "matmul_precision",
     "blas_prefer_cublaslt",
+    "repo_code_bytes",
     "spec_bytes",
     "gzip_spec_bytes",
     "trainable_int8_zlib_bytes",
@@ -86,6 +89,31 @@ SUMMARY_FIELDS = [
 ]
 
 ARTIFACT_LIMIT_BYTES = 16_000_000
+
+CONTROL_TENSOR_NAME_PATTERNS = tuple(
+    pattern
+    for pattern in os.environ.get(
+        "CORE_AMP_CONTROL_TENSOR_NAME_PATTERNS",
+        (
+            "_h0_raw,resid_logit,block_gain,branch_scale,branch_bias,"
+            "readout_branch_scale,residual_log_scale,logit_bias,norm.scale"
+        ),
+    ).split(",")
+    if pattern
+)
+INT8_KEEP_FLOAT_FP32_NAME_PATTERNS = tuple(
+    pattern
+    for pattern in os.environ.get(
+        "CORE_AMP_INT8_KEEP_FLOAT_FP32_NAME_PATTERNS",
+        ",".join(CONTROL_TENSOR_NAME_PATTERNS),
+    ).split(",")
+    if pattern
+)
+INT8_KEEP_FLOAT_MAX_NUMEL = int(os.environ.get("CORE_AMP_INT8_KEEP_FLOAT_MAX_NUMEL", "65536"))
+INT8_KEEP_FLOAT_STORE_DTYPE = torch.float16
+INT8_PER_ROW_SCALE_DTYPE = torch.float16
+INT8_CLIP_PERCENTILE = float(os.environ.get("CORE_AMP_INT8_CLIP_PERCENTILE", "99.99984"))
+INT8_CLIP_Q = INT8_CLIP_PERCENTILE / 100.0
 
 
 def _json_default(obj: Any) -> Any:
@@ -210,28 +238,145 @@ def estimate_repo_code_bytes(repo_root: str | Path) -> int:
     return total
 
 
-def trainable_int8_zlib_bytes(state_dict: dict[str, torch.Tensor]) -> int:
-    """Estimate compressed controller payload bytes using per-tensor int8 packing."""
-    blob = bytearray()
-    for name in sorted(state_dict):
-        tensor = state_dict[name].detach().cpu().float().contiguous()
-        flat = tensor.reshape(-1)
-        max_abs = float(flat.abs().max().item()) if flat.numel() > 0 else 0.0
-        scale = max(max_abs / 127.0, 1e-8)
-        if flat.numel() == 0 or max_abs == 0.0:
-            quantized = torch.zeros(flat.numel(), dtype=torch.int8)
-        else:
-            quantized = torch.clamp(torch.round(flat / scale), -127, 127).to(torch.int8)
+def tensor_nbytes(t: torch.Tensor) -> int:
+    """Return the raw storage bytes for a tensor."""
+    return int(t.numel()) * int(t.element_size())
 
-        name_bytes = name.encode("utf-8")
-        blob.extend(len(name_bytes).to_bytes(2, byteorder="little", signed=False))
-        blob.extend(name_bytes)
-        blob.extend(len(tensor.shape).to_bytes(1, byteorder="little", signed=False))
-        for dim in tensor.shape:
-            blob.extend(int(dim).to_bytes(4, byteorder="little", signed=False))
-        blob.extend(torch.tensor([scale], dtype=torch.float32).numpy().tobytes())
-        blob.extend(quantized.numpy().tobytes())
-    return len(zlib.compress(bytes(blob), level=9))
+
+def _keep_float_tensor(
+    name: str,
+    tensor: torch.Tensor,
+    passthrough_orig_dtypes: dict[str, str],
+) -> torch.Tensor:
+    if any(pattern in name for pattern in INT8_KEEP_FLOAT_FP32_NAME_PATTERNS):
+        return tensor.float().contiguous()
+    if tensor.dtype in {torch.float32, torch.bfloat16}:
+        passthrough_orig_dtypes[name] = str(tensor.dtype).removeprefix("torch.")
+        return tensor.to(dtype=INT8_KEEP_FLOAT_STORE_DTYPE).contiguous()
+    return tensor
+
+
+def _quantize_float_tensor(tensor: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    tensor_f32 = tensor.float()
+    if tensor_f32.ndim == 2:
+        clip_abs = (
+            torch.quantile(tensor_f32.abs(), INT8_CLIP_Q, dim=1)
+            if tensor_f32.numel()
+            else torch.empty((tensor_f32.shape[0],), dtype=torch.float32)
+        )
+        clipped = torch.maximum(
+            torch.minimum(tensor_f32, clip_abs[:, None]),
+            -clip_abs[:, None],
+        )
+        scale = (clip_abs / 127.0).clamp_min(1.0 / 127.0)
+        quantized = torch.clamp(torch.round(clipped / scale[:, None]), -127, 127).to(torch.int8)
+        return quantized.contiguous(), scale.to(dtype=INT8_PER_ROW_SCALE_DTYPE).contiguous()
+
+    clip_abs = (
+        float(torch.quantile(tensor_f32.abs().flatten(), INT8_CLIP_Q).item())
+        if tensor_f32.numel()
+        else 0.0
+    )
+    scale = torch.tensor(clip_abs / 127.0 if clip_abs > 0 else 1.0, dtype=torch.float32)
+    quantized = torch.clamp(
+        torch.round(torch.clamp(tensor_f32, -clip_abs, clip_abs) / scale),
+        -127,
+        127,
+    ).to(torch.int8)
+    return quantized.contiguous(), scale
+
+
+def quantize_state_dict_int8(
+    state_dict: dict[str, torch.Tensor],
+) -> tuple[dict[str, object], dict[str, int]]:
+    """Mirror the record-side clean int8 export format for trainable weights."""
+    quantized: dict[str, torch.Tensor] = {}
+    scales: dict[str, torch.Tensor] = {}
+    dtypes: dict[str, str] = {}
+    passthrough: dict[str, torch.Tensor] = {}
+    passthrough_orig_dtypes: dict[str, str] = {}
+    qmeta: dict[str, dict[str, object]] = {}
+    stats = {
+        "param_count": 0,
+        "num_tensors": 0,
+        "num_float_tensors": 0,
+        "num_nonfloat_tensors": 0,
+        "baseline_tensor_bytes": 0,
+        "int8_payload_bytes": 0,
+    }
+
+    for name, tensor in state_dict.items():
+        detached = tensor.detach().to("cpu").contiguous()
+        stats["param_count"] += int(detached.numel())
+        stats["num_tensors"] += 1
+        stats["baseline_tensor_bytes"] += tensor_nbytes(detached)
+
+        if not detached.is_floating_point():
+            stats["num_nonfloat_tensors"] += 1
+            passthrough[name] = detached
+            stats["int8_payload_bytes"] += tensor_nbytes(detached)
+            continue
+
+        if detached.numel() <= INT8_KEEP_FLOAT_MAX_NUMEL:
+            kept = _keep_float_tensor(name, detached, passthrough_orig_dtypes)
+            passthrough[name] = kept
+            stats["int8_payload_bytes"] += tensor_nbytes(kept)
+            continue
+
+        stats["num_float_tensors"] += 1
+        quantized_tensor, scale_tensor = _quantize_float_tensor(detached)
+        if scale_tensor.ndim > 0:
+            qmeta[name] = {"scheme": "per_row", "axis": 0}
+        quantized[name] = quantized_tensor
+        scales[name] = scale_tensor
+        dtypes[name] = str(detached.dtype).removeprefix("torch.")
+        stats["int8_payload_bytes"] += tensor_nbytes(quantized_tensor) + tensor_nbytes(scale_tensor)
+
+    payload: dict[str, object] = {
+        "__quant_format__": "int8_clean_per_row_v1",
+        "quantized": quantized,
+        "scales": scales,
+        "dtypes": dtypes,
+        "passthrough": passthrough,
+    }
+    if qmeta:
+        payload["qmeta"] = qmeta
+    if passthrough_orig_dtypes:
+        payload["passthrough_orig_dtypes"] = passthrough_orig_dtypes
+    return payload, stats
+
+
+def serialize_trainable_int8_zlib(
+    state_dict: dict[str, torch.Tensor],
+) -> tuple[bytes, dict[str, int]]:
+    """Serialize a trainable state dict using the record-side int8+zlib convention."""
+    quantized, stats = quantize_state_dict_int8(state_dict)
+    buf = io.BytesIO()
+    torch.save(quantized, buf)
+    raw = buf.getvalue()
+    blob = zlib.compress(raw, level=9)
+    out_stats = dict(stats)
+    out_stats["int8_serialized_bytes"] = len(raw)
+    out_stats["int8_zlib_bytes"] = len(blob)
+    return blob, out_stats
+
+
+def export_trainable_int8_zlib(
+    path: str | Path,
+    state_dict: dict[str, torch.Tensor],
+) -> dict[str, int]:
+    """Write the compressed trainable artifact blob and return serialization stats."""
+    blob, stats = serialize_trainable_int8_zlib(state_dict)
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_bytes(blob)
+    return stats
+
+
+def trainable_int8_zlib_bytes(state_dict: dict[str, torch.Tensor]) -> int:
+    """Return the compressed trainable artifact bytes using the record-side export path."""
+    blob, _stats = serialize_trainable_int8_zlib(state_dict)
+    return len(blob)
 
 
 def artifact_estimate_bytes(
@@ -239,12 +384,16 @@ def artifact_estimate_bytes(
     repo_root: str | Path,
     spec_path: str | Path,
     trainable_payload_bytes: Optional[int] = None,
+    repo_code_bytes: Optional[int] = None,
 ) -> Optional[int]:
     """Estimate artifact size as code bytes plus frozen spec plus controller payload."""
     _, gz = spec_size_bytes(spec_path)
     if gz is None:
         return None
-    total = estimate_repo_code_bytes(repo_root) + gz
+    code_bytes = (
+        estimate_repo_code_bytes(repo_root) if repo_code_bytes is None else int(repo_code_bytes)
+    )
+    total = code_bytes + gz
     if trainable_payload_bytes is not None:
         total += int(trainable_payload_bytes)
     return total
@@ -410,6 +559,9 @@ def summarize_run_dir(run_dir: str | Path) -> dict[str, str]:
         "compile_after": _stringify(compile_cfg.get("compile_after")),
         "compile_mode": _stringify(compile_cfg.get("compile_mode")),
         "compile_duration_sec": _stringify(results.get("compile_duration_sec")),
+        "gradient_checkpointing": _stringify(
+            runtime.get("gradient_checkpointing", training.get("gradient_checkpointing"))
+        ),
         "torch_version": _stringify(system.get("torch_version")),
         "cuda_version": _stringify(system.get("cuda_version")),
         "gpu_name": _stringify(system.get("gpu_name")),
@@ -419,6 +571,9 @@ def summarize_run_dir(run_dir: str | Path) -> dict[str, str]:
         "tf32_cudnn": _stringify(system.get("tf32_cudnn")),
         "matmul_precision": _stringify(system.get("float32_matmul_precision")),
         "blas_prefer_cublaslt": _stringify(_parse_env_bool(env.get("TORCH_BLAS_PREFER_CUBLASLT"))),
+        "repo_code_bytes": _stringify(
+            results.get("repo_code_bytes") or spec.get("repo_code_bytes")
+        ),
         "spec_bytes": _stringify(results.get("spec_bytes") or spec.get("spec_bytes")),
         "gzip_spec_bytes": _stringify(
             results.get("gzip_spec_bytes") or spec.get("gzip_spec_bytes")

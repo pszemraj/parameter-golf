@@ -16,6 +16,8 @@ from core_amplifier_lm.experiment import (
     artifact_status,
     collect_summary_rows,
     compute_steady_state_tokens_per_sec,
+    export_trainable_int8_zlib,
+    serialize_trainable_int8_zlib,
     summarize_run_dir,
     trainable_int8_zlib_bytes,
 )
@@ -63,6 +65,19 @@ def test_trainable_int8_zlib_bytes_grows_with_more_parameters():
     assert trainable_int8_zlib_bytes(big) > trainable_int8_zlib_bytes(small)
 
 
+def test_export_trainable_int8_zlib_matches_serialized_length(tmp_path: Path):
+    state = {
+        "proj.weight": torch.randn(128, 64),
+        "proj.bias": torch.randn(128),
+    }
+    blob, stats = serialize_trainable_int8_zlib(state)
+    out_path = tmp_path / "trainable.int8.ptz"
+    export_stats = export_trainable_int8_zlib(out_path, state)
+    assert len(blob) == stats["int8_zlib_bytes"] == export_stats["int8_zlib_bytes"]
+    assert out_path.stat().st_size == len(blob)
+    assert trainable_int8_zlib_bytes(state) == len(blob)
+
+
 def test_artifact_estimate_includes_trainable_payload(tmp_path: Path):
     spec_path = tmp_path / "spec.pt"
     spec_path.write_bytes(b"x" * 32)
@@ -82,6 +97,7 @@ def test_structure_default_preset_uses_full_frozen_spec_budget():
     assert defaults["SPEC_MAX_TOKENS"] == ""
     assert defaults["SEQ_LEN"] == "512"
     assert defaults["NUM_STEPS"] == "192"
+    assert defaults["GRADIENT_CHECKPOINTING"] is True
     assert defaults["DATA_MAX_TOKENS"] == ""
     assert defaults["FORCE_DEVICE"] == ""
     assert defaults["NO_MMAP"] is False
@@ -136,9 +152,11 @@ def test_summarize_run_dir_reads_structured_artifacts(tmp_path: Path):
                 "weight_decay": 0.001,
                 "num_steps": 192,
                 "planned_train_tokens": 50331648,
+                "gradient_checkpointing": True,
             },
             "data": {"source": "/tmp/data.bin"},
             "runtime": {
+                "gradient_checkpointing": True,
                 "exact_val_bpb": True,
                 "compile": {
                     "enabled": True,
@@ -181,6 +199,7 @@ def test_summarize_run_dir_reads_structured_artifacts(tmp_path: Path):
             "artifact_estimate_bytes": 999999,
             "artifact_headroom_bytes": 15000001,
             "artifact_status": "LEFT_ON_TABLE",
+            "repo_code_bytes": 654321,
             "spec_bytes": 1234,
             "gzip_spec_bytes": 234,
             "trainable_int8_zlib_bytes": 345,
@@ -203,6 +222,8 @@ def test_summarize_run_dir_reads_structured_artifacts(tmp_path: Path):
     assert row["artifact_estimate_bytes"] == "999999"
     assert row["artifact_status"] == "LEFT_ON_TABLE"
     assert row["trainable_int8_zlib_bytes"] == "345"
+    assert row["gradient_checkpointing"] == "true"
+    assert row["repo_code_bytes"] == "654321"
     assert row["warmup_steps"] == "50"
     assert row["lr_hold_steps"] == "750"
     assert row["torch_version"] == "2.11.0+cu128"

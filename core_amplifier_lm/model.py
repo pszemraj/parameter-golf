@@ -24,6 +24,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint as activation_checkpoint
 
 ArrayLike = np.ndarray | torch.Tensor
 BranchTemporalState: TypeAlias = torch.Tensor | tuple[torch.Tensor, torch.Tensor]
@@ -752,6 +753,7 @@ class MinGRUCore(nn.Module):
         residual_blocks: bool = True,
         residual_init: float = -2.0,
         norm_eps: float = 1e-5,
+        gradient_checkpointing: bool = False,
         **_kwargs,
     ):
         super().__init__()
@@ -765,6 +767,7 @@ class MinGRUCore(nn.Module):
         self.num_layers = int(num_layers)
         self.dim_inner = int(hidden_size * expansion_factor)
         self.residual_blocks = bool(residual_blocks)
+        self.gradient_checkpointing = bool(gradient_checkpointing)
 
         if self.residual_blocks:
             self.blocks = nn.ModuleList(
@@ -799,7 +802,16 @@ class MinGRUCore(nn.Module):
         new_states = []
         h = x
         for i, layer in enumerate(self.layers):
-            h, next_h = layer(h, prev_hidden=state[i])
+            if self.gradient_checkpointing and self.training and torch.is_grad_enabled():
+                h, next_h = activation_checkpoint(
+                    layer,
+                    h,
+                    state[i],
+                    use_reentrant=False,
+                    preserve_rng_state=False,
+                )
+            else:
+                h, next_h = layer(h, prev_hidden=state[i])
             new_states.append(next_h)
 
         return h, torch.stack(new_states, dim=0)
@@ -893,6 +905,7 @@ class CoreAmplifierLM(nn.Module):
         residual_core_init: float = -2.0,
         branch_temporal_mode: str = "current",
         branch_temporal_lag_scale: float = 1.0,
+        gradient_checkpointing: bool = False,
     ) -> None:
         super().__init__()
         self.vocab_size = spec.vocab_size
@@ -908,6 +921,7 @@ class CoreAmplifierLM(nn.Module):
         self.core_type = core_type
         self.residual_core = bool(residual_core)
         self.residual_core_init = float(residual_core_init)
+        self.gradient_checkpointing = bool(gradient_checkpointing)
 
         self.register_buffer("token_embed", spec.token_embed.clone(), persistent=True)
         self.register_buffer("base_bigram_logits", spec.base_bigram_logits.clone(), persistent=True)
@@ -951,6 +965,7 @@ class CoreAmplifierLM(nn.Module):
                 batch_first=True,
                 residual_blocks=self.residual_core,
                 residual_init=self.residual_core_init,
+                gradient_checkpointing=self.gradient_checkpointing,
             )
         elif core_type == "scan":
             self.core = ScanCore(
@@ -994,6 +1009,9 @@ class CoreAmplifierLM(nn.Module):
         self._readout_out_proj_runtime: Optional[torch.Tensor] = None
         self._base_bigram_logits_runtime: Optional[torch.Tensor] = None
         self._branch_temporal_lag_mix_runtime: Optional[torch.Tensor] = None
+
+    def _use_gradient_checkpointing(self) -> bool:
+        return bool(self.gradient_checkpointing and self.training and torch.is_grad_enabled())
 
     @property
     def trainable_parameters(self) -> int:
@@ -1182,15 +1200,58 @@ class CoreAmplifierLM(nn.Module):
         branch_scale = self.branch_scale.to(device=branches.device, dtype=branches.dtype)
         branch_bias = self.branch_bias.to(device=branches.device, dtype=branches.dtype)
         for i in range(self.num_blocks):
-            y = branches * branch_scale[i].view(1, 1, n, 1) + branch_bias[i].view(1, 1, n, 1)
-            y = y.reshape(b, t, n * c)
-            y = _rms_norm(y)
-            y = F.linear(y, self._amp_w1_runtime[i])
-            y = F.silu(y)
-            y = F.linear(y, self._amp_w2_runtime[i])
-            x = x + block_gain[i] * y
-            branches = x.reshape(b, t, n, c)
+            if self._use_gradient_checkpointing():
+                branches, x = activation_checkpoint(
+                    lambda cur_branches, cur_x, block_idx=i: self._amplify_block(
+                        cur_branches,
+                        cur_x,
+                        block_idx=block_idx,
+                        branch_scale=branch_scale,
+                        branch_bias=branch_bias,
+                        block_gain=block_gain,
+                        branch_count=n,
+                        core_dim=c,
+                    ),
+                    branches,
+                    x,
+                    use_reentrant=False,
+                    preserve_rng_state=False,
+                )
+            else:
+                branches, x = self._amplify_block(
+                    branches,
+                    x,
+                    block_idx=i,
+                    branch_scale=branch_scale,
+                    branch_bias=branch_bias,
+                    block_gain=block_gain,
+                    branch_count=n,
+                    core_dim=c,
+                )
         return branches
+
+    def _amplify_block(
+        self,
+        branches: torch.Tensor,
+        x: torch.Tensor,
+        *,
+        block_idx: int,
+        branch_scale: torch.Tensor,
+        branch_bias: torch.Tensor,
+        block_gain: torch.Tensor,
+        branch_count: int,
+        core_dim: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        y = branches * branch_scale[block_idx].view(1, 1, branch_count, 1)
+        y = y + branch_bias[block_idx].view(1, 1, branch_count, 1)
+        y = y.reshape(branches.shape[0], branches.shape[1], branch_count * core_dim)
+        y = _rms_norm(y)
+        assert self._amp_w1_runtime is not None and self._amp_w2_runtime is not None
+        y = F.linear(y, self._amp_w1_runtime[block_idx])
+        y = F.silu(y)
+        y = F.linear(y, self._amp_w2_runtime[block_idx])
+        x = x + block_gain[block_idx] * y
+        return x.reshape(branches.shape[0], branches.shape[1], branch_count, core_dim), x
 
     def _residual_logits(self, branches: torch.Tensor) -> torch.Tensor:
         self._ensure_runtime_buffers()

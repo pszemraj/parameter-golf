@@ -47,13 +47,14 @@ from core_amplifier_lm.experiment import (
     command_context,
     compute_steady_state_tokens_per_sec,
     current_peak_memory_mib,
+    estimate_repo_code_bytes,
+    export_trainable_int8_zlib,
     git_commit,
     nvidia_smi_metadata,
     read_jsonl,
     reset_peak_memory,
     runtime_device_index,
     spec_size_bytes,
-    trainable_int8_zlib_bytes,
     write_json,
 )
 
@@ -1147,6 +1148,17 @@ def parse_args() -> argparse.Namespace:
         choices=["default", "reduce-overhead", "max-autotune"],
     )
     parser.add_argument("--compile-base-path", action="store_true")
+    parser.add_argument(
+        "--gradient-checkpointing",
+        dest="gradient_checkpointing",
+        action="store_true",
+        default=None,
+    )
+    parser.add_argument(
+        "--no-gradient-checkpointing",
+        dest="gradient_checkpointing",
+        action="store_false",
+    )
     parser.add_argument("--resume", type=str, default=None)
     parser.add_argument("--force-device", type=str, default=None)
     parser.add_argument("--no-mmap", action="store_true")
@@ -1232,6 +1244,7 @@ def build_wandb_config(
             "default_amp_dtype": runtime.get("default_amp_dtype"),
             "amplifier_dtype": runtime.get("amplifier_dtype"),
             "autocast": runtime.get("autocast"),
+            "gradient_checkpointing": runtime.get("gradient_checkpointing"),
             "exact_val_bpb": runtime.get("exact_val_bpb"),
             "compile": runtime.get("compile", {}),
             "wandb": runtime.get("wandb", {}),
@@ -1250,6 +1263,7 @@ def build_wandb_config(
             "driver_version": system.get("driver_version"),
         },
         "spec": {
+            "repo_code_bytes": resolved_config.get("spec", {}).get("repo_code_bytes"),
             "spec_bytes": resolved_config.get("spec", {}).get("spec_bytes"),
             "gzip_spec_bytes": resolved_config.get("spec", {}).get("gzip_spec_bytes"),
             "summary": resolved_config.get("spec", {}).get("summary"),
@@ -1320,6 +1334,7 @@ def build_resolved_config_payload(
     compile_after: int,
     compile_mode: Optional[str],
     compile_base_path: bool,
+    gradient_checkpointing: bool,
     wandb_enabled: bool,
     wandb_project: str,
     wandb_entity: Optional[str],
@@ -1385,6 +1400,7 @@ def build_resolved_config_payload(
             "hard_loss_cap": float(hard_loss_cap),
             "grad_clip": float(grad_clip),
             "dropout": float(dropout),
+            "gradient_checkpointing": bool(gradient_checkpointing),
             "val_every": int(val_every),
             "val_steps": int(val_steps),
             "log_every": int(log_every),
@@ -1407,6 +1423,7 @@ def build_resolved_config_payload(
             "default_amp_dtype": dtype_name(default_amp_dtype),
             "amplifier_dtype": dtype_name(runtime_amp_dtype),
             "autocast": bool(use_autocast),
+            "gradient_checkpointing": bool(gradient_checkpointing),
             "exact_val_bpb": byte_count_lut is not None,
             "compile": {
                 "enabled": bool(compile_requested),
@@ -1430,6 +1447,7 @@ def build_resolved_config_payload(
         "spec": {
             "summary": spec.summary(),
             "spec_path": str(cfg.spec_path),
+            "repo_code_bytes": int(estimate_repo_code_bytes(Path(__file__).resolve().parent)),
             "spec_bytes": spec_bytes,
             "gzip_spec_bytes": gzip_spec_bytes,
         },
@@ -1551,6 +1569,13 @@ def main() -> None:
     log_state_every = int(
         _resolve(args.log_state_every, t.get("log_state_every"), td.get("log_state_every", 0))
     )
+    gradient_checkpointing = bool(
+        _resolve(
+            args.gradient_checkpointing,
+            t.get("gradient_checkpointing"),
+            td.get("gradient_checkpointing", False),
+        )
+    )
     val_every = _resolve(args.val_every, t.get("val_every"), 200)
     val_steps = _resolve(args.val_steps, t.get("val_steps"), 20)
     save_every = _resolve(args.save_every, t.get("save_every"), 1000)
@@ -1615,7 +1640,8 @@ def main() -> None:
         f"  controller: type={core_type} layers={core_layers} expansion={core_expansion} "
         f"residual_core={residual_core} branch_temporal_mode={branch_temporal_mode} "
         f"branch_temporal_lag_scale={branch_temporal_lag_scale} "
-        f"bptt_chunks={bptt_chunks} carry_chunks={carry_chunks}"
+        f"bptt_chunks={bptt_chunks} carry_chunks={carry_chunks} "
+        f"grad_ckpt={gradient_checkpointing}"
     )
     if wandb_enabled:
         print(
@@ -1733,6 +1759,7 @@ def main() -> None:
         residual_core_init=residual_core_init,
         branch_temporal_mode=branch_temporal_mode,
         branch_temporal_lag_scale=branch_temporal_lag_scale,
+        gradient_checkpointing=gradient_checkpointing,
     ).to(device)
     model.prepare_runtime_buffers(device=device, amplifier_dtype=runtime_amp_dtype)
     core_model = model
@@ -1856,6 +1883,7 @@ def main() -> None:
         compile_after=compile_after,
         compile_mode=compile_mode,
         compile_base_path=compile_base_path,
+        gradient_checkpointing=gradient_checkpointing,
         wandb_enabled=wandb_enabled,
         wandb_project=wandb_project,
         wandb_entity=wandb_entity,
@@ -2184,11 +2212,17 @@ def main() -> None:
     )
     best_eval, last_eval = best_and_last_eval(eval_rows)
     spec_bytes, gzip_spec_bytes = spec_size_bytes(cfg.spec_path)
-    trainable_payload_bytes = trainable_int8_zlib_bytes(trainable_state_dict(model))
+    repo_code_bytes = estimate_repo_code_bytes(repo_root)
+    trainable_payload_path = model_dir / "final_trainable.int8.ptz"
+    trainable_quant_stats = export_trainable_int8_zlib(
+        trainable_payload_path, trainable_state_dict(model)
+    )
+    trainable_payload_bytes = int(trainable_quant_stats["int8_zlib_bytes"])
     artifact_bytes = artifact_estimate_bytes(
         repo_root=repo_root,
         spec_path=cfg.spec_path,
         trainable_payload_bytes=trainable_payload_bytes,
+        repo_code_bytes=repo_code_bytes,
     )
     artifact_headroom = artifact_headroom_bytes(artifact_bytes)
     artifact_budget_status = artifact_status(artifact_bytes)
@@ -2209,12 +2243,17 @@ def main() -> None:
         "last_eval_step": last_eval.get("step"),
         "last_val_loss": last_eval.get("val_loss"),
         "last_val_bpb": last_eval.get("val_bpb"),
+        "repo_code_bytes": int(repo_code_bytes),
         "spec_bytes": spec_bytes,
         "gzip_spec_bytes": gzip_spec_bytes,
+        "trainable_baseline_tensor_bytes": int(trainable_quant_stats["baseline_tensor_bytes"]),
+        "trainable_int8_payload_bytes": int(trainable_quant_stats["int8_payload_bytes"]),
+        "trainable_int8_serialized_bytes": int(trainable_quant_stats["int8_serialized_bytes"]),
         "trainable_int8_zlib_bytes": trainable_payload_bytes,
         "artifact_estimate_bytes": artifact_bytes,
         "artifact_headroom_bytes": artifact_headroom,
         "artifact_status": artifact_budget_status,
+        "trainable_payload_path": str(trainable_payload_path),
         "final_checkpoint": str(final_path),
         "wandb_project": wandb_project if wandb_run is not None else None,
         "wandb_group": wandb_group if wandb_run is not None else None,
@@ -2238,8 +2277,15 @@ def main() -> None:
         summary["eval/final_step"] = last_eval.get("step")
         summary["eval/loss_final"] = last_eval.get("val_loss")
         summary["eval/bpb_final"] = last_eval.get("val_bpb")
+        summary["artifact/code_bytes_final"] = int(repo_code_bytes)
         summary["artifact/spec_bytes_final"] = spec_bytes
         summary["artifact/gzip_spec_bytes_final"] = gzip_spec_bytes
+        summary["artifact/trainable_int8_payload_bytes_final"] = int(
+            trainable_quant_stats["int8_payload_bytes"]
+        )
+        summary["artifact/trainable_int8_serialized_bytes_final"] = int(
+            trainable_quant_stats["int8_serialized_bytes"]
+        )
         summary["artifact/trainable_int8_zlib_bytes_final"] = trainable_payload_bytes
         summary["artifact/estimate_bytes_final"] = artifact_bytes
         summary["artifact/headroom_bytes_final"] = artifact_headroom

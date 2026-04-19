@@ -69,6 +69,7 @@ DEFAULTS = {
         "grad_clip": 1.0,
         "dropout": 0.0,
         "amplifier_dtype": "auto",
+        "gradient_checkpointing": False,
         "log_state_every": 200,
     },
     "data": {
@@ -128,6 +129,7 @@ _ARG_MAP: dict[str, tuple[str, str]] = {
     "grad_clip": ("training", "grad_clip"),
     "dropout": ("training", "dropout"),
     "amplifier_dtype": ("training", "amplifier_dtype"),
+    "gradient_checkpointing": ("training", "gradient_checkpointing"),
     "log_state_every": ("training", "log_state_every"),
 }
 

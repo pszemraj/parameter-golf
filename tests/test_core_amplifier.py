@@ -899,6 +899,70 @@ def test_training_script_hybrid_branch_mode():
         assert '"branch_temporal_lag_scale": 0.75' in resolved
 
 
+def test_training_script_gradient_checkpointing_exports_quantized_payload():
+    """Training should support checkpointed minGRU runs and write the final int8 payload."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir = Path(tmpdir)
+        _, gz_path = _make_gz(tmpdir)
+        model_dir = tmpdir / "model_ckpt"
+
+        _run_inspect(
+            [
+                "init",
+                str(model_dir),
+                "--data",
+                str(gz_path),
+                "--storage-dtype",
+                "uint8",
+                "--vocab-size",
+                "256",
+                "--core-dim",
+                "8",
+                "--branch-lags",
+                "1,2,4",
+                "--num-blocks",
+                "1",
+                "--spec-strategy",
+                "stream",
+            ]
+        )
+
+        _run_train(
+            [
+                str(model_dir),
+                "--num-steps",
+                "2",
+                "--seq-len",
+                "32",
+                "--batch-size",
+                "4",
+                "--carry-chunks",
+                "2",
+                "--val-every",
+                "1",
+                "--val-steps",
+                "1",
+                "--log-every",
+                "1",
+                "--learning-rate",
+                "1e-3",
+                "--lr-schedule",
+                "none",
+                "--gradient-checkpointing",
+                "--force-device",
+                "cpu",
+                "--no-mmap",
+            ],
+            expect_in_stdout="Training complete",
+        )
+
+        resolved = (model_dir / "resolved_config.json").read_text()
+        assert '"gradient_checkpointing": true' in resolved
+        payload_path = model_dir / "final_trainable.int8.ptz"
+        assert payload_path.exists()
+        assert payload_path.stat().st_size > 0
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

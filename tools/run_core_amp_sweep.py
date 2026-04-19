@@ -333,6 +333,7 @@ def structure_preset_defaults(preset: str) -> dict[str, str | bool]:
             "FORCE_DEVICE": "",
             "NO_MMAP": False,
             "COMPILE": False,
+            "GRADIENT_CHECKPOINTING": True,
             "TRAIN_FRAC": "0.98",
         }
     if preset == "cpu_structure":
@@ -367,6 +368,7 @@ def structure_preset_defaults(preset: str) -> dict[str, str | bool]:
             "FORCE_DEVICE": "cpu",
             "NO_MMAP": True,
             "COMPILE": False,
+            "GRADIENT_CHECKPOINTING": False,
             "TRAIN_FRAC": "0.98",
         }
     raise SystemExit(f"unknown structure preset: {preset}")
@@ -437,6 +439,10 @@ def update_controller_config(
     cfg.training["grad_clip"] = float(train_defaults["GRAD_CLIP"])
     cfg.training["hard_loss_gamma"] = float(train_defaults["HARD_LOSS_GAMMA"])
     cfg.training["hard_loss_cap"] = float(train_defaults["HARD_LOSS_CAP"])
+    cfg.training["gradient_checkpointing"] = env_bool(
+        "GRADIENT_CHECKPOINTING",
+        bool(int(train_defaults["GRADIENT_CHECKPOINTING"])),
+    )
     cfg.training["val_every"] = int(train_defaults["VAL_EVERY"])
     cfg.training["val_steps"] = int(train_defaults["VAL_STEPS"])
     cfg.training["log_every"] = int(train_defaults["LOG_EVERY"])
@@ -492,6 +498,9 @@ def run_controller_sweep(repo_root: Path) -> None:
         "GRAD_ACCUM": env("GRAD_ACCUM", "1"),
         "DATA_MAX_TOKENS": env("DATA_MAX_TOKENS", ""),
         "TRAIN_FRAC": env("TRAIN_FRAC", "0.9"),
+        "GRADIENT_CHECKPOINTING": env(
+            "GRADIENT_CHECKPOINTING", "0" if preset == "cpu_smoke" else "1"
+        ),
     }
 
     run_specs_raw = os.environ.get("RUN_SPECS")
@@ -508,6 +517,10 @@ def run_controller_sweep(repo_root: Path) -> None:
     no_mmap = env_bool("NO_MMAP", False)
     tokens_on_device = env_bool("TOKENS_ON_DEVICE", False)
     no_autocast = env_bool("NO_AUTOCAST", False)
+    gradient_checkpointing = env_bool(
+        "GRADIENT_CHECKPOINTING",
+        bool(int(train_defaults["GRADIENT_CHECKPOINTING"])),
+    )
     force_device = env("FORCE_DEVICE", "")
     wandb_enabled_default = preset != "cpu_smoke"
 
@@ -674,6 +687,8 @@ def run_controller_sweep(repo_root: Path) -> None:
             cmd += ["--force-device", force_device]
         if no_autocast:
             cmd.append("--no-autocast")
+        if gradient_checkpointing:
+            cmd.append("--gradient-checkpointing")
         if compile_enabled:
             cmd += ["--compile", "--compile-after", compile_after, "--compile-mode", compile_mode]
             if compile_base_path:
@@ -735,6 +750,9 @@ def run_structure_sweep(repo_root: Path) -> None:
     defaults = structure_preset_defaults(preset)
     compile_enabled = env_bool("COMPILE", bool(defaults["COMPILE"]))
     no_mmap = env_bool("NO_MMAP", bool(defaults["NO_MMAP"]))
+    gradient_checkpointing = env_bool(
+        "GRADIENT_CHECKPOINTING", bool(defaults["GRADIENT_CHECKPOINTING"])
+    )
     force_device = env("FORCE_DEVICE", str(defaults["FORCE_DEVICE"]))
     wandb_enabled_default = preset != "cpu_structure"
     planned_steps = int(env("NUM_STEPS", str(defaults["NUM_STEPS"])))
@@ -809,6 +827,7 @@ def run_structure_sweep(repo_root: Path) -> None:
             cfg = ModelConfig.load(run_dir)
             cfg.meta["run_name"] = spec.name
             cfg.meta["phase"] = "5090_structure_screening"
+            cfg.training["gradient_checkpointing"] = gradient_checkpointing
             cfg.save()
 
         train_cmd = [
@@ -879,6 +898,8 @@ def run_structure_sweep(repo_root: Path) -> None:
             train_cmd += ["--force-device", force_device]
         if no_mmap:
             train_cmd.append("--no-mmap")
+        if gradient_checkpointing:
+            train_cmd.append("--gradient-checkpointing")
         if compile_enabled:
             train_cmd += [
                 "--compile",
