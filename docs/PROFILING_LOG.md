@@ -1,9 +1,65 @@
 # Profiling Log
 
-Last updated: 2026-04-18 19:15 CDT
+Last updated: 2026-04-18 22:25 CDT
 
 Profiler-driven checkpoints that should survive beyond the raw artifacts under
 `profiles/`.
+
+## 2026-04-18 22:25 CDT / 2026-04-18T22:25:38Z — Preliminary cross-provider H100 note for the packed replay
+
+Checkpoint context:
+
+- current branch head at note time:
+  - `5f3a755` (`exp/hgdn-k-core`)
+- earlier packed-contract correction:
+  - `b657403`
+  - `5f3a755`
+
+User-supplied hardware identity checks from the in-flight packed replay:
+
+- Colab:
+  - `NVIDIA H100 80GB HBM3, 81559 MiB, 00000000:04:00.0, 700.00 W`
+- RunPod:
+  - `NVIDIA H100 80GB HBM3, 81559 MiB, 00000000:0A:00.0, 700.00 W`
+
+Preliminary implication:
+
+- both providers are reporting the same H100 `80GB HBM3` `700 W` class
+- the earlier `~915 ms` vs `~1191 ms` gap is therefore **not** explained by a
+  simple `SXM vs weaker H100` hardware mismatch
+- smaller provider/stack differences can still exist, but the gross hardware
+  class explanation is no longer credible
+
+Preliminary Colab replay read from the same in-flight command family:
+
+```bash
+GDN_CONTROL_PROJ_FP32=0 \
+GDN_CONV_OUTPUT_CONTIGUOUS=1 \
+GDN_USE_PACKED_QKV_CONV=1 \
+GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=1 \
+GDN_USE_PACKED_QKV_PROJ=1 \
+bash scripts/run_h100_single_gpu_hgdn.sh fixed2k-hybrid
+```
+
+Observed Colab log excerpts:
+
+- `model_params:25279680`
+- `blocks:8G+8A`
+- `step:200/2000 ... step_avg:884.45ms`
+- `step:400/2000 ... step_avg:884.46ms`
+- `step:600/2000 ... step_avg:884.46ms`
+- `step:800/2000 ... step_avg:884.57ms`
+
+Interpretation at note time:
+
+- this preliminary replay is already back in the historical packed H100 band
+- that strongly suggests the packed path itself did **not** broadly regress to
+  the `~1191 ms` level
+- however, the pasted Colab log is still the historical `fixed2k-hybrid`
+  `16L x 384d` shell with packed-kernel env deltas, not yet the final archived
+  statement for the later exact-bridge finalist architecture
+- keep the conclusion provisional until both full archives are retrieved and
+  inspected
 
 ## 2026-04-18 19:03 CDT / 2026-04-19 00:03:45 UTC — Clean core-kernel compare killed the active core path and reopened the packed-speed audit
 

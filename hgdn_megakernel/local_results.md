@@ -1066,3 +1066,47 @@ Bookkeeping note:
 - fixed in:
   `7207fd7`
 - that bug affected bundle metadata only, not the trainer timing result
+
+## Preliminary cross-provider hardware note for the packed replay (`2026-04-18 22:25 CDT / 2026-04-18T22:25:38Z`)
+
+Checkpoint context:
+
+- current branch head at note time:
+  - `5f3a755`
+- earlier packed-contract note commits:
+  - `b657403`
+  - `5f3a755`
+
+User-supplied `nvidia-smi` identity lines from the in-flight packed replay:
+
+- Colab:
+  - `NVIDIA H100 80GB HBM3, 81559 MiB, 00000000:04:00.0, 700.00 W`
+- RunPod:
+  - `NVIDIA H100 80GB HBM3, 81559 MiB, 00000000:0A:00.0, 700.00 W`
+
+Interim read:
+
+- both providers are reporting the same H100 `80GB HBM3` `700 W` class
+- the earlier `~915 ms` vs `~1191 ms` discrepancy is therefore not explained by
+  a simple `SXM vs weaker H100` hardware-class mismatch
+
+Preliminary Colab replay excerpt from the same in-flight command family:
+
+- command family:
+  `GDN_CONTROL_PROJ_FP32=0 GDN_CONV_OUTPUT_CONTIGUOUS=1 GDN_USE_PACKED_QKV_CONV=1 GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=1 GDN_USE_PACKED_QKV_PROJ=1 bash scripts/run_h100_single_gpu_hgdn.sh fixed2k-hybrid`
+- observed log lines:
+  - `model_params:25279680`
+  - `blocks:8G+8A`
+  - `step:200/2000 ... step_avg:884.45ms`
+  - `step:400/2000 ... step_avg:884.46ms`
+  - `step:600/2000 ... step_avg:884.46ms`
+  - `step:800/2000 ... step_avg:884.57ms`
+
+Interim implication:
+
+- this is already back in the historical packed H100 band
+- treat that as provisional until both full archives are retrieved
+- also keep the architecture label precise:
+  this command family is the historical `fixed2k-hybrid` `16L x 384d` shell
+  with packed-kernel env deltas, not yet the final word on the later
+  exact-bridge finalist architecture
