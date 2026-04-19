@@ -67,7 +67,7 @@ Queue launcher:
 
 ## Structure Family
 
-- `pending` `structure_round1`
+- `running` `structure_round1`
   - `blocks0`
   - `blocks3`
   - `blocks6`
@@ -75,6 +75,7 @@ Queue launcher:
   - `branches8_pow2`
   - `readout256`
   - `readout128`
+  - queue session `14136` launched from commit `e43655d`
 - `done` `blocks0_radical_guardrail`
   - `blocks0_resid12_e6_c8t1_r3_current_512m`
 - `done` `blocks0_controller_v1`
