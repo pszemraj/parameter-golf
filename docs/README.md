@@ -182,6 +182,13 @@ Single-entry batch helpers:
 - [`../scripts/run_h100_hgdn_bridge_round.sh`](../scripts/run_h100_hgdn_bridge_round.sh)
 - [`../scripts/run_h100_hgdn_naive_contract_round.sh`](../scripts/run_h100_hgdn_naive_contract_round.sh)
 
+Bundle / artifact helper:
+
+- [`../scripts/bundle_hgdn_run.py`](../scripts/bundle_hgdn_run.py)
+  - packages one run log, git metadata, GPU identity, and selected configs into
+    a `py7zr` `.7z` archive from repo root
+  - extra artifacts are opt-in via `--copy`
+
 Data / setup helpers:
 
 - [`../scripts/bootstrap_challenge_data.sh`](../scripts/bootstrap_challenge_data.sh)
