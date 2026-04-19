@@ -40,13 +40,13 @@ Status legend:
 - `pending` `blocks3_confirm1b_v1`
   - `resid4_e20_c16t1_1b`
   - `resid4_e25_c8t1_1b`
-- `pending` `blocks2_frontier`
+- `done` `blocks2_frontier`
   - `blocks2_resid5_e25_c8t1_current_512m`
   - `blocks2_resid6_e25_c8t1_current_512m`
   - `blocks2_resid5_e30_c8t1_current_512m`
 - `pending` `blocks2_confirm1b`
   - `blocks2_resid6_e25_c8t1_1b`
-- `pending` `blocks2_radical`
+- `running` `blocks2_radical`
   - `blocks2_resid12_e6_c8t1_r3_current_512m`
   - `blocks2_resid12_e8_c8t1_r3_current_512m`
 - `pending` `blocks1_radical`
