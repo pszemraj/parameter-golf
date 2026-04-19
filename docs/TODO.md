@@ -245,6 +245,26 @@ See [REDUNDANCY_AUDIT.md](REDUNDANCY_AUDIT.md) for the concrete code targets.
   - if a packed HGDN helper is meant to represent the live finalist, it must
     resolve to the live14 replay preset by default, not to the old kernel-only
     config plus a separate architecture shell
+
+## 11. Record the 2026-04-19 packed eval-graph prewarm checkpoint
+
+- Base commit before this packed-only runtime tweak: `0a433c9`.
+- Timestamp: `2026-04-19 12:47 CDT`.
+- Scope:
+  - `train_gpt_hybrid.py` now prewarms one representative eval/inference
+    forward after compile warmup and before the timed training loop when the
+    packed HGDN path is running with compile enabled and validation is still
+    reachable in the current contract
+  - the goal is not to change model math or validation semantics; it is only to
+    move the first train→eval grad-mode graph build out of the measured loop
+- Local validation artifact:
+  - `RUN_ID=packed_hgdn_eval_prewarm_audit`
+  - compile log still shows the eval-side recompiles, but they now occur before
+    `step:1` and the prewarm log records `compile_prewarm: ... eval_graph:1`
+- Interpretation:
+  - keep treating this as a packed-HGDN-only runtime cleanup
+  - do not mirror it into `train_gpt.py`; the exact repo baseline stays
+    baseline
 - Local proxy evidence:
   - `PYTHONPATH=$PWD conda run -s --name pg python /tmp/bench_token_input_width.py`
     measured:

@@ -946,6 +946,67 @@ def eval_val(
     return float(val_loss.item()), float(bpt * tpb)
 
 
+def prewarm_eval_forward(
+    args: Hyperparameters,
+    model: nn.Module,
+    rank: int,
+    world_size: int,
+    device: torch.device,
+    grad_accum_steps: int,
+    val_tokens: Tensor,
+) -> bool:
+    """Precompile one representative eval/inference forward before timed training.
+
+    This keeps the first `model.eval()` + `torch.inference_mode()` graph build
+    out of the measured training loop and avoids a one-time grad-mode
+    recompile on the first validation step.
+
+    :param Hyperparameters args: Runtime hyperparameters.
+    :param nn.Module model: Compiled training model or DDP wrapper.
+    :param int rank: Distributed rank.
+    :param int world_size: Distributed world size.
+    :param torch.device device: Active CUDA device.
+    :param int grad_accum_steps: Gradient accumulation steps.
+    :param Tensor val_tokens: Validation token stream.
+    :return bool: `True` when a representative eval batch was prewarmed.
+    """
+
+    local_batch_tokens = args.val_batch_size // (grad_accum_steps * world_size)
+    if local_batch_tokens < args.train_seq_len:
+        return False
+    local_batch_seqs = local_batch_tokens // args.train_seq_len
+    total_seqs = (int(val_tokens.numel()) - 1) // args.train_seq_len
+    if total_seqs <= 0:
+        return False
+    seq_start = (total_seqs * rank) // world_size
+    seq_end = (total_seqs * (rank + 1)) // world_size
+    if seq_start >= seq_end:
+        return False
+    batch_seq_end = min(seq_start + local_batch_seqs, seq_end)
+    raw_start = seq_start * args.train_seq_len
+    raw_end = batch_seq_end * args.train_seq_len + 1
+    local = val_tokens[raw_start:raw_end]
+    x, y, _, _ = stage_eval_batch_views(
+        local[:-1].reshape(-1, args.train_seq_len),
+        local[1:].reshape(-1, args.train_seq_len),
+        device,
+        None,
+        None,
+    )
+    was_training = model.training
+    model.eval()
+    with torch.inference_mode():
+        with torch.autocast(
+            device_type="cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"
+        ):
+            _ = model(x, y)
+    if was_training:
+        model.train()
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+    return True
+
+
 def make_stream_sync_event(device: torch.device) -> torch.cuda.Event | None:
     """Create a reusable current-stream sync event for CUDA timing boundaries.
 
@@ -1511,11 +1572,27 @@ def main() -> None:
         if distributed:
             model.require_backward_grad_sync = True
         train_loader = DistributedTokenLoader(train_files, rank, world_size, device)
-    if muon_prewarm_count > 0 or rotary_prewarm_count > 0:
+    eval_prewarm_count = 0
+    if args.compile and (
+        args.log_step0_eval or args.val_loss_every > 0 or not args.perf_skip_final_eval
+    ):
+        eval_prewarm_count = int(
+            prewarm_eval_forward(
+                args,
+                model,
+                rank,
+                world_size,
+                device,
+                grad_accum_steps,
+                val_tokens,
+            )
+        )
+    if muon_prewarm_count > 0 or rotary_prewarm_count > 0 or eval_prewarm_count > 0:
         log0(
             "compile_prewarm:"
             f" muon_shapes:{muon_prewarm_count}"
             f" rotary_modules:{rotary_prewarm_count}"
+            f" eval_graph:{eval_prewarm_count}"
         )
     if device.type == "cuda":
         torch.cuda.synchronize()
