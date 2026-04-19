@@ -6,11 +6,13 @@
 - Completed a four-point controller neighborhood screen on `blocks3`.
 - Completed a clean matched-token `bptt` sweep on the two best `blocks3` controller families.
 - Completed a clean matched-token `carry` sweep on the two best residual `blocks3` controller families.
+- Completed the first controller-up/spec-down reallocation screen on `blocks2`.
 - All completed controller runs in this report used:
   - `compile=0`
   - exact `val_bpb`
-  - matched `planned_train_tokens=50,331,648`
   - W&B project `pg-core-amp`
+- The earlier `blocks9` and `blocks3` controller screens used matched `planned_train_tokens=50,331,648`.
+- The later `blocks2` reallocation screen used matched `planned_train_tokens=536,870,912` inside its own subfamily.
 - A first attempt at the neighborhood screen with `compile=1` was discarded before completion because the shorter runs would not all cross the compile trigger at the same point. That batch is intentionally excluded from the evidence below.
 
 ## Current Evidence
@@ -225,17 +227,79 @@ Result from the clean `carry` sweep:
 - The gap is about `0.00002` bpb, which is far too small to over-interpret at this short budget.
 - That means the right next step is longer confirmation, not more screening knobs.
 
+### `blocks2` controller-up / spec-down reallocation
+
+All runs below used:
+- `12` branches
+- `2` blocks
+- full readout
+- `spec_max_tokens=5,000,000`
+- `branch_temporal_mode=current`
+- `carry_chunks=8`
+- `bptt_chunks=1`
+- `4096` steps = `536,870,912` planned train tokens
+
+Completed results:
+- `blocks2_resid5_e25_c8t1_current_512m`
+  - `core_layers=5`
+  - `core_expansion=2.5`
+  - `residual_core=1`
+  - final `val_bpb = 2.3986403191`
+  - steady `tok/s = 2,023,976`
+  - peak allocated memory `= 7,270 MiB`
+  - trainable int8 zlib payload `= 75,027`
+  - artifact estimate `= 3,452,276`
+- `blocks2_resid6_e25_c8t1_current_512m`
+  - `core_layers=6`
+  - `core_expansion=2.5`
+  - `residual_core=1`
+  - final `val_bpb = 2.3924393341`
+  - steady `tok/s = 1,849,000`
+  - peak allocated memory `= 7,881 MiB`
+  - trainable int8 zlib payload `= 88,411`
+  - artifact estimate `= 3,465,660`
+- `blocks2_resid5_e30_c8t1_current_512m`
+  - `core_layers=5`
+  - `core_expansion=3.0`
+  - `residual_core=1`
+  - final `val_bpb = 2.3957711310`
+  - steady `tok/s = 1,758,943`
+  - peak allocated memory `= 7,796 MiB`
+  - trainable int8 zlib payload `= 87,556`
+  - artifact estimate `= 3,464,805`
+
+Result from the expanded reallocation screen:
+- All three `blocks2` points beat the previous `blocks3 + resid4_e25_c8t1 + current` anchor.
+- `resid6_e25` is now the best local `512M`-token quality point so far.
+- `resid5_e25` is still the best quality/speed tradeoff on the same frontier.
+- `resid5_e30` is dominated by `resid6_e25`: it is worse on quality and slower.
+- The win came from removing one frozen amplifier block and reinvesting capacity into the recurrent controller, not from adding any attention or token-token mixing.
+
+Diagnostics from the new frontier:
+- `resid5_e25` used the fifth recurrent layer more heavily over time, but stayed stable.
+- `resid6_e25` improved quality again, but concentrated load more aggressively in the top layer:
+  - final top-layer residual gate about `0.631`
+  - top-layer state norms briefly above `110`
+- `resid5_e30` did not buy its way onto the frontier despite having trainable size comparable to `resid6_e25`.
+- That means depth is currently buying more than width on the smaller `blocks2` frozen spec.
+
 ## What This Means
 
 Does more controller depth help?
-- Yes, but only after trimming the frozen side.
+- Yes, and the strongest new signal comes from trimming the frozen side first.
 - On overbuilt `blocks9`, the deeper residual controller package lost.
 - On `blocks3`, moving from `plain3_e20` to `plain4_e20` helped modestly, and moving to `resid4_e20` or `resid4_e25` helped more.
+- On `blocks2`, depth kept paying:
+  - `resid5_e25` beat the old `blocks3` anchor cleanly
+  - `resid6_e25` then beat `resid5_e25` by another `0.00620` bpb
 
 Does more controller width via expansion help?
 - Not as a generic knob.
 - `plain3_e25` lost against `plain4_e20`, so width alone is not rescuing the plain family.
 - Inside the residual `4`-layer controller, `expansion=2.5` beat `2.0` by about `0.00098` bpb at the cost of about `8%` throughput.
+- On the smaller `blocks2` frozen structure, width alone is not the best use of extra controller parameters:
+  - `5 x 3.0` lost to `6 x 2.5`
+  - it was also slower than `6 x 2.5`
 
 Is residualization materially improving trainability?
 - On `blocks3`, yes.
@@ -250,7 +314,19 @@ Is semi-TBPTT helping beyond simple carry?
 ## Best Controller-Only Contender
 
 Current best controller-only contender:
-- `resid4_e20_c16t1` on the `blocks3` structure by a hair in the current screen
+- best pure-quality screening point: `blocks2_resid6_e25_c8t1_current_512m`
+- final `val_bpb = 2.3924393341`
+- steady `tok/s = 1,849,000`
+- artifact estimate `= 3,465,660`
+
+Best current quality/speed point on the same frontier:
+- `blocks2_resid5_e25_c8t1_current_512m`
+- final `val_bpb = 2.3986403191`
+- steady `tok/s = 2,023,976`
+- artifact estimate `= 3,452,276`
+
+Best earlier short-budget `blocks3` controller screen:
+- `resid4_e20_c16t1` on `blocks3`
 - final `val_bpb = 2.5123756944`
 - steady `tok/s = 1,971,871`
 - artifact estimate `= 4,197,310`
@@ -261,17 +337,18 @@ The strongest simpler anchor remains:
 - steady `tok/s = 2,030,859`
 
 The real takeaway is stronger than the nominal winner:
-- the best two residual points are essentially tied at the screening budget
-- the gap to the plain anchor is only a few thousandths of a bpb
-- longer confirmation runs are required before making strong ranking claims
+- inside the earlier `blocks3` screen, the best two residual points are essentially tied
+- once we reallocated one frozen block into the recurrent controller, the new `blocks2` frontier separated itself clearly from the old `blocks3` anchor
+- within that new frontier, depth is currently a better spend than width
+- longer confirmation runs are still required before making strong transfer claims
 
 ## Regression-To-Transformer Guardrail
 
-The latest winner is a somewhat larger controller, so this guardrail has to stay active.
-- The winning controller is still only `4` minGRU layers, not a deep generic stack.
-- The winning frozen structure is still `blocks3`, not the old `blocks9`.
-- Artifact size is unchanged across these controller screens because the frozen side is still doing the byte-heavy work.
-- `carry=16` helping `resid4_e20` is a healthier signal than `bptt>1`, because it keeps the controller in the same recurrent family without adding truncated unroll.
+The latest winner is a larger recurrent controller on a smaller frozen spec, so this guardrail has to stay active.
+- The winning controller is still a minGRU stack, not a deep generic stack and not attention.
+- The winning move was to remove frozen amplifier depth, not to add more frozen blocks.
+- The corrected artifact estimate dropped sharply because the spec got smaller.
+- `carry=16` helping `resid4_e20` and the `blocks2` frontier beating the old anchor are both healthier signals than `bptt>1`, because they stay inside the same recurrent family without adding truncated unroll or token-token mixing.
 - That means the project is still in the intended family, but controller creep is still a real thing to watch.
 
 The remaining risk is different:
