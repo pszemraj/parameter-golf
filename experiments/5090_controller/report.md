@@ -115,6 +115,10 @@ Current corrected result:
   - the top residual gate climbed to about `0.463`
   - the top state norm reached roughly `153`
   - that is a parallel-RNN saturation pattern worth tuning, not evidence that attention is needed
+- a first direct attempt to fix that by closing the residual path further did not help:
+  - `blocks0_resid16_e8_c8t1_r4_current_512m_gc1` was screened against the completed `rinit=-3.0` run
+  - it was worse at `256`, `512`, and `768` with no throughput or memory advantage
+  - on current evidence, simply pushing residual init colder is not the right next move for this geometry
 
 ## Current Evidence
 
