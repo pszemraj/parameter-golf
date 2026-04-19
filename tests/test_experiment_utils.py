@@ -15,7 +15,7 @@ from core_amplifier_lm.experiment import (
     compute_steady_state_tokens_per_sec,
     summarize_run_dir,
 )
-from tools.run_core_amp_sweep import structure_preset_defaults
+from tools.run_core_amp_sweep import parse_controller_specs, structure_preset_defaults
 
 PKG_ROOT = Path(__file__).resolve().parents[1]
 
@@ -60,6 +60,18 @@ def test_structure_default_preset_uses_real_5090_budget():
     assert defaults["NO_MMAP"] is False
 
 
+def test_parse_controller_specs_accepts_optional_per_run_warmup():
+    legacy = parse_controller_specs("plain3_e20 3 2.0 8 1 0 -2.0 0.003 1500 0.0003 384 256 512")
+    assert legacy[0].warmup_steps is None
+    assert legacy[0].lr_hold_steps == 1500
+
+    explicit = parse_controller_specs(
+        "plain4_e20_c8t4 4 2.0 8 4 0 -2.0 0.003 25 375 0.0003 96 256 512"
+    )
+    assert explicit[0].warmup_steps == 25
+    assert explicit[0].lr_hold_steps == 375
+
+
 def test_summarize_run_dir_reads_structured_artifacts(tmp_path: Path):
     run_dir = tmp_path / "run_a"
     run_dir.mkdir()
@@ -85,6 +97,11 @@ def test_summarize_run_dir_reads_structured_artifacts(tmp_path: Path):
                 "seq_len": 512,
                 "batch_size": 256,
                 "grad_accum": 1,
+                "learning_rate": 0.003,
+                "min_lr": 0.0003,
+                "warmup_steps": 50,
+                "lr_hold_steps": 750,
+                "weight_decay": 0.001,
                 "num_steps": 192,
                 "planned_train_tokens": 50331648,
             },
@@ -146,6 +163,8 @@ def test_summarize_run_dir_reads_structured_artifacts(tmp_path: Path):
     assert row["steady_state_tokens_per_sec"] == "950000.0"
     assert row["artifact_estimate_bytes"] == "999999"
     assert row["artifact_status"] == "LEFT_ON_TABLE"
+    assert row["warmup_steps"] == "50"
+    assert row["lr_hold_steps"] == "750"
 
 
 def test_rebuild_summary_cli_writes_tsv_and_markdown(tmp_path: Path):

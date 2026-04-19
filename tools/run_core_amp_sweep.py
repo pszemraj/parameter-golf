@@ -176,6 +176,7 @@ class ControllerRunSpec:
     residual_core: bool
     residual_core_init: float
     learning_rate: float
+    warmup_steps: Optional[int]
     lr_hold_steps: int
     min_lr: float
     num_steps: int
@@ -195,28 +196,41 @@ def controller_default_specs(preset: str) -> list[ControllerRunSpec]:
     if preset == "controller_default":
         return [
             ControllerRunSpec(
-                "d5_e20", 5, 2.0, 16, 2, True, -2.0, 0.003, 1500, 0.0003, 7000, 256, 512
+                "d5_e20", 5, 2.0, 16, 2, True, -2.0, 0.003, 100, 1500, 0.0003, 7000, 256, 512
             ),
             ControllerRunSpec(
-                "d4_e25", 4, 2.5, 16, 2, True, -2.0, 0.003, 1500, 0.0003, 7000, 256, 512
+                "d4_e25", 4, 2.5, 16, 2, True, -2.0, 0.003, 100, 1500, 0.0003, 7000, 256, 512
             ),
             ControllerRunSpec(
-                "d5_e30", 5, 3.0, 16, 2, True, -2.0, 0.003, 1500, 0.0003, 7000, 256, 512
+                "d5_e30", 5, 3.0, 16, 2, True, -2.0, 0.003, 100, 1500, 0.0003, 7000, 256, 512
             ),
             ControllerRunSpec(
-                "d6_e25", 6, 2.5, 16, 2, True, -2.0, 0.003, 1500, 0.0003, 7000, 256, 512
+                "d6_e25", 6, 2.5, 16, 2, True, -2.0, 0.003, 100, 1500, 0.0003, 7000, 256, 512
             ),
         ]
     if preset == "cpu_smoke":
         return [
             ControllerRunSpec(
-                "plain3_e20", 3, 2.0, 8, 1, False, -2.0, 0.003, 20, 0.0003, 80, 8, 128
+                "plain3_e20", 3, 2.0, 8, 1, False, -2.0, 0.003, 20, 20, 0.0003, 80, 8, 128
             ),
             ControllerRunSpec(
-                "resid5_e20", 5, 2.0, 16, 1, True, -2.0, 0.003, 20, 0.0003, 80, 8, 128
+                "resid5_e20", 5, 2.0, 16, 1, True, -2.0, 0.003, 20, 20, 0.0003, 80, 8, 128
             ),
             ControllerRunSpec(
-                "resid5_e20_tbptt2", 5, 2.0, 16, 2, True, -2.0, 0.003, 20, 0.0003, 80, 8, 128
+                "resid5_e20_tbptt2",
+                5,
+                2.0,
+                16,
+                2,
+                True,
+                -2.0,
+                0.003,
+                20,
+                20,
+                0.0003,
+                80,
+                8,
+                128,
             ),
         ]
     raise SystemExit(f"unknown controller preset: {preset}")
@@ -238,8 +252,14 @@ def parse_controller_specs(raw: str) -> list[ControllerRunSpec]:
         if not line or line.startswith("#"):
             continue
         fields = line.split()
-        if len(fields) != 13:
+        if len(fields) not in {13, 14}:
             raise SystemExit(f"invalid controller run spec: {line}")
+        if len(fields) == 13:
+            warmup_steps = None
+            lr_hold_idx = 8
+        else:
+            warmup_steps = int(fields[8])
+            lr_hold_idx = 9
         specs.append(
             ControllerRunSpec(
                 name=fields[0],
@@ -250,11 +270,12 @@ def parse_controller_specs(raw: str) -> list[ControllerRunSpec]:
                 residual_core=bool(int(fields[5])),
                 residual_core_init=float(fields[6]),
                 learning_rate=float(fields[7]),
-                lr_hold_steps=int(fields[8]),
-                min_lr=float(fields[9]),
-                num_steps=int(fields[10]),
-                batch_size=int(fields[11]),
-                seq_len=int(fields[12]),
+                warmup_steps=warmup_steps,
+                lr_hold_steps=int(fields[lr_hold_idx]),
+                min_lr=float(fields[lr_hold_idx + 1]),
+                num_steps=int(fields[lr_hold_idx + 2]),
+                batch_size=int(fields[lr_hold_idx + 3]),
+                seq_len=int(fields[lr_hold_idx + 4]),
             )
         )
     return specs
@@ -379,6 +400,11 @@ def update_controller_config(
     train_defaults: dict[str, str],
 ) -> None:
     cfg = ModelConfig.load(run_dir)
+    warmup_steps = (
+        int(spec.warmup_steps)
+        if spec.warmup_steps is not None
+        else int(train_defaults["WARMUP_STEPS"])
+    )
     cfg.meta["run_name"] = run_name
     cfg.meta["phase"] = phase
     cfg.data["source"] = data_path
@@ -396,7 +422,7 @@ def update_controller_config(
     cfg.training["learning_rate"] = spec.learning_rate
     cfg.training["lr_schedule"] = train_defaults["LR_SCHEDULE"]
     cfg.training["min_lr"] = spec.min_lr
-    cfg.training["warmup_steps"] = int(train_defaults["WARMUP_STEPS"])
+    cfg.training["warmup_steps"] = warmup_steps
     cfg.training["lr_hold_steps"] = spec.lr_hold_steps
     cfg.training["weight_decay"] = float(train_defaults["WEIGHT_DECAY"])
     cfg.training["grad_clip"] = float(train_defaults["GRAD_CLIP"])
@@ -535,6 +561,11 @@ def run_controller_sweep(repo_root: Path) -> None:
             continue
         run_dir = model_root / spec.name
         log_path = run_dir / "train.log"
+        warmup_steps = (
+            int(spec.warmup_steps)
+            if spec.warmup_steps is not None
+            else int(train_defaults["WARMUP_STEPS"])
+        )
         if skip_done and run_complete(run_dir, spec.num_steps):
             print(f"Skipping completed run: {spec.name}")
             continue
@@ -580,7 +611,7 @@ def run_controller_sweep(repo_root: Path) -> None:
             "--min-lr",
             str(spec.min_lr),
             "--warmup-steps",
-            train_defaults["WARMUP_STEPS"],
+            str(warmup_steps),
             "--lr-hold-steps",
             str(spec.lr_hold_steps),
             "--weight-decay",
