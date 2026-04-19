@@ -10,13 +10,15 @@
 - The Core/Amplifier path is logging cleanly to W&B project `pg-core-amp`.
 - Exact `val_bpb` is working locally through the official tokenizer path.
 - Artifact accounting includes the int8-zlib trainable controller payload, not just repo code plus `gzip(spec.pt)`.
+- This note now uses corrected record-style artifact recounts for older finalists, not the stale pre-`26438ae` payload estimates baked into their original `run_results.json`.
 - The local dataset is complete for this variant:
   - `195` train shards
   - about `19.47B` train tokens available to frozen-spec builds
 - The strongest corrected signal is no longer the old `blocks2` setup.
 - The current best completed local point is now `blocks0 + 12 x 10.0`, which beats the previous `blocks0 + 12 x 8.0` leader while staying well inside the artifact limit.
 - The fixed-parameter follow-up, `blocks0 + 10 x 12.0`, finished just behind `12 x 10.0`, which suggests controller shape matters and the present local evidence slightly favors more recurrent depth at similar controller mass.
-- A safer depth-leaning follow-up, `blocks0 + 14 x 8.0`, is now running after `blocks0 + 16 x 8.0` exceeded the 5090 memory budget.
+- `blocks0 + 14 x 8.0` finished behind the top tier.
+- The checkpointed `blocks0 + 16 x 8.0` rerun completed cleanly and is now the strongest finished result above the `~839k`-parameter controller class, but it still trails the best two completed points.
 
 ## Top 3 Local Contenders
 
@@ -27,7 +29,7 @@ These are the current corrected leaders under the full-spec contract. They are a
    - final `val_bpb = 2.2777913795`
    - steady `tok/s = 384,214`
    - trainable params `= 839,129`
-   - artifact estimate `= 2,936,419`
+   - corrected artifact estimate `= 3,855,919`
    - why it matters:
      - this is the strongest corrected local point so far inside the frozen-statistics + parallel minGRU family
      - it beat the previous `blocks0 + 12 x 8.0` leader by about `0.00811` bpb while keeping the same frozen `blocks0` spec
@@ -35,22 +37,22 @@ These are the current corrected leaders under the full-spec contract. They are a
 2. `blocks0_resid10_e12_c8t1_r3_current_512m`
    - evidence: second-best completed pure-quality point; fixed-parameter depth-vs-width comparison partner
    - final `val_bpb = 2.2794286891`
-   - steady `tok/s = 382,789`
+   - steady `tok/s = 382,810`
    - trainable params `= 839,031`
-   - artifact estimate `= 2,921,627`
+   - corrected artifact estimate `= 3,854,342`
    - why it matters:
      - it is only about `0.00164` bpb behind `12 x 10.0`, so the new leader is not just a trivial width hack
      - because it matched `12 x 10.0` on controller mass and nearly matched it on systems cost, it shows the controller shape question is real and not reducible to raw parameter count
 
-3. `blocks0_resid12_e8_c8t1_r3_current_512m`
-   - evidence: strongest medium-size completed point
-   - final `val_bpb = 2.2859021694`
-   - steady `tok/s = 474,391`
-   - trainable params `= 672,089`
-   - artifact estimate `= 2,801,887`
+3. `blocks0_resid16_e8_c8t1_r3_current_512m_gc1`
+   - evidence: strongest completed checkpointed large-controller point
+   - final `val_bpb = 2.2815471392`
+   - steady `tok/s = 273,637`
+   - trainable params `= 895,005`
+   - corrected artifact estimate `= 3,962,318`
    - why it matters:
-     - this was the first corrected `blocks0` quality winner
-     - it remains the best completed point below the new `~839k`-parameter controller tier
+     - this run proves the larger `16 x 8.0` parallel minGRU controller is viable on the 5090 once checkpointing is enabled
+     - it beat the completed `12 x 8.0` and `14 x 8.0` follow-ups, but did not beat the two best `~839k`-parameter leaders
 
 ## Exact Reproduction Commands
 
@@ -94,12 +96,12 @@ env CUDA_VISIBLE_DEVICES=0 TORCH_BLAS_PREFER_CUBLASLT=1 \
   conda run -s --name train python tools/run_core_amp_sweep.py controller
 ```
 
-### 3. `blocks0_resid12_e8_c8t1_r3_current_512m`
+### 3. `blocks0_resid16_e8_c8t1_r3_current_512m_gc1`
 
 ```bash
 env CUDA_VISIBLE_DEVICES=0 TORCH_BLAS_PREFER_CUBLASLT=1 \
-  SHARED_SPEC_DIR=experiments/5090_structure/fullspec_blocks0_radical_v1/blocks0_resid12_e6_c8t1_r3_current_512m \
-  MODEL_ROOT=experiments/5090_controller/fullspec_blocks0_controller_v1 \
+  SHARED_SPEC_DIR=experiments/5090_controller/fullspec_blocks0_controller_v4/blocks0_resid16_e8_c8t1_r3_current_512m \
+  MODEL_ROOT=experiments/5090_controller/fullspec_blocks0_controller_v6 \
   PRESET=controller_default \
   COMPILE=0 \
   VAL_EVERY=256 \
@@ -110,7 +112,8 @@ env CUDA_VISIBLE_DEVICES=0 TORCH_BLAS_PREFER_CUBLASLT=1 \
   TRAIN_FRAC=0.98 \
   BRANCH_TEMPORAL_MODE=current \
   BRANCH_TEMPORAL_LAG_SCALE=1.0 \
-  RUN_SPECS=$'blocks0_resid12_e8_c8t1_r3_current_512m 12 8.0 8 1 1 -3.0 0.003 100 1500 0.0003 4096 256 512' \
+  GRADIENT_CHECKPOINTING=1 \
+  RUN_SPECS=$'blocks0_resid16_e8_c8t1_r3_current_512m_gc1 16 8.0 8 1 1 -3.0 0.003 100 1500 0.0003 4096 256 512' \
   conda run -s --name train python tools/run_core_amp_sweep.py controller
 ```
 
@@ -155,6 +158,7 @@ Code improvements:
 - W&B integration in `train_core_amplifier.py` with a cleaner config/history/summary split
 - per-run metadata capture for commit, environment, device, and runtime settings
 - corrected artifact accounting that includes int8-zlib trainable controller payload
+- gradient checkpointing for the parallel minGRU controller and frozen-amplifier blocks
 - `branch_temporal_mode=current|lagged|hybrid` plus carried branch-history support
 - rebuilt summaries now carry GPU/runtime metadata including CUDA, driver, TF32, and `TORCH_BLAS_PREFER_CUBLASLT`
 - updated reports and logbook under `docs/` and `experiments/`
@@ -166,6 +170,7 @@ Pure hyperparameter / architecture findings:
 - the wider `12 x 10.0` controller improved pure quality again on the same `blocks0` structure, reaching `2.27779` bpb while staying artifact-safe
 - the fixed-parameter `10 x 12.0` comparison finished only about `0.00164` bpb behind `12 x 10.0`, which suggests the new frontier is about controller geometry as well as controller scale
 - the next depth jump, `16 x 8.0`, exceeded the current 5090 memory budget on the fixed batch contract
+- the checkpointed rerun of `16 x 8.0` finished cleanly at `2.28155` bpb, which is strong but not enough to displace the two best `~839k`-parameter leaders
 - removing the current amplifier blocks entirely (`blocks0`) did not hurt the `12 x 6.0` radical controller in any meaningful way by the end of the screening run
 - removing the current amplifier blocks entirely (`blocks0`) slightly improved the completed `12 x 8.0` radical controller result while also shrinking the frozen artifact and improving throughput
 - removing the current amplifier blocks entirely (`blocks0`) remains compatible with controller scaling up to at least `839k` trainable parameters
@@ -196,7 +201,7 @@ That means the guardrail is now:
 - Does `blocks0_resid12_e10_c8t1_r3_current_512m` keep its edge under a longer budget, or is it mostly a screening-budget effect?
 - Does `blocks0_resid12_e6_c8t1_r3_current_512m` hold up at `1B` tokens?
 - Do the new corrected `blocks0` points hold up across `3` seeds?
-- Does the running `blocks0_resid14_e8_c8t1_r3_current_512m` point improve the quality/speed tradeoff by keeping the depth-leaning shape while staying under the `16 x 8.0` memory wall?
+- Does a better residual-init or schedule let the checkpointed `16 x 8.0` family beat `12 x 10.0` and `10 x 12.0` end-to-end?
 - Is there any minimal frozen structure that beats `blocks0`, or should the learned amplifier stack be removed from the current local frontier entirely?
 - Can the wider `12 x 10.0` point be stabilized further with a more closed residual init or a better schedule, without giving up its quality edge?
 - How much of the current ranking survives on `1x H100` and then on the final `8x H100` regime?

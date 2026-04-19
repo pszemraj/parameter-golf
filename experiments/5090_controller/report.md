@@ -3,7 +3,8 @@
 ## Status
 - Completed a stronger corrected full-spec `blocks0` radical controller frontier through `12 x 10.0`.
 - Completed a fixed-parameter depth-vs-width follow-up, `blocks0_resid10_e12_c8t1_r3_current_512m`.
-- Launched a safer depth-leaning follow-up, `blocks0_resid14_e8_c8t1_r3_current_512m`, after `blocks0_resid16_e8_c8t1_r3_current_512m` hit the local memory wall.
+- Completed a safer depth-leaning follow-up, `blocks0_resid14_e8_c8t1_r3_current_512m`.
+- Completed a checkpointed rerun of the previously OOM `blocks0_resid16_e8_c8t1_r3_current_512m` point.
 - Completed the first matched-token controller baseline on the original full frozen structure.
 - Completed a clean controller follow-up on the new structural front-runner, `blocks3`.
 - Completed a four-point controller neighborhood screen on `blocks3`.
@@ -24,6 +25,10 @@
 
 The corrected full-spec `blocks0` radical-controller frontier is now the most relevant controller evidence in this report.
 
+Artifact note:
+- the older `run_results.json` files for pre-`26438ae` controller runs used the earlier payload estimator
+- the artifact estimates listed in this section have been recomputed with the corrected record-style trainable export path so the local frontier is compared on the same byte-counting convention
+
 Frozen structure:
 - `12` branches
 - `0` amplifier blocks
@@ -40,7 +45,7 @@ Matched run results:
   - final `val_bpb = 2.2979334823`
   - steady `tok/s = 616,452`
   - trainable params `= 505,049`
-  - artifact estimate `= 2,673,848`
+  - artifact estimate `= 3,231,686`
 - `blocks0_resid12_e8_c8t1_r3_current_512m`
   - `core_layers=12`
   - `core_expansion=8.0`
@@ -49,7 +54,7 @@ Matched run results:
   - final `val_bpb = 2.2859021694`
   - steady `tok/s = 474,391`
   - trainable params `= 672,089`
-  - artifact estimate `= 2,801,887`
+  - artifact estimate `= 3,544,631`
 - `blocks0_resid12_e10_c8t1_r3_current_512m`
   - `core_layers=12`
   - `core_expansion=10.0`
@@ -58,7 +63,7 @@ Matched run results:
   - final `val_bpb = 2.2777913795`
   - steady `tok/s = 384,214`
   - trainable params `= 839,129`
-  - artifact estimate `= 2,936,419`
+  - artifact estimate `= 3,855,919`
 - `blocks0_resid10_e12_c8t1_r3_current_512m`
   - `core_layers=10`
   - `core_expansion=12.0`
@@ -67,28 +72,49 @@ Matched run results:
   - final `val_bpb = 2.2794286891`
   - steady `tok/s = 382,789`
   - trainable params `= 839,031`
-  - artifact estimate `= 2,921,627`
+  - artifact estimate `= 3,854,342`
+- `blocks0_resid16_e8_c8t1_r3_current_512m_gc1`
+  - `core_layers=16`
+  - `core_expansion=8.0`
+  - `carry_chunks=8`
+  - `bptt_chunks=1`
+  - `gradient_checkpointing=1`
+  - final `val_bpb = 2.2815471392`
+  - steady `tok/s = 273,637`
+  - trainable params `= 895,005`
+  - artifact estimate `= 3,962,318`
 
 Current corrected result:
-- controller-only scaling on the `blocks0` structure is still improving quality
-- `12 x 10.0` beat `12 x 8.0` by about `0.00811` bpb on the same `512M`-token screening contract
-- `12 x 10.0` beat `12 x 6.0` by about `0.02014` bpb on the same contract
-- in the fixed-parameter comparison, `12 x 10.0` beat `10 x 12.0` by about `0.00164` bpb
+- controller-only scaling on the `blocks0` structure improved quality through `12 x 10.0`, but bigger is not automatically better.
+- `12 x 10.0` beat `12 x 8.0` by about `0.00811` bpb on the same `512M`-token screening contract.
+- `12 x 10.0` beat `12 x 6.0` by about `0.02014` bpb on the same contract.
+- in the fixed-parameter comparison, `12 x 10.0` beat `10 x 12.0` by about `0.00164` bpb.
+- the checkpointed `16 x 8.0` rerun shows a larger recurrent controller is genuinely viable on the 5090:
+  - it finished at `2.2815471392`
+  - it beat `12 x 8.0` by about `0.00436` bpb
+  - it beat `14 x 8.0` by about `0.00478` bpb
+  - it still trailed `12 x 10.0` by about `0.00376` bpb
+  - it still trailed `10 x 12.0` by about `0.00212` bpb
 - the quality gain came with real systems cost:
   - `12 x 10.0` is about `19%` slower than `12 x 8.0`
   - `12 x 10.0` is about `38%` slower than `12 x 6.0`
-  - peak allocated memory rose to about `28.75 GiB`
-- `10 x 12.0` shows that the new frontier is not just a raw-parameter story:
+  - `16 x 8.0` with checkpointing is about `29%` slower than `12 x 10.0`
+  - `16 x 8.0` with checkpointing is about `56%` slower than `12 x 6.0`
+- the two `16 x 8.0` outcomes are a useful systems result:
+  - without checkpointing: immediate OOM after the first step on the fixed contract
+  - with checkpointing: stable completion at only about `5.24 GiB` peak reserved
+- `10 x 12.0` still shows the new frontier is not just a raw-parameter story:
   - it ran at almost the same speed as `12 x 10.0`
-  - it used almost the same memory budget
+  - it used almost the same controller byte budget
   - it still finished slightly worse, so controller geometry matters
-- the next depth jump, `16 x 8.0`, failed with a real local memory limit:
-  - OOM after the first step while trying to allocate another `512 MiB`
-  - about `30.9 GiB` already in use on the 5090
 - the strongest current architectural conclusion is still structural, not transformer-like:
   - we are scaling a parallel minGRU controller, not reintroducing attention
   - the current learned amplifier blocks look weaker than the frozen lag/readout basis plus the recurrent controller
   - the real risk is controller dominance over a too-static frozen side, not regression toward a transformer
+- the main caution flag on the checkpointed `16 x 8.0` run is recurrent-layer concentration:
+  - the top residual gate climbed to about `0.463`
+  - the top state norm reached roughly `153`
+  - that is a parallel-RNN saturation pattern worth tuning, not evidence that attention is needed
 
 ## Current Evidence
 

@@ -21,6 +21,7 @@ experiments/**/resolved_config.json
 experiments/**/run_metadata.json
 experiments/**/run_results.json
 experiments/**/train.log
+experiments/**/final_trainable.int8.ptz
 experiments/**/summary.tsv
 experiments/**/summary.md
 experiments/**/commands.txt

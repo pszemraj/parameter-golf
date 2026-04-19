@@ -82,5 +82,8 @@ Status legend:
 - `failed` `blocks0_controller_v4`
   - `blocks0_resid16_e8_c8t1_r3_current_512m`
   - `OOM` on the fixed `seq_len=512`, `batch_size=256` contract after the first step
-- `running` `blocks0_controller_v5`
+- `done` `blocks0_controller_v5`
   - `blocks0_resid14_e8_c8t1_r3_current_512m`
+- `done` `blocks0_controller_v6`
+  - `blocks0_resid16_e8_c8t1_r3_current_512m_gc1`
+  - checkpointed rerun of the `blocks0_controller_v4` OOM point
