@@ -17,6 +17,7 @@ import sys
 import time
 import uuid
 import zlib
+import atexit
 from pathlib import Path
 from typing import Callable, Iterable, Literal
 
@@ -1379,9 +1380,12 @@ def main() -> None:
     enable_math_sdp(False)
 
     logfile = None
+    logfile_handle = None
     if master_process:
         os.makedirs("logs", exist_ok=True)
         logfile = f"logs/{args.run_id}.txt"
+        logfile_handle = open(logfile, "a", encoding="utf-8", buffering=1)
+        atexit.register(logfile_handle.close)
         print(logfile)
 
     def log0(msg: str, console: bool = True) -> None:
@@ -1395,9 +1399,8 @@ def main() -> None:
             return
         if console:
             print(msg)
-        if logfile is not None:
-            with open(logfile, "a", encoding="utf-8") as f:
-                print(msg, file=f)
+        if logfile_handle is not None:
+            print(msg, file=logfile_handle)
 
     log0(code, console=False)
     log0("=" * 100, console=False)

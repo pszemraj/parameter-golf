@@ -36,6 +36,10 @@ Last updated: 2026-04-18 23:44 CDT
     matching the hybrid trainer's cache discipline
   - the baseline trainer no longer runs step-0 validation by default; it now
     uses the same explicit `LOG_STEP0_EVAL=1` escape hatch as the hybrid path
+  - disabled profiling ranges now reuse a shared no-op context instead of
+    allocating fresh `nullcontext()` objects in the hot eager shell
+  - both trainers now keep one line-buffered logfile handle open instead of
+    reopening the run log on every emitted line
   - both attention implementations now cache rotary tables by
     `(seq_len, device, dtype)` rather than recasting cached fp32 tables on
     every call

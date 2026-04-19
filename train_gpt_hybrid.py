@@ -27,7 +27,7 @@ import sys
 import time
 import uuid
 import zlib
-from contextlib import nullcontext
+import atexit
 from pathlib import Path
 from typing import Any, Callable
 
@@ -64,6 +64,23 @@ try:
 except ImportError:
     _USE_WANDB = False
     wandb = None
+
+
+class _NoOpContext:
+    """Shared no-op context manager for disabled profiling ranges."""
+
+    def __enter__(self) -> None:
+        """Enter the no-op context."""
+
+        return None
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+        """Leave the no-op context without suppressing exceptions."""
+
+        return False
+
+
+_NO_OP_CONTEXT = _NoOpContext()
 
 
 # =====================================================================
@@ -1007,6 +1024,10 @@ def main() -> None:
 
     os.makedirs("logs", exist_ok=True)
     logfile = f"logs/{args.run_id}.txt" if master_process else None
+    logfile_handle = None
+    if logfile is not None:
+        logfile_handle = open(logfile, "a", encoding="utf-8", buffering=1)
+        atexit.register(logfile_handle.close)
 
     def log0(msg: str, console: bool = True) -> None:
         """Log a line on rank 0 to stdout and the run logfile.
@@ -1018,9 +1039,8 @@ def main() -> None:
             return
         if console:
             print(msg)
-        if logfile:
-            with open(logfile, "a", encoding="utf-8") as f:
-                print(msg, file=f)
+        if logfile_handle is not None:
+            print(msg, file=logfile_handle)
 
     profiler, profile_output_dir, profile_total_steps = build_profiler(
         args, args.run_id, master_process
@@ -1029,7 +1049,7 @@ def main() -> None:
     profile_ctx = (
         torch.autograd.profiler.record_function
         if args.profile
-        else lambda _n: nullcontext()
+        else lambda _n: _NO_OP_CONTEXT
     )
 
     # ── wandb init ────────────────────────────────────────────────────

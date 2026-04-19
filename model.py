@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import os
-from contextlib import AbstractContextManager, nullcontext
+from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -64,6 +64,23 @@ _GDN_AUDIT_CALL_INDEX = 0
 _HAS_SPLIT_WITH_SIZES_COPY = hasattr(torch.ops.aten, "split_with_sizes_copy")
 
 
+class _NoOpContext(AbstractContextManager[None]):
+    """Shared no-op context manager for disabled profiling paths."""
+
+    def __enter__(self) -> None:
+        """Enter the no-op context."""
+
+        return None
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+        """Leave the no-op context without suppressing exceptions."""
+
+        return False
+
+
+_NO_OP_CONTEXT = _NoOpContext()
+
+
 def profile_range(name: str) -> AbstractContextManager[None]:
     """Return a profiling context manager when range capture is enabled.
 
@@ -72,7 +89,7 @@ def profile_range(name: str) -> AbstractContextManager[None]:
     """
     if _PROFILE_RANGES:
         return torch.autograd.profiler.record_function(name)
-    return nullcontext()
+    return _NO_OP_CONTEXT
 
 
 def _tensor_layout_summary(name: str, tensor: Tensor) -> str:
