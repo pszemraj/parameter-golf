@@ -70,7 +70,6 @@ Status legend:
   - `branches8_pow2`
   - `readout256`
   - `readout128`
-- `running` `blocks0_radical_guardrail`
 - `done` `blocks0_radical_guardrail`
   - `blocks0_resid12_e6_c8t1_r3_current_512m`
 - `done` `blocks0_controller_v1`
