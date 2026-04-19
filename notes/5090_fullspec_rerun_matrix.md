@@ -14,6 +14,11 @@ Status legend:
 - `done`: completed under the corrected contract
 - `failed`: launched under the corrected contract but failed for a real reason worth preserving
 
+Queue launcher:
+- commit `adac6ee`
+- command: `conda run -s --name train python tools/run_core_amp_fullspec_reruns.py`
+- scope: the remaining pending controller, temporal, and structure families listed below
+
 ## Controller Families
 
 - `pending` `blocks3_followup_clean`
