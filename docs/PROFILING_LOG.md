@@ -134,13 +134,13 @@ It did **not** answer:
 ### Next exact check
 
 Run the packed current-winner path on this branch with the old helper family
-before claiming a packed regression:
+and the live packed-kernel preset before claiming a packed regression:
 
 ```bash
 USE_WANDB=0 WANDB_MODE=offline \
 COMPILE_STRATEGY=model \
 RUN_PREFIX=h100packed_recheck \
-bash scripts/run_h100_single_gpu_hgdn.sh fixed2k-hybrid
+python scripts/hgdn.py h100-perf fixed2k-hybrid --preset winner-20260405-19
 ```
 
 If that run lands back near the historical `~915 ms/step` range, the clean core
@@ -148,6 +148,14 @@ compare remains valid and the packed path simply stays mainline. If it instead
 lands near `~1190 ms/step`, then the packed stack itself regressed and the next
 work belongs on packed-path compile/runtime profiling, not on the archived core
 boundary.
+
+Important helper note:
+
+- `scripts/run_h100_single_gpu_hgdn.sh fixed2k-hybrid` by itself uses the
+  generic `single` sweep preset from `scripts/sweep.sh`
+- that is **not** the exact packed winner config
+- `scripts/hgdn.py ... --preset winner-20260405-19` is required here so the
+  packed QKV/conv/current-kernel winner env is actually applied
 
 ## 2026-04-13 — Exact 8x bridge kept HGDN as the main record-path family (`h100bridge1`)
 

@@ -1050,7 +1050,11 @@ So the current open performance question is now on the packed path:
 - rerun the packed current-winner stack on this branch under the historical
   `model`-compile helper family
 - exact next command:
-  `USE_WANDB=0 WANDB_MODE=offline COMPILE_STRATEGY=model RUN_PREFIX=h100packed_recheck bash scripts/run_h100_single_gpu_hgdn.sh fixed2k-hybrid`
+  `USE_WANDB=0 WANDB_MODE=offline COMPILE_STRATEGY=model RUN_PREFIX=h100packed_recheck python scripts/hgdn.py h100-perf fixed2k-hybrid --preset winner-20260405-19`
+- note:
+  `scripts/run_h100_single_gpu_hgdn.sh fixed2k-hybrid` alone only applies the
+  generic `single` sweep defaults; the explicit `winner-20260405-19` preset is
+  required for the live packed-kernel winner contract
 
 Bookkeeping note:
 

@@ -17,7 +17,7 @@ Last updated: 2026-04-18 19:15 CDT
   - rerun the packed current-winner path on the current branch under the
     historical `COMPILE_STRATEGY=model` contract
   - exact command:
-    `USE_WANDB=0 WANDB_MODE=offline COMPILE_STRATEGY=model RUN_PREFIX=h100packed_recheck bash scripts/run_h100_single_gpu_hgdn.sh fixed2k-hybrid`
+    `USE_WANDB=0 WANDB_MODE=offline COMPILE_STRATEGY=model RUN_PREFIX=h100packed_recheck python scripts/hgdn.py h100-perf fixed2k-hybrid --preset winner-20260405-19`
 - Main question:
   - is the current branch's packed path still near the historical
     `~915 ms/step` H100 reference, or did the packed stack itself drift?
