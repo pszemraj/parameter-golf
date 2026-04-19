@@ -29,6 +29,13 @@ Carry screening refined the top two points further:
 Those are effectively tied at the short screening budget.
 The earlier `plain3_e20 + blocks3` point remains a useful simple reference at `val_bpb = 2.5158438607`.
 
+Recent exploratory temporal result:
+- `branch_temporal_mode=lagged` was tested on the stronger `blocks3 + resid4_e25_c8t1` anchor at `512M` matched train tokens.
+- It lost clearly to the default `current` mode:
+  - `current`: `2.4138021379`
+  - `lagged`: `2.4529551592`
+- It was also about `1.7%` slower locally, so pure lagged taps should not become the next default.
+
 ## Exact Reproduction Commands
 
 ### Structural sweep that picked `blocks3`
@@ -176,6 +183,7 @@ Code improvements:
 - artifact budget headroom/status in structured run outputs and summaries
 - step-0 eval removed from the trainer
 - sweep-runner defaults aligned to the actual local `5M` spec-build budget
+- explicit `branch_temporal_mode=current|lagged` support with exact carried branch history and summary/report plumbing
 
 Pure hyperparameter / architecture findings:
 - `blocks3` is better than the old `blocks9` default locally
@@ -190,6 +198,7 @@ Pure hyperparameter / architecture findings:
   - `resid4_e25` prefers `carry=8`
 - `branches8_pow2` and `readout128` both lose enough quality that they should not become the default
 - `readout256` is the only tested compression point that still looks plausibly useful
+- pure `branch_temporal_mode=lagged` loses clearly to the default `current` branch view on the `blocks3 + resid4_e25_c8t1` anchor
 
 ## Regression-To-Transformer Guardrail
 
@@ -204,6 +213,9 @@ The remaining architectural risk is different:
 - the controller may start carrying too much of the real modeling burden if we keep buying gains with trainable depth alone
 
 That still points toward improving the frozen temporal role, not toward adding generic stack depth.
+The new temporal probe sharpens that guidance:
+- a pure switch from current-state branch projections to lagged-state branch projections is not the right move
+- the more promising next attempts are hybrid or filtered temporal views that preserve strong current-state access
 
 ## Unresolved Questions
 
