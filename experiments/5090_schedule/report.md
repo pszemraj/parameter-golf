@@ -2,8 +2,8 @@
 
 ## Status
 - Harness ready
-- Exact commands prepared
-- Schedule sweep not auto-launched from this turn
+- No evidence-backed schedule winner yet
+- Schedule sweep is intentionally deferred until the new `blocks0/blocks1` `1B` confirmations finish
 
 ## What Was Verified
 - Warmup-hold-cosine is the real root schedule path.
@@ -16,9 +16,13 @@
   - whether hold-then-cosine helps this controller family
   - whether decay is starting too early
   - whether `min_lr` is too high or too low
+- The next schedule sweep should be run on the post-confirmation contenders, not on the invalidated older `blocks3` default.
 
-## Exact Screening Commands
-- Broad schedule screen for one chosen contender:
+## Next Planned Screening Contract
+
+Use the confirmed winner from the new `blocks0/blocks1` `1B` queue, then run a labeled screening sweep.
+
+Broad schedule screen for one chosen contender:
 ```bash
 DATA_PATH=./data/datasets/fineweb10B_sp1024 \
 MODEL_ROOT=./experiments/5090_schedule/broad_screen \

@@ -2,57 +2,70 @@
 
 > [!WARNING]
 > This note is still provisional.
-> The old capped-spec runs are invalidated, and some corrected `blocks3`, temporal, and schedule/context families still need to be replayed.
-> The recommendations below reflect the strongest corrected local evidence on the current radical controller axis.
+> The corrected full-spec replay is finished, but the strongest `blocks0/blocks1` contenders still need longer-budget confirmation and then schedule sweeps.
 
 ## Current Status
 
-- The Core/Amplifier path is logging cleanly to W&B project `pg-core-amp`.
-- Exact `val_bpb` is working locally through the official tokenizer path.
-- Artifact accounting includes the int8-zlib trainable controller payload, not just repo code plus `gzip(spec.pt)`.
-- This note now uses corrected record-style artifact recounts for older finalists, not the stale pre-`26438ae` payload estimates baked into their original `run_results.json`.
-- The local dataset is complete for this variant:
+- Logging is clean in W&B project `pg-core-amp`.
+- Exact `val_bpb` is active through the official tokenizer path.
+- Artifact accounting now matches the record-style convention:
+  - repo code bytes
+  - `gzip(spec.pt)`
+  - trainable int8-zlib payload
+- The local dataset is complete for this family:
   - `195` train shards
   - about `19.47B` train tokens available to frozen-spec builds
-- The strongest corrected signal is no longer the old `blocks2` setup.
-- The current best completed local point is now `blocks0 + 12 x 10.0`, which beats the previous `blocks0 + 12 x 8.0` leader while staying well inside the artifact limit.
-- The fixed-parameter follow-up, `blocks0 + 10 x 12.0`, finished just behind `12 x 10.0`, which suggests controller shape matters and the present local evidence slightly favors more recurrent depth at similar controller mass.
-- `blocks0 + 14 x 8.0` finished behind the top tier.
-- The checkpointed `blocks0 + 16 x 8.0` rerun completed cleanly and is now the strongest finished result above the `~839k`-parameter controller class, but it still trails the best two completed points.
+- The strongest corrected local signal is controller-up/spec-down reallocation, not more frozen amplifier depth.
+- The regression-to-transformer guardrail is still intact:
+  - no attention
+  - no token-token mixing
+  - winners are still parallel minGRU controllers over a frozen statistical basis
 
-## Top 3 Local Contenders
+## Top 3 Current Contenders
 
-These are the current corrected leaders under the full-spec contract. They are all single-seed `512M`-token screening runs.
+These are the three most useful local contenders right now for the next confirmation round.
 
 1. `blocks0_resid12_e10_c8t1_r3_current_512m`
-   - evidence: best completed pure-quality screening leader
+   - best completed pure-quality point
    - final `val_bpb = 2.2777913795`
    - steady `tok/s = 384,214`
    - trainable params `= 839,129`
-   - corrected artifact estimate `= 3,855,919`
-   - why it matters:
-     - this is the strongest corrected local point so far inside the frozen-statistics + parallel minGRU family
-     - it beat the previous `blocks0 + 12 x 8.0` leader by about `0.00811` bpb while keeping the same frozen `blocks0` spec
+   - artifact estimate `= 3,855,919`
+   - why it is in:
+     - best corrected completed local quality result
+     - still comfortably inside the artifact cap
 
 2. `blocks0_resid10_e12_c8t1_r3_current_512m`
-   - evidence: second-best completed pure-quality point; fixed-parameter depth-vs-width comparison partner
+   - geometry control and near-tie
    - final `val_bpb = 2.2794286891`
-   - steady `tok/s = 382,810`
+   - steady `tok/s = 382,789`
    - trainable params `= 839,031`
-   - corrected artifact estimate `= 3,854,342`
-   - why it matters:
-     - it is only about `0.00164` bpb behind `12 x 10.0`, so the new leader is not just a trivial width hack
-     - because it matched `12 x 10.0` on controller mass and nearly matched it on systems cost, it shows the controller shape question is real and not reducible to raw parameter count
+   - artifact estimate `= 3,854,342`
+   - why it is in:
+     - only about `0.00164` bpb behind `12 x 10.0`
+     - same controller mass, nearly same speed
+     - strongest evidence that controller geometry matters
 
-3. `blocks0_resid16_e8_c8t1_r3_current_512m_gc1`
-   - evidence: strongest completed checkpointed large-controller point
-   - final `val_bpb = 2.2815471392`
-   - steady `tok/s = 273,637`
-   - trainable params `= 895,005`
-   - corrected artifact estimate `= 3,962,318`
-   - why it matters:
-     - this run proves the larger `16 x 8.0` parallel minGRU controller is viable on the 5090 once checkpointing is enabled
-     - it beat the completed `12 x 8.0` and `14 x 8.0` follow-ups, but did not beat the two best `~839k`-parameter leaders
+3. `blocks1_resid12_e6_c8t1_r3_current_512m`
+   - best completed nonzero-amplifier contender
+   - final `val_bpb = 2.2983212585`
+   - steady `tok/s = 585,746`
+   - trainable params `= 505,049`
+   - artifact estimate `= 4,093,534`
+   - why it is in:
+     - keeps one frozen amplifier block alive as a transfer guardrail
+     - only about `0.00039` bpb behind the cheaper `blocks0_resid12_e6...` anchor
+
+Important nuance:
+
+- The pure-quality top 3 among completed screening points is actually:
+  - `blocks0_resid12_e10...`
+  - `blocks0_resid10_e12...`
+  - `blocks0_resid16_e8..._gc1`
+- I am not elevating the checkpointed `16 x 8.0` run into the main top-3 recommendation yet because:
+  - it is slower by about `29%` vs `12 x 10.0`
+  - it still loses on quality by about `0.00376` bpb
+  - it is a useful stress point, not the cleanest transfer candidate
 
 ## Exact Reproduction Commands
 
@@ -71,7 +84,6 @@ env CUDA_VISIBLE_DEVICES=0 TORCH_BLAS_PREFER_CUBLASLT=1 \
   SAVE_EVERY=2048 \
   TRAIN_FRAC=0.98 \
   BRANCH_TEMPORAL_MODE=current \
-  BRANCH_TEMPORAL_LAG_SCALE=1.0 \
   RUN_SPECS=$'blocks0_resid12_e10_c8t1_r3_current_512m 12 10.0 8 1 1 -3.0 0.003 100 1500 0.0003 4096 256 512' \
   conda run -s --name train python tools/run_core_amp_sweep.py controller
 ```
@@ -91,18 +103,18 @@ env CUDA_VISIBLE_DEVICES=0 TORCH_BLAS_PREFER_CUBLASLT=1 \
   SAVE_EVERY=2048 \
   TRAIN_FRAC=0.98 \
   BRANCH_TEMPORAL_MODE=current \
-  BRANCH_TEMPORAL_LAG_SCALE=1.0 \
   RUN_SPECS=$'blocks0_resid10_e12_c8t1_r3_current_512m 10 12.0 8 1 1 -3.0 0.003 100 1500 0.0003 4096 256 512' \
   conda run -s --name train python tools/run_core_amp_sweep.py controller
 ```
 
-### 3. `blocks0_resid16_e8_c8t1_r3_current_512m_gc1`
+### 3. `blocks1_resid12_e6_c8t1_r3_current_512m`
 
 ```bash
 env CUDA_VISIBLE_DEVICES=0 TORCH_BLAS_PREFER_CUBLASLT=1 \
-  SHARED_SPEC_DIR=experiments/5090_controller/fullspec_blocks0_controller_v4/blocks0_resid16_e8_c8t1_r3_current_512m \
-  MODEL_ROOT=experiments/5090_controller/fullspec_blocks0_controller_v6 \
+  SHARED_SPEC_DIR=experiments/5090_controller/fullspec_blocks1_radical_v1/blocks1_resid12_e6_c8t1_r3_current_512m \
+  MODEL_ROOT=experiments/5090_controller/fullspec_blocks1_radical_v1 \
   PRESET=controller_default \
+  NUM_BLOCKS=1 \
   COMPILE=0 \
   VAL_EVERY=256 \
   VAL_STEPS=8 \
@@ -111,97 +123,89 @@ env CUDA_VISIBLE_DEVICES=0 TORCH_BLAS_PREFER_CUBLASLT=1 \
   SAVE_EVERY=2048 \
   TRAIN_FRAC=0.98 \
   BRANCH_TEMPORAL_MODE=current \
-  BRANCH_TEMPORAL_LAG_SCALE=1.0 \
-  GRADIENT_CHECKPOINTING=1 \
-  RUN_SPECS=$'blocks0_resid16_e8_c8t1_r3_current_512m_gc1 16 8.0 8 1 1 -3.0 0.003 100 1500 0.0003 4096 256 512' \
+  RUN_SPECS=$'blocks1_resid12_e6_c8t1_r3_current_512m 12 6.0 8 1 1 -3.0 0.003 100 1500 0.0003 4096 256 512' \
   conda run -s --name train python tools/run_core_amp_sweep.py controller
 ```
 
 ## Best Current Calls
 
 Best pure-quality contender:
-- `blocks0_resid12_e10_c8t1_r3_current_512m`
-- reason:
-  - this is the best corrected completed local point right now
-  - it beats the previous `blocks0 + 12 x 8.0` leader by about `0.00811` bpb while staying comfortably inside the artifact cap
 
-Best quality/speed tradeoff on the 5090:
+- `blocks0_resid12_e10_c8t1_r3_current_512m`
+
+Best quality-speed tradeoff on the 5090:
+
 - `blocks0_resid12_e6_c8t1_r3_current_512m`
 - reason:
-  - it is about `60%` faster than `blocks0 + 12 x 10.0` while giving up about `0.02014` bpb
-  - it cuts the frozen-spec gzip size from about `3.52 MB` on `blocks2` to about `1.83 MB`
-  - it is the cleanest current result if you want both quality and future systems headroom
+  - about `60%` faster than `blocks0_resid12_e10...`
+  - only about `0.02014` bpb worse
+  - much cleaner systems headroom than the wider radical variants
 
 Most likely to transfer cleanly to `1x H100`:
-- primary candidate: `blocks0_resid12_e6_c8t1_r3_current_512m`
-- pure-quality candidate: `blocks0_resid12_e10_c8t1_r3_current_512m`
-- reason:
-  - `blocks0 + 12 x 6.0` currently looks like the cleanest recurrent controller while preserving much more systems slack
-  - `blocks0 + 12 x 10.0` is the current pure-quality winner, but it is close enough to the local memory ceiling that it should be treated as a quality-first candidate rather than the default transfer bet
+
+- `blocks1_resid12_e6_c8t1_r3_current_512m` as the structural guardrail candidate
+- `blocks0_resid12_e10_c8t1_r3_current_512m` as the pure-quality candidate
+
+Why that split:
+
+- `blocks1_resid12_e6...` preserves one frozen amplifier block and stays in a healthier controller regime.
+- `blocks0_resid12_e10...` is still the best local quality point, so it deserves confirmation even if it is the more aggressive candidate.
 
 ## Findings Likely To Be 5090-Specific
 
 - absolute throughput numbers
 - absolute memory headroom numbers
 - compile warmup economics
-- any interaction with `TORCH_BLAS_PREFER_CUBLASLT=1` on this local stack
+- local interactions with `TORCH_BLAS_PREFER_CUBLASLT=1`
 
-These are less likely to be 5090-specific:
-- the old capped-spec `blocks2` ranking being wrong once the frozen spec is rebuilt from the full corpus
-- larger radical minGRU controllers with a more closed residual init buying much larger gains than the earlier moderate-controller sweeps
-- the current learned amplifier stack failing to buy a meaningful edge once the controller is strong enough
-- a smaller frozen spec plus a stronger recurrent controller being more promising than the older deeper-frozen setup
+## Findings Less Likely To Be 5090-Specific
 
-## Code Improvements Vs Hyperparameter Findings
+- the capped frozen-spec default was invalid and materially changed conclusions
+- extra frozen amplifier depth did not earn its bytes locally
+- controller-up/spec-down reallocation is a stronger direction than the old moderate `blocks3` frontier
+- `carry=8` and `bptt=1` are the clean current defaults
+- the first lag-heavy frozen temporal variants lost clearly to `current`
+
+## Code Improvements Vs Pure Hyperparameter Findings
 
 Code improvements:
-- W&B integration in `train_core_amplifier.py` with a cleaner config/history/summary split
-- per-run metadata capture for commit, environment, device, and runtime settings
-- corrected artifact accounting that includes int8-zlib trainable controller payload
-- gradient checkpointing for the parallel minGRU controller and frozen-amplifier blocks
-- `branch_temporal_mode=current|lagged|hybrid` plus carried branch-history support
-- rebuilt summaries now carry GPU/runtime metadata including CUDA, driver, TF32, and `TORCH_BLAS_PREFER_CUBLASLT`
-- updated reports and logbook under `docs/` and `experiments/`
+
+- W&B logging is now structured cleanly for this family
+- exact environment and runtime metadata are saved per run
+- artifact accounting includes the trainable int8-zlib payload
+- gradient checkpointing is available for larger recurrent controllers
+- the full-spec rerun flow is restart-safe and summary-safe
 
 Pure hyperparameter / architecture findings:
-- the old capped-spec conclusion that `6 x 2.5` was the `blocks2` winner did not survive the full-spec rebuild
-- the first corrected half-million-parameter controller (`12 x 6.0`, `rinit=-3.0`) beat the entire corrected moderate local frontier
-- the wider `12 x 8.0` controller then improved pure quality again, but with a hotter top residual gate and a throughput penalty
-- the wider `12 x 10.0` controller improved pure quality again on the same `blocks0` structure, reaching `2.27779` bpb while staying artifact-safe
-- the fixed-parameter `10 x 12.0` comparison finished only about `0.00164` bpb behind `12 x 10.0`, which suggests the new frontier is about controller geometry as well as controller scale
-- the next depth jump, `16 x 8.0`, exceeded the current 5090 memory budget on the fixed batch contract
-- the checkpointed rerun of `16 x 8.0` finished cleanly at `2.28155` bpb, which is strong but not enough to displace the two best `~839k`-parameter leaders
-- removing the current amplifier blocks entirely (`blocks0`) did not hurt the `12 x 6.0` radical controller in any meaningful way by the end of the screening run
-- removing the current amplifier blocks entirely (`blocks0`) slightly improved the completed `12 x 8.0` radical controller result while also shrinking the frozen artifact and improving throughput
-- removing the current amplifier blocks entirely (`blocks0`) remains compatible with controller scaling up to at least `839k` trainable parameters
+
+- `blocks0` is the best corrected structure so far
+- `12 x 10.0` is the current pure-quality leader
+- `10 x 12.0` is the strongest geometry control
+- `12 x 6.0` remains the quality-speed anchor
+- `blocks1 12 x 6.0` is the best current nonzero-amplifier guardrail point
+- naive lag-heavy temporal variants are not winning
 
 ## Regression-To-Transformer Guardrail
 
 Current evidence still says we are not drifting back into a transformer-shaped local optimum.
 
-- The best corrected new result now comes from removing the current amplifier blocks and increasing recurrent controller capacity, not from adding frozen depth.
-- The controller is still a parallel minGRU stack.
-- There is still no attention and no token-token mixing.
-- The current winners are recurrent controllers reading a frozen statistical basis, not transformer-style token mixers.
+- best moves are recurrent-controller scaling and frozen-spec simplification
+- no attention was added
+- no token-token mixing was added
+- the trainable core remains a parallel minGRU stack
 
-The real risk is different:
-- the controller may start carrying too much of the modeling burden if we keep buying gains with trainable capacity alone
-- the current results already suggest that the present learned amplifier stack may be optional or misallocated
-- an increasingly dominant top residual gate in the widest controller would be a warning sign that we are concentrating too much learning burden into one recurrent layer
-- the new `12 x 10.0` point still shows top-layer concentration, but it is materially better behaved than a simple "wider is automatically less stable" story
+The real risk to watch is not "accidentally rebuilding a transformer."
+It is:
 
-That means the guardrail is now:
-- keep the controller recurrent and parallel
-- keep avoiding attention
-- treat `blocks0` as a serious contender and only add frozen structure back if it earns its bytes experimentally
-- improve the frozen temporal role only when the experiments justify it
+- letting the controller absorb too much of the modeling burden because the frozen side is too weak
+- over-trusting `blocks0` before longer confirmation
+
+That is why the next confirmation round should compare `blocks0` against a live `blocks1` guardrail, not just compare one `blocks0` width setting against another.
 
 ## Unresolved Questions
 
-- Does `blocks0_resid12_e10_c8t1_r3_current_512m` keep its edge under a longer budget, or is it mostly a screening-budget effect?
-- Does `blocks0_resid12_e6_c8t1_r3_current_512m` hold up at `1B` tokens?
-- Do the new corrected `blocks0` points hold up across `3` seeds?
-- Does a better residual-init or schedule let the checkpointed `16 x 8.0` family beat `12 x 10.0` and `10 x 12.0` end-to-end?
-- Is there any minimal frozen structure that beats `blocks0`, or should the learned amplifier stack be removed from the current local frontier entirely?
-- Can the wider `12 x 10.0` point be stabilized further with a more closed residual init or a better schedule, without giving up its quality edge?
-- How much of the current ranking survives on `1x H100` and then on the final `8x H100` regime?
+- Does `blocks0_resid12_e10...` keep its edge at `1B` tokens?
+- Does `blocks0_resid10_e12...` overtake it on a longer budget?
+- Does `blocks1_resid12_e6...` close the gap when given more tokens?
+- Does the checkpointed `blocks0_resid16_e8...` scale better at `1B` tokens than it did at `512M`?
+- Which of the top contenders responds best to schedule tuning?

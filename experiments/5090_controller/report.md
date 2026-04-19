@@ -1,569 +1,232 @@
 # 5090 Controller Report
 
 ## Status
-- Completed a stronger corrected full-spec `blocks0` radical controller frontier through `12 x 10.0`.
-- Completed a fixed-parameter depth-vs-width follow-up, `blocks0_resid10_e12_c8t1_r3_current_512m`.
-- Completed a safer depth-leaning follow-up, `blocks0_resid14_e8_c8t1_r3_current_512m`.
-- Completed a checkpointed rerun of the previously OOM `blocks0_resid16_e8_c8t1_r3_current_512m` point.
-- Completed the corrected `blocks3` follow-up screen, neighborhood screen, and `bptt` sweep on the uncapped full-spec contract.
-- The corrected `blocks3` carry sweep is currently running in the background queue.
-- Completed the first controller-up/spec-down reallocation screen on `blocks2`.
-- Completed a `1B` confirmation run on the new `blocks2` family.
-- Completed the first radical half-million-parameter recurrent controller screen on `blocks2`.
-- All completed controller runs in this report used:
-  - `compile=0`
+
+- The corrected full-spec controller replay is complete.
+- All evidence below uses:
+  - the uncapped full local shard set for frozen-spec construction
   - exact `val_bpb`
   - W&B project `pg-core-amp`
-- The corrected `blocks3` controller screens used matched `planned_train_tokens=50,331,648`.
-- The later `blocks2` reallocation screen used matched `planned_train_tokens=536,870,912` inside its own subfamily.
-- A first attempt at the neighborhood screen with `compile=1` was discarded before completion because the shorter runs would not all cross the compile trigger at the same point. That batch is intentionally excluded from the evidence below.
+  - `COMPILE=0`
+  - TF32 enabled
+  - `TORCH_BLAS_PREFER_CUBLASLT=1`
+- The current local question is no longer whether the old moderate `blocks3` controller wins. It does not.
+- The strongest completed local points are now radical parallel-minGRU controllers on smaller frozen specs, especially `blocks0`.
 
-## Current Corrected Source Of Truth
+Reproduction artifacts live in:
 
-The corrected full-spec `blocks0` radical-controller frontier is now the most relevant controller evidence in this report.
+- [experiments/5090_controller/fullspec_blocks0_controller_v2/summary.tsv](/home/pszemraj/workspace/projects/parameter-golf/experiments/5090_controller/fullspec_blocks0_controller_v2/summary.tsv)
+- [experiments/5090_controller/fullspec_blocks0_controller_v3/summary.tsv](/home/pszemraj/workspace/projects/parameter-golf/experiments/5090_controller/fullspec_blocks0_controller_v3/summary.tsv)
+- [experiments/5090_controller/fullspec_blocks0_controller_v6/summary.tsv](/home/pszemraj/workspace/projects/parameter-golf/experiments/5090_controller/fullspec_blocks0_controller_v6/summary.tsv)
+- [experiments/5090_controller/fullspec_blocks1_radical_v1/summary.tsv](/home/pszemraj/workspace/projects/parameter-golf/experiments/5090_controller/fullspec_blocks1_radical_v1/summary.tsv)
+- [experiments/5090_controller/fullspec_blocks2_confirm1b_v1/summary.tsv](/home/pszemraj/workspace/projects/parameter-golf/experiments/5090_controller/fullspec_blocks2_confirm1b_v1/summary.tsv)
+- [experiments/5090_controller/fullspec_blocks3_confirm1b_v1/summary.tsv](/home/pszemraj/workspace/projects/parameter-golf/experiments/5090_controller/fullspec_blocks3_confirm1b_v1/summary.tsv)
 
-Artifact note:
-- the older `run_results.json` files for pre-`26438ae` controller runs used the earlier payload estimator
-- the artifact estimates listed in this section have been recomputed with the corrected record-style trainable export path so the local frontier is compared on the same byte-counting convention
+## Current Frontier
 
-Frozen structure:
-- `12` branches
-- `0` amplifier blocks
-- full readout
-- full available local train-shard set when the shared frozen spec was built
-- `gzip(spec.pt) = 1,830,185`
+Artifact estimates below use the corrected record-style accounting:
 
-Matched run results:
-- `blocks0_resid12_e6_c8t1_r3_current_512m`
-  - `core_layers=12`
-  - `core_expansion=6.0`
-  - `carry_chunks=8`
-  - `bptt_chunks=1`
-  - final `val_bpb = 2.2979334823`
-  - steady `tok/s = 616,452`
-  - trainable params `= 505,049`
-  - artifact estimate `= 3,231,686`
-- `blocks0_resid12_e8_c8t1_r3_current_512m`
-  - `core_layers=12`
-  - `core_expansion=8.0`
-  - `carry_chunks=8`
-  - `bptt_chunks=1`
-  - final `val_bpb = 2.2859021694`
-  - steady `tok/s = 474,391`
-  - trainable params `= 672,089`
-  - artifact estimate `= 3,544,631`
-- `blocks0_resid12_e10_c8t1_r3_current_512m`
-  - `core_layers=12`
-  - `core_expansion=10.0`
-  - `carry_chunks=8`
-  - `bptt_chunks=1`
-  - final `val_bpb = 2.2777913795`
-  - steady `tok/s = 384,214`
-  - trainable params `= 839,129`
-  - artifact estimate `= 3,855,919`
-- `blocks0_resid10_e12_c8t1_r3_current_512m`
-  - `core_layers=10`
-  - `core_expansion=12.0`
-  - `carry_chunks=8`
-  - `bptt_chunks=1`
-  - final `val_bpb = 2.2794286891`
-  - steady `tok/s = 382,789`
-  - trainable params `= 839,031`
-  - artifact estimate `= 3,854,342`
-- `blocks0_resid16_e8_c8t1_r3_current_512m_gc1`
-  - `core_layers=16`
-  - `core_expansion=8.0`
-  - `carry_chunks=8`
-  - `bptt_chunks=1`
-  - `gradient_checkpointing=1`
-  - final `val_bpb = 2.2815471392`
-  - steady `tok/s = 273,637`
-  - trainable params `= 895,005`
-  - artifact estimate `= 3,962,318`
+- repo code bytes
+- `gzip(spec.pt)`
+- trainable int8-zlib payload
 
-Current corrected result:
-- controller-only scaling on the `blocks0` structure improved quality through `12 x 10.0`, but bigger is not automatically better.
-- `12 x 10.0` beat `12 x 8.0` by about `0.00811` bpb on the same `512M`-token screening contract.
-- `12 x 10.0` beat `12 x 6.0` by about `0.02014` bpb on the same contract.
-- in the fixed-parameter comparison, `12 x 10.0` beat `10 x 12.0` by about `0.00164` bpb.
-- the checkpointed `16 x 8.0` rerun shows a larger recurrent controller is genuinely viable on the 5090:
-  - it finished at `2.2815471392`
-  - it beat `12 x 8.0` by about `0.00436` bpb
-  - it beat `14 x 8.0` by about `0.00478` bpb
-  - it still trailed `12 x 10.0` by about `0.00376` bpb
-  - it still trailed `10 x 12.0` by about `0.00212` bpb
-- the quality gain came with real systems cost:
-  - `12 x 10.0` is about `19%` slower than `12 x 8.0`
-  - `12 x 10.0` is about `38%` slower than `12 x 6.0`
-  - `16 x 8.0` with checkpointing is about `29%` slower than `12 x 10.0`
-  - `16 x 8.0` with checkpointing is about `56%` slower than `12 x 6.0`
-- the two `16 x 8.0` outcomes are a useful systems result:
-  - without checkpointing: immediate OOM after the first step on the fixed contract
-  - with checkpointing: stable completion at only about `5.24 GiB` peak reserved
-- `10 x 12.0` still shows the new frontier is not just a raw-parameter story:
-  - it ran at almost the same speed as `12 x 10.0`
-  - it used almost the same controller byte budget
-  - it still finished slightly worse, so controller geometry matters
-- the strongest current architectural conclusion is still structural, not transformer-like:
-  - we are scaling a parallel minGRU controller, not reintroducing attention
-  - the current learned amplifier blocks look weaker than the frozen lag/readout basis plus the recurrent controller
-  - the real risk is controller dominance over a too-static frozen side, not regression toward a transformer
-- the main caution flag on the checkpointed `16 x 8.0` run is recurrent-layer concentration:
-  - the top residual gate climbed to about `0.463`
-  - the top state norm reached roughly `153`
-  - that is a parallel-RNN saturation pattern worth tuning, not evidence that attention is needed
-- a first direct attempt to fix that by closing the residual path further did not help:
-  - `blocks0_resid16_e8_c8t1_r4_current_512m_gc1` was screened against the completed `rinit=-3.0` run
-  - it was worse at `256`, `512`, and `768` with no throughput or memory advantage
-  - on current evidence, simply pushing residual init colder is not the right next move for this geometry
+| Run | Frozen structure | Trainable params | Planned tokens | Best val_bpb | Steady tok/s | Artifact estimate |
+|---|---|---:|---:|---:|---:|---:|
+| `blocks0_resid12_e10_c8t1_r3_current_512m` | `blocks0` | `839,129` | `536,870,912` | `2.2777913795` | `384,214` | `3,855,919` |
+| `blocks0_resid10_e12_c8t1_r3_current_512m` | `blocks0` | `839,031` | `536,870,912` | `2.2794286891` | `382,789` | `3,854,342` |
+| `blocks0_resid16_e8_c8t1_r3_current_512m_gc1` | `blocks0` | `895,005` | `536,870,912` | `2.2815471392` | `273,637` | `3,962,318` |
+| `blocks0_resid12_e8_c8t1_r3_current_512m` | `blocks0` | `672,089` | `536,870,912` | `2.2859021694` | `474,391` | `3,544,631` |
+| `blocks0_resid12_e6_c8t1_r3_current_512m` | `blocks0` | `505,049` | `536,870,912` | `2.2979334823` | `616,452` | `3,231,686` |
+| `blocks1_resid12_e6_c8t1_r3_current_512m` | `blocks1` | `505,049` | `536,870,912` | `2.2983212585` | `585,746` | `4,093,534` |
+| `blocks2_resid6_e25_c8t1_1b` | `blocks2` | smaller residual controller | `1,073,741,824` | `2.3500271326` | `1,858,685` | `4,196,469` |
+| `resid4_e25_c8t1_1b` | `blocks3` | smaller residual controller | `1,073,741,824` | `2.3436810117` | `1,913,826` | `4,977,266` |
 
-## Corrected Blocks3 Controller Evidence
+Current read on that table:
 
-All corrected `blocks3` runs below used:
-- `12` branches
-- `3` frozen amplifier blocks
-- full readout
-- no `SPEC_MAX_TOKENS` cap
-- full available local train-shard set when the shared spec was built
-- exact `val_bpb`
+- `blocks0_resid12_e10_c8t1_r3_current_512m` is still the best completed local pure-quality point.
+- `blocks0_resid10_e12_c8t1_r3_current_512m` is close enough to matter:
+  - it trails `12 x 10.0` by only about `0.00164` bpb
+  - it matches controller mass almost exactly
+  - that means controller geometry is real signal, not noise
+- `blocks0_resid16_e8_c8t1_r3_current_512m_gc1` proved larger checkpointed controllers are viable, but it is not the preferred local frontier point yet:
+  - slower by about `29%` vs `12 x 10.0`
+  - slightly worse by about `0.00376` bpb
+- `blocks1_resid12_e6_c8t1_r3_current_512m` is the best completed nonzero-amplifier contender:
+  - only about `0.00039` bpb behind the cheaper `blocks0_resid12_e6...`
+  - same trainable controller
+  - useful as a transfer guardrail so we do not overfit to pure `blocks0`
 
-### Follow-up on corrected `blocks3`
+## Corrected `blocks3` Evidence
 
-Matched run results:
-- `plain3_e20`
-  - `core_layers=3`
-  - `core_expansion=2.0`
-  - `residual_core=0`
-  - `carry_chunks=8`
-  - `bptt_chunks=1`
-  - `384` steps
-  - final `val_bpb = 2.4833587679`
-  - steady `tok/s = 2,184,121`
-  - peak allocated memory `= 6,381 MiB`
-- `resid5_e20`
-  - `core_layers=5`
-  - `core_expansion=2.0`
-  - `residual_core=1`
-  - `carry_chunks=16`
-  - `bptt_chunks=2`
-  - `192` steps
-  - final `val_bpb = 2.4865782548`
-  - steady `tok/s = 1,837,046`
-  - peak allocated memory `= 13,654 MiB`
+The corrected `blocks3` screens matter mostly as a filter on what not to over-interpret.
 
-Result on corrected `blocks3`:
-- `plain3_e20` beat `resid5_e20` by about `0.00322` bpb.
-- It ran about `19%` faster.
-- It used about `2.14x` less peak allocated memory.
+### Plain vs residual follow-up
 
-### Corrected `blocks3` controller neighborhood screen
+| Run | Best val_bpb | Steady tok/s | Peak alloc MiB |
+|---|---:|---:|---:|
+| `plain3_e20` | `2.4833587679` | `2,184,121` | `6,381` |
+| `resid5_e20` | `2.4865782548` | `1,837,046` | `13,654` |
 
-All runs below used:
-- `carry_chunks=8`
-- `bptt_chunks=1`
-- `384` steps
+Result:
 
-Matched run results:
-- `plain3_e25_c8t1`
-  - `core_layers=3`
-  - `core_expansion=2.5`
-  - `residual_core=0`
-  - final `val_bpb = 2.4820524220`
-  - steady `tok/s = 1,972,792`
-  - peak allocated memory `= 6,697 MiB`
-- `plain4_e20_c8t1`
-  - `core_layers=4`
-  - `core_expansion=2.0`
-  - `residual_core=0`
-  - final `val_bpb = 2.4838029669`
-  - steady `tok/s = 1,941,708`
-  - peak allocated memory `= 6,814 MiB`
-- `resid4_e20_c8t1`
-  - `core_layers=4`
-  - `core_expansion=2.0`
-  - `residual_core=1`
-  - final `val_bpb = 2.4828974740`
-  - steady `tok/s = 1,960,262`
-  - peak allocated memory `= 7,104 MiB`
-- `resid4_e25_c8t1`
-  - `core_layers=4`
-  - `core_expansion=2.5`
-  - `residual_core=1`
-  - final `val_bpb = 2.4824969375`
-  - steady `tok/s = 1,813,716`
-  - peak allocated memory `= 7,525 MiB`
+- On corrected `blocks3`, `plain3_e20` beat `resid5_e20` by about `0.00322` bpb.
+- The earlier capped-spec claim that the residual default clearly won on `blocks3` does not survive.
 
-Result from the corrected neighborhood screen:
-- `plain3_e25_c8t1` is the current corrected single-seed leader on `blocks3`.
-- `resid4_e25_c8t1` is second, trailing by about `0.00044` bpb.
-- `resid4_e20_c8t1` sits behind `resid4_e25_c8t1` by about `0.00040` bpb.
-- `plain4_e20_c8t1` is the weakest of the four corrected neighborhood points.
-- Relative to the earlier follow-up anchor, both `plain3_e25` and `resid4_e25` improved on corrected `plain3_e20`.
-- This corrected screen does not support the earlier capped-spec story that residualization was the clear local winner on `blocks3`.
+### Corrected `blocks3` controller neighborhood
 
-### Corrected `blocks3` `bptt` sweep
+| Run | Best val_bpb | Steady tok/s |
+|---|---:|---:|
+| `plain3_e25_c8t1` | `2.4820524220` | `1,972,792` |
+| `resid4_e25_c8t1` | `2.4824969375` | `1,813,716` |
+| `resid4_e20_c8t1` | `2.4828974740` | `1,960,262` |
+| `plain4_e20_c8t1` | `2.4838029669` | `1,941,708` |
 
-All runs below used:
-- `carry_chunks=8`
-- matched `planned_train_tokens=50,331,648`
-- warmup and hold scaled with `bptt_chunks`
+Result:
+
+- `plain3_e25_c8t1` is the corrected single-seed `blocks3` leader.
+- Residualization is not a blanket winner on `blocks3`.
+- Moderate controller tuning on `blocks3` is now clearly a secondary frontier behind the radical `blocks0/blocks1` family.
+
+### Corrected `bptt` sweep
 
 Plain family:
-- `plain4_e20_c8t1`
-  - `bptt_chunks=1`
-  - `warmup_steps=100`
-  - `lr_hold_steps=1500`
-  - final `val_bpb = 2.4838029669`
-  - steady `tok/s = 1,978,608`
-  - peak allocated memory `= 6,814 MiB`
-- `plain4_e20_c8t2`
-  - `bptt_chunks=2`
-  - `warmup_steps=50`
-  - `lr_hold_steps=750`
-  - final `val_bpb = 2.4857629362`
-  - steady `tok/s = 1,979,822`
-  - peak allocated memory `= 12,064 MiB`
-- `plain4_e20_c8t4`
-  - `bptt_chunks=4`
-  - `warmup_steps=25`
-  - `lr_hold_steps=375`
-  - final `val_bpb = 2.4881083439`
-  - steady `tok/s = 2,008,597`
-  - peak allocated memory `= 22,563 MiB`
+
+- `plain4_e20_c8t1 = 2.4838029669`
+- `plain4_e20_c8t2 = 2.4857629362`
+- `plain4_e20_c8t4 = 2.4881083439`
 
 Residual family:
-- `resid4_e25_c8t1`
-  - `bptt_chunks=1`
-  - `warmup_steps=100`
-  - `lr_hold_steps=1500`
-  - final `val_bpb = 2.4824969375`
-  - steady `tok/s = 1,803,831`
-  - peak allocated memory `= 7,525 MiB`
-- `resid4_e25_c8t2`
-  - `bptt_chunks=2`
-  - `warmup_steps=50`
-  - `lr_hold_steps=750`
-  - final `val_bpb = 2.4867395116`
-  - steady `tok/s = 1,813,230`
-  - peak allocated memory `= 13,485 MiB`
-- `resid4_e25_c8t4`
-  - `bptt_chunks=4`
-  - `warmup_steps=25`
-  - `lr_hold_steps=375`
-  - final `val_bpb = 2.4870242558`
-  - steady `tok/s = 1,816,147`
-  - peak allocated memory `= 25,405 MiB`
 
-Result from the corrected `bptt` sweep:
+- `resid4_e25_c8t1 = 2.4824969375`
+- `resid4_e25_c8t2 = 2.4867395116`
+- `resid4_e25_c8t4 = 2.4870242558`
+
+Result:
+
 - `bptt=1` won clearly in both families.
-- The plain family degraded by about `0.00196` bpb at `bptt=2` and about `0.00431` bpb at `bptt=4`.
-- The residual family degraded by about `0.00424` bpb at `bptt=2` and about `0.00453` bpb at `bptt=4`.
-- Higher `bptt` gave only minor throughput changes but much worse memory:
-  - plain family: `6.8 -> 12.1 -> 22.6 GiB`
-  - residual family: `7.5 -> 13.5 -> 25.4 GiB`
-- On the corrected local screening budget, semi-TBPTT is still not a quality win.
+- Higher `bptt` increased memory sharply without buying quality.
+- Semi-TBPTT is not the local win condition here.
 
-### `blocks3` `carry` sweep on the best residual families
+### Corrected `carry` sweep
 
-The corrected full-spec carry rerun is currently in progress in the background queue.
+Residual `4 x 2.0`:
 
-Current status:
-- family: `fullspec_blocks3_carry_v1`
-- queue session: `14136`
-- frozen structure: `12` branches, `3` blocks, full readout, uncapped full-spec build
-- completed results will replace the earlier capped-spec carry screen once the family finishes
+- `resid4_e20_c8t1 = 2.4828974740`
+- `resid4_e20_c16t1 = 2.4834046464`
+- `resid4_e20_c32t1 = 2.4831431581`
 
-Interpretation policy:
-- do not treat the older capped-spec carry numbers as current evidence
-- wait for the corrected carry summary before making a final carry recommendation on `blocks3`
+Residual `4 x 2.5`:
 
-### `blocks2` controller-up / spec-down reallocation
+- `resid4_e25_c8t1 = 2.4824969375`
+- `resid4_e25_c16t1 = 2.4828899493`
+- `resid4_e25_c32t1 = 2.4834898042`
 
-All runs below used:
-- `12` branches
-- `2` blocks
-- full readout
-- no `SPEC_MAX_TOKENS` cap
-- `branch_temporal_mode=current`
-- `carry_chunks=8`
-- `bptt_chunks=1`
-- `4096` steps = `536,870,912` planned train tokens
+Result:
 
-Completed results:
-- `blocks2_resid5_e25_c8t1_current_512m`
-  - `core_layers=5`
-  - `core_expansion=2.5`
-  - `residual_core=1`
-  - final `val_bpb = 2.3986403191`
-  - steady `tok/s = 2,023,976`
-  - peak allocated memory `= 7,270 MiB`
-  - trainable int8 zlib payload `= 75,027`
-  - artifact estimate `= 3,452,276`
-- `blocks2_resid6_e25_c8t1_current_512m`
-  - `core_layers=6`
-  - `core_expansion=2.5`
-  - `residual_core=1`
-  - final `val_bpb = 2.3924393341`
-  - steady `tok/s = 1,849,000`
-  - peak allocated memory `= 7,881 MiB`
-  - trainable int8 zlib payload `= 88,411`
-  - artifact estimate `= 3,465,660`
-- `blocks2_resid5_e30_c8t1_current_512m`
-  - `core_layers=5`
-  - `core_expansion=3.0`
-  - `residual_core=1`
-  - final `val_bpb = 2.3957711310`
-  - steady `tok/s = 1,758,943`
-  - peak allocated memory `= 7,796 MiB`
-  - trainable int8 zlib payload `= 87,556`
-  - artifact estimate `= 3,464,805`
+- `carry=8` is the corrected winner in both residual families.
+- The earlier capped-spec suggestion that `carry=16` was helping does not hold up.
 
-Result from the expanded reallocation screen:
-- All three `blocks2` points beat the previous `blocks3 + resid4_e25_c8t1 + current` anchor.
-- `resid6_e25` is now the best local `512M`-token quality point so far.
-- `resid5_e25` is still the best quality/speed tradeoff on the same frontier.
-- `resid5_e30` is dominated by `resid6_e25`: it is worse on quality and slower.
-- The win came from removing one frozen amplifier block and reinvesting capacity into the recurrent controller, not from adding any attention or token-token mixing.
+## Temporal Probe Result
 
-Diagnostics from the new frontier:
-- `resid5_e25` used the fifth recurrent layer more heavily over time, but stayed stable.
-- `resid6_e25` improved quality again, but concentrated load more aggressively in the top layer:
-  - final top-layer residual gate about `0.631`
-  - top-layer state norms briefly above `110`
-- `resid5_e30` did not buy its way onto the frontier despite having trainable size comparable to `resid6_e25`.
-- That means depth is currently buying more than width on the smaller `blocks2` frozen spec.
+The bounded temporal-mode probe finished and stayed inside the same family:
 
-### `blocks2` longer-budget confirmation and radical scaling
+- same `blocks3` frozen structure
+- same `resid4_e25_c8t1` controller
+- only `branch_temporal_mode` changed
 
-Confirmed longer-budget result:
-- `blocks2_resid6_e25_c8t1_1b`
-  - `core_layers=6`
-  - `core_expansion=2.5`
-  - `residual_core=1`
-  - final `val_bpb = 2.3644974368`
-  - steady `tok/s = 1,861,968`
-  - peak allocated memory `= 7,881 MiB`
-  - trainable int8 zlib payload `= 88,254`
-  - artifact estimate `= 3,465,503`
+Corrected results at `512M` tokens:
 
-First radical scale-up result:
-- `blocks2_resid12_e6_c8t1_r3_current_512m`
-  - `core_layers=12`
-  - `core_expansion=6.0`
-  - `residual_core_init=-3.0`
-  - trainable params `= 505,099`
-  - final `val_bpb = 2.3518192702`
-  - steady `tok/s = 560,313`
-  - peak allocated memory `= 20,382 MiB`
-  - trainable int8 zlib payload `= 405,232`
-  - artifact estimate `= 3,782,481`
+| Mode | Best val_bpb | Delta vs `current` | Steady tok/s |
+|---|---:|---:|---:|
+| `current` | `2.3723031488` | `0.0000000000` | `1,902,301` |
+| `hybrid` | `2.3972226129` | `+0.0249194641` | `1,807,879` |
+| `lagged` | `2.4251241108` | `+0.0528209620` | `1,858,847` |
 
-What changed at the radical scale:
-- The first half-million-parameter controller beat every smaller local point on the same `512M` screening budget.
-- It beat `blocks2_resid6_e25_c8t1_current_512m` by about `0.04062` bpb.
-- It did that without any attention or token-token mixing.
-- The deeper controller needed a more closed residual init to stay in a healthier regime:
-  - early logged residual gates stayed around `0.05-0.06`
-  - the run avoided the immediate top-layer blow-open pattern seen in the smaller `6 x 2.5` controller
-- The cost is real:
-  - throughput dropped to about `30%` of the smaller `blocks2` frontier
-  - peak memory jumped above `20 GiB`
+Result:
 
-## What This Means
+- `current` won decisively.
+- `hybrid` recovered some quality relative to `lagged`, but still lost badly to `current`.
+- Pure explicit delayed taps are not the right next move on current evidence.
+
+This is important for the anti-transformer guardrail:
+
+- the negative result does not imply attention is needed
+- it implies the current frozen temporal role is weakly designed, and naive lag substitution is not enough
+
+## What The Evidence Says
 
 Does more controller depth help?
-- Yes, and the strongest new signal comes from trimming the frozen side first.
-- On overbuilt `blocks9`, the deeper residual controller package lost.
-- On `blocks3`, moving from `plain3_e20` to `plain4_e20` helped modestly, and moving to `resid4_e20` or `resid4_e25` helped more.
-- On `blocks2`, depth kept paying:
-  - `resid5_e25` beat the old `blocks3` anchor cleanly
-  - `resid6_e25` then beat `resid5_e25` by another `0.00620` bpb
-  - `resid12_e6` then beat `resid6_e25` by another `0.04062` bpb on the same `512M` screen
+
+- Yes, strongly, once the frozen side is shrunk enough.
+- The biggest gains came from controller-up/spec-down reallocations, not from more frozen amplifier depth.
 
 Does more controller width via expansion help?
-- Not as a generic knob.
-- `plain3_e25` lost against `plain4_e20`, so width alone is not rescuing the plain family.
-- Inside the residual `4`-layer controller, `expansion=2.5` beat `2.0` by about `0.00098` bpb at the cost of about `8%` throughput.
-- On the smaller `blocks2` frozen structure, width alone is not the best use of extra controller parameters:
-  - `5 x 3.0` lost to `6 x 2.5`
-  - it was also slower than `6 x 2.5`
+
+- Sometimes, but not as a generic knob.
+- The near-tie between `12 x 10.0` and `10 x 12.0` says geometry matters.
+- The smaller `blocks2` frontier also preferred added depth over a pure width increase.
 
 Is residualization materially improving trainability?
-- On `blocks3`, yes.
-- The residual path is stable and appears to be earning its keep once the frozen stack is not overbuilt.
-- The current best two screening points are both residual controllers.
+
+- Yes for the radical deeper controllers.
+- No as a blanket rule on the smaller corrected `blocks3` screen.
+- Residualization is now a controlled tool, not a universal default.
 
 Is semi-TBPTT helping beyond simple carry?
-- No, not on the current local budget.
-- A clean matched-token `bptt` sweep showed `bptt=1` beating `2` and `4` in both the plain and residual families.
-- Higher `bptt` also caused large memory inflation without offsetting quality gains.
 
-## Best Controller-Only Contender
+- No.
+- `bptt=1` and `carry=8` remain the working horizon default.
 
-Current best controller-only contender:
-- best pure-quality screening point: `blocks2_resid12_e6_c8t1_r3_current_512m`
-- final `val_bpb = 2.3518192702`
-- steady `tok/s = 560,313`
-- artifact estimate `= 3,782,481`
+Is the learned amplifier stack earning its bytes?
 
-Best current quality/speed point on the same frontier:
-- `blocks2_resid5_e25_c8t1_current_512m`
-- final `val_bpb = 2.3986403191`
-- steady `tok/s = 2,023,976`
-- artifact estimate `= 3,452,276`
+- Not at the old `blocks9` size. That structure already lost the corrected structure screen.
+- `blocks1` remains worth keeping alive as a guardrail contender.
+- The present best quality points are still `blocks0`, so extra frozen depth is guilty until proven useful.
 
-Best confirmed longer-budget point on the new family:
-- `blocks2_resid6_e25_c8t1_1b`
-- final `val_bpb = 2.3644974368`
-- steady `tok/s = 1,861,968`
-- artifact estimate `= 3,465,503`
+## Best Current Calls
 
-Best earlier short-budget `blocks3` controller screen:
-- `resid4_e20_c16t1` on `blocks3`
-- final `val_bpb = 2.5123756944`
-- steady `tok/s = 1,971,871`
-- artifact estimate `= 4,197,310`
+Best pure-quality contender:
 
-The strongest simpler anchor remains:
-- `plain4_e20_c8t1` on `blocks3`
-- final `val_bpb = 2.5154361649`
-- steady `tok/s = 2,030,859`
+- `blocks0_resid12_e10_c8t1_r3_current_512m`
 
-The real takeaway is stronger than the nominal winner:
-- inside the earlier `blocks3` screen, the best two residual points are essentially tied
-- once we reallocated one frozen block into the recurrent controller, the new `blocks2` frontier separated itself clearly from the old `blocks3` anchor
-- within that new frontier, depth is currently a better spend than width
-- once we allowed a genuinely large recurrent controller, quality improved by a much larger margin than any of the earlier small-controller sweeps
-- longer confirmation runs are still required before making strong transfer claims
+Best geometry control / near-tie:
+
+- `blocks0_resid10_e12_c8t1_r3_current_512m`
+
+Best quality-speed tradeoff:
+
+- `blocks0_resid12_e6_c8t1_r3_current_512m`
+
+Best nonzero-amplifier contender:
+
+- `blocks1_resid12_e6_c8t1_r3_current_512m`
+
+Best larger-controller stress point:
+
+- `blocks0_resid16_e8_c8t1_r3_current_512m_gc1`
 
 ## Regression-To-Transformer Guardrail
 
-The latest winner is a larger recurrent controller on a smaller frozen spec, so this guardrail has to stay active.
-- The winning controller is still a minGRU stack, not a deep generic stack and not attention.
-- The winning move was to remove frozen amplifier depth, not to add more frozen blocks.
-- The corrected artifact estimate dropped sharply because the spec got smaller.
-- `carry=16` helping `resid4_e20` and the `blocks2` frontier beating the old anchor are both healthier signals than `bptt>1`, because they stay inside the same recurrent family without adding truncated unroll or token-token mixing.
-- The half-million-parameter controller is still an RNN, but it raises a different risk: controller compute can now dominate enough that we must watch systems cost carefully.
-- That means the project is still in the intended family, but controller creep is still a real thing to watch.
+The project is still inside the intended family.
 
-The remaining risk is different:
-- the frozen amplifier side may still be too static or weakly temporal
-- the controller may start absorbing too much of the modeling burden if we keep adding capacity without proving horizon gains
+- The winners are parallel minGRU controllers.
+- There is still no attention and no token-token mixing.
+- The best structural move so far was removing frozen amplifier depth, not reintroducing transformer-style trainable depth.
 
-That is still a better failure mode than accidentally rebuilding a transformer, because it points toward strengthening the frozen temporal role rather than blindly stacking more trainable depth.
+The real current risk is different:
 
-## Exact Commands
+- the controller can become too dominant if the frozen side stays too static
+- that is a recurrent-model design problem, not a transformer regression
+- the right response is to make the frozen side earn its keep experimentally, not to backslide into attention
 
-Full-structure baseline:
+## Next Step
 
-```bash
-CUDA_VISIBLE_DEVICES=0 \
-TORCH_BLAS_PREFER_CUBLASLT=1 \
-MODEL_ROOT=experiments/5090_controller/baseline_ab_real \
-COMPILE=0 \
-VAL_EVERY=64 \
-VAL_STEPS=8 \
-LOG_EVERY=16 \
-LOG_STATE_EVERY=64 \
-RUN_SPECS=$'plain3_e20 3 2.0 8 1 0 -2.0 0.003 1500 0.0003 384 256 512\n\
-resid5_e20 5 2.0 16 2 1 -2.0 0.003 1500 0.0003 192 256 512' \
-conda run -s --name train python tools/run_core_amp_sweep.py controller
-```
+The next rigorous checkpoint is longer-budget confirmation on the strongest corrected contenders before schedule tuning:
 
-`blocks3` controller follow-up:
+- `blocks0_resid12_e6_c8t1_r3_current`
+- `blocks0_resid12_e10_c8t1_r3_current`
+- `blocks0_resid10_e12_c8t1_r3_current`
+- `blocks1_resid12_e6_c8t1_r3_current`
+- optional larger stress point: `blocks0_resid16_e8_c8t1_r3_current_gc1`
 
-```bash
-CUDA_VISIBLE_DEVICES=0 \
-TORCH_BLAS_PREFER_CUBLASLT=1 \
-MODEL_ROOT=experiments/5090_controller/wandb_blocks3_followup_clean \
-NUM_BLOCKS=3 \
-SPEC_MAX_TOKENS=5000000 \
-COMPILE=0 \
-VAL_EVERY=64 \
-VAL_STEPS=8 \
-LOG_EVERY=16 \
-LOG_STATE_EVERY=64 \
-TRAIN_FRAC=0.98 \
-RUN_SPECS=$'plain3_e20 3 2.0 8 1 0 -2.0 0.003 1500 0.0003 384 256 512\n\
-resid5_e20 5 2.0 16 2 1 -2.0 0.003 1500 0.0003 192 256 512' \
-conda run -s --name train python tools/run_core_amp_sweep.py controller
-```
-
-`blocks3` neighborhood screen:
-
-```bash
-CUDA_VISIBLE_DEVICES=0 \
-TORCH_BLAS_PREFER_CUBLASLT=1 \
-MODEL_ROOT=experiments/5090_controller/wandb_blocks3_neighborhood_v1 \
-NUM_BLOCKS=3 \
-SPEC_MAX_TOKENS=5000000 \
-COMPILE=0 \
-VAL_EVERY=64 \
-VAL_STEPS=8 \
-LOG_EVERY=16 \
-LOG_STATE_EVERY=64 \
-TRAIN_FRAC=0.98 \
-RUN_SPECS=$'plain4_e20_c8t1 4 2.0 8 1 0 -2.0 0.003 1500 0.0003 384 256 512\n\
-plain3_e25_c8t1 3 2.5 8 1 0 -2.0 0.003 1500 0.0003 384 256 512\n\
-resid4_e20_c8t1 4 2.0 8 1 1 -2.0 0.003 1500 0.0003 384 256 512\n\
-resid4_e25_c8t1 4 2.5 8 1 1 -2.0 0.003 1500 0.0003 384 256 512' \
-conda run -s --name train python tools/run_core_amp_sweep.py controller
-```
-
-Clean `bptt` sweep with per-run warmup scaling:
-
-```bash
-CUDA_VISIBLE_DEVICES=0 \
-TORCH_BLAS_PREFER_CUBLASLT=1 \
-MODEL_ROOT=experiments/5090_controller/wandb_blocks3_bptt_v2 \
-NUM_BLOCKS=3 \
-SPEC_MAX_TOKENS=5000000 \
-COMPILE=0 \
-VAL_EVERY=64 \
-VAL_STEPS=8 \
-LOG_EVERY=16 \
-LOG_STATE_EVERY=64 \
-TRAIN_FRAC=0.98 \
-RUN_SPECS=$'plain4_e20_c8t1 4 2.0 8 1 0 -2.0 0.003 100 1500 0.0003 384 256 512\n\
-plain4_e20_c8t2 4 2.0 8 2 0 -2.0 0.003 50 750 0.0003 192 256 512\n\
-plain4_e20_c8t4 4 2.0 8 4 0 -2.0 0.003 25 375 0.0003 96 256 512\n\
-resid4_e25_c8t1 4 2.5 8 1 1 -2.0 0.003 100 1500 0.0003 384 256 512\n\
-resid4_e25_c8t2 4 2.5 8 2 1 -2.0 0.003 50 750 0.0003 192 256 512\n\
-resid4_e25_c8t4 4 2.5 8 4 1 -2.0 0.003 25 375 0.0003 96 256 512' \
-conda run -s --name train python tools/run_core_amp_sweep.py controller
-```
-
-Clean `carry` sweep at fixed `bptt=1`:
-
-```bash
-CUDA_VISIBLE_DEVICES=0 \
-TORCH_BLAS_PREFER_CUBLASLT=1 \
-MODEL_ROOT=experiments/5090_controller/wandb_blocks3_carry_v1 \
-NUM_BLOCKS=3 \
-SPEC_MAX_TOKENS=5000000 \
-COMPILE=0 \
-VAL_EVERY=64 \
-VAL_STEPS=8 \
-LOG_EVERY=16 \
-LOG_STATE_EVERY=64 \
-TRAIN_FRAC=0.98 \
-RUN_SPECS=$'resid4_e20_c8t1 4 2.0 8 1 1 -2.0 0.003 100 1500 0.0003 384 256 512\n\
-resid4_e20_c16t1 4 2.0 16 1 1 -2.0 0.003 100 1500 0.0003 384 256 512\n\
-resid4_e20_c32t1 4 2.0 32 1 1 -2.0 0.003 100 1500 0.0003 384 256 512\n\
-resid4_e25_c8t1 4 2.5 8 1 1 -2.0 0.003 100 1500 0.0003 384 256 512\n\
-resid4_e25_c16t1 4 2.5 16 1 1 -2.0 0.003 100 1500 0.0003 384 256 512\n\
-resid4_e25_c32t1 4 2.5 32 1 1 -2.0 0.003 100 1500 0.0003 384 256 512' \
-conda run -s --name train python tools/run_core_amp_sweep.py controller
-```
-
-## Immediate Next Step
-
-The next step should be longer confirmation, not more broad screening.
-- Keep the `blocks3` structure fixed.
-- Keep `bptt_chunks=1`.
-- Confirm the two near-tied leaders on a much longer token budget:
-  - `resid4_e20_c16t1`
-  - `resid4_e25_c8t1`
-- Only after that should schedule refinement resume.
-
-That is the right move because the short screening budget has already done its job: it found the plausible winners, but it is not long enough to separate them cleanly.
+Those confirmations are the right next decision point for schedule work, because they tell us whether the `blocks0` winner is just a screening-budget effect or a real transfer candidate.
