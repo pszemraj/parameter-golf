@@ -15,6 +15,7 @@ inside the inner loop.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Sequence, TypeAlias
@@ -61,8 +62,10 @@ def _normalize_branch_lags(branch_lags: Sequence[int]) -> tuple[int, ...]:
 
 def _normalize_branch_temporal_mode(mode: str) -> str:
     normalized = str(mode).strip().lower()
-    if normalized not in {"current", "lagged"}:
-        raise ValueError(f"unknown branch_temporal_mode {mode!r}; expected 'current' or 'lagged'")
+    if normalized not in {"current", "lagged", "hybrid"}:
+        raise ValueError(
+            f"unknown branch_temporal_mode {mode!r}; expected 'current', 'lagged', or 'hybrid'"
+        )
     return normalized
 
 
@@ -889,12 +892,14 @@ class CoreAmplifierLM(nn.Module):
         residual_core: bool = True,
         residual_core_init: float = -2.0,
         branch_temporal_mode: str = "current",
+        branch_temporal_lag_scale: float = 1.0,
     ) -> None:
         super().__init__()
         self.vocab_size = spec.vocab_size
         self.core_dim = spec.core_dim
         self.branch_lags = spec.branch_lags
         self.branch_temporal_mode = _normalize_branch_temporal_mode(branch_temporal_mode)
+        self.branch_temporal_lag_scale = float(branch_temporal_lag_scale)
         self.num_branches = len(spec.branch_lags)
         self.max_branch_lag = max(self.branch_lags)
         self.amp_dim = self.core_dim * self.num_branches
@@ -924,6 +929,11 @@ class CoreAmplifierLM(nn.Module):
             None if spec.readout_out_proj is None else spec.readout_out_proj.clone(),
             persistent=True,
         )
+        lag_mix = torch.tensor(
+            [self.branch_temporal_lag_scale / math.sqrt(float(lag)) for lag in self.branch_lags],
+            dtype=torch.float32,
+        )
+        self.register_buffer("branch_temporal_lag_mix", lag_mix, persistent=True)
 
         if learn_input_adapter:
             self.input_adapter = nn.Linear(self.core_dim, self.core_dim, bias=False)
@@ -983,6 +993,7 @@ class CoreAmplifierLM(nn.Module):
         self._readout_in_proj_runtime: Optional[torch.Tensor] = None
         self._readout_out_proj_runtime: Optional[torch.Tensor] = None
         self._base_bigram_logits_runtime: Optional[torch.Tensor] = None
+        self._branch_temporal_lag_mix_runtime: Optional[torch.Tensor] = None
 
     @property
     def trainable_parameters(self) -> int:
@@ -1040,6 +1051,9 @@ class CoreAmplifierLM(nn.Module):
             else self.readout_out_proj.to(device=device, dtype=dtype)
         )
         self._base_bigram_logits_runtime = self.base_bigram_logits.to(device=device, dtype=dtype)
+        self._branch_temporal_lag_mix_runtime = self.branch_temporal_lag_mix.to(
+            device=device, dtype=dtype
+        )
         self._runtime_device_str = str(device)
         self._runtime_amp_dtype = dtype
 
@@ -1053,6 +1067,7 @@ class CoreAmplifierLM(nn.Module):
             or self._amp_w1_runtime is None
             or self._amp_w2_runtime is None
             or self._base_bigram_logits_runtime is None
+            or self._branch_temporal_lag_mix_runtime is None
             or (self.readout_weight is not None and self._readout_weight_runtime is None)
             or (self.readout_in_proj is not None and self._readout_in_proj_runtime is None)
             or (self.readout_out_proj is not None and self._readout_out_proj_runtime is None)
@@ -1136,8 +1151,9 @@ class CoreAmplifierLM(nn.Module):
             return branches, None
 
         assert history is not None
+        assert self._branch_temporal_lag_mix_runtime is not None
         full = torch.cat([history, core_out], dim=1)
-        branch_inputs = torch.stack(
+        lagged_inputs = torch.stack(
             [
                 full[
                     :, self.max_branch_lag - lag : self.max_branch_lag - lag + core_out.shape[1], :
@@ -1147,6 +1163,13 @@ class CoreAmplifierLM(nn.Module):
             dim=2,
         )
         next_history = full[:, -self.max_branch_lag :, :].contiguous()
+        if self.branch_temporal_mode == "lagged":
+            branch_inputs = lagged_inputs
+        else:
+            lag_mix = self._branch_temporal_lag_mix_runtime.view(1, 1, self.num_branches, 1)
+            branch_inputs = (core_out[:, :, None, :] + lag_mix * lagged_inputs) / torch.sqrt(
+                1.0 + lag_mix.square()
+            )
         branches = torch.einsum("btnc,ncd->btnd", branch_inputs, self._lag_ops_runtime)
         return branches, next_history
 

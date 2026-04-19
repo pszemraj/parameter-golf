@@ -417,6 +417,7 @@ def update_controller_config(
     cfg.model["residual_core"] = spec.residual_core
     cfg.model["residual_core_init"] = spec.residual_core_init
     cfg.model["branch_temporal_mode"] = branch_temporal_mode
+    cfg.model["branch_temporal_lag_scale"] = float(env("BRANCH_TEMPORAL_LAG_SCALE", "1.0"))
     cfg.training["seq_len"] = spec.seq_len
     cfg.training["batch_size"] = spec.batch_size
     cfg.training["grad_accum"] = int(train_defaults["GRAD_ACCUM"])
@@ -523,6 +524,8 @@ def run_controller_sweep(repo_root: Path) -> None:
         env("BRANCH_LAGS", "1,2,3,4,6,8,12,16,24,32,48,64"),
         "--branch-temporal-mode",
         env("BRANCH_TEMPORAL_MODE", "current"),
+        "--branch-temporal-lag-scale",
+        env("BRANCH_TEMPORAL_LAG_SCALE", "1.0"),
         "--num-blocks",
         env("NUM_BLOCKS", "9"),
         "--fixed-dtype",
@@ -638,6 +641,8 @@ def run_controller_sweep(repo_root: Path) -> None:
             str(spec.residual_core_init),
             "--branch-temporal-mode",
             env("BRANCH_TEMPORAL_MODE", "current"),
+            "--branch-temporal-lag-scale",
+            env("BRANCH_TEMPORAL_LAG_SCALE", "1.0"),
             "--val-every",
             train_defaults["VAL_EVERY"],
             "--val-steps",
@@ -756,6 +761,8 @@ def run_structure_sweep(repo_root: Path) -> None:
             spec.branch_lags,
             "--branch-temporal-mode",
             env("BRANCH_TEMPORAL_MODE", "current"),
+            "--branch-temporal-lag-scale",
+            env("BRANCH_TEMPORAL_LAG_SCALE", "1.0"),
             "--num-blocks",
             str(spec.num_blocks),
             "--fixed-dtype",
@@ -840,6 +847,8 @@ def run_structure_sweep(repo_root: Path) -> None:
             env("RESIDUAL_CORE_INIT", str(defaults["RESIDUAL_CORE_INIT"])),
             "--branch-temporal-mode",
             env("BRANCH_TEMPORAL_MODE", "current"),
+            "--branch-temporal-lag-scale",
+            env("BRANCH_TEMPORAL_LAG_SCALE", "1.0"),
             "--val-every",
             env("VAL_EVERY", str(defaults["VAL_EVERY"])),
             "--val-steps",

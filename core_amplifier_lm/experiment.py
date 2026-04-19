@@ -16,6 +16,7 @@ import shlex
 import statistics
 import subprocess
 import sys
+import zlib
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -32,6 +33,7 @@ SUMMARY_FIELDS = [
     "residual_core",
     "residual_core_init",
     "branch_temporal_mode",
+    "branch_temporal_lag_scale",
     "carry_chunks",
     "bptt_chunks",
     "branch_lags",
@@ -67,6 +69,7 @@ SUMMARY_FIELDS = [
     "matmul_precision",
     "spec_bytes",
     "gzip_spec_bytes",
+    "trainable_int8_zlib_bytes",
     "artifact_estimate_bytes",
     "artifact_headroom_bytes",
     "artifact_status",
@@ -201,16 +204,44 @@ def estimate_repo_code_bytes(repo_root: str | Path) -> int:
     return total
 
 
+def trainable_int8_zlib_bytes(state_dict: dict[str, torch.Tensor]) -> int:
+    """Estimate compressed controller payload bytes using per-tensor int8 packing."""
+    blob = bytearray()
+    for name in sorted(state_dict):
+        tensor = state_dict[name].detach().cpu().float().contiguous()
+        flat = tensor.reshape(-1)
+        max_abs = float(flat.abs().max().item()) if flat.numel() > 0 else 0.0
+        scale = max(max_abs / 127.0, 1e-8)
+        if flat.numel() == 0 or max_abs == 0.0:
+            quantized = torch.zeros(flat.numel(), dtype=torch.int8)
+        else:
+            quantized = torch.clamp(torch.round(flat / scale), -127, 127).to(torch.int8)
+
+        name_bytes = name.encode("utf-8")
+        blob.extend(len(name_bytes).to_bytes(2, byteorder="little", signed=False))
+        blob.extend(name_bytes)
+        blob.extend(len(tensor.shape).to_bytes(1, byteorder="little", signed=False))
+        for dim in tensor.shape:
+            blob.extend(int(dim).to_bytes(4, byteorder="little", signed=False))
+        blob.extend(torch.tensor([scale], dtype=torch.float32).numpy().tobytes())
+        blob.extend(quantized.numpy().tobytes())
+    return len(zlib.compress(bytes(blob), level=9))
+
+
 def artifact_estimate_bytes(
     *,
     repo_root: str | Path,
     spec_path: str | Path,
+    trainable_payload_bytes: Optional[int] = None,
 ) -> Optional[int]:
-    """Estimate artifact size as maintained repo Python files plus gzip(spec.pt)."""
+    """Estimate artifact size as code bytes plus frozen spec plus controller payload."""
     _, gz = spec_size_bytes(spec_path)
     if gz is None:
         return None
-    return estimate_repo_code_bytes(repo_root) + gz
+    total = estimate_repo_code_bytes(repo_root) + gz
+    if trainable_payload_bytes is not None:
+        total += int(trainable_payload_bytes)
+    return total
 
 
 def artifact_headroom_bytes(artifact_bytes: Optional[int]) -> Optional[int]:
@@ -330,6 +361,7 @@ def summarize_run_dir(run_dir: str | Path) -> dict[str, str]:
         "residual_core": _stringify(model.get("residual_core")),
         "residual_core_init": _stringify(model.get("residual_core_init")),
         "branch_temporal_mode": _stringify(model.get("branch_temporal_mode")),
+        "branch_temporal_lag_scale": _stringify(model.get("branch_temporal_lag_scale")),
         "carry_chunks": _stringify(training.get("carry_chunks")),
         "bptt_chunks": _stringify(training.get("bptt_chunks")),
         "branch_lags": ",".join(str(x) for x in model.get("branch_lags", [])),
@@ -367,6 +399,7 @@ def summarize_run_dir(run_dir: str | Path) -> dict[str, str]:
         "gzip_spec_bytes": _stringify(
             results.get("gzip_spec_bytes") or spec.get("gzip_spec_bytes")
         ),
+        "trainable_int8_zlib_bytes": _stringify(results.get("trainable_int8_zlib_bytes")),
         "artifact_estimate_bytes": _stringify(results.get("artifact_estimate_bytes")),
         "artifact_headroom_bytes": _stringify(results.get("artifact_headroom_bytes")),
         "artifact_status": _stringify(results.get("artifact_status")),

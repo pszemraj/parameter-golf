@@ -34,8 +34,9 @@ def main() -> None:
         "--branch-temporal-mode",
         type=str,
         default=None,
-        choices=["current", "lagged"],
+        choices=["current", "lagged", "hybrid"],
     )
+    g.add_argument("--branch-temporal-lag-scale", type=float, default=None)
     g.add_argument("--num-blocks", type=int, default=None)
     g.add_argument("--smoothing", type=float, default=None)
     g.add_argument("--embedding-init", type=str, default=None, choices=["spectral", "svd"])
@@ -75,6 +76,7 @@ def main() -> None:
             "vocab_size",
             "core_dim",
             "branch_temporal_mode",
+            "branch_temporal_lag_scale",
             "num_blocks",
             "smoothing",
             "embedding_init",
@@ -180,6 +182,7 @@ def main() -> None:
         residual_core=residual_core,
         residual_core_init=residual_core_init,
         branch_temporal_mode=cfg.model.get("branch_temporal_mode", "current"),
+        branch_temporal_lag_scale=float(cfg.model.get("branch_temporal_lag_scale", 1.0)),
     )
 
     print(f"\n{'=' * 60}\nSPEC\n{'=' * 60}")

@@ -7,13 +7,17 @@ import subprocess
 import sys
 from pathlib import Path
 
+import torch
+
 from core_amplifier_lm.experiment import (
     ARTIFACT_LIMIT_BYTES,
     artifact_headroom_bytes,
+    artifact_estimate_bytes,
     artifact_status,
     collect_summary_rows,
     compute_steady_state_tokens_per_sec,
     summarize_run_dir,
+    trainable_int8_zlib_bytes,
 )
 from tools.run_core_amp_sweep import parse_controller_specs, structure_preset_defaults
 
@@ -47,6 +51,25 @@ def test_artifact_budget_helpers_report_left_on_table_under_cap():
     artifact_bytes = ARTIFACT_LIMIT_BYTES - 123
     assert artifact_headroom_bytes(artifact_bytes) == 123
     assert artifact_status(artifact_bytes) == "LEFT_ON_TABLE"
+
+
+def test_trainable_int8_zlib_bytes_grows_with_more_parameters():
+    small = {"w": torch.ones(8)}
+    big = {"w": torch.ones(64)}
+    assert trainable_int8_zlib_bytes(big) > trainable_int8_zlib_bytes(small)
+
+
+def test_artifact_estimate_includes_trainable_payload(tmp_path: Path):
+    spec_path = tmp_path / "spec.pt"
+    spec_path.write_bytes(b"x" * 32)
+    base = artifact_estimate_bytes(repo_root=tmp_path, spec_path=spec_path)
+    bigger = artifact_estimate_bytes(
+        repo_root=tmp_path,
+        spec_path=spec_path,
+        trainable_payload_bytes=123,
+    )
+    assert base is not None
+    assert bigger == base + 123
 
 
 def test_structure_default_preset_uses_real_5090_budget():
@@ -145,6 +168,7 @@ def test_summarize_run_dir_reads_structured_artifacts(tmp_path: Path):
             "artifact_status": "LEFT_ON_TABLE",
             "spec_bytes": 1234,
             "gzip_spec_bytes": 234,
+            "trainable_int8_zlib_bytes": 345,
         },
     )
     _write_jsonl(
@@ -163,6 +187,7 @@ def test_summarize_run_dir_reads_structured_artifacts(tmp_path: Path):
     assert row["steady_state_tokens_per_sec"] == "950000.0"
     assert row["artifact_estimate_bytes"] == "999999"
     assert row["artifact_status"] == "LEFT_ON_TABLE"
+    assert row["trainable_int8_zlib_bytes"] == "345"
     assert row["warmup_steps"] == "50"
     assert row["lr_hold_steps"] == "750"
 

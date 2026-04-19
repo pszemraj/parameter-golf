@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import gzip
 import sys
+import zlib
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -15,6 +16,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from core_amplifier_lm import AmplifierSpec
+import torch
 
 
 def _buffer_bytes(spec: AmplifierSpec) -> dict[str, int]:
@@ -50,6 +52,36 @@ def _code_files(record_dir: Path, mode: str) -> list[Path]:
     ]
 
 
+def _trainable_int8_payload_bytes(model_dir: Path) -> int | None:
+    final_path = model_dir / "final.pt"
+    if not final_path.exists():
+        return None
+    obj = torch.load(final_path, map_location="cpu")
+    state = obj.get("model")
+    if not isinstance(state, dict):
+        return None
+
+    blob = bytearray()
+    for name in sorted(state):
+        tensor = state[name].detach().cpu().float().contiguous()
+        flat = tensor.reshape(-1)
+        max_abs = float(flat.abs().max().item()) if flat.numel() > 0 else 0.0
+        scale = max(max_abs / 127.0, 1e-8)
+        if flat.numel() == 0 or max_abs == 0.0:
+            quantized = torch.zeros(flat.numel(), dtype=torch.int8)
+        else:
+            quantized = torch.clamp(torch.round(flat / scale), -127, 127).to(torch.int8)
+        name_bytes = name.encode("utf-8")
+        blob.extend(len(name_bytes).to_bytes(2, byteorder="little", signed=False))
+        blob.extend(name_bytes)
+        blob.extend(len(tensor.shape).to_bytes(1, byteorder="little", signed=False))
+        for dim in tensor.shape:
+            blob.extend(int(dim).to_bytes(4, byteorder="little", signed=False))
+        blob.extend(torch.tensor([scale], dtype=torch.float32).numpy().tobytes())
+        blob.extend(quantized.numpy().tobytes())
+    return len(zlib.compress(bytes(blob), level=9))
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("model_dir", help="Path to a built model dir containing spec.pt")
@@ -71,11 +103,14 @@ def main() -> None:
     spec_bytes = spec_path.stat().st_size
     spec_gzip_bytes = len(gzip.compress(spec_path.read_bytes(), compresslevel=9))
     buf_bytes = _buffer_bytes(spec)
+    trainable_payload_bytes = _trainable_int8_payload_bytes(model_dir)
 
     print(f"spec: {spec.summary()}")
     print(f"raw fixed buffers: {spec.fixed_nbytes:,}")
     print(f"spec.pt bytes: {spec_bytes:,}")
     print(f"gzip(spec.pt): {spec_gzip_bytes:,}")
+    if trainable_payload_bytes is not None:
+        print(f"int8 zlib(trainable payload): {trainable_payload_bytes:,}")
     print()
     print("Fixed-buffer breakdown:")
     for name, nbytes in sorted(buf_bytes.items(), key=lambda kv: kv[1], reverse=True):
@@ -92,7 +127,10 @@ def main() -> None:
             rel = p.relative_to(record_dir)
             print(f"  {str(rel):50s} {p.stat().st_size:>10,}")
         print()
-        print(f"artifact estimate = code + gzip(spec.pt): {code_total + spec_gzip_bytes:,}")
+        estimate = code_total + spec_gzip_bytes
+        if trainable_payload_bytes is not None:
+            estimate += trainable_payload_bytes
+        print(f"artifact estimate = code + gzip(spec.pt) + int8 trainable: {estimate:,}")
 
 
 if __name__ == "__main__":

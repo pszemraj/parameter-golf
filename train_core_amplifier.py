@@ -53,6 +53,7 @@ from core_amplifier_lm.experiment import (
     reset_peak_memory,
     runtime_device_index,
     spec_size_bytes,
+    trainable_int8_zlib_bytes,
     write_json,
 )
 
@@ -1130,8 +1131,9 @@ def parse_args() -> argparse.Namespace:
         "--branch-temporal-mode",
         type=str,
         default=None,
-        choices=["current", "lagged"],
+        choices=["current", "lagged", "hybrid"],
     )
+    parser.add_argument("--branch-temporal-lag-scale", type=float, default=None)
     parser.add_argument("--readout-rank", type=int, default=None)
 
     # Non-config args
@@ -1304,6 +1306,7 @@ def build_resolved_config_payload(
     residual_core: bool,
     residual_core_init: float,
     branch_temporal_mode: str,
+    branch_temporal_lag_scale: float,
     trainable_parameters: int,
     fixed_buffer_bytes: int,
     compile_requested: bool,
@@ -1348,6 +1351,7 @@ def build_resolved_config_payload(
             "residual_core": bool(residual_core),
             "residual_core_init": float(residual_core_init),
             "branch_temporal_mode": branch_temporal_mode,
+            "branch_temporal_lag_scale": float(branch_temporal_lag_scale),
             "trainable_parameters": int(trainable_parameters),
             "fixed_buffer_bytes": int(fixed_buffer_bytes),
             "smoothing": spec.metadata.get("smoothing"),
@@ -1567,6 +1571,13 @@ def main() -> None:
             md.get("branch_temporal_mode", "current"),
         )
     )
+    branch_temporal_lag_scale = float(
+        _resolve(
+            args.branch_temporal_lag_scale,
+            m.get("branch_temporal_lag_scale"),
+            md.get("branch_temporal_lag_scale", 1.0),
+        )
+    )
     run_name = str(cfg.meta.get("run_name", model_dir.name))
     phase = cfg.meta.get("phase")
     wandb_enabled = bool(args.wandb)
@@ -1596,6 +1607,7 @@ def main() -> None:
     print(
         f"  controller: type={core_type} layers={core_layers} expansion={core_expansion} "
         f"residual_core={residual_core} branch_temporal_mode={branch_temporal_mode} "
+        f"branch_temporal_lag_scale={branch_temporal_lag_scale} "
         f"bptt_chunks={bptt_chunks} carry_chunks={carry_chunks}"
     )
     if wandb_enabled:
@@ -1713,6 +1725,7 @@ def main() -> None:
         residual_core=residual_core,
         residual_core_init=residual_core_init,
         branch_temporal_mode=branch_temporal_mode,
+        branch_temporal_lag_scale=branch_temporal_lag_scale,
     ).to(device)
     model.prepare_runtime_buffers(device=device, amplifier_dtype=runtime_amp_dtype)
     core_model = model
@@ -1829,6 +1842,7 @@ def main() -> None:
         residual_core=residual_core,
         residual_core_init=residual_core_init,
         branch_temporal_mode=branch_temporal_mode,
+        branch_temporal_lag_scale=branch_temporal_lag_scale,
         trainable_parameters=core_model.trainable_parameters,
         fixed_buffer_bytes=core_model.fixed_nbytes,
         compile_requested=compile_requested,
@@ -2163,7 +2177,12 @@ def main() -> None:
     )
     best_eval, last_eval = best_and_last_eval(eval_rows)
     spec_bytes, gzip_spec_bytes = spec_size_bytes(cfg.spec_path)
-    artifact_bytes = artifact_estimate_bytes(repo_root=repo_root, spec_path=cfg.spec_path)
+    trainable_payload_bytes = trainable_int8_zlib_bytes(trainable_state_dict(model))
+    artifact_bytes = artifact_estimate_bytes(
+        repo_root=repo_root,
+        spec_path=cfg.spec_path,
+        trainable_payload_bytes=trainable_payload_bytes,
+    )
     artifact_headroom = artifact_headroom_bytes(artifact_bytes)
     artifact_budget_status = artifact_status(artifact_bytes)
     run_results = {
@@ -2185,6 +2204,7 @@ def main() -> None:
         "last_val_bpb": last_eval.get("val_bpb"),
         "spec_bytes": spec_bytes,
         "gzip_spec_bytes": gzip_spec_bytes,
+        "trainable_int8_zlib_bytes": trainable_payload_bytes,
         "artifact_estimate_bytes": artifact_bytes,
         "artifact_headroom_bytes": artifact_headroom,
         "artifact_status": artifact_budget_status,
@@ -2213,6 +2233,7 @@ def main() -> None:
         summary["eval/bpb_final"] = last_eval.get("val_bpb")
         summary["artifact/spec_bytes_final"] = spec_bytes
         summary["artifact/gzip_spec_bytes_final"] = gzip_spec_bytes
+        summary["artifact/trainable_int8_zlib_bytes_final"] = trainable_payload_bytes
         summary["artifact/estimate_bytes_final"] = artifact_bytes
         summary["artifact/headroom_bytes_final"] = artifact_headroom
         summary["artifact/status_final"] = artifact_budget_status

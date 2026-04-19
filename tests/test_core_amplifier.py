@@ -274,6 +274,40 @@ def test_lagged_temporal_mode_chunk_carry_matches_full_forward():
     assert (full - stitched).abs().max().item() < 1e-4
 
 
+def test_hybrid_temporal_mode_chunk_carry_matches_full_forward():
+    """Hybrid current+lagged taps should preserve forward/chunk consistency."""
+    rng = np.random.default_rng(SEED)
+    tokens = rng.integers(0, VOCAB, size=20_000, dtype=np.int64)
+    spec = build_amplifier_spec(
+        tokens,
+        vocab_size=VOCAB,
+        core_dim=8,
+        branch_lags=(1, 2, 4),
+        num_blocks=1,
+        fixed_dtype=torch.float16,
+    )
+    from core_amplifier_lm import CoreAmplifierLM
+
+    model = CoreAmplifierLM(
+        spec,
+        core_layers=3,
+        core_expansion=2.0,
+        residual_core=True,
+        residual_core_init=-2.0,
+        branch_temporal_mode="hybrid",
+        branch_temporal_lag_scale=1.0,
+        amplifier_dtype=torch.float32,
+    )
+
+    x = torch.randint(0, VOCAB, (2, 17))
+    with torch.no_grad():
+        full = model(x)
+        first, state = model(x[:, :7], return_state=True)
+        second, _ = model(x[:, 7:], state=state, return_state=True)
+        stitched = torch.cat([first, second], dim=1)
+    assert (full - stitched).abs().max().item() < 1e-4
+
+
 def test_hold_then_cosine_lr_schedule():
     """The controller LR should warm up, hold, then decay."""
     from train_core_amplifier import get_lr
@@ -295,6 +329,7 @@ def test_record_defaults_match_recommended_run():
     assert model["core_expansion"] == 2.0
     assert model["residual_core"] is True
     assert model["branch_temporal_mode"] == "current"
+    assert model["branch_temporal_lag_scale"] == 1.0
     assert train["batch_size"] == 256
     assert train["carry_chunks"] == 16
     assert train["bptt_chunks"] == 2
@@ -797,6 +832,71 @@ def test_training_script_lagged_branch_mode():
 
         resolved = (model_dir / "resolved_config.json").read_text()
         assert '"branch_temporal_mode": "lagged"' in resolved
+
+
+def test_training_script_hybrid_branch_mode():
+    """Training should support hybrid branch taps and preserve lag scale in config."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir = Path(tmpdir)
+        _, gz_path = _make_gz(tmpdir)
+        model_dir = tmpdir / "model_hybrid"
+
+        _run_inspect(
+            [
+                "init",
+                str(model_dir),
+                "--data",
+                str(gz_path),
+                "--storage-dtype",
+                "uint8",
+                "--vocab-size",
+                "256",
+                "--core-dim",
+                "8",
+                "--branch-lags",
+                "1,2,4",
+                "--branch-temporal-mode",
+                "hybrid",
+                "--branch-temporal-lag-scale",
+                "0.75",
+                "--num-blocks",
+                "1",
+                "--spec-strategy",
+                "stream",
+            ]
+        )
+
+        _run_train(
+            [
+                str(model_dir),
+                "--num-steps",
+                "2",
+                "--seq-len",
+                "32",
+                "--batch-size",
+                "4",
+                "--carry-chunks",
+                "2",
+                "--val-every",
+                "1",
+                "--val-steps",
+                "1",
+                "--log-every",
+                "1",
+                "--learning-rate",
+                "1e-3",
+                "--lr-schedule",
+                "none",
+                "--force-device",
+                "cpu",
+                "--no-mmap",
+            ],
+            expect_in_stdout="Training complete",
+        )
+
+        resolved = (model_dir / "resolved_config.json").read_text()
+        assert '"branch_temporal_mode": "hybrid"' in resolved
+        assert '"branch_temporal_lag_scale": 0.75' in resolved
 
 
 # ---------------------------------------------------------------------------
