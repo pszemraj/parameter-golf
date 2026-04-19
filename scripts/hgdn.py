@@ -39,6 +39,7 @@ HGDN_PRESET_CONFIGS: dict[str, str] = {
     "winner-20260405-11-cuda-output-only": "winner_20260405_11_cuda_output_only.toml",
     "winner-20260405-11-custom-bwd": "winner_20260405_11_custombwd.toml",
     "winner-20260405-19": "winner_20260405_19.toml",
+    "winner-20260405-19-live14": "winner_20260405_19_live14.toml",
     "winner-20260405-19-single-contig": "winner_20260405_19_single_contig.toml",
     "winner-20260405-19-split-copy": "winner_20260405_19_split_copy.toml",
     "winner-20260405-19-cuda-split-norm": "winner_20260405_19_cuda_split_norm.toml",
@@ -316,8 +317,8 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  python scripts/hgdn.py h100-profile hybrid-eager --preset winner-20260405-19 --run-prefix h100k10a\n"
-            "  python scripts/hgdn.py h100-perf perf --preset winner-20260405-19 --run-prefix h100k10a --offline\n"
+            "  python scripts/hgdn.py h100-profile hybrid-eager --preset winner-20260405-19-live14 --run-prefix h100k10a\n"
+            "  python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-live14 --run-prefix h100k10a --offline\n"
             "  python scripts/hgdn.py h100-megakernel all --offline --set GDN_MEGAKERNEL_REC_CHUNK_T=8\n"
             "  python scripts/hgdn.py h100-megakernel matrix --offline\n"
             "  python scripts/hgdn.py h100-megakernel compare100 --offline\n"
@@ -327,7 +328,7 @@ def parse_args() -> argparse.Namespace:
             "  python scripts/hgdn.py arch-size-screen --config configs/hgdn/winner_20260405_11_retune.toml\n"
             "  python scripts/hgdn.py fixed2k-compare --name h100k6_fixed2k_hybrid_r1_mlp3.25_seq2048 --name h100k6_fixed2k_depth_mlp4.0_seq2048 --reference h100k6_fixed2k_hybrid_r1_mlp3.25_seq2048\n"
             "  python scripts/hgdn.py local-phase1 --config configs/hgdn/winner_20260405_19.toml --run-prefix rtx4070_phase1\n"
-            "  python scripts/hgdn.py preflight --preset winner-20260405-19\n"
+            "  python scripts/hgdn.py preflight --preset winner-20260405-19-live14\n"
             "  python scripts/hgdn.py preflight --preset winner-20260405-11-cuda-fused"
         ),
     )

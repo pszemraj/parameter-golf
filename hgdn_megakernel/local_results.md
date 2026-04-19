@@ -1050,11 +1050,14 @@ So the current open performance question is now on the packed path:
 - rerun the packed current-winner stack on this branch under the historical
   `model`-compile helper family
 - exact next command:
-  `USE_WANDB=0 WANDB_MODE=offline COMPILE_STRATEGY=model RUN_PREFIX=h100packed_recheck python scripts/hgdn.py h100-perf fixed2k-hybrid --preset winner-20260405-19`
+  `USE_WANDB=0 WANDB_MODE=offline COMPILE_STRATEGY=model RUN_PREFIX=h100packed_recheck python scripts/hgdn.py h100-perf fixed2k-hybrid --preset winner-20260405-19-live14`
 - note:
   `scripts/run_h100_single_gpu_hgdn.sh fixed2k-hybrid` alone only applies the
-  generic `single` sweep defaults; the explicit `winner-20260405-19` preset is
-  required for the live packed-kernel winner contract
+  generic `single` sweep defaults
+  - `winner-20260405-19` is a kernel-only preset and still leaves that helper
+    on the default `16L x 384d` shell
+  - `winner-20260405-19-live14` is the exact replay preset for the live
+    `14L x 384d x mlp3.25` packed HGDN contract
 
 Bookkeeping note:
 
@@ -1102,11 +1105,15 @@ Preliminary Colab replay excerpt from the same in-flight command family:
   - `step:600/2000 ... step_avg:884.46ms`
   - `step:800/2000 ... step_avg:884.57ms`
 
-Interim implication:
+Interpretation after bundle retrieval:
 
-- this is already back in the historical packed H100 band
-- treat that as provisional until both full archives are retrieved
-- also keep the architecture label precise:
-  this command family is the historical `fixed2k-hybrid` `16L x 384d` shell
-  with packed-kernel env deltas, not yet the final word on the later
-  exact-bridge finalist architecture
+- this command family is already back in the historical packed H100 throughput
+  band
+- however, it is **not** the live finalist architecture replay
+- both Colab and RunPod executed the helper's default `fixed2k-hybrid`
+  `16L x 384d` shell with packed-kernel env deltas
+- both are therefore over-limit packed-kernel ceiling points, not valid
+  under-limit finalist rechecks
+- the Colab vs RunPod quality delta is also not a fair hardware conclusion:
+  - Colab saw `train_shards:50`
+  - RunPod saw `train_shards:80`

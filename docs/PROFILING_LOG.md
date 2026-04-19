@@ -30,7 +30,7 @@ Preliminary implication:
 - smaller provider/stack differences can still exist, but the gross hardware
   class explanation is no longer credible
 
-Preliminary Colab replay read from the same in-flight command family:
+Returned packed replay read from the same command family:
 
 ```bash
 GDN_CONTROL_PROJ_FP32=0 \
@@ -50,16 +50,18 @@ Observed Colab log excerpts:
 - `step:600/2000 ... step_avg:884.46ms`
 - `step:800/2000 ... step_avg:884.57ms`
 
-Interpretation at note time:
+Interpretation after bundle retrieval:
 
-- this preliminary replay is already back in the historical packed H100 band
-- that strongly suggests the packed path itself did **not** broadly regress to
-  the `~1191 ms` level
-- however, the pasted Colab log is still the historical `fixed2k-hybrid`
-  `16L x 384d` shell with packed-kernel env deltas, not yet the final archived
-  statement for the later exact-bridge finalist architecture
-- keep the conclusion provisional until both full archives are retrieved and
-  inspected
+- this command family is already back in the historical packed H100 throughput
+  band
+- however, it is **not** the live finalist architecture replay
+- both Colab and RunPod executed the helper's default `fixed2k-hybrid`
+  `16L x 384d` shell with packed-kernel env deltas
+- both are therefore over-limit packed-kernel ceiling points, not valid
+  under-limit finalist rechecks
+- the Colab vs RunPod quality delta is also not a fair hardware conclusion:
+  - Colab saw `train_shards:50`
+  - RunPod saw `train_shards:80`
 
 ## 2026-04-18 19:03 CDT / 2026-04-19 00:03:45 UTC — Clean core-kernel compare killed the active core path and reopened the packed-speed audit
 
@@ -196,7 +198,7 @@ and the live packed-kernel preset before claiming a packed regression:
 USE_WANDB=0 WANDB_MODE=offline \
 COMPILE_STRATEGY=model \
 RUN_PREFIX=h100packed_recheck \
-python scripts/hgdn.py h100-perf fixed2k-hybrid --preset winner-20260405-19
+python scripts/hgdn.py h100-perf fixed2k-hybrid --preset winner-20260405-19-live14
 ```
 
 If that run lands back near the historical `~915 ms/step` range, the clean core
@@ -210,8 +212,10 @@ Important helper note:
 - `scripts/run_h100_single_gpu_hgdn.sh fixed2k-hybrid` by itself uses the
   generic `single` sweep preset from `scripts/sweep.sh`
 - that is **not** the exact packed winner config
-- `scripts/hgdn.py ... --preset winner-20260405-19` is required here so the
-  packed QKV/conv/current-kernel winner env is actually applied
+- `winner-20260405-19` is a kernel-only preset; it does **not** override the
+  helper's default `16L x 384d` architecture shell
+- `winner-20260405-19-live14` is the exact replay preset for the live
+  `14L x 384d x mlp3.25` packed HGDN contract
 
 ## 2026-04-13 — Exact 8x bridge kept HGDN as the main record-path family (`h100bridge1`)
 
