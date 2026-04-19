@@ -21,22 +21,22 @@ Queue launcher:
 
 ## Controller Families
 
-- `pending` `blocks3_followup_clean`
+- `done` `blocks3_followup_clean`
   - `plain3_e20`
   - `resid5_e20`
-- `pending` `blocks3_neighborhood_v1`
+- `done` `blocks3_neighborhood_v1`
   - `plain3_e25_c8t1`
   - `plain4_e20_c8t1`
   - `resid4_e20_c8t1`
   - `resid4_e25_c8t1`
-- `pending` `blocks3_bptt_v2`
+- `done` `blocks3_bptt_v2`
   - `plain4_e20_c8t1`
   - `plain4_e20_c8t2`
   - `plain4_e20_c8t4`
   - `resid4_e25_c8t1`
   - `resid4_e25_c8t2`
   - `resid4_e25_c8t4`
-- `pending` `blocks3_carry_v1`
+- `running` `blocks3_carry_v1`
   - `resid4_e20_c8t1`
   - `resid4_e20_c16t1`
   - `resid4_e20_c32t1`
@@ -67,7 +67,7 @@ Queue launcher:
 
 ## Structure Family
 
-- `running` `structure_round1`
+- `done` `structure_round1`
   - `blocks0`
   - `blocks3`
   - `blocks6`
@@ -76,10 +76,14 @@ Queue launcher:
   - `readout256`
   - `readout128`
   - queue session `14136` launched from commit `e43655d`
-  - completed so far:
+  - final corrected ranking:
     - `blocks0`: `best_val_bpb=2.4859076582`, `tok/s=3,336,299`
     - `blocks3`: `best_val_bpb=2.4865782548`, `tok/s=1,837,963`
-  - currently building/training next point: `blocks6`
+    - `readout256`: `best_val_bpb=2.4867157200`, `tok/s=959,199`
+    - `blocks6`: `best_val_bpb=2.4867944734`, `tok/s=1,267,624`
+    - `readout128`: `best_val_bpb=2.4875669087`, `tok/s=964,897`
+    - `branches8_pow2`: `best_val_bpb=2.4885888269`, `tok/s=1,319,498`
+    - `blocks9`: `best_val_bpb=2.4891548818`, `tok/s=966,778`
 - `done` `blocks0_radical_guardrail`
   - `blocks0_resid12_e6_c8t1_r3_current_512m`
 - `done` `blocks0_controller_v1`

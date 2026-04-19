@@ -5,11 +5,8 @@
 - Completed a fixed-parameter depth-vs-width follow-up, `blocks0_resid10_e12_c8t1_r3_current_512m`.
 - Completed a safer depth-leaning follow-up, `blocks0_resid14_e8_c8t1_r3_current_512m`.
 - Completed a checkpointed rerun of the previously OOM `blocks0_resid16_e8_c8t1_r3_current_512m` point.
-- Completed the first matched-token controller baseline on the original full frozen structure.
-- Completed a clean controller follow-up on the new structural front-runner, `blocks3`.
-- Completed a four-point controller neighborhood screen on `blocks3`.
-- Completed a clean matched-token `bptt` sweep on the two best `blocks3` controller families.
-- Completed a clean matched-token `carry` sweep on the two best residual `blocks3` controller families.
+- Completed the corrected `blocks3` follow-up screen, neighborhood screen, and `bptt` sweep on the uncapped full-spec contract.
+- The corrected `blocks3` carry sweep is currently running in the background queue.
 - Completed the first controller-up/spec-down reallocation screen on `blocks2`.
 - Completed a `1B` confirmation run on the new `blocks2` family.
 - Completed the first radical half-million-parameter recurrent controller screen on `blocks2`.
@@ -17,7 +14,7 @@
   - `compile=0`
   - exact `val_bpb`
   - W&B project `pg-core-amp`
-- The earlier `blocks9` and `blocks3` controller screens used matched `planned_train_tokens=50,331,648`.
+- The corrected `blocks3` controller screens used matched `planned_train_tokens=50,331,648`.
 - The later `blocks2` reallocation screen used matched `planned_train_tokens=536,870,912` inside its own subfamily.
 - A first attempt at the neighborhood screen with `compile=1` was discarded before completion because the shorter runs would not all cross the compile trigger at the same point. That batch is intentionally excluded from the evidence below.
 
@@ -120,15 +117,17 @@ Current corrected result:
   - it was worse at `256`, `512`, and `768` with no throughput or memory advantage
   - on current evidence, simply pushing residual init colder is not the right next move for this geometry
 
-## Current Evidence
+## Corrected Blocks3 Controller Evidence
 
-### Baseline on full `blocks9` structure
-
-Frozen structure:
+All corrected `blocks3` runs below used:
 - `12` branches
-- `9` blocks
+- `3` frozen amplifier blocks
 - full readout
-- `spec_max_tokens=5,000,000`
+- no `SPEC_MAX_TOKENS` cap
+- full available local train-shard set when the shared spec was built
+- exact `val_bpb`
+
+### Follow-up on corrected `blocks3`
 
 Matched run results:
 - `plain3_e20`
@@ -138,9 +137,9 @@ Matched run results:
   - `carry_chunks=8`
   - `bptt_chunks=1`
   - `384` steps
-  - final `val_bpb = 2.5171747775`
-  - steady `tok/s = 1,042,359`
-  - peak allocated memory `= 11,576 MiB`
+  - final `val_bpb = 2.4833587679`
+  - steady `tok/s = 2,184,121`
+  - peak allocated memory `= 6,381 MiB`
 - `resid5_e20`
   - `core_layers=5`
   - `core_expansion=2.0`
@@ -148,115 +147,88 @@ Matched run results:
   - `carry_chunks=16`
   - `bptt_chunks=2`
   - `192` steps
-  - final `val_bpb = 2.5178967561`
-  - steady `tok/s = 966,227`
-  - peak allocated memory `= 24,036 MiB`
-
-Result on `blocks9`:
-- `plain3_e20` beat `resid5_e20` by about `0.00072` bpb.
-- It was also faster and much lighter on memory.
-
-### Follow-up on `blocks3` structure
-
-Frozen structure:
-- `12` branches
-- `3` blocks
-- full readout
-- `spec_max_tokens=5,000,000`
-
-Matched run results:
-- `plain3_e20`
-  - final `val_bpb = 2.5158438607`
-  - steady `tok/s = 2,191,340`
-  - peak allocated memory `= 6,381 MiB`
-- `resid5_e20`
-  - final `val_bpb = 2.5175855416`
-  - steady `tok/s = 1,857,335`
+  - final `val_bpb = 2.4865782548`
+  - steady `tok/s = 1,837,046`
   - peak allocated memory `= 13,654 MiB`
 
-Result on `blocks3`:
-- `plain3_e20` beat `resid5_e20` by about `0.00174` bpb.
-- It ran about `18%` faster.
+Result on corrected `blocks3`:
+- `plain3_e20` beat `resid5_e20` by about `0.00322` bpb.
+- It ran about `19%` faster.
 - It used about `2.14x` less peak allocated memory.
 
-### `blocks3` controller neighborhood screen
+### Corrected `blocks3` controller neighborhood screen
 
-All runs below used the same frozen structure:
-- `12` branches
-- `3` blocks
-- full readout
-- `spec_max_tokens=5,000,000`
+All runs below used:
 - `carry_chunks=8`
 - `bptt_chunks=1`
+- `384` steps
 
 Matched run results:
 - `plain3_e25_c8t1`
   - `core_layers=3`
   - `core_expansion=2.5`
   - `residual_core=0`
-  - final `val_bpb = 2.5170427183`
-  - steady `tok/s = 2,052,454`
+  - final `val_bpb = 2.4820524220`
+  - steady `tok/s = 1,972,792`
   - peak allocated memory `= 6,697 MiB`
 - `plain4_e20_c8t1`
   - `core_layers=4`
   - `core_expansion=2.0`
   - `residual_core=0`
-  - final `val_bpb = 2.5154361649`
-  - steady `tok/s = 2,030,859`
+  - final `val_bpb = 2.4838029669`
+  - steady `tok/s = 1,941,708`
   - peak allocated memory `= 6,814 MiB`
 - `resid4_e20_c8t1`
   - `core_layers=4`
   - `core_expansion=2.0`
   - `residual_core=1`
-  - final `val_bpb = 2.5133777174`
-  - steady `tok/s = 1,970,720`
+  - final `val_bpb = 2.4828974740`
+  - steady `tok/s = 1,960,262`
   - peak allocated memory `= 7,104 MiB`
 - `resid4_e25_c8t1`
   - `core_layers=4`
   - `core_expansion=2.5`
   - `residual_core=1`
-  - final `val_bpb = 2.5123951758`
-  - steady `tok/s = 1,820,432`
+  - final `val_bpb = 2.4824969375`
+  - steady `tok/s = 1,813,716`
   - peak allocated memory `= 7,525 MiB`
 
-Result from the neighborhood screen:
-- `plain4_e20` improved on the previous `plain3_e20` anchor by about `0.00041` bpb.
-- `plain3_e25` was a regression relative to both `plain3_e20` and `plain4_e20`.
-- `resid4_e20` was the first controller point to clearly beat the plain family on the trimmed `blocks3` structure.
-- `resid4_e25` is the current single-seed screening leader, beating `plain4_e20` by about `0.00304` bpb and `resid4_e20` by about `0.00098` bpb.
-- Residual gates stayed in a narrow non-saturated range, roughly `0.119 -> 0.141`, so the residual path is active without collapsing.
+Result from the corrected neighborhood screen:
+- `plain3_e25_c8t1` is the current corrected single-seed leader on `blocks3`.
+- `resid4_e25_c8t1` is second, trailing by about `0.00044` bpb.
+- `resid4_e20_c8t1` sits behind `resid4_e25_c8t1` by about `0.00040` bpb.
+- `plain4_e20_c8t1` is the weakest of the four corrected neighborhood points.
+- Relative to the earlier follow-up anchor, both `plain3_e25` and `resid4_e25` improved on corrected `plain3_e20`.
+- This corrected screen does not support the earlier capped-spec story that residualization was the clear local winner on `blocks3`.
 
-### `blocks3` `bptt` sweep on the leading families
+### Corrected `blocks3` `bptt` sweep
 
 All runs below used:
-- `12` branches
-- `3` blocks
-- full readout
-- `spec_max_tokens=5,000,000`
 - `carry_chunks=8`
-- explicit per-run warmup/hold scaling so schedule stayed matched in token terms
+- matched `planned_train_tokens=50,331,648`
+- warmup and hold scaled with `bptt_chunks`
 
 Plain family:
 - `plain4_e20_c8t1`
   - `bptt_chunks=1`
   - `warmup_steps=100`
   - `lr_hold_steps=1500`
-  - final `val_bpb = 2.5154361649`
-  - steady `tok/s = 2,030,714`
+  - final `val_bpb = 2.4838029669`
+  - steady `tok/s = 1,978,608`
   - peak allocated memory `= 6,814 MiB`
 - `plain4_e20_c8t2`
   - `bptt_chunks=2`
   - `warmup_steps=50`
   - `lr_hold_steps=750`
-  - final `val_bpb = 2.5199320452`
-  - steady `tok/s = 2,063,541`
+  - final `val_bpb = 2.4857629362`
+  - steady `tok/s = 1,979,822`
   - peak allocated memory `= 12,064 MiB`
 - `plain4_e20_c8t4`
   - `bptt_chunks=4`
   - `warmup_steps=25`
   - `lr_hold_steps=375`
-  - final `val_bpb = 2.5207602945`
-  - steady `tok/s = 2,078,943`
+  - final `val_bpb = 2.4881083439`
+  - steady `tok/s = 2,008,597`
   - peak allocated memory `= 22,563 MiB`
 
 Residual family:
@@ -264,73 +236,46 @@ Residual family:
   - `bptt_chunks=1`
   - `warmup_steps=100`
   - `lr_hold_steps=1500`
-  - final `val_bpb = 2.5123951758`
-  - steady `tok/s = 1,820,552`
+  - final `val_bpb = 2.4824969375`
+  - steady `tok/s = 1,803,831`
   - peak allocated memory `= 7,525 MiB`
 - `resid4_e25_c8t2`
   - `bptt_chunks=2`
   - `warmup_steps=50`
   - `lr_hold_steps=750`
-  - final `val_bpb = 2.5175869540`
-  - steady `tok/s = 1,854,033`
+  - final `val_bpb = 2.4867395116`
+  - steady `tok/s = 1,813,230`
   - peak allocated memory `= 13,485 MiB`
 - `resid4_e25_c8t4`
   - `bptt_chunks=4`
   - `warmup_steps=25`
   - `lr_hold_steps=375`
-  - final `val_bpb = 2.5193139021`
-  - steady `tok/s = 1,865,468`
+  - final `val_bpb = 2.4870242558`
+  - steady `tok/s = 1,816,147`
   - peak allocated memory `= 25,405 MiB`
 
-Result from the clean `bptt` sweep:
+Result from the corrected `bptt` sweep:
 - `bptt=1` won clearly in both families.
-- The plain family degraded by about `0.00450` bpb at `bptt=2` and about `0.00532` bpb at `bptt=4`.
-- The residual family degraded by about `0.00519` bpb at `bptt=2` and about `0.00692` bpb at `bptt=4`.
-- Higher `bptt` increased steady `tok/s` slightly because there were fewer optimizer steps, but that came with sharply worse memory:
+- The plain family degraded by about `0.00196` bpb at `bptt=2` and about `0.00431` bpb at `bptt=4`.
+- The residual family degraded by about `0.00424` bpb at `bptt=2` and about `0.00453` bpb at `bptt=4`.
+- Higher `bptt` gave only minor throughput changes but much worse memory:
   - plain family: `6.8 -> 12.1 -> 22.6 GiB`
   - residual family: `7.5 -> 13.5 -> 25.4 GiB`
-- On the current local screening budget, semi-TBPTT is not a quality win.
+- On the corrected local screening budget, semi-TBPTT is still not a quality win.
 
 ### `blocks3` `carry` sweep on the best residual families
 
-All runs below used:
-- `12` branches
-- `3` blocks
-- full readout
-- `spec_max_tokens=5,000,000`
-- `bptt_chunks=1`
+The corrected full-spec carry rerun is currently in progress in the background queue.
 
-`resid4_e20` family:
-- `resid4_e20_c8t1`
-  - final `val_bpb = 2.5133777174`
-  - steady `tok/s = 1,971,311`
-- `resid4_e20_c16t1`
-  - final `val_bpb = 2.5123756944`
-  - steady `tok/s = 1,971,871`
-- `resid4_e20_c32t1`
-  - final `val_bpb = 2.5137890659`
-  - steady `tok/s = 1,967,211`
+Current status:
+- family: `fullspec_blocks3_carry_v1`
+- queue session: `14136`
+- frozen structure: `12` branches, `3` blocks, full readout, uncapped full-spec build
+- completed results will replace the earlier capped-spec carry screen once the family finishes
 
-`resid4_e25` family:
-- `resid4_e25_c8t1`
-  - final `val_bpb = 2.5123951758`
-  - steady `tok/s = 1,820,046`
-- `resid4_e25_c16t1`
-  - final `val_bpb = 2.5136024590`
-  - steady `tok/s = 1,819,138`
-- `resid4_e25_c32t1`
-  - final `val_bpb = 2.5141047368`
-  - steady `tok/s = 1,819,390`
-
-Result from the clean `carry` sweep:
-- `carry=16` helped the smaller residual controller by about `0.00100` bpb relative to `carry=8`.
-- `carry=32` regressed for that same controller.
-- For the larger residual controller, both `carry=16` and `carry=32` regressed from `carry=8`.
-- The top two screening points are now effectively tied:
-  - `resid4_e20_c16t1 = 2.5123756944`
-  - `resid4_e25_c8t1 = 2.5123951758`
-- The gap is about `0.00002` bpb, which is far too small to over-interpret at this short budget.
-- That means the right next step is longer confirmation, not more screening knobs.
+Interpretation policy:
+- do not treat the older capped-spec carry numbers as current evidence
+- wait for the corrected carry summary before making a final carry recommendation on `blocks3`
 
 ### `blocks2` controller-up / spec-down reallocation
 
@@ -338,7 +283,7 @@ All runs below used:
 - `12` branches
 - `2` blocks
 - full readout
-- `spec_max_tokens=5,000,000`
+- no `SPEC_MAX_TOKENS` cap
 - `branch_temporal_mode=current`
 - `carry_chunks=8`
 - `bptt_chunks=1`
