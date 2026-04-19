@@ -957,3 +957,108 @@ Implication:
 - rerun the bounded `1xH100` core-kernel compare after this checkpoint
 - treat older core-kernel compare logs as pre-cleanup evidence, not the final
   fair comparison
+
+## Clean core-kernel compare and packed-path reconciliation (`2026-04-18 19:03 CDT / 2026-04-19 00:03:45 UTC`)
+
+Bundle inspected directly:
+
+- `local-scratch/h100core_compare100_clean.7z`
+
+Bundle provenance:
+
+- compare commit: `c96ff08`
+- branch at compare time: `exp/hgdn-k-core`
+- post-bundle metadata fix: `7207fd7`
+- branch point from `exp/hgdn`: `7df6f8d1`
+- additional `exp/hgdn` commits beyond the branch point at note time: none
+
+Branch-only commits from `exp/hgdn` into `exp/hgdn-k-core`:
+
+- `ae927f2` add core-kernel runtime path
+- `4c66e6f` add core-kernel validation helper
+- `3b40630` align core-kernel helper contract
+- `cb332a1` split active core docs from archived full-block notes
+- `85f122e` doc hygiene checkpoint
+- `0f0fc04` clean core-kernel compile path
+- `40582b9` helper CLI cleanup
+- `5a52b99` shared repo bootstrap cleanup
+- `c96ff08` helper diagnostics opt-in fix
+- `7207fd7` helper CLI repo bootstrap fix for bundle metadata
+
+Clean compare contract:
+
+- helper:
+  `scripts/run_h100_single_gpu_hgdn_corekernel.sh compare100`
+- GPU:
+  `1xH100`
+- trainer launcher:
+  `plain`
+- compile strategy:
+  `selective`
+- `TORCH_LOGS`:
+  unset
+- common contract:
+  - `TRAIN_BATCH_TOKENS=524288`
+  - `TRAIN_SEQ_LEN=2048`
+  - `ITERATIONS=100`
+  - `MAX_WALLCLOCK_SECONDS=0`
+- packed control:
+  - `GDN_USE_CUDA_COREKERNEL=0`
+  - `GDN_USE_CUDA_MEGAKERNEL=0`
+  - `GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=1`
+- core candidate:
+  - `GDN_USE_CUDA_COREKERNEL=1`
+  - `GDN_USE_CUDA_MEGAKERNEL=0`
+  - `GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=0`
+  - `GDN_COREKERNEL_REC_CHUNK_T=8`
+
+Observed trainer step averages:
+
+- packed control:
+  - `1191.52 ms/step`
+- core `rc8`:
+  - `6369.37 ms/step`
+
+Observed losses at step `100`:
+
+- packed control:
+  - `5.0863`
+- core `rc8`:
+  - `5.0867`
+
+Interpretation:
+
+- the compare is fair enough to trust for the within-HGDN keep/kill question
+- the core path remains about `5.35x` slower than the packed control even after
+  the helper cleanup
+- that kills the current core-kernel path as an active finalist direction
+
+Important nuance:
+
+- this bundle does **not** prove that the packed path itself regressed from the
+  historical `~915.10 ms` H100 reference
+- the clean compare used:
+  - `COMPILE_STRATEGY=selective`
+  - the new core-helper contract
+- the historical packed reference came from the old H100 perf/fixed2k helper
+  family under:
+  - `COMPILE_STRATEGY=model`
+  - `python scripts/hgdn.py h100-perf fixed2k --preset current-winner ...`
+
+So the current open performance question is now on the packed path:
+
+- rerun the packed current-winner stack on this branch under the historical
+  `model`-compile helper family
+- exact next command:
+  `USE_WANDB=0 WANDB_MODE=offline COMPILE_STRATEGY=model RUN_PREFIX=h100packed_recheck bash scripts/run_h100_single_gpu_hgdn.sh fixed2k-hybrid`
+
+Bookkeeping note:
+
+- the bundle manifest from `c96ff08` incorrectly reported
+  `extension_status.loaded=false`
+- root cause:
+  `scripts/hgdn_helper_cli.py` did not bootstrap repo root when run as a direct
+  script
+- fixed in:
+  `7207fd7`
+- that bug affected bundle metadata only, not the trainer timing result

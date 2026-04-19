@@ -1,31 +1,28 @@
 # HGDN Next Steps
 
-Last updated: 2026-04-18
+Last updated: 2026-04-18 19:15 CDT
 
-## 0. Pivot kernel work to the HGDN core boundary
+## 0. Reconcile the packed H100 winner path on the current branch
 
-- The full-block HGDN megakernel is no longer the active performance path.
-- Keep it as a research/archive path only.
-- The active kernel goal is now an **HGDN core kernel**:
-  - dense `W_qkv`, `W_a`, `W_b`, `W_g`, `W_out` outside
-  - owned CUDA path for conv + gate math + recurrence + output gate
-- Do not pay for more full-block H100 compare work unless the question is
-  explicitly about that archived design.
-- Active plan and keep/kill gate:
-  [HGDN_CORE_KERNEL_PLAN.md](HGDN_CORE_KERNEL_PLAN.md)
-- Current local checkpoint:
-  - `GDN_USE_CUDA_COREKERNEL=1` is wired through model + trainer + compile plan
-  - the owned core op has a dedicated parity/launch harness:
-    [`../hgdn_megakernel/test_corekernel.py`](../hgdn_megakernel/test_corekernel.py)
-  - local `sm_89` parity passed through `B=2,T=512`
-  - local compiled trainer smoke passed with `gdn_corekernel_left_enabled:7`
-- Next paid gate:
-  - run the bounded `1xH100` helper:
-    [`../scripts/run_h100_single_gpu_hgdn_corekernel.sh`](../scripts/run_h100_single_gpu_hgdn_corekernel.sh)
-  - default fixed-step compare there is:
-    - packed control
-    - core-kernel `rec_chunk_t=8`
-  - only keep the branch active if that result gets back near the packed control
+- The clean bounded core compare is done and fair enough to trust.
+- Result:
+  - packed control under the cleaned core helper: `1191.52 ms/step`
+  - core `rc8`: `6369.37 ms/step`
+  - losses matched; the systems boundary lost
+- Keep both custom-kernel forks archived only:
+  - full-block megakernel: research-only
+  - core-kernel pivot: research-only after the clean keep/kill miss
+- The next active work is on the packed HGDN winner path.
+- Immediate paid check:
+  - rerun the packed current-winner path on the current branch under the
+    historical `COMPILE_STRATEGY=model` contract
+  - exact command:
+    `USE_WANDB=0 WANDB_MODE=offline COMPILE_STRATEGY=model RUN_PREFIX=h100packed_recheck bash scripts/run_h100_single_gpu_hgdn.sh fixed2k-hybrid`
+- Main question:
+  - is the current branch's packed path still near the historical
+    `~915 ms/step` H100 reference, or did the packed stack itself drift?
+- Core history and keep/kill notes remain in
+  [HGDN_CORE_KERNEL_PLAN.md](HGDN_CORE_KERNEL_PLAN.md).
 
 ## 1. Keep the exact 8x bridge result as the architecture gate
 

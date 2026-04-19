@@ -1,9 +1,153 @@
 # Profiling Log
 
-Last updated: 2026-04-13 13:35 EDT
+Last updated: 2026-04-18 19:15 CDT
 
 Profiler-driven checkpoints that should survive beyond the raw artifacts under
 `profiles/`.
+
+## 2026-04-18 19:03 CDT / 2026-04-19 00:03:45 UTC — Clean core-kernel compare killed the active core path and reopened the packed-speed audit
+
+Artifacts:
+
+- clean bounded `1xH100` compare bundle:
+  - `local-scratch/h100core_compare100_clean.7z`
+- branch point entering the core fork:
+  - `7df6f8d1` (`exp/hgdn`)
+- upstream `exp/hgdn` delta at note time:
+  - none beyond `7df6f8d1`
+- branch-only commits through the clean helper rerun:
+  - `ae927f2` add core-kernel runtime path
+  - `4c66e6f` add core-kernel validation helper
+  - `3b40630` align core-kernel helper contract
+  - `cb332a1` split active core docs from archived full-block notes
+  - `85f122e` doc hygiene checkpoint
+  - `0f0fc04` core-kernel compile-path cleanup
+  - `40582b9` helper CLI cleanup
+  - `5a52b99` shared repo bootstrap cleanup
+  - `c96ff08` helper diagnostics opt-in fix
+- post-bundle bookkeeping fix:
+  - `7207fd7` fixed `scripts/hgdn_helper_cli.py` repo bootstrap so the bundle
+    manifest can import `hgdn_megakernel` while running as a direct script
+
+Contract:
+
+- GPU: `1xH100`
+- helper:
+  - `scripts/run_h100_single_gpu_hgdn_corekernel.sh compare100`
+- packed control leg:
+  - `GDN_USE_CUDA_COREKERNEL=0`
+  - `GDN_USE_CUDA_MEGAKERNEL=0`
+  - `GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=1`
+- core leg:
+  - `GDN_USE_CUDA_COREKERNEL=1`
+  - `GDN_USE_CUDA_MEGAKERNEL=0`
+  - `GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=0`
+  - `GDN_COREKERNEL_REC_CHUNK_T=8`
+- common contract:
+  - `TRAIN_BATCH_TOKENS=524288`
+  - `TRAIN_SEQ_LEN=2048`
+  - `ITERATIONS=100`
+  - `MAX_WALLCLOCK_SECONDS=0`
+  - `HK_TRAINER_LAUNCHER_MODE=plain`
+  - `COMPILE_STRATEGY=selective`
+  - `TORCH_LOGS` unset by default
+
+### Main finding
+
+The cleaned `compare100` run is fair enough to trust, and it kills the current
+core-kernel path as an active finalist candidate.
+
+Observed trainer step averages from the bundle:
+
+- packed control:
+  - `1191.52 ms/step`
+- core `rc8`:
+  - `6369.37 ms/step`
+
+The losses are effectively the same by step `100`:
+
+- packed control:
+  - `train_loss: 5.0863`
+- core `rc8`:
+  - `train_loss: 5.0867`
+
+Interpretation:
+
+- this is a systems boundary loss, not a math/parity failure
+- the core path is still about `5.35x` slower than the packed control under the
+  cleaned helper contract
+- that is far outside the planned `20-30%` keep band
+
+### Fairness read
+
+The cleaned bundle does **not** show the earlier helper slop:
+
+- both legs were launched through plain Python rather than `torchrun`
+- both legs used the same fixed-step contract
+- the packed control used the live packed-conv custom backward setting
+- `TORCH_LOGS` was not silently forced on
+- the same H100 image had FLA available, and the parity leg in the same bundle
+  recorded `has_fla_reference: True`
+
+So this compare is valid for the within-HGDN keep/kill question.
+
+### What this compare did **not** answer
+
+This bundle does **not** prove that the packed path itself is back at the old
+`~915 ms/step` H100 reference.
+
+Important contract mismatch:
+
+- historical packed HGDN reference:
+  - `h100k6_fixed2k_hybrid_r1_mlp3.25_seq2048`
+  - `915.10 ms/step`
+  - launcher family:
+    - `python scripts/hgdn.py h100-perf fixed2k --preset current-winner ...`
+  - compile mode:
+    - `COMPILE_STRATEGY=model`
+- cleaned core helper packed control:
+  - `1191.52 ms/step`
+  - launcher family:
+    - `scripts/run_h100_single_gpu_hgdn_corekernel.sh compare100`
+  - compile mode:
+    - `COMPILE_STRATEGY=selective`
+
+That means the clean compare answered:
+
+- packed control vs core kernel under the **new helper**
+
+It did **not** answer:
+
+- why the packed winner path under the old `model` compile contract used to run
+  near `915 ms/step`
+- whether the current branch still preserves that packed-path operating point
+
+### Decision
+
+- stop treating the HGDN core-kernel path as the active finalist direction
+- keep the core path as research-only until it has a new reason to live
+- return the active performance path to the packed HGDN winner stack
+- next paid step is **not** another core compare; it is a packed-path
+  reconciliation run on the current branch under the historical packed
+  `model`-compile contract
+
+### Next exact check
+
+Run the packed current-winner path on this branch with the old helper family
+before claiming a packed regression:
+
+```bash
+USE_WANDB=0 WANDB_MODE=offline \
+COMPILE_STRATEGY=model \
+RUN_PREFIX=h100packed_recheck \
+bash scripts/run_h100_single_gpu_hgdn.sh fixed2k-hybrid
+```
+
+If that run lands back near the historical `~915 ms/step` range, the clean core
+compare remains valid and the packed path simply stays mainline. If it instead
+lands near `~1190 ms/step`, then the packed stack itself regressed and the next
+work belongs on packed-path compile/runtime profiling, not on the archived core
+boundary.
 
 ## 2026-04-13 — Exact 8x bridge kept HGDN as the main record-path family (`h100bridge1`)
 

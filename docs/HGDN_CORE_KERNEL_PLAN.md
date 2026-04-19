@@ -1,8 +1,37 @@
 # HGDN Core-Kernel Pivot
 
-Last updated: 2026-04-18
+Last updated: 2026-04-18 19:15 CDT
 
-## Why this pivot exists
+## Status after the clean `1xH100` compare
+
+The core-kernel pivot is now **archived as research**, not the active
+performance direction.
+
+The clean bounded compare bundle
+`local-scratch/h100core_compare100_clean.7z` was produced at
+`2026-04-19T00:03:45Z` from commit `c96ff08`. It used the cleaned helper
+contract:
+
+- `HK_TRAINER_LAUNCHER_MODE=plain`
+- `COMPILE_STRATEGY=selective`
+- honest packed control with `GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=1`
+- no forced `TORCH_LOGS`
+
+Observed step averages from that bundle:
+
+- packed control:
+  - `1191.52 ms/step`
+- core `rc8`:
+  - `6369.37 ms/step`
+
+That is about `5.35x` slower than the packed control and far outside the
+planned keep band. The losses at step `100` are effectively identical, so this
+is a systems result, not a parity failure.
+
+The follow-up commit `7207fd7` fixed one bundle bookkeeping bug in
+`scripts/hgdn_helper_cli.py`, but it did not change the timing result.
+
+## Why this pivot existed
 
 The repo-backed full-block HGDN megakernel preserved the right modeling pieces,
 but the `compare100` evidence killed it as a finalist-training path.
@@ -25,9 +54,9 @@ That is not a micro-optimization problem. It means the custom kernel swallowed
 the wrong ownership boundary: it replaced dense GEMM phases that H100 libraries
 already do well, then paid cooperative-grid barrier costs around them.
 
-## Active boundary
+## Archived boundary under test
 
-The active performance direction is now an **HGDN core kernel**.
+The owned CUDA path under this archived experiment owned:
 
 The owned CUDA path should own:
 
@@ -46,7 +75,7 @@ The owned CUDA path should not own:
 - `W_g`
 - `W_out`
 
-Those dense projections stay on the normal vendor/compiler GEMM path.
+Those dense projections stayed on the normal vendor/compiler GEMM path.
 
 ## Non-goals
 
@@ -56,7 +85,7 @@ Those dense projections stay on the normal vendor/compiler GEMM path.
 - Do not claim victory from fixed-token kernel microbenchmarks if trainer
   wallclock stays far from the packed control.
 
-## Keep / kill gate
+## Keep / kill gate result
 
 The first serious goal is not beating the packed HGDN control. The first goal is
 to get back into the same order of magnitude.
@@ -64,8 +93,11 @@ to get back into the same order of magnitude.
 Keep the core-kernel branch only if it can get within roughly `20-30%` of the
 packed HGDN control on the matched `1xH100` fixed-step contract.
 
-If it cannot clear that bar after the core boundary is implemented and compiled
-cleanly, stop and keep the packed winner path as the mainline.
+Result:
+
+- it did **not** clear that bar
+- the packed winner path is the active mainline again
+- this file now remains as design history for the archived core experiment
 
 ## Task list
 
@@ -118,9 +150,10 @@ cleanly, stop and keep the packed winner path as the mainline.
   - optional full-block research path
 - [x] keep same batch contract / step budget / eval cadence across candidates
 - [x] use `MAX_WALLCLOCK_SECONDS=0`
-- [ ] treat the first `1xH100` result as a keep/kill checkpoint, not as a final leaderboard claim
+- [x] treat the first `1xH100` result as a keep/kill checkpoint, not as a final leaderboard claim
+- [x] kill the active core path after the clean compare missed the packed control by a wide margin
 
-## Current local checkpoint
+## Current archived checkpoint
 
 - Static audit passes with both the archived full-block path and the new
   core-kernel boundary checks enabled.
@@ -146,7 +179,7 @@ cleanly, stop and keep the packed winner path as the mainline.
   - the real keep/kill measurement is the new bounded `1xH100` `compare100`
     helper below
 
-## Contract hygiene
+## Contract hygiene that still mattered
 
 - The active H100 core helper should default to the live packed control, which
   means `GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=1` for `packed_control`.
@@ -170,12 +203,16 @@ cleanly, stop and keep the packed winner path as the mainline.
     `hgdn_megakernel/local_results.md` and
     `hgdn_megakernel/h100_resource_report.md`
 
-## Immediate implementation order
+## Outcome
 
-1. run one bounded `1xH100` compile/parity smoke through the new helper
-2. run the fixed-100-step packed-vs-core comparison
-3. keep only if the core candidate gets back into the packed-control ballpark
-4. only after that consider core-internal schedule tuning or save/recompute work
+What this file still says:
+
+1. the ownership-boundary idea was coherent enough to implement and validate
+2. the clean H100 compare says the current core schedule is not competitive
+3. packed HGDN is back to being the active path
+4. the remaining open performance question is now on the packed path:
+   reconciling the historical `~915 ms/step` reference against the current
+   branch's `selective`-compile helper read of `~1191 ms/step`
 
 ## References
 

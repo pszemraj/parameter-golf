@@ -128,13 +128,19 @@ Branch: `exp/hgdn`
   - the full-block path swallowed the dense GEMMs that H100 already handles
     better through the vendor/compiler stack
 - Active kernel direction on `exp/hgdn-k-core`:
-  - keep dense `W_qkv`, `W_a`, `W_b`, `W_g`, and `W_out` outside the owned CUDA path
-  - build an **HGDN core kernel** for conv + gate math + recurrence + output gate
-- Keep/kill gate for the new boundary:
-  - if the core-kernel path cannot get within roughly `20-30%` of the packed
-    HGDN control on the matched `1xH100` fixed-step contract, stop and keep the
-    packed winner path as the mainline
-- The active implementation checklist lives in
+  - the core-kernel pivot was implemented and given a clean bounded `1xH100`
+    compare
+  - that clean compare still lost badly:
+    - packed control under the cleaned helper: `1191.52 ms/step`
+    - core `rc8`: `6369.37 ms/step`
+  - losses matched, so the result is a systems boundary failure
+- Active next move:
+  - keep packed HGDN as the mainline again
+  - reconcile why the cleaned packed-control helper reads `~1191 ms/step`
+    while the historical packed H100 reference was `~915 ms/step`
+  - do that reconciliation on the packed path before spending more time on
+    archived custom-kernel branches
+- Core-kernel history and archived checklist live in
   [HGDN_CORE_KERNEL_PLAN.md](HGDN_CORE_KERNEL_PLAN.md).
 
 ## Current compile state
