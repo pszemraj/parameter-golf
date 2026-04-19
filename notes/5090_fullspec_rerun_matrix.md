@@ -76,6 +76,10 @@ Queue launcher:
   - `readout256`
   - `readout128`
   - queue session `14136` launched from commit `e43655d`
+  - completed so far:
+    - `blocks0`: `best_val_bpb=2.4859076582`, `tok/s=3,336,299`
+    - `blocks3`: `best_val_bpb=2.4865782548`, `tok/s=1,837,963`
+  - currently building/training next point: `blocks6`
 - `done` `blocks0_radical_guardrail`
   - `blocks0_resid12_e6_c8t1_r3_current_512m`
 - `done` `blocks0_controller_v1`
