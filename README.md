@@ -26,6 +26,15 @@ python inspect_model.py init core_amp_run   --data ./data/datasets/fineweb10B_sp
 python train_core_amplifier.py core_amp_run   --data ./data/datasets/fineweb10B_sp1024   --seq-len 512 --batch-size 256 --num-steps 7000   --learning-rate 3e-3 --warmup-steps 100 --lr-hold-steps 1500 --min-lr 3e-4   --weight-decay 1e-3 --hard-loss-gamma 0.5 --hard-loss-cap 5.0   --core-layers 5 --core-expansion 2.0 --residual-core 1   --carry-chunks 16 --bptt-chunks 2   --compile --compile-after 200 --compile-mode reduce-overhead --compile-base-path   --wandb --wandb-project pg-core-amp
 ```
 
+Optional in-family temporal axis:
+- `--branch-temporal-mode current`
+  - current default: frozen lag operators project the current recurrent state
+- `--branch-temporal-mode lagged`
+  - explicit temporal taps: each frozen branch projects the controller state from `lag_n` steps ago
+
+This remains in the same frozen-amplifier + parallel recurrent-controller family.
+It does not add attention, token-token mixing, or a transformer block.
+
 Or use the new root wrapper:
 
 ```bash
@@ -52,6 +61,10 @@ Sweep artifacts now rebuild from structured per-run outputs rather than log scra
 - `run_metadata.json`
 - `run_results.json`
 - per-sweep `summary.tsv`, `summary.md`, and `commands.txt`
+
+Sweep override notes:
+- `BRANCH_TEMPORAL_MODE=current|lagged` can be exported before `tools/run_core_amp_sweep.py`
+- this lets you compare frozen temporal-view variants under the same structure/controller protocol
 
 Developer sanity checks:
 

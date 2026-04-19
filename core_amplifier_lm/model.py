@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Optional, Sequence, TypeAlias
 
 import numpy as np
 import torch
@@ -25,6 +25,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 ArrayLike = np.ndarray | torch.Tensor
+BranchTemporalState: TypeAlias = torch.Tensor | tuple[torch.Tensor, torch.Tensor]
 
 
 def _to_numpy_1d(tokens: ArrayLike) -> np.ndarray:
@@ -56,6 +57,13 @@ def _normalize_branch_lags(branch_lags: Sequence[int]) -> tuple[int, ...]:
     if any(lag <= 0 for lag in out):
         raise ValueError(f"all lags must be positive, got {out}")
     return out
+
+
+def _normalize_branch_temporal_mode(mode: str) -> str:
+    normalized = str(mode).strip().lower()
+    if normalized not in {"current", "lagged"}:
+        raise ValueError(f"unknown branch_temporal_mode {mode!r}; expected 'current' or 'lagged'")
+    return normalized
 
 
 def _count_unigrams(tokens: np.ndarray, vocab_size: int) -> np.ndarray:
@@ -880,12 +888,15 @@ class CoreAmplifierLM(nn.Module):
         core_expansion: float = 2.0,
         residual_core: bool = True,
         residual_core_init: float = -2.0,
+        branch_temporal_mode: str = "current",
     ) -> None:
         super().__init__()
         self.vocab_size = spec.vocab_size
         self.core_dim = spec.core_dim
         self.branch_lags = spec.branch_lags
+        self.branch_temporal_mode = _normalize_branch_temporal_mode(branch_temporal_mode)
         self.num_branches = len(spec.branch_lags)
+        self.max_branch_lag = max(self.branch_lags)
         self.amp_dim = self.core_dim * self.num_branches
         self.num_blocks = spec.num_blocks
         self.preferred_amplifier_dtype = amplifier_dtype
@@ -1048,15 +1059,59 @@ class CoreAmplifierLM(nn.Module):
         ):
             self.prepare_runtime_buffers(device=device, amplifier_dtype=desired)
 
-    def initial_state(self, batch_size: int, device: Optional[torch.device] = None) -> torch.Tensor:
+    def initial_state(
+        self, batch_size: int, device: Optional[torch.device] = None
+    ) -> BranchTemporalState:
         if self.core_type == "mingru":
             # MinGRU needs positive hidden states for log-space stability
-            state = F.softplus(self._h0_raw).clamp_min(1e-8).expand(-1, batch_size, -1).contiguous()
+            core_state = (
+                F.softplus(self._h0_raw).clamp_min(1e-8).expand(-1, batch_size, -1).contiguous()
+            )
         else:
-            state = self._h0_raw.expand(-1, batch_size, -1).contiguous()
+            core_state = self._h0_raw.expand(-1, batch_size, -1).contiguous()
         if device is not None:
-            state = state.to(device)
-        return state
+            core_state = core_state.to(device)
+        if self.branch_temporal_mode == "current":
+            return core_state
+        history = core_state.new_zeros(batch_size, self.max_branch_lag, self.core_dim)
+        return core_state, history
+
+    def detach_state(self, state: BranchTemporalState) -> BranchTemporalState:
+        if isinstance(state, tuple):
+            return tuple(part.detach() for part in state)  # type: ignore[return-value]
+        return state.detach()
+
+    def state_norms(self, state: BranchTemporalState) -> list[float]:
+        core_state = state[0] if isinstance(state, tuple) else state
+        return core_state.float().norm(dim=-1).mean(dim=1).detach().cpu().tolist()
+
+    def _split_state(
+        self,
+        state: BranchTemporalState,
+        *,
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        if self.branch_temporal_mode == "current":
+            if isinstance(state, tuple):
+                return state[0].to(device=device, dtype=dtype), None
+            return state.to(device=device, dtype=dtype), None
+
+        if isinstance(state, tuple):
+            core_state, history = state
+        else:
+            core_state = state
+            history = state.new_zeros(batch_size, self.max_branch_lag, self.core_dim)
+        core_state = core_state.to(device=device, dtype=dtype)
+        history = history.to(device=device, dtype=dtype)
+        expected_shape = (batch_size, self.max_branch_lag, self.core_dim)
+        if tuple(history.shape) != expected_shape:
+            raise ValueError(
+                "branch history shape mismatch: "
+                f"expected {expected_shape}, got {tuple(history.shape)}"
+            )
+        return core_state, history
 
     def _embed(self, input_ids: torch.Tensor) -> torch.Tensor:
         emb = F.embedding(input_ids, self.token_embed)
@@ -1068,11 +1123,32 @@ class CoreAmplifierLM(nn.Module):
             emb = emb.to(dtype=core_param.dtype)
         return self.input_adapter(emb)
 
-    def _expand_branches(self, core_out: torch.Tensor) -> torch.Tensor:
+    def _expand_branches(
+        self,
+        core_out: torch.Tensor,
+        history: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         self._ensure_runtime_buffers()
         assert self._lag_ops_runtime is not None
         core_out = core_out.to(dtype=self._lag_ops_runtime.dtype)
-        return torch.einsum("btc,ncd->btnd", core_out, self._lag_ops_runtime)
+        if self.branch_temporal_mode == "current":
+            branches = torch.einsum("btc,ncd->btnd", core_out, self._lag_ops_runtime)
+            return branches, None
+
+        assert history is not None
+        full = torch.cat([history, core_out], dim=1)
+        branch_inputs = torch.stack(
+            [
+                full[
+                    :, self.max_branch_lag - lag : self.max_branch_lag - lag + core_out.shape[1], :
+                ]
+                for lag in self.branch_lags
+            ],
+            dim=2,
+        )
+        next_history = full[:, -self.max_branch_lag :, :].contiguous()
+        branches = torch.einsum("btnc,ncd->btnd", branch_inputs, self._lag_ops_runtime)
+        return branches, next_history
 
     def _amplify(self, branches: torch.Tensor) -> torch.Tensor:
         self._ensure_runtime_buffers()
@@ -1122,19 +1198,24 @@ class CoreAmplifierLM(nn.Module):
     def forward(
         self,
         input_ids: torch.Tensor,
-        state: Optional[torch.Tensor] = None,
+        state: Optional[BranchTemporalState] = None,
         *,
         return_state: bool = False,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor | tuple[torch.Tensor, BranchTemporalState]:
         if input_ids.dtype not in (torch.int32, torch.int64):
             input_ids = input_ids.long()
         batch_size = input_ids.shape[0]
         if state is None:
             state = self.initial_state(batch_size, device=input_ids.device)
         x = self._embed(input_ids)
-        state = state.to(device=x.device, dtype=x.dtype)
-        core_out, next_state = self.core(x, state)
-        branches = self._expand_branches(core_out)
+        core_state, history = self._split_state(
+            state,
+            batch_size=batch_size,
+            device=x.device,
+            dtype=x.dtype,
+        )
+        core_out, next_core_state = self.core(x, core_state)
+        branches, next_history = self._expand_branches(core_out, history=history)
         branches = self._amplify(branches)
         residual_logits = self._residual_logits(branches)
         base_logits = self.base_path_logits(input_ids, dtype=residual_logits.dtype)
@@ -1146,6 +1227,11 @@ class CoreAmplifierLM(nn.Module):
             )
             * residual_logits
         )
+        next_state: BranchTemporalState
+        if next_history is None:
+            next_state = next_core_state
+        else:
+            next_state = (next_core_state, next_history)
         if return_state:
             return logits, next_state
         return logits
@@ -1160,8 +1246,8 @@ class CoreAmplifierLM(nn.Module):
     def step(
         self,
         input_ids: torch.Tensor,
-        state: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        state: Optional[BranchTemporalState] = None,
+    ) -> tuple[torch.Tensor, BranchTemporalState]:
         if input_ids.ndim == 1:
             input_ids = input_ids[:, None]
         logits, next_state = self.forward(input_ids, state=state, return_state=True)

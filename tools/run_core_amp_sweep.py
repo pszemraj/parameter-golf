@@ -400,6 +400,9 @@ def update_controller_config(
     train_defaults: dict[str, str],
 ) -> None:
     cfg = ModelConfig.load(run_dir)
+    branch_temporal_mode = env(
+        "BRANCH_TEMPORAL_MODE", cfg.model.get("branch_temporal_mode", "current")
+    )
     warmup_steps = (
         int(spec.warmup_steps)
         if spec.warmup_steps is not None
@@ -413,6 +416,7 @@ def update_controller_config(
     cfg.model["core_expansion"] = spec.core_expansion
     cfg.model["residual_core"] = spec.residual_core
     cfg.model["residual_core_init"] = spec.residual_core_init
+    cfg.model["branch_temporal_mode"] = branch_temporal_mode
     cfg.training["seq_len"] = spec.seq_len
     cfg.training["batch_size"] = spec.batch_size
     cfg.training["grad_accum"] = int(train_defaults["GRAD_ACCUM"])
@@ -517,6 +521,8 @@ def run_controller_sweep(repo_root: Path) -> None:
         env("CORE_DIM", "48"),
         "--branch-lags",
         env("BRANCH_LAGS", "1,2,3,4,6,8,12,16,24,32,48,64"),
+        "--branch-temporal-mode",
+        env("BRANCH_TEMPORAL_MODE", "current"),
         "--num-blocks",
         env("NUM_BLOCKS", "9"),
         "--fixed-dtype",
@@ -630,6 +636,8 @@ def run_controller_sweep(repo_root: Path) -> None:
             "1" if spec.residual_core else "0",
             "--residual-core-init",
             str(spec.residual_core_init),
+            "--branch-temporal-mode",
+            env("BRANCH_TEMPORAL_MODE", "current"),
             "--val-every",
             train_defaults["VAL_EVERY"],
             "--val-steps",
@@ -746,6 +754,8 @@ def run_structure_sweep(repo_root: Path) -> None:
             env("CORE_DIM", str(defaults["CORE_DIM"])),
             "--branch-lags",
             spec.branch_lags,
+            "--branch-temporal-mode",
+            env("BRANCH_TEMPORAL_MODE", "current"),
             "--num-blocks",
             str(spec.num_blocks),
             "--fixed-dtype",
@@ -828,6 +838,8 @@ def run_structure_sweep(repo_root: Path) -> None:
             env("RESIDUAL_CORE", str(defaults["RESIDUAL_CORE"])),
             "--residual-core-init",
             env("RESIDUAL_CORE_INIT", str(defaults["RESIDUAL_CORE_INIT"])),
+            "--branch-temporal-mode",
+            env("BRANCH_TEMPORAL_MODE", "current"),
             "--val-every",
             env("VAL_EVERY", str(defaults["VAL_EVERY"])),
             "--val-steps",

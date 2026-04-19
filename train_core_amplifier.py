@@ -919,7 +919,7 @@ def evaluate(
             return torch.autocast(device_type=device_type, dtype=amp_dtype)
         return nullcontext()
 
-    state: Optional[torch.Tensor] = None
+    state: Optional[Any] = None
     with torch.no_grad():
         for _ in range(steps):
             batch, reset_state = batcher.next_batch()
@@ -928,7 +928,7 @@ def evaluate(
             if state is None or reset_state:
                 state = core_model.initial_state(inputs.size(0), device=device)
             else:
-                state = state.detach()
+                state = core_model.detach_state(state)
             with autocast_context():
                 logits, state = model(inputs, state=state, return_state=True)
             per_token = cross_entropy_per_token(logits, targets)
@@ -939,8 +939,7 @@ def evaluate(
                 bits = per_token / math.log(2)  # nats → bits, per token
                 total_bits += float(bits.sum().item())
                 total_bytes += int(byte_count_lut[targets.long()].sum().item())
-
-            state = state.detach()
+            state = core_model.detach_state(state)
 
     val_loss = total_loss / max(1, total_tokens)
     val_bpb = (total_bits / max(1, total_bytes)) if total_bytes > 0 else float("nan")
@@ -1127,6 +1126,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--core-expansion", type=float, default=None)
     parser.add_argument("--residual-core", type=int, default=None, choices=[0, 1])
     parser.add_argument("--residual-core-init", type=float, default=None)
+    parser.add_argument(
+        "--branch-temporal-mode",
+        type=str,
+        default=None,
+        choices=["current", "lagged"],
+    )
     parser.add_argument("--readout-rank", type=int, default=None)
 
     # Non-config args
@@ -1298,6 +1303,7 @@ def build_resolved_config_payload(
     core_expansion: float,
     residual_core: bool,
     residual_core_init: float,
+    branch_temporal_mode: str,
     trainable_parameters: int,
     fixed_buffer_bytes: int,
     compile_requested: bool,
@@ -1341,6 +1347,7 @@ def build_resolved_config_payload(
             "core_expansion": float(core_expansion),
             "residual_core": bool(residual_core),
             "residual_core_init": float(residual_core_init),
+            "branch_temporal_mode": branch_temporal_mode,
             "trainable_parameters": int(trainable_parameters),
             "fixed_buffer_bytes": int(fixed_buffer_bytes),
             "smoothing": spec.metadata.get("smoothing"),
@@ -1553,6 +1560,13 @@ def main() -> None:
             args.residual_core_init, m.get("residual_core_init"), md.get("residual_core_init", -2.0)
         )
     )
+    branch_temporal_mode = str(
+        _resolve(
+            args.branch_temporal_mode,
+            m.get("branch_temporal_mode"),
+            md.get("branch_temporal_mode", "current"),
+        )
+    )
     run_name = str(cfg.meta.get("run_name", model_dir.name))
     phase = cfg.meta.get("phase")
     wandb_enabled = bool(args.wandb)
@@ -1581,7 +1595,8 @@ def main() -> None:
     )
     print(
         f"  controller: type={core_type} layers={core_layers} expansion={core_expansion} "
-        f"residual_core={residual_core} bptt_chunks={bptt_chunks} carry_chunks={carry_chunks}"
+        f"residual_core={residual_core} branch_temporal_mode={branch_temporal_mode} "
+        f"bptt_chunks={bptt_chunks} carry_chunks={carry_chunks}"
     )
     if wandb_enabled:
         print(
@@ -1697,6 +1712,7 @@ def main() -> None:
         core_expansion=core_expansion,
         residual_core=residual_core,
         residual_core_init=residual_core_init,
+        branch_temporal_mode=branch_temporal_mode,
     ).to(device)
     model.prepare_runtime_buffers(device=device, amplifier_dtype=runtime_amp_dtype)
     core_model = model
@@ -1812,6 +1828,7 @@ def main() -> None:
         core_expansion=core_expansion,
         residual_core=residual_core,
         residual_core_init=residual_core_init,
+        branch_temporal_mode=branch_temporal_mode,
         trainable_parameters=core_model.trainable_parameters,
         fixed_buffer_bytes=core_model.fixed_nbytes,
         compile_requested=compile_requested,
@@ -1905,7 +1922,7 @@ def main() -> None:
         prior_processed_tokens = max(int(row.get("processed_tokens", 0)) for row in train_rows)
         prior_elapsed_sec = max(float(row.get("elapsed_sec", 0.0)) for row in train_rows)
     seen_train_tokens = prior_processed_tokens
-    train_state: Optional[torch.Tensor] = None
+    train_state: Optional[Any] = None
     model.train()
     use_lr_schedule = lr_schedule == "cosine"
 
@@ -1948,7 +1965,7 @@ def main() -> None:
                 if state is None or reset_state:
                     state = core_model.initial_state(inputs.size(0), device=device)
                 elif j == 0:
-                    state = state.detach()
+                    state = core_model.detach_state(state)
 
                 with autocast_context():
                     logits, state = model(inputs, state=state, return_state=True)
@@ -1969,7 +1986,7 @@ def main() -> None:
                 window_loss = weighted_sum if window_loss is None else window_loss + weighted_sum
 
             assert state is not None and window_loss is not None
-            train_state = state.detach()
+            train_state = core_model.detach_state(state)
             loss_accum = window_loss if loss_accum is None else loss_accum + window_loss
 
         assert loss_accum is not None
@@ -2026,9 +2043,7 @@ def main() -> None:
             )
             if log_state_every > 0 and train_state is not None and step % log_state_every == 0:
                 with torch.no_grad():
-                    state_norms = (
-                        train_state.float().norm(dim=-1).mean(dim=1).detach().cpu().tolist()
-                    )
+                    state_norms = core_model.state_norms(train_state)
                     gate_values = core_model.residual_gate_values()
                 state_s = ",".join(f"{x:.3f}" for x in state_norms[:8])
                 gate_s = ",".join(f"{x:.3f}" for x in gate_values[:8]) if gate_values else "none"

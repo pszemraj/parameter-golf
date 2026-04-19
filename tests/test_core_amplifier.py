@@ -205,6 +205,75 @@ def test_residual_mingru_controller_step_consistency():
     assert (full - stepwise).abs().max().item() < 1e-4
 
 
+def test_lagged_temporal_mode_step_consistency():
+    """Explicit lagged branch taps should preserve forward/step equivalence."""
+    rng = np.random.default_rng(SEED)
+    tokens = rng.integers(0, VOCAB, size=20_000, dtype=np.int64)
+    spec = build_amplifier_spec(
+        tokens,
+        vocab_size=VOCAB,
+        core_dim=8,
+        branch_lags=(1, 2, 4),
+        num_blocks=1,
+        fixed_dtype=torch.float16,
+    )
+    from core_amplifier_lm import CoreAmplifierLM
+
+    model = CoreAmplifierLM(
+        spec,
+        core_layers=3,
+        core_expansion=2.0,
+        residual_core=True,
+        residual_core_init=-2.0,
+        branch_temporal_mode="lagged",
+        amplifier_dtype=torch.float32,
+    )
+
+    x = torch.randint(0, VOCAB, (2, 19))
+    with torch.no_grad():
+        full = model(x[:, :-1])
+        state = model.initial_state(2)
+        parts = []
+        for t in range(x.size(1) - 1):
+            logits, state = model.step(x[:, t], state)
+            parts.append(logits[:, None, :])
+        stepwise = torch.cat(parts, dim=1)
+    assert (full - stepwise).abs().max().item() < 1e-4
+
+
+def test_lagged_temporal_mode_chunk_carry_matches_full_forward():
+    """Lagged branch history should carry exactly across chunk boundaries."""
+    rng = np.random.default_rng(SEED)
+    tokens = rng.integers(0, VOCAB, size=20_000, dtype=np.int64)
+    spec = build_amplifier_spec(
+        tokens,
+        vocab_size=VOCAB,
+        core_dim=8,
+        branch_lags=(1, 2, 4),
+        num_blocks=1,
+        fixed_dtype=torch.float16,
+    )
+    from core_amplifier_lm import CoreAmplifierLM
+
+    model = CoreAmplifierLM(
+        spec,
+        core_layers=3,
+        core_expansion=2.0,
+        residual_core=True,
+        residual_core_init=-2.0,
+        branch_temporal_mode="lagged",
+        amplifier_dtype=torch.float32,
+    )
+
+    x = torch.randint(0, VOCAB, (2, 17))
+    with torch.no_grad():
+        full = model(x)
+        first, state = model(x[:, :7], return_state=True)
+        second, _ = model(x[:, 7:], state=state, return_state=True)
+        stitched = torch.cat([first, second], dim=1)
+    assert (full - stitched).abs().max().item() < 1e-4
+
+
 def test_hold_then_cosine_lr_schedule():
     """The controller LR should warm up, hold, then decay."""
     from train_core_amplifier import get_lr
@@ -225,6 +294,7 @@ def test_record_defaults_match_recommended_run():
     assert model["core_layers"] == 5
     assert model["core_expansion"] == 2.0
     assert model["residual_core"] is True
+    assert model["branch_temporal_mode"] == "current"
     assert train["batch_size"] == 256
     assert train["carry_chunks"] == 16
     assert train["bptt_chunks"] == 2
@@ -665,6 +735,68 @@ def test_training_script_single_file():
             ],
             expect_in_stdout="Training complete",
         )
+
+
+def test_training_script_lagged_branch_mode():
+    """Training should support lagged branch taps and record them in resolved config."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir = Path(tmpdir)
+        _, gz_path = _make_gz(tmpdir)
+        model_dir = tmpdir / "model_lagged"
+
+        _run_inspect(
+            [
+                "init",
+                str(model_dir),
+                "--data",
+                str(gz_path),
+                "--storage-dtype",
+                "uint8",
+                "--vocab-size",
+                "256",
+                "--core-dim",
+                "8",
+                "--branch-lags",
+                "1,2,4",
+                "--branch-temporal-mode",
+                "lagged",
+                "--num-blocks",
+                "1",
+                "--spec-strategy",
+                "stream",
+            ]
+        )
+
+        _run_train(
+            [
+                str(model_dir),
+                "--num-steps",
+                "2",
+                "--seq-len",
+                "32",
+                "--batch-size",
+                "4",
+                "--carry-chunks",
+                "2",
+                "--val-every",
+                "1",
+                "--val-steps",
+                "1",
+                "--log-every",
+                "1",
+                "--learning-rate",
+                "1e-3",
+                "--lr-schedule",
+                "none",
+                "--force-device",
+                "cpu",
+                "--no-mmap",
+            ],
+            expect_in_stdout="Training complete",
+        )
+
+        resolved = (model_dir / "resolved_config.json").read_text()
+        assert '"branch_temporal_mode": "lagged"' in resolved
 
 
 # ---------------------------------------------------------------------------
