@@ -193,6 +193,34 @@ See [REDUNDANCY_AUDIT.md](REDUNDANCY_AUDIT.md) for the concrete code targets.
 - Keep this checkpoint as the minimum local proof before asking for another
   H100 rerun on the packed path.
 
+## 9. Record the 2026-04-19 packed-loader follow-up checkpoint
+
+- Base commit before the loader follow-up: `e08be3a`.
+- Scope of the validated packed-path follow-up:
+  - both trainers now stage `x` tokens as `int32` and keep `y` as `int64`
+    across train and eval batch staging
+  - `train_gpt.py` now times the final int8 roundtrip eval with CUDA events on
+    CUDA instead of broad `torch.cuda.synchronize()` calls
+  - both distributed token loaders now materialize only the local rank span and
+    skip the other ranks' spans in-stream instead of reading the full global
+    chunk on every rank and slicing one local view out of it
+- Contract validation:
+  - `PYTHONPATH=$PWD conda run -s --name pg python /tmp/check_loader_contract.py`
+    returned `{'loader_contract_ok': True}` after matching the new loader
+    against the old global-chunk reference for `world_size` `1`, `2`, and `4`
+    across multiple steps on `local-scratch/smoke_data`
+  - `local-scratch/smoke_train_gpt.log` passed again with compile enabled
+  - `local-scratch/smoke_train_gpt_hybrid.log` passed again with compile
+    enabled
+- Local proxy evidence:
+  - `PYTHONPATH=$PWD conda run -s --name pg python /tmp/bench_token_input_width.py`
+    measured:
+    - `int64_ms = 4.2373`
+    - `int32_ms = 3.2885`
+    - `speedup_x = 1.2885x`
+  - treat this as local directionality only; the real keep/kill still belongs
+    to the next bounded H100 packed-path rerun.
+
 ## Stop rules
 
 - The current post-conv front-end seam is closed after `h100k20`.

@@ -673,6 +673,22 @@ class TokenStream:
         self.tokens = load_data_shard(self.files[self.file_idx])
         self.pos = 0
 
+    def skip(self, n: int) -> None:
+        """Advance the stream by ``n`` tokens without materializing them.
+
+        :param int n: Number of tokens to discard.
+        """
+
+        remaining = n
+        while remaining > 0:
+            avail = self.tokens.numel() - self.pos
+            if avail <= 0:
+                self._advance_file()
+                continue
+            k = min(remaining, avail)
+            self.pos += k
+            remaining -= k
+
     def take(self, n: int) -> Tensor:
         """Take a contiguous token span across shard boundaries.
 
@@ -710,18 +726,19 @@ class DistributedTokenLoader:
         self.stream = TokenStream(files)
         self._x_stage: Tensor | None = None
         self._y_stage: Tensor | None = None
+        self._per_rank_span: int | None = None
 
     def _stage_batch_views(self, x_cpu: Tensor, y_cpu: Tensor) -> tuple[Tensor, Tensor]:
         """Copy one CPU batch pair into reusable pinned staging buffers.
 
         :param Tensor x_cpu: CPU input token ids shaped `(batch, seq)`.
         :param Tensor y_cpu: CPU target token ids shaped `(batch, seq)`.
-        :return tuple[Tensor, Tensor]: Reusable pinned int64 staging tensors.
+        :return tuple[Tensor, Tensor]: Reusable pinned `x:int32` / `y:int64` staging tensors.
         """
         if self.device.type != "cuda":
-            return x_cpu.to(dtype=torch.int64), y_cpu.to(dtype=torch.int64)
+            return x_cpu.to(dtype=torch.int32), y_cpu.to(dtype=torch.int64)
         if self._x_stage is None or tuple(self._x_stage.shape) != tuple(x_cpu.shape):
-            self._x_stage = torch.empty_like(x_cpu, dtype=torch.int64, pin_memory=True)
+            self._x_stage = torch.empty_like(x_cpu, dtype=torch.int32, pin_memory=True)
         if self._y_stage is None or tuple(self._y_stage.shape) != tuple(y_cpu.shape):
             self._y_stage = torch.empty_like(y_cpu, dtype=torch.int64, pin_memory=True)
         self._x_stage.copy_(x_cpu)
@@ -740,9 +757,17 @@ class DistributedTokenLoader:
         """
         local_tokens = global_tokens // (self.world_size * grad_accum_steps)
         per_rank_span = local_tokens + 1
-        chunk = self.stream.take(per_rank_span * self.world_size)
-        start = self.rank * per_rank_span
-        local = chunk[start : start + per_rank_span]
+        if self._per_rank_span is None:
+            self.stream.skip(self.rank * per_rank_span)
+            self._per_rank_span = per_rank_span
+        elif self._per_rank_span != per_rank_span:
+            raise RuntimeError(
+                "DistributedTokenLoader requires a stable per-rank span within one run, "
+                f"got {self._per_rank_span} then {per_rank_span}."
+            )
+        local = self.stream.take(per_rank_span)
+        if self.world_size > 1:
+            self.stream.skip((self.world_size - 1) * per_rank_span)
         x_cpu = local[:-1].reshape(-1, seq_len)
         y_cpu = local[1:].reshape(-1, seq_len)
         x_stage, y_stage = self._stage_batch_views(x_cpu, y_cpu)
@@ -825,13 +850,13 @@ def stage_eval_batch_views(
 
     if device.type != "cuda":
         return (
-            x_cpu.to(device=device, dtype=torch.int64),
+            x_cpu.to(device=device, dtype=torch.int32),
             y_cpu.to(device=device, dtype=torch.int64),
             x_stage,
             y_stage,
         )
     if x_stage is None or tuple(x_stage.shape) != tuple(x_cpu.shape):
-        x_stage = torch.empty_like(x_cpu, dtype=torch.int64, pin_memory=True)
+        x_stage = torch.empty_like(x_cpu, dtype=torch.int32, pin_memory=True)
         y_stage = torch.empty_like(y_cpu, dtype=torch.int64, pin_memory=True)
     x_stage.copy_(x_cpu)
     y_stage.copy_(y_cpu)
