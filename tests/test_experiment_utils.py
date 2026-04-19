@@ -19,7 +19,11 @@ from core_amplifier_lm.experiment import (
     summarize_run_dir,
     trainable_int8_zlib_bytes,
 )
-from tools.run_core_amp_sweep import parse_controller_specs, structure_preset_defaults
+from tools.run_core_amp_sweep import (
+    controller_spec_max_tokens_default,
+    parse_controller_specs,
+    structure_preset_defaults,
+)
 
 PKG_ROOT = Path(__file__).resolve().parents[1]
 
@@ -72,15 +76,20 @@ def test_artifact_estimate_includes_trainable_payload(tmp_path: Path):
     assert bigger == base + 123
 
 
-def test_structure_default_preset_uses_real_5090_budget():
+def test_structure_default_preset_uses_full_frozen_spec_budget():
     defaults = structure_preset_defaults("structure_default")
     assert defaults["CORE_DIM"] == "48"
-    assert defaults["SPEC_MAX_TOKENS"] == "5000000"
+    assert defaults["SPEC_MAX_TOKENS"] == ""
     assert defaults["SEQ_LEN"] == "512"
     assert defaults["NUM_STEPS"] == "192"
     assert defaults["DATA_MAX_TOKENS"] == ""
     assert defaults["FORCE_DEVICE"] == ""
     assert defaults["NO_MMAP"] is False
+
+
+def test_controller_default_preset_uses_full_frozen_spec_budget():
+    assert controller_spec_max_tokens_default("controller_default") == ""
+    assert controller_spec_max_tokens_default("cpu_smoke") == "500000"
 
 
 def test_parse_controller_specs_accepts_optional_per_run_warmup():

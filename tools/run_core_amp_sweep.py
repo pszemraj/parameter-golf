@@ -237,9 +237,13 @@ def controller_default_specs(preset: str) -> list[ControllerRunSpec]:
 
 
 def controller_spec_max_tokens_default(preset: str) -> str:
-    """Return the default frozen-spec build budget for a controller preset."""
+    """Return the default frozen-spec build budget for a controller preset.
+
+    Real 5090 controller sweeps should build the frozen spec from the full
+    available training shard set unless the caller explicitly requests a cap.
+    """
     if preset == "controller_default":
-        return "5000000"
+        return ""
     if preset == "cpu_smoke":
         return "500000"
     raise SystemExit(f"unknown controller preset: {preset}")
@@ -303,7 +307,7 @@ def structure_preset_defaults(preset: str) -> dict[str, str | bool]:
             "FIXED_DTYPE": "bfloat16",
             "EMBEDDING_INIT": "spectral",
             "SPEC_STRATEGY": "auto",
-            "SPEC_MAX_TOKENS": "5000000",
+            "SPEC_MAX_TOKENS": "",
             "SEQ_LEN": "512",
             "BATCH_SIZE": "256",
             "NUM_STEPS": "192",
@@ -550,6 +554,8 @@ def run_controller_sweep(repo_root: Path) -> None:
         "-2.0",
     ]
     spec_max_tokens = env("SPEC_MAX_TOKENS", controller_spec_max_tokens_default(preset))
+    spec_budget_label = spec_max_tokens if spec_max_tokens else "full_available_train_shards"
+    print(f"Frozen spec budget: {spec_budget_label}", flush=True)
     if spec_max_tokens:
         init_cmd += ["--max-tokens", spec_max_tokens]
 
@@ -787,6 +793,8 @@ def run_structure_sweep(repo_root: Path) -> None:
             env("RESIDUAL_CORE_INIT", str(defaults["RESIDUAL_CORE_INIT"])),
         ]
         spec_max_tokens = env("SPEC_MAX_TOKENS", str(defaults["SPEC_MAX_TOKENS"]))
+        spec_budget_label = spec_max_tokens if spec_max_tokens else "full_available_train_shards"
+        print(f"Frozen spec budget: {spec_budget_label}", flush=True)
         if spec_max_tokens:
             init_cmd += ["--max-tokens", spec_max_tokens]
         if spec.readout_rank is not None:
