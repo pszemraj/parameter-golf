@@ -676,6 +676,26 @@ class DistributedTokenLoader:
         self.world_size = world_size
         self.device = device
         self.stream = TokenStream(pattern)
+        self._x_stage: Tensor | None = None
+        self._y_stage: Tensor | None = None
+
+    def _stage_batch_views(self, x_cpu: Tensor, y_cpu: Tensor) -> tuple[Tensor, Tensor]:
+        """Copy one CPU batch pair into reusable pinned staging buffers.
+
+        :param Tensor x_cpu: CPU input token ids shaped `(batch, seq)`.
+        :param Tensor y_cpu: CPU target token ids shaped `(batch, seq)`.
+        :return tuple[Tensor, Tensor]: Reusable pinned int64 staging tensors.
+        """
+
+        if self.device.type != "cuda":
+            return x_cpu.to(dtype=torch.int64), y_cpu.to(dtype=torch.int64)
+        if self._x_stage is None or tuple(self._x_stage.shape) != tuple(x_cpu.shape):
+            self._x_stage = torch.empty_like(x_cpu, dtype=torch.int64, pin_memory=True)
+        if self._y_stage is None or tuple(self._y_stage.shape) != tuple(y_cpu.shape):
+            self._y_stage = torch.empty_like(y_cpu, dtype=torch.int64, pin_memory=True)
+        self._x_stage.copy_(x_cpu)
+        self._y_stage.copy_(y_cpu)
+        return self._x_stage, self._y_stage
 
     def next_batch(
         self, global_tokens: int, seq_len: int, grad_accum_steps: int
@@ -692,12 +712,13 @@ class DistributedTokenLoader:
         per_rank_span = local_tokens + 1
         chunk = self.stream.take(per_rank_span * self.world_size)
         start = self.rank * per_rank_span
-        local = chunk[start : start + per_rank_span].to(dtype=torch.int64)
-        x = local[:-1].reshape(-1, seq_len)
-        y = local[1:].reshape(-1, seq_len)
-        return x.to(self.device, non_blocking=True), y.to(
-            self.device, non_blocking=True
-        )
+        local = chunk[start : start + per_rank_span]
+        x_cpu = local[:-1].reshape(-1, seq_len)
+        y_cpu = local[1:].reshape(-1, seq_len)
+        x_stage, y_stage = self._stage_batch_views(x_cpu, y_cpu)
+        x = x_stage.to(self.device, non_blocking=True)
+        y = y_stage.to(self.device, non_blocking=True)
+        return x, y
 
 
 # -----------------------------
@@ -818,7 +839,7 @@ class Rotary(nn.Module):
         super().__init__()
         inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
-        self._seq_len_cached = 0
+        self._cache_key: tuple[int, str, int | None, torch.dtype] | None = None
         self._cos_cached: Tensor | None = None
         self._sin_cached: Tensor | None = None
 
@@ -833,18 +854,23 @@ class Rotary(nn.Module):
         :return tuple[Tensor, Tensor]: Cosine and sine RoPE tables.
         """
 
+        cache_key = (seq_len, device.type, device.index, dtype)
         if (
             self._cos_cached is None
             or self._sin_cached is None
-            or self._seq_len_cached != seq_len
-            or self._cos_cached.device != device
+            or self._cache_key != cache_key
         ):
             t = torch.arange(seq_len, device=device, dtype=self.inv_freq.dtype)
             freqs = torch.outer(t, self.inv_freq.to(device))
-            self._cos_cached = freqs.cos()[None, None, :, :]
-            self._sin_cached = freqs.sin()[None, None, :, :]
-            self._seq_len_cached = seq_len
-        return self._cos_cached.to(dtype=dtype), self._sin_cached.to(dtype=dtype)
+            cos = freqs.cos()[None, None, :, :]
+            sin = freqs.sin()[None, None, :, :]
+            if dtype != torch.float32:
+                cos = cos.to(dtype=dtype)
+                sin = sin.to(dtype=dtype)
+            self._cos_cached = cos
+            self._sin_cached = sin
+            self._cache_key = cache_key
+        return self._cos_cached, self._sin_cached
 
 
 def apply_rotary_emb(x: Tensor, cos: Tensor, sin: Tensor) -> Tensor:

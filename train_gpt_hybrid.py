@@ -707,6 +707,25 @@ class DistributedTokenLoader:
         """
         self.rank, self.world_size, self.device = rank, world_size, device
         self.stream = TokenStream(files)
+        self._x_stage: Tensor | None = None
+        self._y_stage: Tensor | None = None
+
+    def _stage_batch_views(self, x_cpu: Tensor, y_cpu: Tensor) -> tuple[Tensor, Tensor]:
+        """Copy one CPU batch pair into reusable pinned staging buffers.
+
+        :param Tensor x_cpu: CPU input token ids shaped `(batch, seq)`.
+        :param Tensor y_cpu: CPU target token ids shaped `(batch, seq)`.
+        :return tuple[Tensor, Tensor]: Reusable pinned int64 staging tensors.
+        """
+        if self.device.type != "cuda":
+            return x_cpu.to(dtype=torch.int64), y_cpu.to(dtype=torch.int64)
+        if self._x_stage is None or tuple(self._x_stage.shape) != tuple(x_cpu.shape):
+            self._x_stage = torch.empty_like(x_cpu, dtype=torch.int64, pin_memory=True)
+        if self._y_stage is None or tuple(self._y_stage.shape) != tuple(y_cpu.shape):
+            self._y_stage = torch.empty_like(y_cpu, dtype=torch.int64, pin_memory=True)
+        self._x_stage.copy_(x_cpu)
+        self._y_stage.copy_(y_cpu)
+        return self._x_stage, self._y_stage
 
     def next_batch(
         self, global_tokens: int, seq_len: int, grad_accum_steps: int
@@ -722,12 +741,13 @@ class DistributedTokenLoader:
         per_rank_span = local_tokens + 1
         chunk = self.stream.take(per_rank_span * self.world_size)
         start = self.rank * per_rank_span
-        local = chunk[start : start + per_rank_span].to(dtype=torch.int64)
-        x = local[:-1].reshape(-1, seq_len)
-        y = local[1:].reshape(-1, seq_len)
-        return x.to(self.device, non_blocking=True), y.to(
-            self.device, non_blocking=True
-        )
+        local = chunk[start : start + per_rank_span]
+        x_cpu = local[:-1].reshape(-1, seq_len)
+        y_cpu = local[1:].reshape(-1, seq_len)
+        x_stage, y_stage = self._stage_batch_views(x_cpu, y_cpu)
+        x = x_stage.to(self.device, non_blocking=True)
+        y = y_stage.to(self.device, non_blocking=True)
+        return x, y
 
 
 # =====================================================================

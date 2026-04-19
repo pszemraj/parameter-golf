@@ -1698,7 +1698,7 @@ class Rotary(nn.Module):
             1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim)),
             persistent=False,
         )
-        self._cache_len = 0
+        self._cache_key: tuple[int, str, int | None, torch.dtype] | None = None
         self._cos: Optional[Tensor] = None
         self._sin: Optional[Tensor] = None
 
@@ -1712,17 +1712,19 @@ class Rotary(nn.Module):
         :param torch.dtype dtype: Target dtype for the cache.
         :return tuple[Tensor, Tensor]: Cosine and sine rotary tables.
         """
-        if (
-            self._cos is None
-            or self._cache_len != seq_len
-            or self._cos.device != device
-        ):
+        cache_key = (seq_len, device.type, device.index, dtype)
+        if self._cos is None or self._sin is None or self._cache_key != cache_key:
             t = torch.arange(seq_len, device=device, dtype=self.inv_freq.dtype)
             freqs = torch.outer(t, self.inv_freq.to(device))
-            self._cos = freqs.cos()[None, None, :, :]
-            self._sin = freqs.sin()[None, None, :, :]
-            self._cache_len = seq_len
-        return self._cos.to(dtype), self._sin.to(dtype)
+            cos = freqs.cos()[None, None, :, :]
+            sin = freqs.sin()[None, None, :, :]
+            if dtype != torch.float32:
+                cos = cos.to(dtype)
+                sin = sin.to(dtype)
+            self._cos = cos
+            self._sin = sin
+            self._cache_key = cache_key
+        return self._cos, self._sin
 
 
 def apply_rotary_emb(x: Tensor, cos: Tensor, sin: Tensor) -> Tensor:

@@ -21,6 +21,14 @@ Last updated: 2026-04-18 19:15 CDT
 - Main question:
   - is the current branch's packed path still near the historical
     `~915 ms/step` H100 reference, or did the packed stack itself drift?
+- Local packed-path runtime cleanup now landed on this branch:
+  - both trainers use reusable pinned `int64` host staging buffers for the
+    rank-local token batches instead of pageable CPU widening every step
+  - both attention implementations now cache rotary tables by
+    `(seq_len, device, dtype)` rather than recasting cached fp32 tables on
+    every call
+  - these are local/runtime cleanups only until the next bounded H100 compare
+    confirms or rejects their end-to-end value
 - Core history and keep/kill notes remain in
   [HGDN_CORE_KERNEL_PLAN.md](HGDN_CORE_KERNEL_PLAN.md).
 
