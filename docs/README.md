@@ -53,6 +53,8 @@ Branch: `exp/hgdn`
   - the exact 8x matched-control bridge is complete
   - do not reopen broad H100 architecture search or another cross-family ladder without fresh contradictory exact evidence
 - Exact metrics, reject rationale, and run history live in [PROFILING_LOG.md](PROFILING_LOG.md).
+- Packed-path timing/fairness audit for the current branch lives in
+  [HGDN_PACKED_DRIFT_AUDIT.md](HGDN_PACKED_DRIFT_AUDIT.md).
 
 ## Operating rules
 

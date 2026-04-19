@@ -1,9 +1,11 @@
 # HGDN Next Steps
 
-Last updated: 2026-04-19 12:30 CDT
+Last updated: 2026-04-19 18:50 CDT
 
 ## 0. Reconcile the packed H100 winner path on the current branch
 
+- Packed-path drift/fairness audit for this reconciliation work now lives in
+  [HGDN_PACKED_DRIFT_AUDIT.md](HGDN_PACKED_DRIFT_AUDIT.md).
 - The clean bounded core compare is done and fair enough to trust.
 - Result:
   - packed control under the cleaned core helper: `1191.52 ms/step`
