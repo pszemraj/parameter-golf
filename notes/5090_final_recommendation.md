@@ -1,5 +1,10 @@
 # 5090 Final Recommendation
 
+> [!WARNING]
+> This note currently contains provisional results from a now-invalidated frozen-spec contract.
+> The affected runs built the frozen spec with `SPEC_MAX_TOKENS=5000000` instead of the full available train-shard set.
+> Commit `57d4261` fixes that default. These results are being rerun and should not be treated as the final local recommendation.
+
 ## Current Status
 
 - The Core/Amplifier path is logging cleanly to W&B project `pg-core-amp`.
