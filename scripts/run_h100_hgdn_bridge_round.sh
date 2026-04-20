@@ -42,7 +42,7 @@ train_log_every="${TRAIN_LOG_EVERY:-200}"
 val_batch_size="${VAL_BATCH_SIZE:-524288}"
 max_wallclock_seconds="${MAX_WALLCLOCK_SECONDS:-600}"
 compile="${COMPILE:-1}"
-compile_strategy="${COMPILE_STRATEGY:-model}"
+compile_strategy="${COMPILE_STRATEGY:-hybrid}"
 depth_mlp_mult="${DEPTH_MLP_MULT:-4.0}"
 
 hgdn_config="${HGDN_CONFIG:-configs/hgdn/retune_trim_layers_14.toml}"

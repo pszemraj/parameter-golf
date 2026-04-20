@@ -1,6 +1,6 @@
 # HGDN Branch Status
 
-Last updated: 2026-04-19 22:30 CDT
+Last updated: 2026-04-20 13:40 CDT
 
 Branch: `exp/hgdn-k-core`
 
@@ -43,21 +43,42 @@ Branch: `exp/hgdn-k-core`
 
 ## Current H100 work
 
-- The next packed-path H100 step is the compile-strategy matrix on the live14
-  replay shell:
+- `59d0817a` (2026-04-20 02:38 UTC / 2026-04-19 21:38 CDT): the `1xH100`
+  live14 packed compile matrix
+  closed on the active replay shell.
+  - `hybrid`: `799.05 ms/step`, sampled val `4.1849`, final exact roundtrip
+    `4.25972394`
+  - `model`: `799.32 ms/step`, sampled val `4.2709`, final exact roundtrip
+    `4.43016197`
+  - `selective`: `875.67 ms/step`, sampled val `4.1869`, final exact roundtrip
+    `4.15098498`
+- Packed-path default stays `hybrid` for speed-sensitive helpers.
+- `selective` stays alive for the exact `8xH100` tiebreak.
+
+- The next packed-path H100 steps are:
+  - exact `8xH100` live14 packed tiebreak: `hybrid` vs `selective`
+  - bounded naive-contract sanity batch:
+    - exact repo baseline from `train_gpt.py`
+    - live HGDN finalist
+    - hybrid-trainer attention-only control
+    - direct baseline leg explicitly pins `DATA_PATH`, `TOKENIZER_PATH`, and
+      `VOCAB_SIZE`
+
+Exact 8x packed tiebreak:
 
 ```bash
 USE_WANDB=0 WANDB_MODE=offline \
-RUN_PREFIX=h100packed_compilematrix \
-bash scripts/run_h100_single_gpu_hgdn.sh fixed2k-hybrid-compile-matrix
+RUN_PREFIX_BASE=h100packed_tiebreak \
+bash scripts/run_h100_hgdn_compile_tiebreak_round.sh
 ```
 
-- After that matrix, the next paid architecture gate is the bounded naive-contract
-  batch:
-  - exact repo baseline from `train_gpt.py`
-  - live HGDN finalist
-  - hybrid-trainer attention-only control
-  - `WEIGHT_DECAY=0` on the hybrid-trainer legs
+Naive-contract sanity batch:
+
+```bash
+USE_WANDB=0 WANDB_MODE=offline \
+RUN_PREFIX_BASE=h100naive1 \
+bash scripts/run_h100_hgdn_naive_contract_round.sh
+```
 
 Details and open items live in [TODO.md](TODO.md).
 
@@ -72,6 +93,7 @@ Batch helpers:
 - [`../scripts/run_local_hgdn_resize_round.sh`](../scripts/run_local_hgdn_resize_round.sh)
 - [`../scripts/run_h100_hgdn_resize_round.sh`](../scripts/run_h100_hgdn_resize_round.sh)
 - [`../scripts/run_h100_hgdn_bridge_round.sh`](../scripts/run_h100_hgdn_bridge_round.sh)
+- [`../scripts/run_h100_hgdn_compile_tiebreak_round.sh`](../scripts/run_h100_hgdn_compile_tiebreak_round.sh)
 - [`../scripts/run_h100_hgdn_naive_contract_round.sh`](../scripts/run_h100_hgdn_naive_contract_round.sh)
 - [`../scripts/run_h100_single_gpu_hgdn.sh`](../scripts/run_h100_single_gpu_hgdn.sh)
 - [`../scripts/run_h100_single_gpu_hgdn_profile.sh`](../scripts/run_h100_single_gpu_hgdn_profile.sh)

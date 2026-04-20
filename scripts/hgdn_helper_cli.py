@@ -466,6 +466,9 @@ def cmd_write_h100_naive_contract_manifest(args: argparse.Namespace) -> int:
                 "trainer": "train_gpt.py",
                 "mode": "direct",
                 "run_id": args.gpt_naive_run_id,
+                "data_path": args.baseline_data_path,
+                "tokenizer_path": args.baseline_tokenizer_path,
+                "vocab_size": args.baseline_vocab_size,
                 "num_layers": 9,
                 "model_dim": 512,
                 "num_heads": 8,
@@ -492,6 +495,57 @@ def cmd_write_h100_naive_contract_manifest(args: argparse.Namespace) -> int:
                 "gdn_ratio": 0,
                 "mlp_mult": 2,
             },
+        ],
+    }
+    write_json(args.output, manifest)
+    return 0
+
+
+def cmd_write_h100_compile_tiebreak_manifest(args: argparse.Namespace) -> int:
+    """Write the exact-8x compile-tiebreak manifest.
+
+    :param argparse.Namespace args: Parsed CLI arguments.
+    :return int: Shell-style exit code.
+    """
+    if len(args.run_id) != len(args.compile_strategy):
+        raise SystemExit("run-id and compile-strategy counts must match")
+    manifest = {
+        "run_prefix_base": args.run_prefix_base,
+        "wandb_project": args.wandb_project,
+        "wandb_mode": args.wandb_mode,
+        "archive_output": str(args.archive_output),
+        "command_log": args.command_log,
+        "matched_logs": args.matched_logs,
+        "contract": {
+            "ngpu": args.ngpu,
+            "iterations": args.iterations,
+            "train_batch_tokens": args.train_batch_tokens,
+            "train_seq_len": args.train_seq_len,
+            "val_loss_every": args.val_loss_every,
+            "train_log_every": args.train_log_every,
+            "val_batch_size": args.val_batch_size,
+            "max_wallclock_seconds": args.max_wallclock_seconds,
+            "compile": args.compile_enabled,
+            "torch_logs": args.torch_logs or None,
+            "torch_trace": args.torch_trace or None,
+            "omp_num_threads": args.omp_num_threads,
+            "mkl_num_threads": args.mkl_num_threads,
+            "openblas_num_threads": args.openblas_num_threads,
+            "numexpr_num_threads": args.numexpr_num_threads,
+        },
+        "runs": [
+            {
+                "label": f"HGDN finalist COMPILE_STRATEGY={compile_strategy}",
+                "trainer": "train_gpt_hybrid.py",
+                "mode": "single-live14",
+                "run_id": run_id,
+                "compile_strategy": compile_strategy,
+                "hgdn_config": args.hgdn_config,
+                "hgdn_kernel_config": args.hgdn_kernel_config,
+            }
+            for run_id, compile_strategy in zip(
+                args.run_id, args.compile_strategy, strict=True
+            )
         ],
     }
     write_json(args.output, manifest)
@@ -712,6 +766,9 @@ def build_parser() -> argparse.ArgumentParser:
     h100_naive.add_argument("--compile-enabled", type=parse_bool_flag, required=True)
     h100_naive.add_argument("--compile-strategy", required=True)
     h100_naive.add_argument("--weight-decay", type=float, required=True)
+    h100_naive.add_argument("--baseline-data-path", required=True)
+    h100_naive.add_argument("--baseline-tokenizer-path", required=True)
+    h100_naive.add_argument("--baseline-vocab-size", type=int, required=True)
     h100_naive.add_argument("--gpt-naive-run-id", required=True)
     h100_naive.add_argument("--hgdn-config", required=True)
     h100_naive.add_argument("--hgdn-kernel-config", required=True)
@@ -723,6 +780,48 @@ def build_parser() -> argparse.ArgumentParser:
     )
     h100_naive.add_argument("--naive-reference-stop-bpb", type=float, required=True)
     h100_naive.set_defaults(func=cmd_write_h100_naive_contract_manifest)
+
+    h100_compile_tiebreak = subparsers.add_parser(
+        "write-h100-compile-tiebreak-manifest",
+        help="write the exact-8x packed HGDN compile-tiebreak manifest",
+    )
+    h100_compile_tiebreak.add_argument("--output", type=Path, required=True)
+    h100_compile_tiebreak.add_argument("--run-prefix-base", required=True)
+    h100_compile_tiebreak.add_argument("--wandb-project", required=True)
+    h100_compile_tiebreak.add_argument("--wandb-mode", required=True)
+    h100_compile_tiebreak.add_argument("--archive-output", type=Path, required=True)
+    h100_compile_tiebreak.add_argument(
+        "--matched-logs", type=parse_bool_flag, required=True
+    )
+    h100_compile_tiebreak.add_argument("--command-log", required=True)
+    h100_compile_tiebreak.add_argument("--torch-logs", default="")
+    h100_compile_tiebreak.add_argument("--torch-trace", default="")
+    h100_compile_tiebreak.add_argument("--omp-num-threads", type=int, required=True)
+    h100_compile_tiebreak.add_argument("--mkl-num-threads", type=int, required=True)
+    h100_compile_tiebreak.add_argument(
+        "--openblas-num-threads", type=int, required=True
+    )
+    h100_compile_tiebreak.add_argument("--numexpr-num-threads", type=int, required=True)
+    h100_compile_tiebreak.add_argument("--ngpu", type=int, required=True)
+    h100_compile_tiebreak.add_argument("--iterations", type=int, required=True)
+    h100_compile_tiebreak.add_argument("--train-batch-tokens", type=int, required=True)
+    h100_compile_tiebreak.add_argument("--train-seq-len", type=int, required=True)
+    h100_compile_tiebreak.add_argument("--val-loss-every", type=int, required=True)
+    h100_compile_tiebreak.add_argument("--train-log-every", type=int, required=True)
+    h100_compile_tiebreak.add_argument("--val-batch-size", type=int, required=True)
+    h100_compile_tiebreak.add_argument(
+        "--max-wallclock-seconds", type=float, required=True
+    )
+    h100_compile_tiebreak.add_argument(
+        "--compile-enabled", type=parse_bool_flag, required=True
+    )
+    h100_compile_tiebreak.add_argument("--hgdn-config", required=True)
+    h100_compile_tiebreak.add_argument("--hgdn-kernel-config", required=True)
+    h100_compile_tiebreak.add_argument("--run-id", action="append", default=[])
+    h100_compile_tiebreak.add_argument(
+        "--compile-strategy", action="append", default=[]
+    )
+    h100_compile_tiebreak.set_defaults(func=cmd_write_h100_compile_tiebreak_manifest)
 
     return parser
 

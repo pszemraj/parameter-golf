@@ -42,8 +42,11 @@ train_log_every="${TRAIN_LOG_EVERY:-50}"
 val_batch_size="${VAL_BATCH_SIZE:-524288}"
 max_wallclock_seconds="${MAX_WALLCLOCK_SECONDS:-600}"
 compile="${COMPILE:-1}"
-compile_strategy="${COMPILE_STRATEGY:-model}"
+compile_strategy="${COMPILE_STRATEGY:-hybrid}"
 weight_decay="${WEIGHT_DECAY:-0}"
+data_path="${DATA_PATH:-$HGDN_REPO_ROOT/data/datasets/fineweb10B_sp1024}"
+tokenizer_path="${TOKENIZER_PATH:-$HGDN_REPO_ROOT/data/tokenizers/fineweb_1024_bpe.model}"
+vocab_size="${VOCAB_SIZE:-1024}"
 
 hgdn_config="${HGDN_CONFIG:-configs/hgdn/retune_trim_layers_14.toml}"
 hgdn_kernel_config="${HGDN_KERNEL_CONFIG:-configs/hgdn/winner_20260405_19_live14.toml}"
@@ -99,6 +102,9 @@ print_plan() {
     echo "compile_strategy=${compile_strategy}"
     echo "weight_decay=${weight_decay}"
     echo "max_wallclock_seconds=${max_wallclock_seconds}"
+    echo "data_path=${data_path}"
+    echo "tokenizer_path=${tokenizer_path}"
+    echo "vocab_size=${vocab_size}"
     echo "hgdn_config=${hgdn_config}"
     echo "hgdn_kernel_config=${hgdn_kernel_config}"
     echo "gpt_naive_run_id=${gpt_naive_run_id}"
@@ -164,6 +170,9 @@ run_round() {
         "VAL_LOSS_EVERY=${val_loss_every}" \
         "TRAIN_LOG_EVERY=${train_log_every}" \
         "VAL_BATCH_SIZE=${val_batch_size}" \
+        "DATA_PATH=${data_path}" \
+        "TOKENIZER_PATH=${tokenizer_path}" \
+        "VOCAB_SIZE=${vocab_size}" \
         "NUM_LAYERS=9" \
         "MODEL_DIM=512" \
         "NUM_HEADS=8" \
@@ -185,6 +194,9 @@ run_round() {
         "VAL_LOSS_EVERY=${val_loss_every}" \
         "TRAIN_LOG_EVERY=${train_log_every}" \
         "VAL_BATCH_SIZE=${val_batch_size}" \
+        "DATA_PATH=${data_path}" \
+        "TOKENIZER_PATH=${tokenizer_path}" \
+        "VOCAB_SIZE=${vocab_size}" \
         "NUM_LAYERS=9" \
         "MODEL_DIM=512" \
         "NUM_HEADS=8" \
@@ -361,6 +373,9 @@ build_bundle() {
         --compile-enabled "${compile}" \
         --compile-strategy "${compile_strategy}" \
         --weight-decay "${weight_decay}" \
+        --baseline-data-path "${data_path}" \
+        --baseline-tokenizer-path "${tokenizer_path}" \
+        --baseline-vocab-size "${vocab_size}" \
         --gpt-naive-run-id "${gpt_naive_run_id}" \
         --hgdn-config "${hgdn_config}" \
         --hgdn-kernel-config "${hgdn_kernel_config}" \

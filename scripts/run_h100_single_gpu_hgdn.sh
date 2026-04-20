@@ -90,7 +90,7 @@ Environment overrides:
   WANDB_PROJECT              Passed through to sweep.sh if enabled.
   DATA_PATH                  Passed through to sweep.sh.
   TOKENIZER_PATH             Passed through to sweep.sh.
-  COMPILE_STRATEGY           Defaults to model.
+  COMPILE_STRATEGY           Defaults to hybrid.
   TRAIN_BATCH_TOKENS         Defaults to 524288.
   HYBRID_GDN_RATIO           Defaults to 1.
   HYBRID_MLP_MULT            Defaults to 3.25.
@@ -106,7 +106,7 @@ Environment overrides:
   PACKED_COMPILE_MATRIX_STRATEGIES
                              Space-delimited compile strategy list for
                              fixed2k-hybrid-compile-matrix, defaults to
-                             "model selective hybrid".
+                             "hybrid selective model".
   PYTHON_BIN                 Python binary used for py7zr bundle creation,
                              defaults to python.
   HP_OUTPUT_DIR              Packed helper bundle stage directory. Defaults to
@@ -185,7 +185,7 @@ run_sweep() {
         "USE_WANDB=${USE_WANDB:-1}" \
         "WANDB_MODE=${WANDB_MODE:-online}" \
         "WANDB_WATCH=${WANDB_WATCH:-none}" \
-        "COMPILE_STRATEGY=${COMPILE_STRATEGY:-model}" \
+        "COMPILE_STRATEGY=${COMPILE_STRATEGY:-hybrid}" \
         "$@"
 }
 
@@ -250,7 +250,7 @@ build_bundle() {
         echo "  \"command_log\": \"${command_log}\","
         echo "  \"matched_logs\": ${matched_logs},"
         echo "  \"contract\": {"
-        echo "    \"compile_strategy_default\": \"${COMPILE_STRATEGY:-model}\","
+        echo "    \"compile_strategy_default\": \"${COMPILE_STRATEGY:-hybrid}\","
         echo "    \"train_batch_tokens\": ${manifest_train_batch_tokens},"
         echo "    \"train_seq_len\": ${manifest_seq_len},"
         echo "    \"iterations\": ${manifest_iterations},"
@@ -305,12 +305,12 @@ run_perf_pair() {
         "hybrid GDN_RATIO=${hybrid_gdn_ratio} MLP_MULT=${hybrid_mlp_mult}" \
         "single-live14" \
         "${hybrid_run_id}" \
-        "${COMPILE_STRATEGY:-model}"
+        "${COMPILE_STRATEGY:-hybrid}"
     record_bundle_run \
         "attention-only baseline MLP_MULT=${depth_mlp_mult}" \
         "depth" \
         "${depth_run_id}" \
-        "${COMPILE_STRATEGY:-model}"
+        "${COMPILE_STRATEGY:-hybrid}"
     record_bundle_config "${HGDN_REPO_ROOT}/configs/hgdn/winner_20260405_19_live14.toml"
 
     run_sweep \
@@ -364,12 +364,12 @@ run_fixed2k_pair() {
         "hybrid GDN_RATIO=${hybrid_gdn_ratio} MLP_MULT=${hybrid_mlp_mult}" \
         "single-live14" \
         "${hybrid_run_id}" \
-        "${COMPILE_STRATEGY:-model}"
+        "${COMPILE_STRATEGY:-hybrid}"
     record_bundle_run \
         "attention-only baseline MLP_MULT=${depth_mlp_mult}" \
         "depth" \
         "${depth_run_id}" \
-        "${COMPILE_STRATEGY:-model}"
+        "${COMPILE_STRATEGY:-hybrid}"
     record_bundle_config "${HGDN_REPO_ROOT}/configs/hgdn/winner_20260405_19_live14.toml"
 
     run_sweep \
@@ -419,7 +419,7 @@ run_fixed2k_hybrid() {
         "hybrid GDN_RATIO=${hybrid_gdn_ratio} MLP_MULT=${hybrid_mlp_mult}" \
         "single-live14" \
         "${hybrid_run_id}" \
-        "${COMPILE_STRATEGY:-model}"
+        "${COMPILE_STRATEGY:-hybrid}"
     record_bundle_config "${HGDN_REPO_ROOT}/configs/hgdn/winner_20260405_19_live14.toml"
 
     run_sweep \
@@ -440,7 +440,7 @@ run_fixed2k_hybrid() {
 
 run_fixed2k_hybrid_compile_matrix() {
     local prefix="$1"
-    local strategies="${PACKED_COMPILE_MATRIX_STRATEGIES:-model selective hybrid}"
+    local strategies="${PACKED_COMPILE_MATRIX_STRATEGIES:-hybrid selective model}"
     local strategy
 
     for strategy in ${strategies}; do
@@ -483,7 +483,7 @@ run_prefix=${run_prefix}
 python_bin=${python_bin}
 hp_output_dir=${output_dir}
 hp_archive_output=${archive_output}
-compile_strategy_default=${COMPILE_STRATEGY:-model}
+compile_strategy_default=${COMPILE_STRATEGY:-hybrid}
 use_wandb=${USE_WANDB:-1}
 wandb_mode=${WANDB_MODE:-online}
 git_commit=${git_commit}

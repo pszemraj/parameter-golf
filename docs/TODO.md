@@ -1,27 +1,25 @@
 # HGDN Next Steps
 
-Last updated: 2026-04-19 22:30 CDT
+Last updated: 2026-04-20 13:40 CDT
 
-## 1. Recover the packed-path speed floor on H100
+## 1. Run the exact 8x packed compile tiebreak
 
-- Run the live packed finalist replay under the dedicated compile-strategy
-  matrix helper:
+- The `1xH100` compile matrix closed at `59d0817a` on the live14 replay shell:
+  - `hybrid`: `799.05 ms/step`
+  - `model`: `799.32 ms/step`, worse quality than `hybrid`
+  - `selective`: `875.67 ms/step`, still alive because its final roundtrip
+    stayed stronger than `hybrid`
+- Do not kill `selective` yet.
+- Run the exact `8xH100` packed-HGDN tiebreak under the same live14 finalist
+  shell:
 
 ```bash
 USE_WANDB=0 WANDB_MODE=offline \
-RUN_PREFIX=h100packed_compilematrix \
-bash scripts/run_h100_single_gpu_hgdn.sh fixed2k-hybrid-compile-matrix
+RUN_PREFIX_BASE=h100packed_tiebreak \
+bash scripts/run_h100_hgdn_compile_tiebreak_round.sh
 ```
 
-- Compare `COMPILE_STRATEGY=model`, `hybrid`, and `selective` on the same live
-  replay shell.
-- Use the live14 replay shell, not the archived 16-layer kernel-only shell.
-- Keep the packed path configured as:
-  - `GDN_USE_CUDA_COREKERNEL=0`
-  - `GDN_USE_CUDA_MEGAKERNEL=0`
-  - `GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD=1`
-
-## 2. Run the naive-contract sanity batch
+## 2. Run the naive-contract sanity batch against the exact repo baseline
 
 - Use [`../scripts/run_h100_hgdn_naive_contract_round.sh`](../scripts/run_h100_hgdn_naive_contract_round.sh).
 - Include exactly three legs:
@@ -29,8 +27,18 @@ bash scripts/run_h100_single_gpu_hgdn.sh fixed2k-hybrid-compile-matrix
   - live HGDN finalist
   - hybrid-trainer attention-only control
 - Pin the hybrid-trainer legs to `WEIGHT_DECAY=0`.
+- Pin the direct baseline leg explicitly to:
+  - `DATA_PATH`
+  - `TOKENIZER_PATH`
+  - `VOCAB_SIZE`
 - Treat the repo baseline as the calibration anchor. The hybrid attention-only
   control remains diagnostic only.
+
+```bash
+USE_WANDB=0 WANDB_MODE=offline \
+RUN_PREFIX_BASE=h100naive1 \
+bash scripts/run_h100_hgdn_naive_contract_round.sh
+```
 
 ## 3. Keep HGDN-only finalist work tightly bounded
 
@@ -54,6 +62,9 @@ bash scripts/run_h100_single_gpu_hgdn.sh fixed2k-hybrid-compile-matrix
   - regional compilation
   - train/eval grad-mode handling
   - backend swaps
+- Packed helper defaults now use `COMPILE_STRATEGY=hybrid`.
+- Use explicit overrides instead of changing shared defaults again when running
+  controlled comparisons.
 
 ## 5. Leave archived kernel paths archived
 
@@ -73,6 +84,10 @@ bash scripts/run_h100_single_gpu_hgdn.sh fixed2k-hybrid-compile-matrix
   after compile prewarm.
 - `f3d8c2f` (2026-04-19 19:08 CDT): packed FLA-backed GDN blocks became
   compile-eligible in `selective` / `hybrid`.
+- `59d0817a` (2026-04-20 02:38 UTC / 2026-04-19 21:38 CDT): live14 packed
+  `1xH100` compile matrix
+  closed with `hybrid` as the speed default and `selective` retained for the
+  exact-8x tiebreak.
 
 ## References
 

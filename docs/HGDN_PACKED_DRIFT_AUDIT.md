@@ -1,6 +1,6 @@
 # HGDN Packed Drift Audit
 
-Last updated: 2026-04-19 18:50 CDT
+Last updated: 2026-04-20 13:40 CDT
 
 Branch: `exp/hgdn-k-core`
 
@@ -40,6 +40,20 @@ and the remaining active code changes after the core-kernel split are either:
 
 The next H100 packed rerun should therefore be interpreted as a **fresh valid
 measurement**, not as a "regression confirmation" run.
+
+That fresh measurement now exists.
+
+- `59d0817a` (2026-04-20 02:38 UTC / 2026-04-19 21:38 CDT): `1xH100`
+  live14 packed compile matrix
+  closed on the corrected replay shell.
+  - `hybrid`: `799.05 ms/step`
+  - `model`: `799.32 ms/step`, worse sampled and final quality than `hybrid`
+  - `selective`: `875.67 ms/step`, slower than `hybrid` but still alive for the
+    exact-8x tiebreak because its final exact roundtrip remained stronger
+
+This closes the "did the packed helper drift?" question for the corrected live14
+launch surface. The remaining open choice is now the exact `8xH100`
+submission-time tiebreak between `hybrid` and `selective`.
 
 ## Historical references
 
@@ -220,11 +234,15 @@ What is closed:
 - the large packed discrepancy is **not** explained by Colab vs RunPod H100
 - the first `h100packed_recheck` reruns were not fair live packed controls
 - the current branch no longer has that helper/config bug
+- the corrected live14 `1xH100` compile matrix says the packed path is back in
+  the expected performance range on a valid contract
 
 What remains open:
 
-- the packed path still needs the corrected `1xH100` compile-strategy matrix on
-  the live14 replay shell before making a new absolute packed step-ms claim
+- the exact `8xH100` packed finalist still needs the compile-strategy tiebreak
+  between `hybrid` and `selective`
+- the exact repo naive baseline still needs the bounded sanity round under the
+  explicit direct-baseline replay pins
 
 What this audit says today:
 
@@ -232,16 +250,19 @@ What this audit says today:
   slowdown
 - do **not** use the `5f3a755e` recheck bundles as evidence against the live
   packed `14L` finalist
-- do treat the next packed H100 compile matrix as the first valid post-fix
+- do treat the live14 compile matrix at `59d0817a` as the first valid post-fix
   packed timing measurement
+- do use `hybrid` as the packed helper default unless a comparison explicitly
+  says otherwise
+- do keep `selective` alive only for the exact-8x tiebreak, not as the default
 
 ## Next action after this audit
 
 Use the corrected packed helper path, not the old kernel-only launch surface,
-for the next bounded packed H100 compile-strategy matrix:
+for the exact `8xH100` packed compile tiebreak:
 
 ```bash
 USE_WANDB=0 WANDB_MODE=offline \
-RUN_PREFIX=h100packed_compilematrix \
-bash scripts/run_h100_single_gpu_hgdn.sh fixed2k-hybrid-compile-matrix
+RUN_PREFIX_BASE=h100packed_tiebreak \
+bash scripts/run_h100_hgdn_compile_tiebreak_round.sh
 ```
