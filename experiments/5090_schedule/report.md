@@ -2,13 +2,15 @@
 
 ## Status
 - Harness ready
+- Controller frontier is now stable enough to start schedule isolation
+- Phase 1 schedule work is an isolated `lr_hold_steps` sweep on the two best completed `blocks0` `1B` controllers
 - No evidence-backed schedule winner yet
-- Schedule sweep is intentionally deferred until the new `blocks0/blocks1` `1B` confirmations finish
 
 ## What Was Verified
 - Warmup-hold-cosine is the real root schedule path.
 - `lr_hold_steps` is wired end to end.
 - The trainer now records structured train/eval metrics and final run results, so schedule comparisons no longer depend on ad hoc log parsing.
+- The sweep harness now supports a fixed effective-step-token contract, so schedule runs can later drop the local microbatch and recover apples-to-apples comparisons with derived `grad_accum` instead of silently changing the optimizer-step budget.
 
 ## Current Evidence
 - No evidence-backed schedule winner yet.
@@ -17,42 +19,57 @@
   - whether decay is starting too early
   - whether `min_lr` is too high or too low
 - The next schedule sweep should be run on the post-confirmation contenders, not on the invalidated older `blocks3` default.
+- The first variable to move should be `lr_hold_steps`, because it can be isolated cleanly while keeping:
+  - controller geometry fixed
+  - `max_lr`, `min_lr`, `warmup_steps`, and `weight_decay` fixed
+  - full-dataset `blocks0` shared spec fixed
+  - planned screening tokens fixed at `512M`
 
-## Next Planned Screening Contract
+## Phase 1 Screening Contract
 
-Use the confirmed winner from the new `blocks0/blocks1` `1B` queue, then run a labeled screening sweep.
+- same frozen structure: corrected full-dataset `blocks0` shared spec
+- same effective step tokens: `131,072`
+- same planned screening budget: `4,096` steps = `536,870,912` tokens
+- same logging:
+  - `VAL_EVERY=256`
+  - `VAL_STEPS=8`
+  - `LOG_EVERY=64`
+  - `LOG_STATE_EVERY=256`
+  - `SAVE_EVERY=2048`
+- same schedule defaults except for `lr_hold_steps`:
+  - `max_lr = 3e-3`
+  - `warmup_steps = 100`
+  - `min_lr = 3e-4`
+  - `weight_decay = 1e-3`
 
-Broad schedule screen for one chosen contender:
+Run the queue:
+
 ```bash
-DATA_PATH=./data/datasets/fineweb10B_sp1024 \
-MODEL_ROOT=./experiments/5090_schedule/broad_screen \
-FORCE_DEVICE=cuda \
-COMPILE=0 \
-RUN_SPECS=$'sched_lr2_w50_h0_min1e5 5 2.0 16 2 1 -2.0 0.002 0 0.00001 192 256 512\n\
-sched_lr3_w100_h500_min1e4 5 2.0 16 2 1 -2.0 0.003 500 0.0001 192 256 512\n\
-sched_lr3_w100_h1500_min3e4 5 2.0 16 2 1 -2.0 0.003 1500 0.0003 192 256 512\n\
-sched_lr4_w200_h2500_min5e4 5 2.0 16 2 1 -2.0 0.004 2500 0.0005 192 256 512' \
-WARMUP_STEPS=100 \
-WEIGHT_DECAY=0.001 \
-bash scripts/sweep_controller.sh
+conda run -s --name train python tools/run_core_amp_schedule_sweeps.py
 ```
 
-- Confirmation rerun for the best schedule point:
+List or dry-run families:
+
 ```bash
-for seed in 1337 2027 4242; do
-  DATA_PATH=./data/datasets/fineweb10B_sp1024 \
-  MODEL_ROOT=./experiments/5090_schedule/confirm_seed_${seed} \
-  FORCE_DEVICE=cuda \
-  COMPILE=0 \
-  SEED=$seed \
-  RUN_SPECS=$'winner 5 2.0 16 2 1 -2.0 0.003 1500 0.0003 768 256 512' \
-  WARMUP_STEPS=100 \
-  WEIGHT_DECAY=0.001 \
-  bash scripts/sweep_controller.sh
-done
+conda run -s --name train python tools/run_core_amp_schedule_sweeps.py --list
+conda run -s --name train python tools/run_core_amp_schedule_sweeps.py --dry-run
 ```
+
+Current phase-1 families:
+
+```bash
+blocks0_12x10_hold_screen_v1:
+  h0, h500, h1500, h2500
+
+blocks0_10x12_hold_screen_v1:
+  h0, h500, h1500, h2500
+```
+
+After phase 1, use the winning hold value to stage isolated sweeps for `max_lr`, `warmup_steps`, `min_lr`, and finally `weight_decay`.
 
 ## Questions This Sweep Should Answer
+- Does the inherited `1500`-step hold actually earn its keep on the radical `blocks0` controllers?
+- Is the same hold value preferred by both `12 x 10.0` and `10 x 12.0`, or is schedule preference geometry-dependent?
 - Is hold-then-cosine actually helping this recurrent-controller family?
 - Are we decaying too early for the chosen local token budget?
 - Is the current `min_lr` floor too conservative?

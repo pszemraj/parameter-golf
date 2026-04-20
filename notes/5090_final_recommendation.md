@@ -2,7 +2,8 @@
 
 > [!WARNING]
 > This note is still provisional.
-> The corrected full-spec replay is finished, the main `blocks0/blocks1` `1B` confirmations are now complete, and only the checkpointed `16x8` stress point is still running before schedule sweeps.
+> The corrected full-spec replay and the main `1B` controller confirmations are complete.
+> The next source of movement should come from schedule, context, or a revised frozen-side mechanism, not from pretending the current frontier is still undecided.
 
 ## Current Status
 
@@ -18,6 +19,7 @@
 - The strongest corrected local signal is controller-up/spec-down reallocation, not more frozen amplifier depth.
 - The `1B` confirmation queue changed the recommendation quality materially:
   - `blocks0 12x10` and `blocks0 10x12` both held up
+  - checkpointed `blocks0 16x8` also held up and landed as the third-best pure-quality point
   - `blocks1 12x6` slightly beat `blocks0 12x6` on the longer budget
 - The regression-to-transformer guardrail is still intact:
   - no attention
@@ -49,22 +51,27 @@ These are the three most useful completed local contenders right now.
      - same controller mass, nearly same speed
      - strongest evidence that controller geometry matters
 
-3. `blocks1_resid12_e6_c8t1_r3_current_1b`
-   - best completed nonzero-amplifier contender
-   - final `val_bpb = 2.2356768287`
-   - steady `tok/s = 590,071`
-   - trainable params `= 505,049`
-   - artifact estimate `= 4,102,717`
+3. `blocks0_resid16_e8_c8t1_r3_current_1b_gc1`
+   - best completed larger-controller stress point
+   - final `val_bpb = 2.2177299568`
+   - steady `tok/s = 274,683`
+   - trainable params `= 895,005`
+   - artifact estimate `= 3,995,273`
    - why it is in:
-     - keeps one frozen amplifier block alive as a transfer guardrail
-     - it slightly beat `blocks0_resid12_e6...` on the same `1B` budget
+     - it proves larger checkpointed parallel-minGRU controllers can improve quality without changing the family
+     - it finished clearly ahead of the `12x6` quality-speed anchors
+     - it still stays well inside the artifact budget
 
 Important nuance:
 
+- `blocks1_resid12_e6_c8t1_r3_current_1b` remains the best nonzero-amplifier guardrail:
+  - `final val_bpb = 2.2356768287`
+  - `steady tok/s = 590,071`
+  - artifact estimate `= 4,102,717`
 - `blocks0_resid12_e6_c8t1_r3_current_1b` is still the cleanest quality-speed anchor:
   - `final val_bpb = 2.2363421409`
   - `steady tok/s = 618,833`
-- The checkpointed `16 x 8.0` `1B` run is still in flight, so it is not in the top 3 yet.
+- The `16 x 8.0` point is real, but it is not the default next candidate because the extra quality costs a large throughput hit.
 
 ## Exact Reproduction Commands
 
@@ -106,14 +113,13 @@ env CUDA_VISIBLE_DEVICES=0 TORCH_BLAS_PREFER_CUBLASLT=1 \
   conda run -s --name train python tools/run_core_amp_sweep.py controller
 ```
 
-### 3. `blocks1_resid12_e6_c8t1_r3_current_1b`
+### 3. `blocks0_resid16_e8_c8t1_r3_current_1b_gc1`
 
 ```bash
 env CUDA_VISIBLE_DEVICES=0 TORCH_BLAS_PREFER_CUBLASLT=1 \
-  SHARED_SPEC_DIR=experiments/5090_controller/fullspec_blocks1_radical_v1/blocks1_resid12_e6_c8t1_r3_current_512m \
-  MODEL_ROOT=experiments/5090_controller/fullspec_blocks1_confirm1b_v1 \
+  SHARED_SPEC_DIR=experiments/5090_structure/fullspec_blocks0_radical_v1/blocks0_resid12_e6_c8t1_r3_current_512m \
+  MODEL_ROOT=experiments/5090_controller/fullspec_blocks0_large_checkpointed_confirm1b_v1 \
   PRESET=controller_default \
-  NUM_BLOCKS=1 \
   COMPILE=0 \
   VAL_EVERY=512 \
   VAL_STEPS=8 \
@@ -121,8 +127,9 @@ env CUDA_VISIBLE_DEVICES=0 TORCH_BLAS_PREFER_CUBLASLT=1 \
   LOG_STATE_EVERY=512 \
   SAVE_EVERY=4096 \
   TRAIN_FRAC=0.98 \
+  GRADIENT_CHECKPOINTING=1 \
   BRANCH_TEMPORAL_MODE=current \
-  RUN_SPECS=$'blocks1_resid12_e6_c8t1_r3_current_1b 12 6.0 8 1 1 -3.0 0.003 100 1500 0.0003 8192 256 512' \
+  RUN_SPECS=$'blocks0_resid16_e8_c8t1_r3_current_1b_gc1 16 8.0 8 1 1 -3.0 0.003 100 1500 0.0003 8192 256 512' \
   conda run -s --name train python tools/run_core_amp_sweep.py controller
 ```
 
@@ -181,6 +188,7 @@ Pure hyperparameter / architecture findings:
 - `blocks0` is the best corrected structure so far
 - `12 x 10.0` is the current pure-quality leader at `1B`
 - `10 x 12.0` remains the strongest geometry control at `1B`
+- `16 x 8.0` is now the strongest larger-controller checkpointed point at `1B`
 - `12 x 6.0` remains the quality-speed anchor at `1B`
 - `blocks1 12 x 6.0` is the best current nonzero-amplifier guardrail point and slightly beat the matching `blocks0 12x6` run at `1B`
 - naive lag-heavy temporal variants are not winning
@@ -201,9 +209,10 @@ It is:
 - over-trusting `blocks0` before the checkpointed larger stress point and schedule sweeps finish
 
 That is why the next confirmation round should compare `blocks0` against a live `blocks1` guardrail, not just compare one `blocks0` width setting against another.
+That is also why schedule sweeps should start on the two best `blocks0` points, then circle back to `blocks1` as a transfer-control condition.
 
 ## Unresolved Questions
 
-- Does the checkpointed `blocks0_resid16_e8...` `1B` run close the remaining gap to `12x10` / `10x12`?
-- Does the checkpointed `blocks0_resid16_e8...` scale better at `1B` tokens than it did at `512M`?
 - Which of the top contenders responds best to schedule tuning?
+- Does `blocks1 12x6` keep its slight edge over `blocks0 12x6` once both get a tuned schedule instead of the inherited default?
+- Does longer context help the `12x10` / `10x12` pair more than the cheaper `12x6` anchors?
