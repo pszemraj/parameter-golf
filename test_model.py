@@ -144,6 +144,14 @@ def _make_standard_packed_kwargs(**overrides: object) -> dict[str, object]:
     return kwargs
 
 
+_PACKED_QKV_PARITY_GRAD_NAMES = (
+    "w_qkv.linear.weight",
+    "qkv_conv.conv.weight",
+    "w_a.weight",
+    "w_out.weight",
+)
+
+
 def _assert_gdn_init_rejected(message: str, **kwargs: object) -> None:
     """Assert that a tiny HGDN fixture rejects an invalid configuration.
 
@@ -205,6 +213,74 @@ def _assert_gdn_cpu_fallback_matches_reference(
         atol=grad_atol,
         rtol=grad_rtol,
     )
+    print(success_message)
+
+
+def _skip_if_missing_split_with_sizes_copy(context: str) -> bool:
+    """Return whether a split-with-sizes-copy dependent test should be skipped.
+
+    :param str context: Human-readable test context for the skip message.
+    :return bool: Whether the current runtime lacks `aten.split_with_sizes_copy`.
+    """
+    if hasattr(torch.ops.aten, "split_with_sizes_copy"):
+        return False
+    print(f"  - skipping {context} (aten.split_with_sizes_copy unavailable)")
+    return True
+
+
+def _assert_packed_qkv_variant_matches_default(
+    *,
+    base_kwargs: dict[str, object] | None = None,
+    candidate_overrides: dict[str, object],
+    success_message: str,
+    require_contiguous_inputs: bool = False,
+    contiguity_overrides: dict[str, object] | None = None,
+) -> None:
+    """Check that one packed-path variant matches the default packed HGDN path.
+
+    :param dict[str, object] | None base_kwargs: Shared kwargs for reference and candidate.
+    :param dict[str, object] candidate_overrides: Candidate-only kwargs.
+    :param str success_message: Message printed after the check passes.
+    :param bool require_contiguous_inputs: Whether to also assert contiguous q/k/v outputs.
+    :param dict[str, object] | None contiguity_overrides: Optional kwargs for the bf16 contiguity fixture.
+    """
+    torch.manual_seed(42)
+    if base_kwargs is None:
+        base_kwargs = _make_standard_packed_kwargs()
+    eager = GatedDeltaNet(**base_kwargs)
+    candidate_kwargs = dict(base_kwargs)
+    candidate_kwargs.update(candidate_overrides)
+    candidate = GatedDeltaNet(**candidate_kwargs)
+    candidate.load_state_dict(eager.state_dict(), strict=True)
+
+    x_eager = torch.randn(2, 32, 64, requires_grad=True)
+    x_candidate = x_eager.detach().clone().requires_grad_(True)
+    grad = torch.randn_like(x_eager)
+
+    out_eager = eager(x_eager)
+    out_candidate = candidate(x_candidate)
+    torch.testing.assert_close(out_candidate, out_eager, atol=1e-6, rtol=1e-6)
+
+    out_eager.backward(grad, retain_graph=True)
+    out_candidate.backward(grad)
+    torch.testing.assert_close(x_candidate.grad, x_eager.grad, atol=1e-5, rtol=1e-5)
+
+    eager_grads = dict(eager.named_parameters())
+    candidate_grads = dict(candidate.named_parameters())
+    for name in _PACKED_QKV_PARITY_GRAD_NAMES:
+        torch.testing.assert_close(
+            candidate_grads[name].grad,
+            eager_grads[name].grad,
+            atol=1e-5,
+            rtol=1e-5,
+        )
+
+    if require_contiguous_inputs:
+        _assert_bf16_packed_recurrence_inputs_contiguous(
+            success_message,
+            **({} if contiguity_overrides is None else contiguity_overrides),
+        )
+        return
     print(success_message)
 
 
@@ -518,50 +594,10 @@ def test_gdn_packed_qkv_proj_conv_matches_separate_path() -> None:
 
 def test_gdn_packed_qkv_custom_backward_matches_default_path() -> None:
     """Packed qkv custom backward should preserve forward and gradient parity."""
-    torch.manual_seed(42)
-    kwargs = dict(
-        d_model=64,
-        n_heads=4,
-        head_k_dim=8,
-        expand_v=1.0,
-        allow_neg_eigval=True,
-        conv_size=4,
-        use_fla=False,
-        use_packed_qkv_conv=True,
-        use_packed_qkv_proj=True,
-        conv_output_contiguous=True,
+    _assert_packed_qkv_variant_matches_default(
+        candidate_overrides=dict(use_packed_qkv_conv_custom_backward=True),
+        success_message="  ✓ packed qkv custom backward matches default path",
     )
-    eager = GatedDeltaNet(**kwargs)
-    custom = GatedDeltaNet(**kwargs, use_packed_qkv_conv_custom_backward=True)
-    custom.load_state_dict(eager.state_dict(), strict=True)
-
-    x_eager = torch.randn(2, 32, 64, requires_grad=True)
-    x_custom = x_eager.detach().clone().requires_grad_(True)
-    grad = torch.randn_like(x_eager)
-
-    out_eager = eager(x_eager)
-    out_custom = custom(x_custom)
-    torch.testing.assert_close(out_custom, out_eager, atol=1e-6, rtol=1e-6)
-
-    out_eager.backward(grad, retain_graph=True)
-    out_custom.backward(grad)
-    torch.testing.assert_close(x_custom.grad, x_eager.grad, atol=1e-5, rtol=1e-5)
-
-    eager_grads = dict(eager.named_parameters())
-    custom_grads = dict(custom.named_parameters())
-    for name in [
-        "w_qkv.linear.weight",
-        "qkv_conv.conv.weight",
-        "w_a.weight",
-        "w_out.weight",
-    ]:
-        torch.testing.assert_close(
-            custom_grads[name].grad,
-            eager_grads[name].grad,
-            atol=1e-5,
-            rtol=1e-5,
-        )
-    print("  ✓ packed qkv custom backward matches default path")
 
 
 def test_gdn_packed_qkv_custom_backward_validation() -> None:
@@ -587,57 +623,20 @@ def test_gdn_packed_qkv_custom_backward_validation() -> None:
 
 def test_gdn_packed_qkv_single_contig_matches_default_path() -> None:
     """Single packed materialization should preserve packed qkv outputs and grads."""
-    torch.manual_seed(42)
-    kwargs = dict(
-        d_model=64,
-        n_heads=4,
-        head_k_dim=8,
-        expand_v=1.0,
-        allow_neg_eigval=True,
-        conv_size=4,
-        use_fla=False,
-        use_packed_qkv_conv=True,
-        use_packed_qkv_proj=True,
-        use_packed_qkv_conv_custom_backward=True,
-        conv_output_contiguous=True,
-    )
-    eager = GatedDeltaNet(**kwargs)
-    single = GatedDeltaNet(**kwargs, use_packed_qkv_single_contig=True)
-    single.load_state_dict(eager.state_dict(), strict=True)
-
-    x_eager = torch.randn(2, 32, 64, requires_grad=True)
-    x_single = x_eager.detach().clone().requires_grad_(True)
-    grad = torch.randn_like(x_eager)
-
-    out_eager = eager(x_eager)
-    out_single = single(x_single)
-    torch.testing.assert_close(out_single, out_eager, atol=1e-6, rtol=1e-6)
-
-    out_eager.backward(grad, retain_graph=True)
-    out_single.backward(grad)
-    torch.testing.assert_close(x_single.grad, x_eager.grad, atol=1e-5, rtol=1e-5)
-
-    eager_grads = dict(eager.named_parameters())
-    single_grads = dict(single.named_parameters())
-    for name in [
-        "w_qkv.linear.weight",
-        "qkv_conv.conv.weight",
-        "w_a.weight",
-        "w_out.weight",
-    ]:
-        torch.testing.assert_close(
-            single_grads[name].grad,
-            eager_grads[name].grad,
-            atol=1e-5,
-            rtol=1e-5,
-        )
-    _assert_bf16_packed_recurrence_inputs_contiguous(
-        "  ✓ packed qkv single-contig matches default path",
-        use_packed_qkv_conv=True,
-        use_packed_qkv_proj=True,
-        use_packed_qkv_conv_custom_backward=True,
-        use_packed_qkv_single_contig=True,
-        conv_output_contiguous=True,
+    _assert_packed_qkv_variant_matches_default(
+        base_kwargs=_make_standard_packed_kwargs(
+            use_packed_qkv_conv_custom_backward=True
+        ),
+        candidate_overrides=dict(use_packed_qkv_single_contig=True),
+        success_message="  ✓ packed qkv single-contig matches default path",
+        require_contiguous_inputs=True,
+        contiguity_overrides=dict(
+            use_packed_qkv_conv=True,
+            use_packed_qkv_proj=True,
+            use_packed_qkv_conv_custom_backward=True,
+            use_packed_qkv_single_contig=True,
+            conv_output_contiguous=True,
+        ),
     )
 
 
@@ -669,69 +668,28 @@ def test_gdn_packed_qkv_single_contig_validation() -> None:
 
 def test_gdn_packed_qkv_split_copy_matches_default_path() -> None:
     """Generated split-copy should preserve packed qkv outputs, grads, and contiguity."""
-    if not hasattr(torch.ops.aten, "split_with_sizes_copy"):
-        print(
-            "  - skipping packed qkv split-copy parity (aten.split_with_sizes_copy unavailable)"
-        )
+    if _skip_if_missing_split_with_sizes_copy("packed qkv split-copy parity"):
         return
-    torch.manual_seed(42)
-    kwargs = dict(
-        d_model=64,
-        n_heads=4,
-        head_k_dim=8,
-        expand_v=1.0,
-        use_fla=False,
-        use_packed_qkv_conv=True,
-        use_packed_qkv_proj=True,
-        use_packed_qkv_conv_custom_backward=True,
-        conv_output_contiguous=True,
-    )
-    eager = GatedDeltaNet(**kwargs)
-    split_copy = GatedDeltaNet(**kwargs, use_packed_qkv_split_copy=True)
-    split_copy.load_state_dict(eager.state_dict())
-
-    x_eager = torch.randn(2, 32, 64, requires_grad=True)
-    x_split = x_eager.detach().clone().requires_grad_(True)
-    grad = torch.randn_like(x_eager)
-
-    out_eager = eager(x_eager)
-    out_split = split_copy(x_split)
-    torch.testing.assert_close(out_split, out_eager, atol=1e-6, rtol=1e-6)
-
-    out_eager.backward(grad, retain_graph=True)
-    out_split.backward(grad)
-    torch.testing.assert_close(x_split.grad, x_eager.grad, atol=1e-5, rtol=1e-5)
-
-    eager_grads = dict(eager.named_parameters())
-    split_grads = dict(split_copy.named_parameters())
-    for name in [
-        "w_qkv.linear.weight",
-        "qkv_conv.conv.weight",
-        "w_a.weight",
-        "w_out.weight",
-    ]:
-        torch.testing.assert_close(
-            split_grads[name].grad,
-            eager_grads[name].grad,
-            atol=1e-5,
-            rtol=1e-5,
-        )
-    _assert_bf16_packed_recurrence_inputs_contiguous(
-        "  ✓ packed qkv split-copy matches default path",
-        use_packed_qkv_conv=True,
-        use_packed_qkv_proj=True,
-        use_packed_qkv_conv_custom_backward=True,
-        use_packed_qkv_split_copy=True,
-        conv_output_contiguous=True,
+    _assert_packed_qkv_variant_matches_default(
+        base_kwargs=_make_standard_packed_kwargs(
+            use_packed_qkv_conv_custom_backward=True
+        ),
+        candidate_overrides=dict(use_packed_qkv_split_copy=True),
+        success_message="  ✓ packed qkv split-copy matches default path",
+        require_contiguous_inputs=True,
+        contiguity_overrides=dict(
+            use_packed_qkv_conv=True,
+            use_packed_qkv_proj=True,
+            use_packed_qkv_conv_custom_backward=True,
+            use_packed_qkv_split_copy=True,
+            conv_output_contiguous=True,
+        ),
     )
 
 
 def test_gdn_packed_qkv_split_copy_validation() -> None:
     """Generated split-copy should only run on the non-fused packed path."""
-    if not hasattr(torch.ops.aten, "split_with_sizes_copy"):
-        print(
-            "  - skipping packed qkv split-copy validation (aten.split_with_sizes_copy unavailable)"
-        )
+    if _skip_if_missing_split_with_sizes_copy("packed qkv split-copy validation"):
         return
     for message, kwargs in [
         (

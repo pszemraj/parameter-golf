@@ -1,6 +1,6 @@
 # Redundancy Audit
 
-Last updated: 2026-04-10
+Last updated: 2026-04-19
 
 Parallel implementations and helper drift are the main redundancy issue in this
 branch. Large amounts of obviously dead model logic are not.
@@ -32,24 +32,30 @@ The cleanest immediate cleanup target is the profiler/report toolchain. The risk
 - `scripts/hgdn_cuda_preflight.py` and `scripts/profile_hgdn_local_hotpath.py`
   now share the same CUDA module-preparation helper instead of carrying their
   own copies of the mixed-precision and conv-freeze logic.
+- `scripts/run_hgdn_local_phase1.sh` now defines each phase-1 command once and
+  reuses the same arrays for `commands.sh` snapshots and execution instead of
+  repeating the HGDN env contract in two separate blocks.
 - `scripts/hgdn_cuda_parity.py` now uses one parameterized packed-conv parity
   helper for the three backward-ownership variants instead of repeating the same
   test body three times.
 - `test_model.py` now shares one invalid-config helper and one packed-path CPU
   fallback helper across the HGDN CUDA family tests instead of keeping those
   cases as hand-expanded near-duplicates.
+- `test_model.py` now uses one packed-qkv parity helper for the custom-backward,
+  single-contig, and split-copy variants instead of repeating the same
+  forward/backward gradient checks three times.
 
 ## Findings
 
 | ID | Area | Type | Recommendation | Risk |
 |---|---|---|---|---|
 | A2 | profiler comparison helpers | semantic duplicates | Extract shared row/CSV/markdown helpers | low |
-| A3 | `scripts/run_hgdn_local_phase1.sh` | semantic duplication | Extract shared env-contract builder | low-medium |
+| A3 | `scripts/run_hgdn_local_phase1.sh` | semantic duplication | Closed: shared command/env arrays now drive both snapshots and execution | low-medium |
 | A4 | `env_flag` in local GPU tools | semantic duplicate | Extract shared helper | low |
 | A5 | baseline vs hybrid tokenizer/data helpers | drifted near-duplicates | Extract + parameterize | medium |
 | A6 | baseline vs hybrid quantization helpers | drifted near-duplicates | Extract a shared core, keep trainer wrapper | high |
 | A7 | baseline vs `model.py` transformer utilities | duplicate by design but drifting | Defer, document boundary | high |
-| A8 | contiguity/parity tests in `test_model.py` | test redundancy | Parameterize and extract test helpers | low-medium |
+| A8 | contiguity/parity tests in `test_model.py` | test redundancy | In progress: packed-qkv parity family is consolidated; wider CUDA-family test tables still remain | low-medium |
 | A9 | `scripts/export_wandb_hgdn_runs.py` | formerly orphan utility | Documented and sharing the W&B helper boundary now; keep | low |
 
 ## Detailed Findings
