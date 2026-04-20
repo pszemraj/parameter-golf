@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gzip
+import json
 import subprocess
 import sys
 import tempfile
@@ -961,6 +962,73 @@ def test_training_script_gradient_checkpointing_exports_quantized_payload():
         payload_path = model_dir / "final_trainable.int8.ptz"
         assert payload_path.exists()
         assert payload_path.stat().st_size > 0
+
+
+def test_training_script_records_step_token_contract():
+    """Resolved config should record local and effective step-token counts."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir = Path(tmpdir)
+        _, gz_path = _make_gz(tmpdir)
+        model_dir = tmpdir / "model_step_tokens"
+
+        _run_inspect(
+            [
+                "init",
+                str(model_dir),
+                "--data",
+                str(gz_path),
+                "--storage-dtype",
+                "uint8",
+                "--vocab-size",
+                "256",
+                "--core-dim",
+                "8",
+                "--branch-lags",
+                "1,2,4",
+                "--num-blocks",
+                "1",
+                "--spec-strategy",
+                "stream",
+            ]
+        )
+
+        _run_train(
+            [
+                str(model_dir),
+                "--num-steps",
+                "2",
+                "--seq-len",
+                "32",
+                "--batch-size",
+                "4",
+                "--grad-accum",
+                "2",
+                "--bptt-chunks",
+                "3",
+                "--carry-chunks",
+                "2",
+                "--val-every",
+                "1",
+                "--val-steps",
+                "1",
+                "--log-every",
+                "1",
+                "--learning-rate",
+                "1e-3",
+                "--lr-schedule",
+                "none",
+                "--force-device",
+                "cpu",
+                "--no-mmap",
+            ],
+            expect_in_stdout="Training complete",
+        )
+
+        resolved = json.loads((model_dir / "resolved_config.json").read_text())
+        training = resolved["training"]
+        assert training["local_step_tokens"] == 4 * 32 * 3
+        assert training["effective_step_tokens"] == 4 * 32 * 3 * 2
+        assert training["planned_train_tokens"] == 4 * 32 * 3 * 2 * 2
 
 
 # ---------------------------------------------------------------------------

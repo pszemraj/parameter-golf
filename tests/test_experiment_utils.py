@@ -24,6 +24,7 @@ from core_amplifier_lm.experiment import (
 from tools.run_core_amp_sweep import (
     controller_spec_max_tokens_default,
     parse_controller_specs,
+    resolve_step_token_contract,
     structure_preset_defaults,
 )
 
@@ -120,6 +121,24 @@ def test_parse_controller_specs_accepts_optional_per_run_warmup():
     assert explicit[0].lr_hold_steps == 375
 
 
+def test_resolve_step_token_contract_supports_fixed_effective_tokens(monkeypatch):
+    monkeypatch.setenv("LOCAL_BATCH_SIZE_OVERRIDE", "128")
+    monkeypatch.setenv("TARGET_EFFECTIVE_STEP_TOKENS", "131072")
+    batch_size, seq_len, grad_accum, local_step_tokens, effective_step_tokens = (
+        resolve_step_token_contract(
+            batch_size=256,
+            seq_len=512,
+            bptt_chunks=1,
+            grad_accum=1,
+        )
+    )
+    assert batch_size == 128
+    assert seq_len == 512
+    assert grad_accum == 2
+    assert local_step_tokens == 65536
+    assert effective_step_tokens == 131072
+
+
 def test_summarize_run_dir_reads_structured_artifacts(tmp_path: Path):
     run_dir = tmp_path / "run_a"
     run_dir.mkdir()
@@ -145,6 +164,8 @@ def test_summarize_run_dir_reads_structured_artifacts(tmp_path: Path):
                 "seq_len": 512,
                 "batch_size": 256,
                 "grad_accum": 1,
+                "local_step_tokens": 262144,
+                "effective_step_tokens": 262144,
                 "learning_rate": 0.003,
                 "min_lr": 0.0003,
                 "warmup_steps": 50,
@@ -224,6 +245,8 @@ def test_summarize_run_dir_reads_structured_artifacts(tmp_path: Path):
     assert row["trainable_int8_zlib_bytes"] == "345"
     assert row["gradient_checkpointing"] == "true"
     assert row["repo_code_bytes"] == "654321"
+    assert row["local_step_tokens"] == "262144"
+    assert row["effective_step_tokens"] == "262144"
     assert row["warmup_steps"] == "50"
     assert row["lr_hold_steps"] == "750"
     assert row["torch_version"] == "2.11.0+cu128"

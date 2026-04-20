@@ -1349,7 +1349,9 @@ def build_resolved_config_payload(
 ) -> dict[str, Any]:
     """Build a resolved run snapshot from config, CLI, and runtime decisions."""
     spec_bytes, gzip_spec_bytes = spec_size_bytes(cfg.spec_path)
-    planned_train_tokens = int(batch_size * seq_len * grad_accum * bptt_chunks * num_steps)
+    local_step_tokens = int(batch_size * seq_len * bptt_chunks)
+    effective_step_tokens = int(local_step_tokens * grad_accum)
+    planned_train_tokens = int(effective_step_tokens * num_steps)
     run_name = cfg.meta.get("run_name", model_dir.name)
     phase = cfg.meta.get("phase")
     readout_rank = spec.metadata.get("readout_rank")
@@ -1386,6 +1388,8 @@ def build_resolved_config_payload(
             "seq_len": int(seq_len),
             "batch_size": int(batch_size),
             "grad_accum": int(grad_accum),
+            "local_step_tokens": local_step_tokens,
+            "effective_step_tokens": effective_step_tokens,
             "carry_chunks": int(carry_chunks),
             "bptt_chunks": int(bptt_chunks),
             "num_steps": int(num_steps),

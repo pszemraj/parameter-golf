@@ -3,6 +3,9 @@
 ## Status
 
 - The corrected full-spec controller replay is complete.
+- The `blocks0` and `blocks1` `1B` confirmation queue is mostly complete:
+  - `12x6`, `12x10`, `10x12`, and `blocks1 12x6` are finished
+  - only checkpointed `blocks0 16x8` remains in flight
 - All evidence below uses:
   - the uncapped full local shard set for frozen-spec construction
   - exact `val_bpb`
@@ -32,8 +35,10 @@ Artifact estimates below use the corrected record-style accounting:
 
 | Run | Frozen structure | Trainable params | Planned tokens | Best val_bpb | Steady tok/s | Artifact estimate |
 |---|---|---:|---:|---:|---:|---:|
-| `blocks0_resid12_e10_c8t1_r3_current_512m` | `blocks0` | `839,129` | `536,870,912` | `2.2777913795` | `384,214` | `3,855,919` |
-| `blocks0_resid10_e12_c8t1_r3_current_512m` | `blocks0` | `839,031` | `536,870,912` | `2.2794286891` | `382,789` | `3,854,342` |
+| `blocks0_resid12_e10_c8t1_r3_current_1b` | `blocks0` | `839,129` | `1,073,741,824` | `2.2113941366` | `386,200` | `3,879,987` |
+| `blocks0_resid10_e12_c8t1_r3_current_1b` | `blocks0` | `839,031` | `1,073,741,824` | `2.2128156660` | `384,622` | `3,878,440` |
+| `blocks1_resid12_e6_c8t1_r3_current_1b` | `blocks1` | `505,049` | `1,073,741,824` | `2.2356768287` | `590,071` | `4,102,717` |
+| `blocks0_resid12_e6_c8t1_r3_current_1b` | `blocks0` | `505,049` | `1,073,741,824` | `2.2363421409` | `618,833` | `3,255,888` |
 | `blocks0_resid16_e8_c8t1_r3_current_512m_gc1` | `blocks0` | `895,005` | `536,870,912` | `2.2815471392` | `273,637` | `3,962,318` |
 | `blocks0_resid12_e8_c8t1_r3_current_512m` | `blocks0` | `672,089` | `536,870,912` | `2.2859021694` | `474,391` | `3,544,631` |
 | `blocks0_resid12_e6_c8t1_r3_current_512m` | `blocks0` | `505,049` | `536,870,912` | `2.2979334823` | `616,452` | `3,231,686` |
@@ -43,18 +48,21 @@ Artifact estimates below use the corrected record-style accounting:
 
 Current read on that table:
 
-- `blocks0_resid12_e10_c8t1_r3_current_512m` is still the best completed local pure-quality point.
-- `blocks0_resid10_e12_c8t1_r3_current_512m` is close enough to matter:
-  - it trails `12 x 10.0` by only about `0.00164` bpb
+- `blocks0_resid12_e10_c8t1_r3_current_1b` is now the best completed local pure-quality point.
+- `blocks0_resid10_e12_c8t1_r3_current_1b` stayed extremely close on the longer budget:
+  - it trails `12 x 10.0` by only about `0.00142` bpb
   - it matches controller mass almost exactly
-  - that means controller geometry is real signal, not noise
+  - that means controller geometry is still real signal, not screening noise
+- `blocks1_resid12_e6_c8t1_r3_current_1b` slightly beat `blocks0_resid12_e6_c8t1_r3_current_1b` on the longer budget:
+  - `2.2356768287` vs `2.2363421409`
+  - that is only about `0.00067` bpb, but it is enough to keep a one-block frozen structure very much alive as a transfer guardrail
 - `blocks0_resid16_e8_c8t1_r3_current_512m_gc1` proved larger checkpointed controllers are viable, but it is not the preferred local frontier point yet:
   - slower by about `29%` vs `12 x 10.0`
   - slightly worse by about `0.00376` bpb
-- `blocks1_resid12_e6_c8t1_r3_current_512m` is the best completed nonzero-amplifier contender:
-  - only about `0.00039` bpb behind the cheaper `blocks0_resid12_e6...`
-  - same trainable controller
-  - useful as a transfer guardrail so we do not overfit to pure `blocks0`
+- the still-running checkpointed `16x8` `1B` confirmation is promising enough to watch, but not to elevate yet:
+  - midpoint `4096 -> 2.3055954707`
+  - next eval `4608 -> 2.2713556688`
+  - that is real progress, but not enough evidence yet to displace the completed `12x10` / `10x12` pair
 
 ## Corrected `blocks3` Evidence
 
@@ -187,19 +195,19 @@ Is the learned amplifier stack earning its bytes?
 
 Best pure-quality contender:
 
-- `blocks0_resid12_e10_c8t1_r3_current_512m`
+- `blocks0_resid12_e10_c8t1_r3_current_1b`
 
 Best geometry control / near-tie:
 
-- `blocks0_resid10_e12_c8t1_r3_current_512m`
+- `blocks0_resid10_e12_c8t1_r3_current_1b`
 
 Best quality-speed tradeoff:
 
-- `blocks0_resid12_e6_c8t1_r3_current_512m`
+- `blocks0_resid12_e6_c8t1_r3_current_1b`
 
 Best nonzero-amplifier contender:
 
-- `blocks1_resid12_e6_c8t1_r3_current_512m`
+- `blocks1_resid12_e6_c8t1_r3_current_1b`
 
 Best larger-controller stress point:
 
@@ -221,12 +229,8 @@ The real current risk is different:
 
 ## Next Step
 
-The next rigorous checkpoint is longer-budget confirmation on the strongest corrected contenders before schedule tuning:
+The next rigorous checkpoint is no longer "start confirmations." It is:
 
-- `blocks0_resid12_e6_c8t1_r3_current`
-- `blocks0_resid12_e10_c8t1_r3_current`
-- `blocks0_resid10_e12_c8t1_r3_current`
-- `blocks1_resid12_e6_c8t1_r3_current`
-- optional larger stress point: `blocks0_resid16_e8_c8t1_r3_current_gc1`
-
-Those confirmations are the right next decision point for schedule work, because they tell us whether the `blocks0` winner is just a screening-budget effect or a real transfer candidate.
+- finish the checkpointed `blocks0_resid16_e8_c8t1_r3_current_1b_gc1` stress point
+- then run schedule sweeps on the completed `1B` leaders
+- keep `blocks1 12x6` in that schedule set as the live nonzero-amplifier guardrail

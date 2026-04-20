@@ -14,7 +14,7 @@ import os
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -46,6 +46,16 @@ def env_bool(name: str, default: bool) -> bool:
 
 def now_stamp() -> str:
     return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+def env_optional_int(*names: str) -> Optional[int]:
+    """Return the first non-empty integer environment variable."""
+    for name in names:
+        raw = os.environ.get(name)
+        if raw is None or raw == "":
+            continue
+        return int(raw)
+    return None
 
 
 def append_command(path: Path, cmd: list[str]) -> None:
@@ -190,6 +200,46 @@ class StructureRunSpec:
     branch_lags: str
     num_blocks: int
     readout_rank: Optional[int]
+
+
+def resolve_step_token_contract(
+    *,
+    batch_size: int,
+    seq_len: int,
+    bptt_chunks: int,
+    grad_accum: int,
+) -> tuple[int, int, int, int, int]:
+    """Resolve local batch overrides and a fixed effective tokens-per-step contract.
+
+    The local 5090 can use a smaller microbatch than the eventual H100 run, but
+    comparisons stay apples-to-apples only if the effective processed tokens per
+    optimizer step stay fixed. When ``TARGET_EFFECTIVE_STEP_TOKENS`` is set, we
+    derive ``grad_accum`` from the resolved microbatch contract.
+    """
+    resolved_batch_size = env_optional_int("LOCAL_BATCH_SIZE_OVERRIDE", "BATCH_SIZE_OVERRIDE")
+    resolved_seq_len = env_optional_int("SEQ_LEN_OVERRIDE")
+    batch_size = int(resolved_batch_size or batch_size)
+    seq_len = int(resolved_seq_len or seq_len)
+    local_step_tokens = int(batch_size * seq_len * bptt_chunks)
+    target_effective_step_tokens = env_optional_int(
+        "TARGET_EFFECTIVE_STEP_TOKENS", "TARGET_STEP_TOKENS"
+    )
+    if target_effective_step_tokens is not None:
+        if target_effective_step_tokens < local_step_tokens:
+            raise SystemExit(
+                "TARGET_EFFECTIVE_STEP_TOKENS is smaller than one local microbatch "
+                f"({target_effective_step_tokens} < {local_step_tokens})"
+            )
+        if target_effective_step_tokens % local_step_tokens != 0:
+            raise SystemExit(
+                "TARGET_EFFECTIVE_STEP_TOKENS must divide evenly by "
+                "batch_size * seq_len * bptt_chunks "
+                f"({target_effective_step_tokens} vs {local_step_tokens})"
+            )
+        grad_accum = target_effective_step_tokens // local_step_tokens
+    grad_accum = max(1, int(grad_accum))
+    effective_step_tokens = int(local_step_tokens * grad_accum)
+    return batch_size, seq_len, grad_accum, local_step_tokens, effective_step_tokens
 
 
 def controller_default_specs(preset: str) -> list[ControllerRunSpec]:
@@ -404,6 +454,11 @@ def update_controller_config(
     storage_dtype: str,
     spec: ControllerRunSpec,
     train_defaults: dict[str, str],
+    batch_size: int,
+    seq_len: int,
+    grad_accum: int,
+    local_step_tokens: int,
+    effective_step_tokens: int,
 ) -> None:
     cfg = ModelConfig.load(run_dir)
     branch_temporal_mode = env(
@@ -424,9 +479,11 @@ def update_controller_config(
     cfg.model["residual_core_init"] = spec.residual_core_init
     cfg.model["branch_temporal_mode"] = branch_temporal_mode
     cfg.model["branch_temporal_lag_scale"] = float(env("BRANCH_TEMPORAL_LAG_SCALE", "1.0"))
-    cfg.training["seq_len"] = spec.seq_len
-    cfg.training["batch_size"] = spec.batch_size
-    cfg.training["grad_accum"] = int(train_defaults["GRAD_ACCUM"])
+    cfg.training["seq_len"] = int(seq_len)
+    cfg.training["batch_size"] = int(batch_size)
+    cfg.training["grad_accum"] = int(grad_accum)
+    cfg.training["local_step_tokens"] = int(local_step_tokens)
+    cfg.training["effective_step_tokens"] = int(effective_step_tokens)
     cfg.training["carry_chunks"] = spec.carry_chunks
     cfg.training["bptt_chunks"] = spec.bptt_chunks
     cfg.training["num_steps"] = spec.num_steps
@@ -587,14 +644,24 @@ def run_controller_sweep(repo_root: Path) -> None:
     for spec in specs:
         if run_filter and run_filter not in spec.name:
             continue
+        resolved_spec = replace(spec)
+        batch_size, seq_len, grad_accum, local_step_tokens, effective_step_tokens = (
+            resolve_step_token_contract(
+                batch_size=resolved_spec.batch_size,
+                seq_len=resolved_spec.seq_len,
+                bptt_chunks=resolved_spec.bptt_chunks,
+                grad_accum=int(train_defaults["GRAD_ACCUM"]),
+            )
+        )
+        resolved_spec = replace(resolved_spec, batch_size=batch_size, seq_len=seq_len)
         run_dir = model_root / spec.name
         log_path = run_dir / "train.log"
         warmup_steps = (
-            int(spec.warmup_steps)
-            if spec.warmup_steps is not None
+            int(resolved_spec.warmup_steps)
+            if resolved_spec.warmup_steps is not None
             else int(train_defaults["WARMUP_STEPS"])
         )
-        if skip_done and run_complete(run_dir, spec.num_steps):
+        if skip_done and run_complete(run_dir, resolved_spec.num_steps):
             print(f"Skipping completed run: {spec.name}")
             continue
 
@@ -608,9 +675,21 @@ def run_controller_sweep(repo_root: Path) -> None:
                 phase="5090_controller_screening",
                 data_path=data_path,
                 storage_dtype=env("STORAGE_DTYPE", "uint16"),
-                spec=spec,
+                spec=resolved_spec,
                 train_defaults=train_defaults,
+                batch_size=batch_size,
+                seq_len=seq_len,
+                grad_accum=grad_accum,
+                local_step_tokens=local_step_tokens,
+                effective_step_tokens=effective_step_tokens,
             )
+        print(
+            f"Batch contract for {spec.name}: local_batch_size={batch_size} seq_len={seq_len} "
+            f"bptt_chunks={resolved_spec.bptt_chunks} grad_accum={grad_accum} "
+            f"local_step_tokens={local_step_tokens:,} "
+            f"effective_step_tokens={effective_step_tokens:,}",
+            flush=True,
+        )
 
         cmd = [
             python_bin,
@@ -621,27 +700,27 @@ def run_controller_sweep(repo_root: Path) -> None:
             "--storage-dtype",
             env("STORAGE_DTYPE", "uint16"),
             "--seq-len",
-            str(spec.seq_len),
+            str(seq_len),
             "--batch-size",
-            str(spec.batch_size),
+            str(batch_size),
             "--grad-accum",
-            train_defaults["GRAD_ACCUM"],
+            str(grad_accum),
             "--carry-chunks",
-            str(spec.carry_chunks),
+            str(resolved_spec.carry_chunks),
             "--bptt-chunks",
-            str(spec.bptt_chunks),
+            str(resolved_spec.bptt_chunks),
             "--num-steps",
-            str(spec.num_steps),
+            str(resolved_spec.num_steps),
             "--learning-rate",
-            str(spec.learning_rate),
+            str(resolved_spec.learning_rate),
             "--lr-schedule",
             train_defaults["LR_SCHEDULE"],
             "--min-lr",
-            str(spec.min_lr),
+            str(resolved_spec.min_lr),
             "--warmup-steps",
             str(warmup_steps),
             "--lr-hold-steps",
-            str(spec.lr_hold_steps),
+            str(resolved_spec.lr_hold_steps),
             "--weight-decay",
             train_defaults["WEIGHT_DECAY"],
             "--hard-loss-gamma",
@@ -651,13 +730,13 @@ def run_controller_sweep(repo_root: Path) -> None:
             "--grad-clip",
             train_defaults["GRAD_CLIP"],
             "--core-layers",
-            str(spec.core_layers),
+            str(resolved_spec.core_layers),
             "--core-expansion",
-            str(spec.core_expansion),
+            str(resolved_spec.core_expansion),
             "--residual-core",
-            "1" if spec.residual_core else "0",
+            "1" if resolved_spec.residual_core else "0",
             "--residual-core-init",
-            str(spec.residual_core_init),
+            str(resolved_spec.residual_core_init),
             "--branch-temporal-mode",
             env("BRANCH_TEMPORAL_MODE", "current"),
             "--branch-temporal-lag-scale",
@@ -711,7 +790,7 @@ def run_controller_sweep(repo_root: Path) -> None:
 
     if not dry_run:
         rebuild_summaries(model_root, "5090 Controller Sweep")
-    print(f"Done. Summary: {model_root / 'summary.tsv'}")
+        print(f"Done. Summary: {model_root / 'summary.tsv'}")
 
 
 def run_structure_sweep(repo_root: Path) -> None:
@@ -756,6 +835,22 @@ def run_structure_sweep(repo_root: Path) -> None:
     force_device = env("FORCE_DEVICE", str(defaults["FORCE_DEVICE"]))
     wandb_enabled_default = preset != "cpu_structure"
     planned_steps = int(env("NUM_STEPS", str(defaults["NUM_STEPS"])))
+    structure_bptt_chunks = int(env("BPTT_CHUNKS", str(defaults["BPTT_CHUNKS"])))
+    structure_batch_size = int(env("BATCH_SIZE", str(defaults["BATCH_SIZE"])))
+    structure_seq_len = int(env("SEQ_LEN", str(defaults["SEQ_LEN"])))
+    structure_grad_accum = int(env("GRAD_ACCUM", "1"))
+    (
+        resolved_structure_batch_size,
+        resolved_structure_seq_len,
+        resolved_structure_grad_accum,
+        structure_local_step_tokens,
+        structure_effective_step_tokens,
+    ) = resolve_step_token_contract(
+        batch_size=structure_batch_size,
+        seq_len=structure_seq_len,
+        bptt_chunks=structure_bptt_chunks,
+        grad_accum=structure_grad_accum,
+    )
 
     for spec in specs:
         if run_filter and run_filter not in spec.name:
@@ -827,8 +922,21 @@ def run_structure_sweep(repo_root: Path) -> None:
             cfg = ModelConfig.load(run_dir)
             cfg.meta["run_name"] = spec.name
             cfg.meta["phase"] = "5090_structure_screening"
+            cfg.training["seq_len"] = int(resolved_structure_seq_len)
+            cfg.training["batch_size"] = int(resolved_structure_batch_size)
+            cfg.training["grad_accum"] = int(resolved_structure_grad_accum)
+            cfg.training["local_step_tokens"] = int(structure_local_step_tokens)
+            cfg.training["effective_step_tokens"] = int(structure_effective_step_tokens)
             cfg.training["gradient_checkpointing"] = gradient_checkpointing
             cfg.save()
+        print(
+            f"Batch contract for {spec.name}: local_batch_size={resolved_structure_batch_size} "
+            f"seq_len={resolved_structure_seq_len} bptt_chunks={structure_bptt_chunks} "
+            f"grad_accum={resolved_structure_grad_accum} "
+            f"local_step_tokens={structure_local_step_tokens:,} "
+            f"effective_step_tokens={structure_effective_step_tokens:,}",
+            flush=True,
+        )
 
         train_cmd = [
             python_bin,
@@ -839,9 +947,11 @@ def run_structure_sweep(repo_root: Path) -> None:
             "--storage-dtype",
             env("STORAGE_DTYPE", "uint16"),
             "--seq-len",
-            env("SEQ_LEN", str(defaults["SEQ_LEN"])),
+            str(resolved_structure_seq_len),
             "--batch-size",
-            env("BATCH_SIZE", str(defaults["BATCH_SIZE"])),
+            str(resolved_structure_batch_size),
+            "--grad-accum",
+            str(resolved_structure_grad_accum),
             "--num-steps",
             str(planned_steps),
             "--learning-rate",
@@ -863,7 +973,7 @@ def run_structure_sweep(repo_root: Path) -> None:
             "--carry-chunks",
             env("CARRY_CHUNKS", str(defaults["CARRY_CHUNKS"])),
             "--bptt-chunks",
-            env("BPTT_CHUNKS", str(defaults["BPTT_CHUNKS"])),
+            str(structure_bptt_chunks),
             "--core-layers",
             env("CORE_LAYERS", str(defaults["CORE_LAYERS"])),
             "--core-expansion",
