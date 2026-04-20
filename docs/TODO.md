@@ -297,6 +297,39 @@ See [REDUNDANCY_AUDIT.md](REDUNDANCY_AUDIT.md) for the concrete code targets.
   - treat this as local directionality only; the real keep/kill still belongs
     to the next bounded H100 packed-path rerun.
 
+## 13. Record the 2026-04-19 packed selective-compile follow-up
+
+- Base commit before this follow-up: `f3d8c2f`.
+- Timestamp: `2026-04-19 19:08 CDT`.
+- Scope:
+  - `prepare_hybrid_compile()` now treats the normal packed FLA-backed GDN path
+    as compile-eligible in `selective` / `hybrid` mode rather than forcing the
+    whole `block.gdn` wrapper into an eager-only island
+  - compile stats now record `gdn_fla_blocks_compiled` explicitly so later H100
+    bundles can distinguish packed-FLA GDN compilation from corekernel /
+    megakernel ownership paths
+- Local validation artifacts:
+  - `RUN_ID=packed_gdn_selective_compile_audit`
+    - `compile_plan: strategy:selective gdn_disabled:0 gdn_blocks_compiled:7 gdn_fla_blocks_compiled:7 model_compiled:0`
+    - only the expected train/eval `grad_mode` recompiles remained under
+      `TORCH_LOGS=graph_breaks,recompiles`
+    - tiny local smoke timing: `step:2/2 ... step_avg:392.90 ms`
+  - `RUN_ID=packed_gdn_hybrid_compile_audit`
+    - `compile_plan: strategy:hybrid gdn_disabled:0 gdn_blocks_compiled:7 gdn_fla_blocks_compiled:7 model_compiled:1`
+    - only the expected train/eval `grad_mode` recompile remained
+    - tiny local smoke timing: `step:2/2 ... step_avg:410.94 ms`
+  - `RUN_ID=packed_gdn_model_compile_control`
+    - `compile_plan: strategy:model gdn_blocks_compiled:0 gdn_fla_blocks_compiled:0 model_compiled:1`
+    - tiny local smoke timing: `step:2/2 ... step_avg:410.08 ms`
+- Interpretation:
+  - this is a packed-mainline compile-boundary cleanup, not an H100 speed claim
+  - on the tiny local smoke, `selective` is now at least plausible for the
+    packed HGDN path instead of being disqualified by forced eager GDN islands
+  - the next bounded H100 packed compile-strategy check can now compare
+    `model` vs `selective` fairly on the same live `14L` packed contract
+  - single-entry helper for that follow-up now exists:
+    `scripts/run_h100_single_gpu_hgdn.sh fixed2k-hybrid-compile-matrix`
+
 ## Stop rules
 
 - The current post-conv front-end seam is closed after `h100k20`.

@@ -310,6 +310,7 @@ def build_wandb_config(
         "COMPILE": args.compile,
         "COMPILE_STRATEGY": args.compile_strategy,
         "COMPILE_GDN_DISABLED": compile_stats["gdn_disabled"],
+        "COMPILE_GDN_FLA_BLOCKS_COMPILED": compile_stats["gdn_fla_blocks_compiled"],
         "COMPILE_GDN_COREKERNEL_LEFT_ENABLED": compile_stats[
             "gdn_corekernel_left_enabled"
         ],
@@ -1414,6 +1415,7 @@ def main() -> None:
         f"strategy:{compile_stats['strategy']} "
         f"gdn_disabled:{compile_stats['gdn_disabled']} "
         f"gdn_blocks_compiled:{compile_stats['gdn_blocks_compiled']} "
+        f"gdn_fla_blocks_compiled:{compile_stats['gdn_fla_blocks_compiled']} "
         f"gdn_corekernel_left_enabled:{compile_stats['gdn_corekernel_left_enabled']} "
         f"gdn_megakernel_left_enabled:{compile_stats['gdn_megakernel_left_enabled']} "
         f"gdn_mlps_compiled:{compile_stats['gdn_mlps_compiled']} "

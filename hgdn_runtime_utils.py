@@ -283,6 +283,7 @@ def prepare_hybrid_compile(
     compile_stats: dict[str, int | str] = {
         "strategy": "off" if not enabled else strategy,
         "gdn_disabled": 0,
+        "gdn_fla_blocks_compiled": 0,
         "gdn_corekernel_left_enabled": 0,
         "gdn_megakernel_left_enabled": 0,
         "gdn_blocks_compiled": 0,
@@ -304,11 +305,12 @@ def prepare_hybrid_compile(
             if block_type == "gdn" and hasattr(block, "gdn") and hasattr(block, "mlp"):
                 use_corekernel = bool(getattr(block.gdn, "use_cuda_corekernel", False))
                 use_megakernel = bool(getattr(block.gdn, "use_cuda_megakernel", False))
-                if not use_corekernel and not use_megakernel:
+                use_fla = bool(getattr(block.gdn, "use_fla", False))
+                if not use_corekernel and not use_megakernel and not use_fla:
                     block.gdn = maybe_disable_compile(
                         block.gdn,
                         enabled=True,
-                        reason="FLA GDN path already dispatches Triton kernels",
+                        reason="Naive GDN fallback stays eager-only",
                     )
                     compile_stats["gdn_disabled"] += 1
                 else:
@@ -319,6 +321,8 @@ def prepare_hybrid_compile(
                         fullgraph=False,
                     )
                     compile_stats["gdn_blocks_compiled"] += 1
+                    if use_fla and not use_corekernel and not use_megakernel:
+                        compile_stats["gdn_fla_blocks_compiled"] += 1
                     if use_corekernel:
                         compile_stats["gdn_corekernel_left_enabled"] += 1
                     if use_megakernel:

@@ -8,7 +8,7 @@ mode="${1:-perf}"
 
 usage() {
     cat <<'EOF'
-Usage: scripts/run_h100_single_gpu_hgdn.sh {perf|fixed2k|fixed2k-hybrid|all|help}
+Usage: scripts/run_h100_single_gpu_hgdn.sh {perf|fixed2k|fixed2k-hybrid|fixed2k-hybrid-compile-matrix|all|help}
 
 Purpose:
   Single-GPU H100 helper for HGDN target-hardware calibration.
@@ -46,6 +46,16 @@ Modes:
     Contract also forces:
     - PERF_ISOLATE_COMPILE_CACHE=1
 
+  fixed2k-hybrid-compile-matrix
+    Run the same live packed `14L x 384d` hybrid leg under multiple compile
+    strategies on one 1xH100 box.
+    Default strategy list:
+    - model
+    - selective
+    - hybrid
+    Use this when the packed HGDN path needs a fair compile-placement check
+    without manually reassembling three long commands.
+
   all
     Run perf first, then fixed2k.
 
@@ -74,11 +84,16 @@ Environment overrides:
   FIXED2K_ITERATIONS         Defaults to 2000.
   FIXED2K_VAL_LOSS_EVERY     Defaults to 500.
   FIXED2K_TRAIN_LOG_EVERY    Defaults to 200.
+  PACKED_COMPILE_MATRIX_STRATEGIES
+                             Space-delimited compile strategy list for
+                             fixed2k-hybrid-compile-matrix, defaults to
+                             "model selective hybrid".
 
 Examples:
   scripts/run_h100_single_gpu_hgdn.sh perf
   RUN_PREFIX=h100a scripts/run_h100_single_gpu_hgdn.sh fixed2k
   RUN_PREFIX=h100a scripts/run_h100_single_gpu_hgdn.sh fixed2k-hybrid
+  RUN_PREFIX=h100a scripts/run_h100_single_gpu_hgdn.sh fixed2k-hybrid-compile-matrix
   USE_WANDB=0 WANDB_MODE=offline scripts/run_h100_single_gpu_hgdn.sh perf
 EOF
 }
@@ -212,6 +227,31 @@ run_fixed2k_hybrid() {
         "PERF_SKIP_FINAL_EVAL=0"
 }
 
+run_fixed2k_hybrid_compile_matrix() {
+    local prefix="$1"
+    local strategies="${PACKED_COMPILE_MATRIX_STRATEGIES:-model selective hybrid}"
+    local strategy
+
+    for strategy in ${strategies}; do
+        run_sweep \
+            "1xH100 fixed2k compile-matrix: hybrid packed COMPILE_STRATEGY=${strategy}" \
+            single-live14 \
+            "RUN_ID=${prefix}_fixed2k_hybrid_compile_${strategy}" \
+            "COMPILE_STRATEGY=${strategy}" \
+            "GDN_RATIO=${HYBRID_GDN_RATIO:-1}" \
+            "MLP_MULT=${HYBRID_MLP_MULT:-${MLP_MULT:-3.25}}" \
+            "ITERATIONS=${FIXED2K_ITERATIONS:-2000}" \
+            "MAX_WALLCLOCK_SECONDS=0" \
+            "TRAIN_BATCH_TOKENS=${TRAIN_BATCH_TOKENS:-524288}" \
+            "TRAIN_SEQ_LEN=${FIXED2K_SEQ_LEN:-2048}" \
+            "VAL_LOSS_EVERY=${FIXED2K_VAL_LOSS_EVERY:-500}" \
+            "TRAIN_LOG_EVERY=${FIXED2K_TRAIN_LOG_EVERY:-200}" \
+            "PERF_TIMING=0" \
+            "PERF_ISOLATE_COMPILE_CACHE=1" \
+            "PERF_SKIP_FINAL_EVAL=0"
+    done
+}
+
 hgdn_require_cmd bash
 hgdn_require_cmd torchrun
 
@@ -227,6 +267,9 @@ fixed2k)
     ;;
 fixed2k-hybrid)
     run_fixed2k_hybrid "$run_prefix"
+    ;;
+fixed2k-hybrid-compile-matrix)
+    run_fixed2k_hybrid_compile_matrix "$run_prefix"
     ;;
 all)
     run_perf_pair "$run_prefix"
