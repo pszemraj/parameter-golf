@@ -76,6 +76,7 @@ def _controller_family(
         env_overrides={
             "PRESET": "controller_default",
             "NUM_BLOCKS": str(num_blocks),
+            "GRADIENT_CHECKPOINTING": "0",
             "VAL_EVERY": str(val_every),
             "VAL_STEPS": str(val_steps),
             "LOG_EVERY": str(log_every),

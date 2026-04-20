@@ -41,6 +41,7 @@ def test_schedule_queue_uses_blocks0_shared_spec_and_fixed_token_contract():
     env = top.merged_env()
     assert "fullspec_blocks0_radical_v1" in top.shared_spec_dir
     assert env["NUM_BLOCKS"] == "0"
+    assert env["GRADIENT_CHECKPOINTING"] == "0"
     assert env["TARGET_EFFECTIVE_STEP_TOKENS"] == "131072"
     assert "blocks0_resid12_e10_h1500_512m" in env["RUN_SPECS"]
 
