@@ -22,7 +22,7 @@
   - checkpointed `blocks0 16x8` also held up and landed as the third-best pure-quality point
   - `blocks1 12x6` slightly beat `blocks0 12x6` on the longer budget
 - The first real schedule result also changed the recommendation:
-  - on the `512M` screen, `lr_hold_steps=2500` beat the inherited `1500` default for both `blocks0 12x10` and `blocks0 10x12`
+  - on the `512M` screen, the edge follow-up moved the best tested hold from `2500` to `3500` for both `blocks0 12x10` and `blocks0 10x12`
   - the schedule is still decaying too early under the inherited root default
 - The regression-to-transformer guardrail is still intact:
   - no attention
@@ -196,6 +196,7 @@ Pure hyperparameter / architecture findings:
 - `blocks1 12 x 6.0` is the best current nonzero-amplifier guardrail point and slightly beat the matching `blocks0 12x6` run at `1B`
 - naive lag-heavy temporal variants are not winning
 - first schedule evidence says the current default `lr_hold_steps=1500` is too short for the top radical `blocks0` controllers on the `512M` screen
+- current best tested `512M` screening hold is `3500`, and the next confirmation candidate for the `1B` budget is the proportional transfer `7000`
 
 ## Regression-To-Transformer Guardrail
 
@@ -218,6 +219,6 @@ That is also why schedule sweeps should start on the two best `blocks0` points, 
 ## Unresolved Questions
 
 - Which of the top contenders responds best to schedule tuning?
-- Does hold keep improving past `2500`, or does the schedule want a plateau closer to no decay on this screening budget?
+- Does the `h3500 -> h7000` transfer hold up on the `1B` budget?
 - Does `blocks1 12x6` keep its slight edge over `blocks0 12x6` once both get a tuned schedule instead of the inherited default?
 - Does longer context help the `12x10` / `10x12` pair more than the cheaper `12x6` anchors?

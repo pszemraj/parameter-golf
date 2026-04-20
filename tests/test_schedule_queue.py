@@ -31,6 +31,8 @@ def test_build_queue_contains_expected_schedule_families():
         "blocks0_10x12_hold_screen_v1",
         "blocks0_12x10_hold_edge_v2",
         "blocks0_10x12_hold_edge_v2",
+        "blocks0_12x10_hold_confirm1b_v1",
+        "blocks0_10x12_hold_confirm1b_v1",
     ]
 
 
@@ -63,3 +65,15 @@ def test_schedule_queue_exposes_edge_follow_up_families():
     control_edge = queue["blocks0_10x12_hold_edge_v2"].merged_env()["RUN_SPECS"]
     assert "blocks0_resid10_e12_h3500_512m" in control_edge
     assert "blocks0_resid10_e12_h4096_512m" in control_edge
+
+
+def test_schedule_queue_exposes_1b_hold_confirmation_families():
+    """The launcher should include the scaled-hold 1B confirmation families."""
+    module = load_module()
+    queue = {launch.name: launch for launch in module.build_queue(REPO_ROOT)}
+
+    top_confirm = queue["blocks0_12x10_hold_confirm1b_v1"].merged_env()["RUN_SPECS"]
+    assert "blocks0_resid12_e10_h7000_1b" in top_confirm
+
+    control_confirm = queue["blocks0_10x12_hold_confirm1b_v1"].merged_env()["RUN_SPECS"]
+    assert "blocks0_resid10_e12_h7000_1b" in control_confirm

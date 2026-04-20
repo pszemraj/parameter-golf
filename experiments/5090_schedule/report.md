@@ -3,9 +3,9 @@
 ## Status
 - Harness ready
 - Controller frontier is now stable enough to start schedule isolation
-- Phase 1a `lr_hold_steps` sweep finished on the two best completed `blocks0` `1B` controllers
-- The best tested hold is currently `2500` for both leaders
-- No final schedule winner yet because the best hold landed on the edge of the tested range
+- Phase 1 hold sweep and edge follow-up are complete on the two best completed `blocks0` `1B` controllers
+- The best tested `512M` screening hold is currently `3500` for both leaders
+- No fully promoted global default yet because `3500` is still screening evidence until the corresponding `1B` confirmation lands
 
 ## What Was Verified
 - Warmup-hold-cosine is the real root schedule path.
@@ -32,15 +32,35 @@ Important systems note:
 - steady-state throughput was effectively unchanged across the hold sweep
 - the win is schedule quality, not a hidden speed artifact
 
+## Edge Follow-Up Result
+
+The edge probe resolved the main ambiguity from phase 1a.
+
+| Controller | `h2500` | `h3000` | `h3500` | `h4096` | Best tested |
+|---|---:|---:|---:|---:|---:|
+| `blocks0 12x10` | `2.2696659544` | `2.2719321948` | `2.2690508796` | `2.2830053665` | `h3500` |
+| `blocks0 10x12` | `2.2715466346` | `2.2684898656` | `2.2669840064` | `2.2834303277` | `h3500` |
+
+Delta relative to the inherited `h1500` default:
+
+- `blocks0 12x10`: `h3500` improved by about `0.00874` bpb
+- `blocks0 10x12`: `h3500` improved by about `0.01244` bpb
+
+Interpretation:
+
+- `h3500` is the best tested setting for both top controllers on the `512M` screening contract
+- effective no-decay (`h4096`) is clearly worse for both
+- the schedule wants a very late cosine tail, not zero decay
+
 What can now be stated with evidence:
 
 - hold-then-cosine is helping this family
 - decay is still starting too early under the current default
+- the `512M` screening default should move from `h1500` to `h3500`
 
 What cannot yet be stated:
 
-- whether `h2500` is the real optimum
-- whether the best setting is close to no decay for this screening budget
+- whether `h3500` is the right transferred hold for the `1B` budget
 - whether `min_lr` is too high or too low once hold is tuned farther out
 
 ## Phase 1 Screening Contract
@@ -83,28 +103,26 @@ blocks0_10x12_hold_screen_v1:
   h0, h500, h1500, h2500
 ```
 
-## Phase 1b Edge Follow-Up
+## Phase 2 Confirmation
 
-Because both families won on the edge of the tested range, the next disciplined move is not a different LR yet. It is a direct hold-edge probe:
+Because `4096` no-decay lost cleanly and `3500` won for both families, the next disciplined move is a budget-matched `1B` confirmation using the scaled hold:
+
+- `4096 -> 8192` total steps is an exact 2x step-budget increase
+- so the direct proportional transfer of `h3500` is `h7000`
 
 ```bash
-blocks0_12x10_hold_edge_v2:
-  h3000, h3500, h4096
+blocks0_12x10_hold_confirm1b_v1:
+  h7000 @ 1B
 
-blocks0_10x12_hold_edge_v2:
-  h3000, h3500, h4096
+blocks0_10x12_hold_confirm1b_v1:
+  h7000 @ 1B
 ```
 
-Interpretation of `h4096`:
-
-- with `4096` total steps and `100` warmup steps, this is effectively a no-decay boundary check under the same cosine-with-hold code path
-
-Only after the edge follow-up lands should the next isolated sweeps move to `max_lr`, `warmup_steps`, `min_lr`, and `weight_decay`.
+Only after that `1B` confirmation lands should the next isolated sweeps move to `max_lr`, `warmup_steps`, `min_lr`, and `weight_decay`.
 
 ## Questions This Sweep Should Answer
-- Does the inherited `1500`-step hold actually earn its keep on the radical `blocks0` controllers?
-- Is the same hold value preferred by both `12 x 10.0` and `10 x 12.0`, or is schedule preference geometry-dependent?
-- Does the monotonic improvement continue past `h2500`, or do we hit a plateau / reversal closer to no decay?
+- Does the `h3500 -> h7000` transfer hold up on the `1B` budget?
+- Does the same late-tail schedule remain best for both `12 x 10.0` and `10 x 12.0` after the budget change?
 - Is hold-then-cosine actually helping this recurrent-controller family?
 - Are we decaying too early for the chosen local token budget?
 - Is the current `min_lr` floor too conservative?

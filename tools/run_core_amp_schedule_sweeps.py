@@ -155,6 +155,40 @@ blocks0_resid10_e12_h3500_512m  10 12.0 8 1 1 -3.0 0.003 100 3500 0.0003 4096 25
 blocks0_resid10_e12_h4096_512m  10 12.0 8 1 1 -3.0 0.003 100 4096 0.0003 4096 256 512
 """,
         ),
+        _controller_family(
+            name="blocks0_12x10_hold_confirm1b_v1",
+            model_root=str(schedule_root / "blocks0_12x10_hold_confirm1b_v1"),
+            shared_spec_dir=blocks0_shared,
+            description=(
+                "1B confirmation of the proportional h7000 hold transfer for the "
+                "best tested pure-quality blocks0 controller."
+            ),
+            val_every=512,
+            val_steps=8,
+            log_every=128,
+            log_state_every=512,
+            save_every=4096,
+            run_specs="""
+blocks0_resid12_e10_h7000_1b  12 10.0 8 1 1 -3.0 0.003 100 7000 0.0003 8192 256 512
+""",
+        ),
+        _controller_family(
+            name="blocks0_10x12_hold_confirm1b_v1",
+            model_root=str(schedule_root / "blocks0_10x12_hold_confirm1b_v1"),
+            shared_spec_dir=blocks0_shared,
+            description=(
+                "1B confirmation of the proportional h7000 hold transfer for the "
+                "near-tied geometry-control blocks0 controller."
+            ),
+            val_every=512,
+            val_steps=8,
+            log_every=128,
+            log_state_every=512,
+            save_every=4096,
+            run_specs="""
+blocks0_resid10_e12_h7000_1b  10 12.0 8 1 1 -3.0 0.003 100 7000 0.0003 8192 256 512
+""",
+        ),
     ]
 
 
