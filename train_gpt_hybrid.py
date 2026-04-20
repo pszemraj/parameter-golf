@@ -17,10 +17,8 @@ from __future__ import annotations
 
 import copy
 import gc
-import glob
 import io
 import json
-import math
 import os
 import random
 import sys
@@ -56,6 +54,16 @@ from profiler_report import (
     build_profile_report,
     build_profile_rows,
     write_profile_report,
+)
+from trainer_shared import (
+    DistributedTokenLoader,
+    build_sentencepiece_luts,
+    eval_val,
+    load_validation_tokens_from_files,
+    make_stream_sync_event,
+    resolve_glob_files,
+    stage_eval_batch_views,
+    wait_current_stream,
 )
 
 # ── Optional wandb ────────────────────────────────────────────────────
@@ -637,316 +645,6 @@ def load_data_shard(file: Path) -> Tensor:
     return torch.from_numpy(tokens_np.astype(np.uint16, copy=False))
 
 
-def resolve_token_files(
-    pattern: str, *, missing_message: str | None = None
-) -> list[Path]:
-    """Resolve a token-shard glob into a sorted file list.
-
-    :param str pattern: Glob pattern for token shards.
-    :param str | None missing_message: Optional custom error when no files match, defaults to None.
-    :raises FileNotFoundError: If the pattern matches no files.
-    :return list[Path]: Sorted shard paths.
-    """
-    files = [Path(p) for p in sorted(glob.glob(pattern))]
-    if not files:
-        raise FileNotFoundError(missing_message or f"No files for: {pattern}")
-    return files
-
-
-class TokenStream:
-    """Sequential shard reader that wraps around at the end of the file list."""
-
-    def __init__(self, files: list[Path]):
-        """Initialize a streaming shard reader.
-
-        :param list[Path] files: Ordered token shard paths.
-        """
-        self.files = list(files)
-        if not self.files:
-            raise ValueError("TokenStream requires at least one shard file")
-        self.file_idx = 0
-        self.tokens = load_data_shard(self.files[0])
-        self.pos = 0
-
-    def _advance_file(self) -> None:
-        """Advance to the next shard, wrapping around when needed."""
-        self.file_idx = (self.file_idx + 1) % len(self.files)
-        self.tokens = load_data_shard(self.files[self.file_idx])
-        self.pos = 0
-
-    def skip(self, n: int) -> None:
-        """Advance the stream by ``n`` tokens without materializing them.
-
-        :param int n: Number of tokens to discard.
-        """
-
-        remaining = n
-        while remaining > 0:
-            avail = self.tokens.numel() - self.pos
-            if avail <= 0:
-                self._advance_file()
-                continue
-            k = min(remaining, avail)
-            self.pos += k
-            remaining -= k
-
-    def take(self, n: int) -> Tensor:
-        """Take a contiguous token span across shard boundaries.
-
-        :param int n: Number of tokens to read.
-        :return Tensor: Requested token span.
-        """
-        chunks = []
-        remaining = n
-        while remaining > 0:
-            avail = self.tokens.numel() - self.pos
-            if avail <= 0:
-                self._advance_file()
-                continue
-            k = min(remaining, avail)
-            chunks.append(self.tokens[self.pos : self.pos + k])
-            self.pos += k
-            remaining -= k
-        return chunks[0] if len(chunks) == 1 else torch.cat(chunks)
-
-
-class DistributedTokenLoader:
-    """Shard loader that slices each global batch by distributed rank."""
-
-    def __init__(
-        self, files: list[Path], rank: int, world_size: int, device: torch.device
-    ):
-        """Initialize the distributed token loader.
-
-        :param list[Path] files: Ordered token shard paths.
-        :param int rank: Distributed rank.
-        :param int world_size: Distributed world size.
-        :param torch.device device: Target device for batches.
-        """
-        self.rank, self.world_size, self.device = rank, world_size, device
-        self.stream = TokenStream(files)
-        self._x_stage: Tensor | None = None
-        self._y_stage: Tensor | None = None
-        self._per_rank_span: int | None = None
-
-    def _stage_batch_views(self, x_cpu: Tensor, y_cpu: Tensor) -> tuple[Tensor, Tensor]:
-        """Copy one CPU batch pair into reusable pinned staging buffers.
-
-        :param Tensor x_cpu: CPU input token ids shaped `(batch, seq)`.
-        :param Tensor y_cpu: CPU target token ids shaped `(batch, seq)`.
-        :return tuple[Tensor, Tensor]: Reusable pinned `x:int32` / `y:int64` staging tensors.
-        """
-        if self.device.type != "cuda":
-            return x_cpu.to(dtype=torch.int32), y_cpu.to(dtype=torch.int64)
-        if self._x_stage is None or tuple(self._x_stage.shape) != tuple(x_cpu.shape):
-            self._x_stage = torch.empty_like(x_cpu, dtype=torch.int32, pin_memory=True)
-        if self._y_stage is None or tuple(self._y_stage.shape) != tuple(y_cpu.shape):
-            self._y_stage = torch.empty_like(y_cpu, dtype=torch.int64, pin_memory=True)
-        self._x_stage.copy_(x_cpu)
-        self._y_stage.copy_(y_cpu)
-        return self._x_stage, self._y_stage
-
-    def next_batch(
-        self, global_tokens: int, seq_len: int, grad_accum_steps: int
-    ) -> tuple[Tensor, Tensor]:
-        """Build the next local input/target batch pair.
-
-        :param int global_tokens: Global tokens per optimizer step.
-        :param int seq_len: Sequence length.
-        :param int grad_accum_steps: Gradient accumulation factor.
-        :return tuple[Tensor, Tensor]: Input and target batches on the target device.
-        """
-        local_tokens = global_tokens // (self.world_size * grad_accum_steps)
-        per_rank_span = local_tokens + 1
-        if self._per_rank_span is None:
-            self.stream.skip(self.rank * per_rank_span)
-            self._per_rank_span = per_rank_span
-        elif self._per_rank_span != per_rank_span:
-            raise RuntimeError(
-                "DistributedTokenLoader requires a stable per-rank span within one run, "
-                f"got {self._per_rank_span} then {per_rank_span}."
-            )
-        local = self.stream.take(per_rank_span)
-        if self.world_size > 1:
-            self.stream.skip((self.world_size - 1) * per_rank_span)
-        x_cpu = local[:-1].reshape(-1, seq_len)
-        y_cpu = local[1:].reshape(-1, seq_len)
-        x_stage, y_stage = self._stage_batch_views(x_cpu, y_cpu)
-        x = x_stage.to(self.device, non_blocking=True)
-        y = y_stage.to(self.device, non_blocking=True)
-        return x, y
-
-
-# =====================================================================
-# EVAL (from baseline — BPB calculation)
-# =====================================================================
-
-
-def build_sentencepiece_luts(
-    sp: spm.SentencePieceProcessor, vocab_size: int, device: torch.device
-) -> tuple[Tensor, Tensor, Tensor]:
-    """Build lookup tables for tokenizer-aware byte counting.
-
-    :param spm.SentencePieceProcessor sp: Loaded SentencePiece tokenizer.
-    :param int vocab_size: Expected vocabulary size.
-    :param torch.device device: Target device for the lookup tensors.
-    :return tuple[Tensor, Tensor, Tensor]: Base bytes, leading-space flags, and boundary flags.
-    """
-    sp_vocab_size = int(sp.vocab_size())
-    table_size = max(sp_vocab_size, vocab_size)
-    base_bytes = np.zeros(table_size, dtype=np.int16)
-    has_leading_space = np.zeros(table_size, dtype=np.bool_)
-    is_boundary = np.ones(table_size, dtype=np.bool_)
-    for tid in range(sp_vocab_size):
-        if sp.is_control(tid) or sp.is_unknown(tid) or sp.is_unused(tid):
-            continue
-        is_boundary[tid] = False
-        if sp.is_byte(tid):
-            base_bytes[tid] = 1
-            continue
-        piece = sp.id_to_piece(tid)
-        if piece.startswith("▁"):
-            has_leading_space[tid] = True
-            piece = piece[1:]
-        base_bytes[tid] = len(piece.encode("utf-8"))
-    return (
-        torch.tensor(base_bytes, dtype=torch.int16, device=device),
-        torch.tensor(has_leading_space, dtype=torch.bool, device=device),
-        torch.tensor(is_boundary, dtype=torch.bool, device=device),
-    )
-
-
-def load_validation_tokens(files: list[Path], seq_len: int) -> Tensor:
-    """Load and trim validation tokens to an integer number of sequences.
-
-    :param list[Path] files: Ordered validation shard paths.
-    :param int seq_len: Sequence length used for eval reshaping.
-    :return Tensor: Concatenated validation tokens.
-    """
-    if not files:
-        raise FileNotFoundError("No validation shards provided")
-    tokens = torch.cat([load_data_shard(f) for f in files]).contiguous()
-    usable = ((tokens.numel() - 1) // seq_len) * seq_len
-    if usable <= 0:
-        raise ValueError(f"Validation split is too short for TRAIN_SEQ_LEN={seq_len}")
-    return tokens[: usable + 1]
-
-
-def stage_eval_batch_views(
-    x_cpu: Tensor,
-    y_cpu: Tensor,
-    device: torch.device,
-    x_stage: Tensor | None,
-    y_stage: Tensor | None,
-) -> tuple[Tensor, Tensor, Tensor | None, Tensor | None]:
-    """Stage one validation batch pair through reusable pinned host buffers.
-
-    :param Tensor x_cpu: CPU input token ids shaped `(batch, seq)`.
-    :param Tensor y_cpu: CPU target token ids shaped `(batch, seq)`.
-    :param torch.device device: Target device for the staged batch.
-    :param Tensor | None x_stage: Reusable pinned input staging buffer.
-    :param Tensor | None y_stage: Reusable pinned target staging buffer.
-    :return tuple[Tensor, Tensor, Tensor | None, Tensor | None]: Device batches plus updated staging buffers.
-    """
-
-    if device.type != "cuda":
-        return (
-            x_cpu.to(device=device, dtype=torch.int32),
-            y_cpu.to(device=device, dtype=torch.int64),
-            x_stage,
-            y_stage,
-        )
-    if x_stage is None or tuple(x_stage.shape) != tuple(x_cpu.shape):
-        x_stage = torch.empty_like(x_cpu, dtype=torch.int32, pin_memory=True)
-        y_stage = torch.empty_like(y_cpu, dtype=torch.int64, pin_memory=True)
-    x_stage.copy_(x_cpu)
-    y_stage.copy_(y_cpu)
-    return (
-        x_stage.to(device=device, non_blocking=True),
-        y_stage.to(device=device, non_blocking=True),
-        x_stage,
-        y_stage,
-    )
-
-
-def eval_val(
-    args: Hyperparameters,
-    model: nn.Module,
-    rank: int,
-    world_size: int,
-    device: torch.device,
-    grad_accum_steps: int,
-    val_tokens: Tensor,
-    base_bytes_lut: Tensor,
-    has_leading_space_lut: Tensor,
-    is_boundary_lut: Tensor,
-) -> tuple[float, float]:
-    """Evaluate validation loss and tokenizer-agnostic BPB.
-
-    :param Hyperparameters args: Trainer hyperparameters.
-    :param nn.Module model: Model or DDP-wrapped model.
-    :param int rank: Distributed rank.
-    :param int world_size: Distributed world size.
-    :param torch.device device: Evaluation device.
-    :param int grad_accum_steps: Gradient accumulation factor used to derive local batch size.
-    :param Tensor val_tokens: Flat validation token buffer.
-    :param Tensor base_bytes_lut: Base byte-count lookup table.
-    :param Tensor has_leading_space_lut: Leading-space lookup table.
-    :param Tensor is_boundary_lut: Boundary-token lookup table.
-    :return tuple[float, float]: Validation loss and bits-per-byte.
-    """
-    local_batch_tokens = args.val_batch_size // (world_size * grad_accum_steps)
-    if local_batch_tokens < args.train_seq_len:
-        raise ValueError(
-            "VAL_BATCH_SIZE must provide at least one sequence per rank; "
-            f"got VAL_BATCH_SIZE={args.val_batch_size}, WORLD_SIZE={world_size}, "
-            f"GRAD_ACCUM_STEPS={grad_accum_steps}, TRAIN_SEQ_LEN={args.train_seq_len}"
-        )
-    local_batch_seqs = local_batch_tokens // args.train_seq_len
-    total_seqs = (val_tokens.numel() - 1) // args.train_seq_len
-    seq_start = (total_seqs * rank) // world_size
-    seq_end = (total_seqs * (rank + 1)) // world_size
-    val_loss_sum = torch.zeros((), device=device, dtype=torch.float64)
-    val_token_count = torch.zeros((), device=device, dtype=torch.float64)
-    val_byte_count = torch.zeros((), device=device, dtype=torch.float64)
-    model.eval()
-    x_stage: Tensor | None = None
-    y_stage: Tensor | None = None
-    with torch.no_grad():
-        for bss in range(seq_start, seq_end, local_batch_seqs):
-            bse = min(bss + local_batch_seqs, seq_end)
-            rs, re = bss * args.train_seq_len, bse * args.train_seq_len + 1
-            local = val_tokens[rs:re]
-            x, y, x_stage, y_stage = stage_eval_batch_views(
-                local[:-1].reshape(-1, args.train_seq_len),
-                local[1:].reshape(-1, args.train_seq_len),
-                device,
-                x_stage,
-                y_stage,
-            )
-            with torch.autocast(
-                device_type="cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"
-            ):
-                bl = model(x, y).detach()
-            btc = float(y.numel())
-            val_loss_sum += bl.to(torch.float64) * btc
-            val_token_count += btc
-            prev_ids, tgt_ids = x.reshape(-1), y.reshape(-1)
-            tb = base_bytes_lut[tgt_ids]
-            tb += (has_leading_space_lut[tgt_ids] & ~is_boundary_lut[prev_ids]).to(
-                torch.int16
-            )
-            val_byte_count += tb.to(torch.float64).sum()
-    if dist.is_available() and dist.is_initialized():
-        for t in (val_loss_sum, val_token_count, val_byte_count):
-            dist.all_reduce(t, op=dist.ReduceOp.SUM)
-    val_loss = val_loss_sum / val_token_count
-    bpt = val_loss.item() / math.log(2.0)
-    tpb = val_token_count.item() / val_byte_count.item()
-    model.train()
-    return float(val_loss.item()), float(bpt * tpb)
-
-
 def prewarm_eval_forward(
     args: Hyperparameters,
     model: nn.Module,
@@ -1006,30 +704,6 @@ def prewarm_eval_forward(
     if device.type == "cuda":
         torch.cuda.synchronize()
     return True
-
-
-def make_stream_sync_event(device: torch.device) -> torch.cuda.Event | None:
-    """Create a reusable current-stream sync event for CUDA timing boundaries.
-
-    :param torch.device device: Active execution device.
-    :return torch.cuda.Event | None: Reusable CUDA event, or `None` for non-CUDA devices.
-    """
-
-    if device.type != "cuda":
-        return None
-    return torch.cuda.Event()
-
-
-def wait_current_stream(event: torch.cuda.Event | None) -> None:
-    """Wait for work already queued on the current CUDA stream.
-
-    :param torch.cuda.Event | None event: Reusable CUDA event created by `make_stream_sync_event`.
-    """
-
-    if event is None:
-        return
-    event.record()
-    event.synchronize()
 
 
 # =====================================================================
@@ -1294,19 +968,22 @@ def main() -> None:
         "  python data/cached_challenge_fineweb.py --variant sp1024 --train-shards 1\n"
         f"Expected dataset under: {dataset_dir}"
     )
-    train_files = resolve_token_files(
+    train_files = resolve_glob_files(
         args.train_files, missing_message=missing_data_message
     )
-    val_files = resolve_token_files(
-        args.val_files, missing_message=missing_data_message
-    )
+    val_files = resolve_glob_files(args.val_files, missing_message=missing_data_message)
 
     sp = spm.SentencePieceProcessor(model_file=args.tokenizer_path)
     if int(sp.vocab_size()) != args.vocab_size:
         raise ValueError(
             f"VOCAB_SIZE={args.vocab_size} does not match tokenizer vocab_size={int(sp.vocab_size())}"
         )
-    val_tokens = load_validation_tokens(val_files, args.train_seq_len)
+    val_tokens = load_validation_tokens_from_files(
+        val_files,
+        args.train_seq_len,
+        load_data_shard=load_data_shard,
+        missing_message="No validation shards provided",
+    )
     base_bytes_lut, has_ls_lut, is_bnd_lut = build_sentencepiece_luts(
         sp, args.vocab_size, device
     )
@@ -1513,7 +1190,13 @@ def main() -> None:
         )
 
     # ── Data loader & warmup ──────────────────────────────────────────
-    train_loader = DistributedTokenLoader(train_files, rank, world_size, device)
+    train_loader = DistributedTokenLoader(
+        train_files,
+        rank,
+        world_size,
+        device,
+        load_data_shard=load_data_shard,
+    )
     max_wallclock_ms = (
         1000.0 * args.max_wallclock_seconds if args.max_wallclock_seconds > 0 else None
     )
@@ -1573,7 +1256,13 @@ def main() -> None:
         zero_grad_all()
         if distributed:
             model.require_backward_grad_sync = True
-        train_loader = DistributedTokenLoader(train_files, rank, world_size, device)
+        train_loader = DistributedTokenLoader(
+            train_files,
+            rank,
+            world_size,
+            device,
+            load_data_shard=load_data_shard,
+        )
     eval_prewarm_count = 0
     if args.compile and (
         args.log_step0_eval or args.val_loss_every > 0 or not args.perf_skip_final_eval
@@ -1638,16 +1327,18 @@ def main() -> None:
             training_time_ms += 1000.0 * (time.perf_counter() - t0)
             with profile_ctx("eval.val"):
                 val_loss, val_bpb = eval_val(
-                    args,
-                    model,
-                    rank,
-                    world_size,
-                    device,
-                    grad_accum_steps,
-                    val_tokens,
-                    base_bytes_lut,
-                    has_ls_lut,
-                    is_bnd_lut,
+                    model=model,
+                    rank=rank,
+                    world_size=world_size,
+                    device=device,
+                    grad_accum_steps=grad_accum_steps,
+                    train_seq_len=args.train_seq_len,
+                    val_batch_size=args.val_batch_size,
+                    val_tokens=val_tokens,
+                    base_bytes_lut=base_bytes_lut,
+                    has_leading_space_lut=has_ls_lut,
+                    is_boundary_token_lut=is_bnd_lut,
+                    use_inference_mode=False,
                 )
             log0(
                 f"step:{step}/{args.iterations} val_loss:{val_loss:.4f} val_bpb:{val_bpb:.4f} "
@@ -1876,16 +1567,18 @@ def main() -> None:
         q_eval_end = torch.cuda.Event(enable_timing=True)
         q_eval_start.record()
         q_val_loss, q_val_bpb = eval_val(
-            args,
-            model,
-            rank,
-            world_size,
-            device,
-            grad_accum_steps,
-            val_tokens,
-            base_bytes_lut,
-            has_ls_lut,
-            is_bnd_lut,
+            model=model,
+            rank=rank,
+            world_size=world_size,
+            device=device,
+            grad_accum_steps=grad_accum_steps,
+            train_seq_len=args.train_seq_len,
+            val_batch_size=args.val_batch_size,
+            val_tokens=val_tokens,
+            base_bytes_lut=base_bytes_lut,
+            has_leading_space_lut=has_ls_lut,
+            is_boundary_token_lut=is_bnd_lut,
+            use_inference_mode=False,
         )
         q_eval_end.record()
         q_eval_end.synchronize()
@@ -1893,16 +1586,18 @@ def main() -> None:
     else:
         t_q = time.perf_counter()
         q_val_loss, q_val_bpb = eval_val(
-            args,
-            model,
-            rank,
-            world_size,
-            device,
-            grad_accum_steps,
-            val_tokens,
-            base_bytes_lut,
-            has_ls_lut,
-            is_bnd_lut,
+            model=model,
+            rank=rank,
+            world_size=world_size,
+            device=device,
+            grad_accum_steps=grad_accum_steps,
+            train_seq_len=args.train_seq_len,
+            val_batch_size=args.val_batch_size,
+            val_tokens=val_tokens,
+            base_bytes_lut=base_bytes_lut,
+            has_leading_space_lut=has_ls_lut,
+            is_boundary_token_lut=is_bnd_lut,
+            use_inference_mode=False,
         )
         q_eval_ms = 1000 * (time.perf_counter() - t_q)
     log0(

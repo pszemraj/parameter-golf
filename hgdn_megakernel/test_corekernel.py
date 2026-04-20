@@ -15,13 +15,15 @@ REPO_ROOT = ensure_repo_root_on_sys_path()
 
 from hgdn_megakernel import device_report, extension_status  # noqa: E402
 from hgdn_megakernel.generate_test_data import (  # noqa: E402
-    CASE_FORMAT_VERSION,
-    RECURRENCE_CONTRACT,
-    generate_case,
     hydrate_module_from_inputs,
     make_module,
 )
-from model import _HAS_FLA  # noqa: E402
+from hgdn_megakernel.test_harness import (  # noqa: E402
+    check_close,
+    ensure_case,
+    load_payload,
+    payload_references,
+)
 
 REFERENCE_NAMES = (
     "y",
@@ -36,116 +38,6 @@ REFERENCE_NAMES = (
     "grad_A_log",
     "grad_dt_bias",
 )
-
-
-def _diff_stats(got: torch.Tensor, ref: torch.Tensor) -> dict[str, float | int]:
-    """Return error statistics for one tensor pair.
-
-    :param torch.Tensor got: Candidate tensor.
-    :param torch.Tensor ref: Reference tensor.
-    :return dict[str, float | int]: Error summary.
-    """
-    got_f = got.detach().float().cpu().flatten()
-    ref_f = ref.detach().float().cpu().flatten()
-    delta = got_f - ref_f
-    abs_diff = delta.abs()
-    rel_diff = abs_diff / ref_f.abs().clamp_min(1e-6)
-    flat_index = int(abs_diff.argmax().item())
-    rmse = float(delta.square().mean().sqrt().item())
-    norm_rel = float(delta.norm().item() / ref_f.norm().clamp_min(1e-6).item())
-    return {
-        "max_abs": float(abs_diff.max().item()),
-        "max_rel": float(rel_diff.max().item()),
-        "rmse": rmse,
-        "norm_rel": norm_rel,
-        "flat_index": flat_index,
-    }
-
-
-def _tensor_window(
-    tensor: torch.Tensor, flat_index: int, radius: int = 2
-) -> list[float]:
-    """Return a small flat window around one failing element.
-
-    :param torch.Tensor tensor: Tensor to inspect.
-    :param int flat_index: Flat failing index.
-    :param int radius: Window radius, defaults to 2.
-    :return list[float]: Neighboring flat values.
-    """
-    flat = tensor.detach().float().cpu().flatten()
-    lo = max(0, flat_index - radius)
-    hi = min(flat.numel(), flat_index + radius + 1)
-    return [float(v) for v in flat[lo:hi].tolist()]
-
-
-def check_close(
-    name: str,
-    got: torch.Tensor,
-    ref: torch.Tensor,
-    *,
-    atol: float,
-    rtol: float,
-    enforce: bool = True,
-) -> bool:
-    """Check one tensor pair and print mismatch diagnostics on failure.
-
-    :param str name: Display label.
-    :param torch.Tensor got: Candidate tensor.
-    :param torch.Tensor ref: Reference tensor.
-    :param float atol: Absolute tolerance.
-    :param float rtol: Relative tolerance.
-    :param bool enforce: Whether to raise on mismatch, defaults to `True`.
-    :raises AssertionError: If the tensors do not match and `enforce=True`.
-    :return bool: Whether the tensors matched within tolerance.
-    """
-    stats = _diff_stats(got, ref)
-    ok = torch.allclose(
-        got.detach().float().cpu(),
-        ref.detach().float().cpu(),
-        atol=atol,
-        rtol=rtol,
-    )
-    print(
-        f"{name:>24s}: max_abs={stats['max_abs']:.6g} "
-        f"max_rel={stats['max_rel']:.6g} rmse={stats['rmse']:.6g} "
-        f"norm_rel={stats['norm_rel']:.6g} idx={stats['flat_index']} ok={ok}"
-    )
-    if ok:
-        return True
-    print(f"{name} got_window={_tensor_window(got, int(stats['flat_index']))}")
-    print(f"{name} ref_window={_tensor_window(ref, int(stats['flat_index']))}")
-    if enforce:
-        raise AssertionError(f"{name} mismatch")
-    return False
-
-
-def load_payload(path: Path) -> dict[str, object]:
-    """Load one serialized reference payload from disk.
-
-    :param Path path: Case file path.
-    :return dict[str, object]: Serialized payload.
-    """
-    return torch.load(path, map_location="cpu")
-
-
-def _legacy_references(payload: dict[str, object]) -> dict[str, dict[str, object]]:
-    """Adapt the old flat payload shape into the new reference structure.
-
-    :param dict[str, object] payload: Loaded payload.
-    :return dict[str, dict[str, object]]: Named references.
-    """
-    return {"eager": {name: payload[name] for name in REFERENCE_NAMES}}
-
-
-def payload_references(payload: dict[str, object]) -> dict[str, dict[str, object]]:
-    """Return the named reference dictionaries for one payload.
-
-    :param dict[str, object] payload: Loaded payload.
-    :return dict[str, dict[str, object]]: Reference outputs and gradients.
-    """
-    if "references" in payload:
-        return payload["references"]
-    return _legacy_references(payload)
 
 
 def _make_case_module(
@@ -470,59 +362,6 @@ def count_launches(path: Path) -> dict[str, object]:
             "core-kernel launch count is not exactly one owned forward + one owned backward"
         )
     return summary
-
-
-def _case_needs_regen(path: Path) -> bool:
-    """Return whether a serialized case should be regenerated.
-
-    :param Path path: Case file path.
-    :return bool: Whether the case is missing or stale.
-    """
-    if not path.exists():
-        return True
-    try:
-        payload = load_payload(path)
-    except Exception:
-        return True
-    if payload.get("format_version") != CASE_FORMAT_VERSION:
-        return True
-    if "inputs" not in payload or "references" not in payload:
-        return True
-    if payload["meta"].get("recurrence_contract") != RECURRENCE_CONTRACT:
-        return True
-    references = payload_references(payload)
-    if "eager" not in references:
-        return True
-    if _HAS_FLA and payload["meta"].get("has_fla_reference", False) != (
-        "fla" in references
-    ):
-        return True
-    if _HAS_FLA and "fla" not in references:
-        return True
-    return False
-
-
-def ensure_case(path: Path, *, batch: int, seq: int, seed: int) -> None:
-    """Generate a missing reference case in place.
-
-    :param Path path: Output case path.
-    :param int batch: Batch size.
-    :param int seq: Sequence length.
-    :param int seed: RNG seed.
-    """
-    if not _case_needs_regen(path):
-        return
-    generate_case(
-        out=path,
-        batch=batch,
-        seq=seq,
-        d_model=384,
-        n_heads=8,
-        head_k_dim=48,
-        expand_v=1.0,
-        conv_size=4,
-        seed=seed,
-    )
 
 
 def main() -> None:

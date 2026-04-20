@@ -8,7 +8,6 @@ from .hgdn_megakernel_binding import (
     hgdn_megakernel,
     rec_chunk_t_max,
     resolve_runtime_rec_chunk_t,
-    run_core_from_gated_delta_net,
     run_from_gated_delta_net,
 )
 
@@ -20,6 +19,5 @@ __all__ = [
     "hgdn_megakernel",
     "rec_chunk_t_max",
     "resolve_runtime_rec_chunk_t",
-    "run_core_from_gated_delta_net",
     "run_from_gated_delta_net",
 ]

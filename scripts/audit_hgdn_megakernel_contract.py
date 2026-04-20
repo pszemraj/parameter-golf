@@ -211,6 +211,13 @@ def main() -> None:
         "binding should expose the HGDN core kernel through a torch.library op",
     )
 
+    core_binding_start = binding.find("def hgdn_corekernel(")
+    core_binding_end = binding.find("return z", core_binding_start)
+    core_binding_region = (
+        binding[core_binding_start : core_binding_end + len("return z")]
+        if core_binding_start != -1 and core_binding_end != -1
+        else ""
+    )
     core_binding_contract = (
         "def hgdn_corekernel(" in binding
         and "qkv: Tensor," in binding
@@ -220,18 +227,8 @@ def main() -> None:
         and "conv_w: Tensor," in binding
         and "A_log: Tensor," in binding
         and "dt_bias: Tensor," in binding
-        and "w_qkv"
-        not in binding[
-            binding.find("def hgdn_corekernel(") : binding.find(
-                "def run_core_from_gated_delta_net("
-            )
-        ]
-        and "w_out"
-        not in binding[
-            binding.find("def hgdn_corekernel(") : binding.find(
-                "def run_core_from_gated_delta_net("
-            )
-        ]
+        and "w_qkv" not in core_binding_region
+        and "w_out" not in core_binding_region
     )
     failures += not check(
         "corekernel forward input contract",
