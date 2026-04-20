@@ -42,8 +42,9 @@ The cleanest immediate cleanup target is the profiler/report toolchain. The risk
   fallback helper across the HGDN CUDA family tests instead of keeping those
   cases as hand-expanded near-duplicates.
 - `test_model.py` now uses one packed-qkv parity helper for the custom-backward,
-  single-contig, and split-copy variants instead of repeating the same
-  forward/backward gradient checks three times.
+  single-contig, and split-copy variants, and one shared rejection helper for
+  repeated invalid-config tables, instead of repeating the same parity and
+  validation scaffolding across the packed-path family.
 
 ## Findings
 
@@ -55,7 +56,7 @@ The cleanest immediate cleanup target is the profiler/report toolchain. The risk
 | A5 | baseline vs hybrid tokenizer/data helpers | drifted near-duplicates | Extract + parameterize | medium |
 | A6 | baseline vs hybrid quantization helpers | drifted near-duplicates | Extract a shared core, keep trainer wrapper | high |
 | A7 | baseline vs `model.py` transformer utilities | duplicate by design but drifting | Defer, document boundary | high |
-| A8 | contiguity/parity tests in `test_model.py` | test redundancy | In progress: packed-qkv parity family is consolidated; wider CUDA-family test tables still remain | low-medium |
+| A8 | contiguity/parity tests in `test_model.py` | test redundancy | In progress: packed-qkv parity family and common invalid-config tables are consolidated; wider CUDA-family tables still remain | low-medium |
 | A9 | `scripts/export_wandb_hgdn_runs.py` | formerly orphan utility | Documented and sharing the W&B helper boundary now; keep | low |
 
 ## Detailed Findings

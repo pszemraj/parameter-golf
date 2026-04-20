@@ -165,6 +165,12 @@ def _assert_gdn_init_rejected(message: str, **kwargs: object) -> None:
     raise AssertionError(message)
 
 
+def _assert_gdn_init_rejections(cases: list[tuple[str, dict[str, object]]]) -> None:
+    """Assert that a list of invalid HGDN configs are all rejected."""
+    for message, kwargs in cases:
+        _assert_gdn_init_rejected(message, **kwargs)
+
+
 def _assert_gdn_cpu_fallback_matches_reference(
     *,
     base_kwargs: dict[str, object],
@@ -216,6 +222,25 @@ def _assert_gdn_cpu_fallback_matches_reference(
     print(success_message)
 
 
+def _assert_packed_qkv_matches_separate_path(
+    *, copy_proj: bool, success_message: str
+) -> None:
+    """Check that the packed qkv path matches the separate-path reference.
+    :param bool copy_proj: Whether to also compare packed qkv projection parity.
+    :param str success_message: Message printed after the check passes.
+    """
+    torch.manual_seed(42)
+    kwargs = _make_standard_packed_kwargs()
+    separate = GatedDeltaNet(
+        **dict(kwargs, use_packed_qkv_conv=False, use_packed_qkv_proj=False)
+    )
+    packed = GatedDeltaNet(**dict(kwargs, use_packed_qkv_proj=copy_proj))
+    _load_packed_qkv_state(separate, packed, copy_proj=copy_proj)
+    x = torch.randn(2, 32, 64)
+    torch.testing.assert_close(separate(x), packed(x), atol=1e-5, rtol=1e-5)
+    print(success_message)
+
+
 def _skip_if_missing_split_with_sizes_copy(context: str) -> bool:
     """Return whether a split-with-sizes-copy dependent test should be skipped.
 
@@ -237,7 +262,6 @@ def _assert_packed_qkv_variant_matches_default(
     contiguity_overrides: dict[str, object] | None = None,
 ) -> None:
     """Check that one packed-path variant matches the default packed HGDN path.
-
     :param dict[str, object] | None base_kwargs: Shared kwargs for reference and candidate.
     :param dict[str, object] candidate_overrides: Candidate-only kwargs.
     :param str success_message: Message printed after the check passes.
@@ -517,79 +541,44 @@ def test_gdn_conv_toggles() -> None:
 
 def test_gdn_packed_qkv_conv_matches_separate_path() -> None:
     """Packed q/k/v conv should match the separate conv path with copied weights."""
-    torch.manual_seed(42)
-    kwargs = dict(
-        d_model=64,
-        n_heads=4,
-        head_k_dim=8,
-        expand_v=1.0,
-        allow_neg_eigval=True,
-        conv_size=4,
-        use_fla=False,
-        use_q_conv=True,
-        use_k_conv=True,
-        use_v_conv=True,
-        conv_output_contiguous=True,
+    _assert_packed_qkv_matches_separate_path(
+        copy_proj=False,
+        success_message="  ✓ packed qkv conv matches separate path",
     )
-    separate = GatedDeltaNet(**kwargs)
-    packed = GatedDeltaNet(**kwargs, use_packed_qkv_conv=True)
-    _load_packed_qkv_state(separate, packed, copy_proj=False)
-    x = torch.randn(2, 32, 64)
-    torch.testing.assert_close(separate(x), packed(x), atol=1e-5, rtol=1e-5)
-    print("  ✓ packed qkv conv matches separate path")
 
 
 def test_gdn_packed_qkv_conv_requires_aligned_settings() -> None:
     """Packed q/k/v conv should reject mixed enablement or layout settings."""
-    for message, kwargs in [
-        (
-            "Expected packed qkv conv to reject disabled v conv",
-            dict(use_packed_qkv_conv=True, use_v_conv=False),
-        ),
-        (
-            "Expected packed qkv conv to reject mixed output_contiguous flags",
-            dict(
-                use_packed_qkv_conv=True,
-                q_conv_output_contiguous=True,
-                k_conv_output_contiguous=False,
-                v_conv_output_contiguous=True,
+    _assert_gdn_init_rejections(
+        [
+            (
+                "Expected packed qkv conv to reject disabled v conv",
+                dict(use_packed_qkv_conv=True, use_v_conv=False),
             ),
-        ),
-        (
-            "Expected packed qkv projection to require packed qkv conv",
-            dict(use_packed_qkv_proj=True),
-        ),
-    ]:
-        _assert_gdn_init_rejected(message, **kwargs)
+            (
+                "Expected packed qkv conv to reject mixed output_contiguous flags",
+                dict(
+                    use_packed_qkv_conv=True,
+                    q_conv_output_contiguous=True,
+                    k_conv_output_contiguous=False,
+                    v_conv_output_contiguous=True,
+                ),
+            ),
+            (
+                "Expected packed qkv projection to require packed qkv conv",
+                dict(use_packed_qkv_proj=True),
+            ),
+        ]
+    )
     print("  ✓ packed qkv conv rejects incompatible settings")
 
 
 def test_gdn_packed_qkv_proj_conv_matches_separate_path() -> None:
     """Packed qkv projection+conv should match the separate path with copied weights."""
-    torch.manual_seed(42)
-    kwargs = dict(
-        d_model=64,
-        n_heads=4,
-        head_k_dim=8,
-        expand_v=1.0,
-        allow_neg_eigval=True,
-        conv_size=4,
-        use_fla=False,
-        use_q_conv=True,
-        use_k_conv=True,
-        use_v_conv=True,
-        conv_output_contiguous=True,
+    _assert_packed_qkv_matches_separate_path(
+        copy_proj=True,
+        success_message="  ✓ packed qkv projection+conv matches separate path",
     )
-    separate = GatedDeltaNet(**kwargs)
-    packed = GatedDeltaNet(
-        **kwargs,
-        use_packed_qkv_conv=True,
-        use_packed_qkv_proj=True,
-    )
-    _load_packed_qkv_state(separate, packed, copy_proj=True)
-    x = torch.randn(2, 32, 64)
-    torch.testing.assert_close(separate(x), packed(x), atol=1e-5, rtol=1e-5)
-    print("  ✓ packed qkv projection+conv matches separate path")
 
 
 def test_gdn_packed_qkv_custom_backward_matches_default_path() -> None:
@@ -602,22 +591,23 @@ def test_gdn_packed_qkv_custom_backward_matches_default_path() -> None:
 
 def test_gdn_packed_qkv_custom_backward_validation() -> None:
     """Packed qkv custom backward should only run on the non-fused packed path."""
-    for message, kwargs in [
-        (
-            "Expected packed qkv custom backward to require packed qkv conv",
-            dict(use_packed_qkv_conv_custom_backward=True),
-        ),
-        (
-            "Expected packed qkv custom backward to reject the CUDA fused frontend",
-            dict(
-                use_packed_qkv_conv=True,
-                use_packed_qkv_proj=True,
-                use_packed_qkv_conv_custom_backward=True,
-                use_cuda_fused_frontend=True,
+    _assert_gdn_init_rejections(
+        [
+            (
+                "Expected packed qkv custom backward to require packed qkv conv",
+                dict(use_packed_qkv_conv_custom_backward=True),
             ),
-        ),
-    ]:
-        _assert_gdn_init_rejected(message, **kwargs)
+            (
+                "Expected packed qkv custom backward to reject the CUDA fused frontend",
+                dict(
+                    use_packed_qkv_conv=True,
+                    use_packed_qkv_proj=True,
+                    use_packed_qkv_conv_custom_backward=True,
+                    use_cuda_fused_frontend=True,
+                ),
+            ),
+        ]
+    )
     print("  ✓ packed qkv custom backward validates requirements")
 
 
@@ -642,27 +632,28 @@ def test_gdn_packed_qkv_single_contig_matches_default_path() -> None:
 
 def test_gdn_packed_qkv_single_contig_validation() -> None:
     """Single packed materialization should only run on the non-fused packed path."""
-    for message, kwargs in [
-        (
-            "Expected packed qkv single-contig to require packed qkv conv",
-            dict(use_packed_qkv_single_contig=True),
-        ),
-        (
-            "Expected packed qkv single-contig to require packed qkv output_contiguous",
-            dict(use_packed_qkv_conv=True, use_packed_qkv_single_contig=True),
-        ),
-        (
-            "Expected packed qkv single-contig to reject the CUDA fused frontend",
-            dict(
-                use_packed_qkv_conv=True,
-                use_packed_qkv_proj=True,
-                conv_output_contiguous=True,
-                use_packed_qkv_single_contig=True,
-                use_cuda_fused_frontend=True,
+    _assert_gdn_init_rejections(
+        [
+            (
+                "Expected packed qkv single-contig to require packed qkv conv",
+                dict(use_packed_qkv_single_contig=True),
             ),
-        ),
-    ]:
-        _assert_gdn_init_rejected(message, **kwargs)
+            (
+                "Expected packed qkv single-contig to require packed qkv output_contiguous",
+                dict(use_packed_qkv_conv=True, use_packed_qkv_single_contig=True),
+            ),
+            (
+                "Expected packed qkv single-contig to reject the CUDA fused frontend",
+                dict(
+                    use_packed_qkv_conv=True,
+                    use_packed_qkv_proj=True,
+                    conv_output_contiguous=True,
+                    use_packed_qkv_single_contig=True,
+                    use_cuda_fused_frontend=True,
+                ),
+            ),
+        ]
+    )
     print("  ✓ packed qkv single-contig validates requirements")
 
 
@@ -691,37 +682,38 @@ def test_gdn_packed_qkv_split_copy_validation() -> None:
     """Generated split-copy should only run on the non-fused packed path."""
     if _skip_if_missing_split_with_sizes_copy("packed qkv split-copy validation"):
         return
-    for message, kwargs in [
-        (
-            "Expected packed qkv split-copy to require packed qkv conv",
-            dict(use_packed_qkv_split_copy=True),
-        ),
-        (
-            "Expected packed qkv split-copy to require packed qkv output_contiguous",
-            dict(use_packed_qkv_conv=True, use_packed_qkv_split_copy=True),
-        ),
-        (
-            "Expected packed qkv split-copy to reject the CUDA fused frontend",
-            dict(
-                use_packed_qkv_conv=True,
-                use_packed_qkv_proj=True,
-                conv_output_contiguous=True,
-                use_packed_qkv_split_copy=True,
-                use_cuda_fused_frontend=True,
+    _assert_gdn_init_rejections(
+        [
+            (
+                "Expected packed qkv split-copy to require packed qkv conv",
+                dict(use_packed_qkv_split_copy=True),
             ),
-        ),
-        (
-            "Expected packed qkv split-copy to reject packed qkv single-contig",
-            dict(
-                use_packed_qkv_conv=True,
-                use_packed_qkv_proj=True,
-                conv_output_contiguous=True,
-                use_packed_qkv_single_contig=True,
-                use_packed_qkv_split_copy=True,
+            (
+                "Expected packed qkv split-copy to require packed qkv output_contiguous",
+                dict(use_packed_qkv_conv=True, use_packed_qkv_split_copy=True),
             ),
-        ),
-    ]:
-        _assert_gdn_init_rejected(message, **kwargs)
+            (
+                "Expected packed qkv split-copy to reject the CUDA fused frontend",
+                dict(
+                    use_packed_qkv_conv=True,
+                    use_packed_qkv_proj=True,
+                    conv_output_contiguous=True,
+                    use_packed_qkv_split_copy=True,
+                    use_cuda_fused_frontend=True,
+                ),
+            ),
+            (
+                "Expected packed qkv split-copy to reject packed qkv single-contig",
+                dict(
+                    use_packed_qkv_conv=True,
+                    use_packed_qkv_proj=True,
+                    conv_output_contiguous=True,
+                    use_packed_qkv_single_contig=True,
+                    use_packed_qkv_split_copy=True,
+                ),
+            ),
+        ]
+    )
     print("  ✓ packed qkv split-copy validates requirements")
 
 
@@ -925,73 +917,74 @@ def test_gdn_cuda_packed_conv_aten_weight_bwd_cpu_fallback_matches_packed_path()
 
 def test_gdn_cuda_packed_conv_validation() -> None:
     """CUDA packed conv should only run on the packed non-fused front-end path."""
-    for message, kwargs in [
-        (
-            "Expected CUDA packed conv to require packed qkv proj+conv",
-            dict(use_cuda_packed_conv=True),
-        ),
-        (
-            "Expected CUDA packed conv ATen-weight-backward to reject ATen-backward",
-            dict(
-                use_packed_qkv_conv=True,
-                use_packed_qkv_proj=True,
-                conv_output_contiguous=True,
-                use_cuda_packed_conv_aten_weight_backward=True,
-                use_cuda_packed_conv_aten_backward=True,
+    _assert_gdn_init_rejections(
+        [
+            (
+                "Expected CUDA packed conv to require packed qkv proj+conv",
+                dict(use_cuda_packed_conv=True),
             ),
-        ),
-        (
-            "Expected CUDA packed conv ATen-weight-backward to reject packed qkv custom backward",
-            dict(
-                use_packed_qkv_conv=True,
-                use_packed_qkv_proj=True,
-                conv_output_contiguous=True,
-                use_packed_qkv_conv_custom_backward=True,
-                use_cuda_packed_conv_aten_weight_backward=True,
+            (
+                "Expected CUDA packed conv ATen-weight-backward to reject ATen-backward",
+                dict(
+                    use_packed_qkv_conv=True,
+                    use_packed_qkv_proj=True,
+                    conv_output_contiguous=True,
+                    use_cuda_packed_conv_aten_weight_backward=True,
+                    use_cuda_packed_conv_aten_backward=True,
+                ),
             ),
-        ),
-        (
-            "Expected CUDA packed conv ATen-backward to reject packed qkv custom backward",
-            dict(
-                use_packed_qkv_conv=True,
-                use_packed_qkv_proj=True,
-                conv_output_contiguous=True,
-                use_packed_qkv_conv_custom_backward=True,
-                use_cuda_packed_conv_aten_backward=True,
+            (
+                "Expected CUDA packed conv ATen-weight-backward to reject packed qkv custom backward",
+                dict(
+                    use_packed_qkv_conv=True,
+                    use_packed_qkv_proj=True,
+                    conv_output_contiguous=True,
+                    use_packed_qkv_conv_custom_backward=True,
+                    use_cuda_packed_conv_aten_weight_backward=True,
+                ),
             ),
-        ),
-        (
-            "Expected CUDA packed conv ATen-backward to reject full CUDA packed conv",
-            dict(
-                use_packed_qkv_conv=True,
-                use_packed_qkv_proj=True,
-                conv_output_contiguous=True,
-                use_cuda_packed_conv=True,
-                use_cuda_packed_conv_aten_backward=True,
+            (
+                "Expected CUDA packed conv ATen-backward to reject packed qkv custom backward",
+                dict(
+                    use_packed_qkv_conv=True,
+                    use_packed_qkv_proj=True,
+                    conv_output_contiguous=True,
+                    use_packed_qkv_conv_custom_backward=True,
+                    use_cuda_packed_conv_aten_backward=True,
+                ),
             ),
-        ),
-        (
-            "Expected CUDA packed conv to reject packed qkv custom backward",
-            dict(
-                use_packed_qkv_conv=True,
-                use_packed_qkv_proj=True,
-                conv_output_contiguous=True,
-                use_packed_qkv_conv_custom_backward=True,
-                use_cuda_packed_conv=True,
+            (
+                "Expected CUDA packed conv ATen-backward to reject full CUDA packed conv",
+                dict(
+                    use_packed_qkv_conv=True,
+                    use_packed_qkv_proj=True,
+                    conv_output_contiguous=True,
+                    use_cuda_packed_conv=True,
+                    use_cuda_packed_conv_aten_backward=True,
+                ),
             ),
-        ),
-        (
-            "Expected CUDA packed conv to reject CUDA split+l2norm",
-            dict(
-                use_packed_qkv_conv=True,
-                use_packed_qkv_proj=True,
-                conv_output_contiguous=True,
-                use_cuda_packed_conv=True,
-                use_cuda_split_norm=True,
+            (
+                "Expected CUDA packed conv to reject packed qkv custom backward",
+                dict(
+                    use_packed_qkv_conv=True,
+                    use_packed_qkv_proj=True,
+                    conv_output_contiguous=True,
+                    use_packed_qkv_conv_custom_backward=True,
+                    use_cuda_packed_conv=True,
+                ),
             ),
-        ),
-    ]:
-        _assert_gdn_init_rejected(message, **kwargs)
+            (
+                "Expected CUDA packed conv to reject CUDA split+l2norm",
+                dict(
+                    use_packed_qkv_conv=True,
+                    use_packed_qkv_proj=True,
+                    conv_output_contiguous=True,
+                    use_cuda_packed_conv=True,
+                    use_cuda_split_norm=True,
+                ),
+            ),
+        ]
+    )
     print("  ✓ CUDA packed conv validates requirements")
 
 
@@ -1023,85 +1016,87 @@ def test_gdn_cuda_frontend_nct_validation() -> None:
 
 def test_gdn_cuda_split_norm_validation() -> None:
     """CUDA split+l2norm should only run on the non-fused packed-projection path."""
-    for message, kwargs in [
-        (
-            "Expected CUDA split+l2norm to require packed qkv proj+conv",
-            dict(use_cuda_split_norm=True),
-        ),
-        (
-            "Expected CUDA split+l2norm to reject the CUDA fused frontend",
-            dict(
-                use_packed_qkv_conv=True,
-                use_packed_qkv_proj=True,
-                conv_output_contiguous=True,
-                use_cuda_split_norm=True,
-                use_cuda_fused_frontend=True,
+    _assert_gdn_init_rejections(
+        [
+            (
+                "Expected CUDA split+l2norm to require packed qkv proj+conv",
+                dict(use_cuda_split_norm=True),
             ),
-        ),
-        (
-            "Expected CUDA split+l2norm to reject split-copy materialization",
-            dict(
-                use_packed_qkv_conv=True,
-                use_packed_qkv_proj=True,
-                conv_output_contiguous=True,
-                use_cuda_split_norm=True,
-                use_packed_qkv_split_copy=True,
+            (
+                "Expected CUDA split+l2norm to reject the CUDA fused frontend",
+                dict(
+                    use_packed_qkv_conv=True,
+                    use_packed_qkv_proj=True,
+                    conv_output_contiguous=True,
+                    use_cuda_split_norm=True,
+                    use_cuda_fused_frontend=True,
+                ),
             ),
-        ),
-        (
-            "Expected CUDA split+l2norm to reject split+l2norm lib",
-            dict(
-                use_packed_qkv_conv=True,
-                use_packed_qkv_proj=True,
-                conv_output_contiguous=True,
-                use_cuda_split_norm=True,
-                use_cuda_split_norm_lib=True,
+            (
+                "Expected CUDA split+l2norm to reject split-copy materialization",
+                dict(
+                    use_packed_qkv_conv=True,
+                    use_packed_qkv_proj=True,
+                    conv_output_contiguous=True,
+                    use_cuda_split_norm=True,
+                    use_packed_qkv_split_copy=True,
+                ),
             ),
-        ),
-    ]:
-        _assert_gdn_init_rejected(message, **kwargs)
+            (
+                "Expected CUDA split+l2norm to reject split+l2norm lib",
+                dict(
+                    use_packed_qkv_conv=True,
+                    use_packed_qkv_proj=True,
+                    conv_output_contiguous=True,
+                    use_cuda_split_norm=True,
+                    use_cuda_split_norm_lib=True,
+                ),
+            ),
+        ]
+    )
     print("  ✓ CUDA split+l2norm validates requirements")
 
 
 def test_gdn_cuda_split_norm_lib_validation() -> None:
     """Compile-visible CUDA split+l2norm should stay on the packed custom-backward path."""
-    for message, kwargs in [
-        (
-            "Expected CUDA split+l2norm lib to require packed qkv proj+conv",
-            dict(use_cuda_split_norm_lib=True),
-        ),
-        (
-            "Expected CUDA split+l2norm lib to reject CUDA split+l2norm",
-            dict(
-                use_packed_qkv_conv=True,
-                use_packed_qkv_proj=True,
-                conv_output_contiguous=True,
-                use_cuda_split_norm=True,
-                use_cuda_split_norm_lib=True,
+    _assert_gdn_init_rejections(
+        [
+            (
+                "Expected CUDA split+l2norm lib to require packed qkv proj+conv",
+                dict(use_cuda_split_norm_lib=True),
             ),
-        ),
-        (
-            "Expected CUDA split+l2norm lib to reject the CUDA fused frontend lib",
-            dict(
-                use_packed_qkv_conv=True,
-                use_packed_qkv_proj=True,
-                conv_output_contiguous=True,
-                use_cuda_split_norm_lib=True,
-                use_cuda_fused_frontend_lib=True,
+            (
+                "Expected CUDA split+l2norm lib to reject CUDA split+l2norm",
+                dict(
+                    use_packed_qkv_conv=True,
+                    use_packed_qkv_proj=True,
+                    conv_output_contiguous=True,
+                    use_cuda_split_norm=True,
+                    use_cuda_split_norm_lib=True,
+                ),
             ),
-        ),
-        (
-            "Expected CUDA split+l2norm lib to reject split-copy materialization",
-            dict(
-                use_packed_qkv_conv=True,
-                use_packed_qkv_proj=True,
-                conv_output_contiguous=True,
-                use_cuda_split_norm_lib=True,
-                use_packed_qkv_split_copy=True,
+            (
+                "Expected CUDA split+l2norm lib to reject the CUDA fused frontend lib",
+                dict(
+                    use_packed_qkv_conv=True,
+                    use_packed_qkv_proj=True,
+                    conv_output_contiguous=True,
+                    use_cuda_split_norm_lib=True,
+                    use_cuda_fused_frontend_lib=True,
+                ),
             ),
-        ),
-    ]:
-        _assert_gdn_init_rejected(message, **kwargs)
+            (
+                "Expected CUDA split+l2norm lib to reject split-copy materialization",
+                dict(
+                    use_packed_qkv_conv=True,
+                    use_packed_qkv_proj=True,
+                    conv_output_contiguous=True,
+                    use_cuda_split_norm_lib=True,
+                    use_packed_qkv_split_copy=True,
+                ),
+            ),
+        ]
+    )
     layer = _make_small_gdn(
         use_packed_qkv_conv=True,
         use_packed_qkv_proj=True,
@@ -1174,17 +1169,18 @@ def test_rmsnorm_silu_gate_reference_matches_eager_ops() -> None:
 
 def test_gdn_cuda_fused_flags_validate_requirements() -> None:
     """Reject fused HGDN settings that the CUDA kernels do not implement."""
-    for message, kwargs in [
-        (
-            "Expected fused frontend to require packed qkv proj+conv",
-            dict(use_cuda_fused_frontend=True),
-        ),
-        (
-            "Expected fused output to require output_norm_fp32",
-            dict(use_cuda_fused_output=True, output_norm_fp32=False),
-        ),
-    ]:
-        _assert_gdn_init_rejected(message, **kwargs)
+    _assert_gdn_init_rejections(
+        [
+            (
+                "Expected fused frontend to require packed qkv proj+conv",
+                dict(use_cuda_fused_frontend=True),
+            ),
+            (
+                "Expected fused output to require output_norm_fp32",
+                dict(use_cuda_fused_output=True, output_norm_fp32=False),
+            ),
+        ]
+    )
     print("  ✓ fused HGDN flag validation OK")
 
 
@@ -1204,33 +1200,34 @@ def test_gdn_cuda_fused_cpu_fallback_matches_packed_path() -> None:
 
 def test_gdn_cuda_megakernel_flag_validation() -> None:
     """Reject megakernel settings that violate the packed HGDN contract."""
-    for message, kwargs in [
-        (
-            "Expected megakernel to require packed qkv proj+conv",
-            dict(use_cuda_megakernel=True),
-        ),
-        (
-            "Expected megakernel to require fp32 gate math",
-            dict(
-                use_packed_qkv_conv=True,
-                use_packed_qkv_proj=True,
-                conv_output_contiguous=True,
-                use_cuda_megakernel=True,
-                gates_fp32=False,
+    _assert_gdn_init_rejections(
+        [
+            (
+                "Expected megakernel to require packed qkv proj+conv",
+                dict(use_cuda_megakernel=True),
             ),
-        ),
-        (
-            "Expected megakernel to reject legacy fused frontend flags",
-            dict(
-                use_packed_qkv_conv=True,
-                use_packed_qkv_proj=True,
-                conv_output_contiguous=True,
-                use_cuda_megakernel=True,
-                use_cuda_fused_frontend=True,
+            (
+                "Expected megakernel to require fp32 gate math",
+                dict(
+                    use_packed_qkv_conv=True,
+                    use_packed_qkv_proj=True,
+                    conv_output_contiguous=True,
+                    use_cuda_megakernel=True,
+                    gates_fp32=False,
+                ),
             ),
-        ),
-    ]:
-        _assert_gdn_init_rejected(message, **kwargs)
+            (
+                "Expected megakernel to reject legacy fused frontend flags",
+                dict(
+                    use_packed_qkv_conv=True,
+                    use_packed_qkv_proj=True,
+                    conv_output_contiguous=True,
+                    use_cuda_megakernel=True,
+                    use_cuda_fused_frontend=True,
+                ),
+            ),
+        ]
+    )
     print("  ✓ HGDN megakernel flag validation OK")
 
 
@@ -1247,33 +1244,34 @@ def test_gdn_cuda_megakernel_cpu_fallback_matches_packed_path() -> None:
 
 def test_gdn_cuda_fused_frontend_lib_validation() -> None:
     """Compile-visible fused frontend should validate the intended family contract."""
-    for message, kwargs in [
-        (
-            "Expected compile-visible fused frontend to require packed qkv proj+conv",
-            dict(use_cuda_fused_frontend_lib=True),
-        ),
-        (
-            "Expected compile-visible fused frontend to reject packed qkv custom backward",
-            dict(
-                use_packed_qkv_conv=True,
-                use_packed_qkv_proj=True,
-                conv_output_contiguous=True,
-                use_packed_qkv_conv_custom_backward=True,
-                use_cuda_fused_frontend_lib=True,
+    _assert_gdn_init_rejections(
+        [
+            (
+                "Expected compile-visible fused frontend to require packed qkv proj+conv",
+                dict(use_cuda_fused_frontend_lib=True),
             ),
-        ),
-        (
-            "Expected compile-visible fused frontend to reject the old fused frontend path",
-            dict(
-                use_packed_qkv_conv=True,
-                use_packed_qkv_proj=True,
-                conv_output_contiguous=True,
-                use_cuda_fused_frontend=True,
-                use_cuda_fused_frontend_lib=True,
+            (
+                "Expected compile-visible fused frontend to reject packed qkv custom backward",
+                dict(
+                    use_packed_qkv_conv=True,
+                    use_packed_qkv_proj=True,
+                    conv_output_contiguous=True,
+                    use_packed_qkv_conv_custom_backward=True,
+                    use_cuda_fused_frontend_lib=True,
+                ),
             ),
-        ),
-    ]:
-        _assert_gdn_init_rejected(message, **kwargs)
+            (
+                "Expected compile-visible fused frontend to reject the old fused frontend path",
+                dict(
+                    use_packed_qkv_conv=True,
+                    use_packed_qkv_proj=True,
+                    conv_output_contiguous=True,
+                    use_cuda_fused_frontend=True,
+                    use_cuda_fused_frontend_lib=True,
+                ),
+            ),
+        ]
+    )
     print("  ✓ compile-visible fused frontend validates requirements")
 
 
