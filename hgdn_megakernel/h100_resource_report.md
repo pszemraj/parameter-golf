@@ -1,12 +1,7 @@
-# HGDN Megakernel H100 Resource Report
+# Archived Full-Block HGDN Megakernel H100 Resource Report
 
-> Active-path note (`2026-04-18`): this document is now primarily archived
-> full-block megakernel resource history. The active performance mainline is the
-> HGDN core-kernel path in
-> [`../docs/HGDN_CORE_KERNEL_PLAN.md`](../docs/HGDN_CORE_KERNEL_PLAN.md). A
-> later cleanup should split archived full-block reporting from active
-> core-kernel reporting; until then this file remains the historical full-block
-> reference.
+The active performance path is the packed HGDN stack. The archived core-kernel
+notes live in [../docs/HGDN_CORE_KERNEL_PLAN.md](../docs/HGDN_CORE_KERNEL_PLAN.md).
 
 ## Candidate shape
 

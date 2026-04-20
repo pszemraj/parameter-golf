@@ -2,7 +2,8 @@
 
 ## Live forward math
 
-The live HGDN block contract comes from [`model.py`](/home/pszemraj/workspace/projects/parameter-golf/model.py).
+The live HGDN block contract comes from
+[`../model.py`](../model.py).
 
 1. Input `x` is shaped `(B, T, D)` and is normally `bf16` on CUDA.
 2. Packed qkv projection is dense:
@@ -35,7 +36,8 @@ The live HGDN block contract comes from [`model.py`](/home/pszemraj/workspace/pr
     `v` in activation dtype,
     `alpha = exp(g)` interpreted in fp32,
     `beta` interpreted in fp32.
-12. Reference recurrence is [`gdn_recurrent_naive`](/home/pszemraj/workspace/projects/parameter-golf/model.py:648):
+12. Reference recurrence is
+    [`gdn_recurrent_naive`](../model.py):
     `S_t = alpha_t * (S_{t-1} - beta_t * k_t (k_t^T S_{t-1})) + k_t v_t^T`
     and
     `o_t = S_t^T q_t`.
@@ -79,7 +81,8 @@ checks rather than hidden wrapper fixes:
 
 ## Winner-style contract used for the first pass
 
-From [`configs/hgdn/current_winner_retune.toml`](/home/pszemraj/workspace/projects/parameter-golf/configs/hgdn/current_winner_retune.toml):
+From
+[`../configs/hgdn/current_winner_retune.toml`](../configs/hgdn/current_winner_retune.toml):
 
 - `D = 384`
 - `H = 8`

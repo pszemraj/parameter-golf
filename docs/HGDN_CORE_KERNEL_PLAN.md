@@ -58,8 +58,6 @@ already do well, then paid cooperative-grid barrier costs around them.
 
 The owned CUDA path under this archived experiment owned:
 
-The owned CUDA path should own:
-
 - packed depthwise QKV conv
 - post-conv SiLU
 - q/k normalization

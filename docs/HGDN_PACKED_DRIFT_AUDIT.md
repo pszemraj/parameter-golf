@@ -223,8 +223,8 @@ What is closed:
 
 What remains open:
 
-- one fresh fair `1xH100` packed rerun from the corrected helper defaults is
-  still needed before making a new absolute packed step-ms claim
+- the packed path still needs the corrected `1xH100` compile-strategy matrix on
+  the live14 replay shell before making a new absolute packed step-ms claim
 
 What this audit says today:
 
@@ -232,10 +232,16 @@ What this audit says today:
   slowdown
 - do **not** use the `5f3a755e` recheck bundles as evidence against the live
   packed `14L` finalist
-- do treat the next packed H100 rerun as the first valid post-fix packed timing
-  measurement
+- do treat the next packed H100 compile matrix as the first valid post-fix
+  packed timing measurement
 
 ## Next action after this audit
 
 Use the corrected packed helper path, not the old kernel-only launch surface,
-for the next bounded packed H100 rerun.
+for the next bounded packed H100 compile-strategy matrix:
+
+```bash
+USE_WANDB=0 WANDB_MODE=offline \
+RUN_PREFIX=h100packed_compilematrix \
+bash scripts/run_h100_single_gpu_hgdn.sh fixed2k-hybrid-compile-matrix
+```

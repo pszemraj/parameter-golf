@@ -1,4 +1,4 @@
-# HGDN CUDA Extension
+# Archived HGDN CUDA Extension
 
 Last updated: 2026-04-10
 
