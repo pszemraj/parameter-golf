@@ -3,8 +3,9 @@
 ## Status
 - Harness ready
 - Controller frontier is now stable enough to start schedule isolation
-- Phase 1 schedule work is an isolated `lr_hold_steps` sweep on the two best completed `blocks0` `1B` controllers
-- No evidence-backed schedule winner yet
+- Phase 1a `lr_hold_steps` sweep finished on the two best completed `blocks0` `1B` controllers
+- The best tested hold is currently `2500` for both leaders
+- No final schedule winner yet because the best hold landed on the edge of the tested range
 
 ## What Was Verified
 - Warmup-hold-cosine is the real root schedule path.
@@ -13,17 +14,34 @@
 - The sweep harness now supports a fixed effective-step-token contract, so schedule runs can later drop the local microbatch and recover apples-to-apples comparisons with derived `grad_accum` instead of silently changing the optimizer-step budget.
 
 ## Current Evidence
-- No evidence-backed schedule winner yet.
-- No claim is made yet about:
-  - whether hold-then-cosine helps this controller family
-  - whether decay is starting too early
-  - whether `min_lr` is too high or too low
-- The next schedule sweep should be run on the post-confirmation contenders, not on the invalidated older `blocks3` default.
-- The first variable to move should be `lr_hold_steps`, because it can be isolated cleanly while keeping:
-  - controller geometry fixed
-  - `max_lr`, `min_lr`, `warmup_steps`, and `weight_decay` fixed
-  - full-dataset `blocks0` shared spec fixed
-  - planned screening tokens fixed at `512M`
+- There is now strong evidence that the inherited `1500`-step hold is too short for the radical `blocks0` controllers at the `512M` screening budget.
+- Hold helped monotonically across the tested range for both leading controllers:
+
+| Controller | `h0` | `h500` | `h1500` | `h2500` | Best tested |
+|---|---:|---:|---:|---:|---:|
+| `blocks0 12x10` | `2.2949891937` | `2.2876574385` | `2.2777913795` | `2.2696659544` | `h2500` |
+| `blocks0 10x12` | `2.3017589365` | `2.2910034081` | `2.2794286891` | `2.2715466346` | `h2500` |
+
+Delta relative to the current inherited `h1500` default:
+
+- `blocks0 12x10`: `h2500` improved by about `0.00813` bpb
+- `blocks0 10x12`: `h2500` improved by about `0.00788` bpb
+
+Important systems note:
+
+- steady-state throughput was effectively unchanged across the hold sweep
+- the win is schedule quality, not a hidden speed artifact
+
+What can now be stated with evidence:
+
+- hold-then-cosine is helping this family
+- decay is still starting too early under the current default
+
+What cannot yet be stated:
+
+- whether `h2500` is the real optimum
+- whether the best setting is close to no decay for this screening budget
+- whether `min_lr` is too high or too low once hold is tuned farther out
 
 ## Phase 1 Screening Contract
 
@@ -65,11 +83,28 @@ blocks0_10x12_hold_screen_v1:
   h0, h500, h1500, h2500
 ```
 
-After phase 1, use the winning hold value to stage isolated sweeps for `max_lr`, `warmup_steps`, `min_lr`, and finally `weight_decay`.
+## Phase 1b Edge Follow-Up
+
+Because both families won on the edge of the tested range, the next disciplined move is not a different LR yet. It is a direct hold-edge probe:
+
+```bash
+blocks0_12x10_hold_edge_v2:
+  h3000, h3500, h4096
+
+blocks0_10x12_hold_edge_v2:
+  h3000, h3500, h4096
+```
+
+Interpretation of `h4096`:
+
+- with `4096` total steps and `100` warmup steps, this is effectively a no-decay boundary check under the same cosine-with-hold code path
+
+Only after the edge follow-up lands should the next isolated sweeps move to `max_lr`, `warmup_steps`, `min_lr`, and `weight_decay`.
 
 ## Questions This Sweep Should Answer
 - Does the inherited `1500`-step hold actually earn its keep on the radical `blocks0` controllers?
 - Is the same hold value preferred by both `12 x 10.0` and `10 x 12.0`, or is schedule preference geometry-dependent?
+- Does the monotonic improvement continue past `h2500`, or do we hit a plateau / reversal closer to no decay?
 - Is hold-then-cosine actually helping this recurrent-controller family?
 - Are we decaying too early for the chosen local token budget?
 - Is the current `min_lr` floor too conservative?

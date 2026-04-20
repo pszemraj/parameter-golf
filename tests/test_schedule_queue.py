@@ -29,6 +29,8 @@ def test_build_queue_contains_expected_schedule_families():
     assert names == [
         "blocks0_12x10_hold_screen_v1",
         "blocks0_10x12_hold_screen_v1",
+        "blocks0_12x10_hold_edge_v2",
+        "blocks0_10x12_hold_edge_v2",
     ]
 
 
@@ -47,3 +49,17 @@ def test_schedule_queue_uses_blocks0_shared_spec_and_fixed_token_contract():
 
     control = queue["blocks0_10x12_hold_screen_v1"]
     assert "blocks0_resid10_e12_h2500_512m" in control.merged_env()["RUN_SPECS"]
+
+
+def test_schedule_queue_exposes_edge_follow_up_families():
+    """The launcher should include the follow-up hold families beyond h2500."""
+    module = load_module()
+    queue = {launch.name: launch for launch in module.build_queue(REPO_ROOT)}
+
+    top_edge = queue["blocks0_12x10_hold_edge_v2"].merged_env()["RUN_SPECS"]
+    assert "blocks0_resid12_e10_h3000_512m" in top_edge
+    assert "blocks0_resid12_e10_h4096_512m" in top_edge
+
+    control_edge = queue["blocks0_10x12_hold_edge_v2"].merged_env()["RUN_SPECS"]
+    assert "blocks0_resid10_e12_h3500_512m" in control_edge
+    assert "blocks0_resid10_e12_h4096_512m" in control_edge

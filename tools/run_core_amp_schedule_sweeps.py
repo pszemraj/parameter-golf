@@ -90,7 +90,7 @@ def _controller_family(
 
 
 def build_queue(repo_root: Path = REPO_ROOT) -> list[SweepLaunch]:
-    """Return the first disciplined schedule-screen families."""
+    """Return the disciplined schedule-screen families in launch order."""
     schedule_root = repo_root / "experiments" / "5090_schedule"
     blocks0_shared = str(
         repo_root
@@ -127,6 +127,32 @@ blocks0_resid10_e12_h0_512m     10 12.0 8 1 1 -3.0 0.003 100    0 0.0003 4096 25
 blocks0_resid10_e12_h500_512m   10 12.0 8 1 1 -3.0 0.003 100  500 0.0003 4096 256 512
 blocks0_resid10_e12_h1500_512m  10 12.0 8 1 1 -3.0 0.003 100 1500 0.0003 4096 256 512
 blocks0_resid10_e12_h2500_512m  10 12.0 8 1 1 -3.0 0.003 100 2500 0.0003 4096 256 512
+""",
+        ),
+        _controller_family(
+            name="blocks0_12x10_hold_edge_v2",
+            model_root=str(schedule_root / "blocks0_12x10_hold_edge_v2"),
+            shared_spec_dir=blocks0_shared,
+            description=(
+                "Edge follow-up on lr_hold_steps after h2500 won the initial blocks0 12x10 screen."
+            ),
+            run_specs="""
+blocks0_resid12_e10_h3000_512m  12 10.0 8 1 1 -3.0 0.003 100 3000 0.0003 4096 256 512
+blocks0_resid12_e10_h3500_512m  12 10.0 8 1 1 -3.0 0.003 100 3500 0.0003 4096 256 512
+blocks0_resid12_e10_h4096_512m  12 10.0 8 1 1 -3.0 0.003 100 4096 0.0003 4096 256 512
+""",
+        ),
+        _controller_family(
+            name="blocks0_10x12_hold_edge_v2",
+            model_root=str(schedule_root / "blocks0_10x12_hold_edge_v2"),
+            shared_spec_dir=blocks0_shared,
+            description=(
+                "Edge follow-up on lr_hold_steps after h2500 won the initial blocks0 10x12 screen."
+            ),
+            run_specs="""
+blocks0_resid10_e12_h3000_512m  10 12.0 8 1 1 -3.0 0.003 100 3000 0.0003 4096 256 512
+blocks0_resid10_e12_h3500_512m  10 12.0 8 1 1 -3.0 0.003 100 3500 0.0003 4096 256 512
+blocks0_resid10_e12_h4096_512m  10 12.0 8 1 1 -3.0 0.003 100 4096 0.0003 4096 256 512
 """,
         ),
     ]
