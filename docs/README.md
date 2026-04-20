@@ -201,6 +201,8 @@ Data / setup helpers:
 1xH100 perf / profiling helpers:
 
 - [`../scripts/run_h100_single_gpu_hgdn.sh`](../scripts/run_h100_single_gpu_hgdn.sh)
+  - stages logs/commands/metadata under `artifacts/hgdn_single_gpu/<run>_<mode>/`
+    and writes a `py7zr` archive by default
 - [`../scripts/run_h100_single_gpu_hgdn_profile.sh`](../scripts/run_h100_single_gpu_hgdn_profile.sh)
 - [`../scripts/run_h100_single_gpu_hgdn_corekernel.sh`](../scripts/run_h100_single_gpu_hgdn_corekernel.sh)
 - [`../scripts/hgdn_cuda_preflight.py`](../scripts/hgdn_cuda_preflight.py)
