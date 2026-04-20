@@ -193,6 +193,8 @@ Bundle / artifact helper:
   - packages one run log, git metadata, GPU identity, and selected configs into
     a `py7zr` `.7z` archive from repo root
   - extra artifacts are opt-in via `--copy`
+- Shell experiment helpers should also stage their outputs and auto-write a
+  `py7zr` archive by default rather than leaving bundling as a manual step.
 
 Data / setup helpers:
 
