@@ -32,6 +32,7 @@ omp_num_threads="${OMP_NUM_THREADS:-1}"
 mkl_num_threads="${MKL_NUM_THREADS:-1}"
 openblas_num_threads="${OPENBLAS_NUM_THREADS:-1}"
 numexpr_num_threads="${NUMEXPR_NUM_THREADS:-1}"
+nccl_ib_disable="${NCCL_IB_DISABLE:-1}"
 
 ngpu="${NGPU:-8}"
 iterations="${ITERATIONS:-20000}"
@@ -89,6 +90,7 @@ print_plan() {
     echo "MKL_NUM_THREADS=${mkl_num_threads}"
     echo "OPENBLAS_NUM_THREADS=${openblas_num_threads}"
     echo "NUMEXPR_NUM_THREADS=${numexpr_num_threads}"
+    echo "NCCL_IB_DISABLE=${nccl_ib_disable}"
     echo "build_hgdn_cuda=${build_hgdn_cuda}"
     echo "run_hgdn_cuda_parity=${run_hgdn_cuda_parity}"
     echo "ngpu=${ngpu}"
@@ -161,6 +163,7 @@ run_round() {
         "MKL_NUM_THREADS=${mkl_num_threads}" \
         "OPENBLAS_NUM_THREADS=${openblas_num_threads}" \
         "NUMEXPR_NUM_THREADS=${numexpr_num_threads}" \
+        "NCCL_IB_DISABLE=${nccl_ib_disable}" \
         "${diagnostic_env[@]}" \
         "RUN_ID=${gpt_naive_run_id}" \
         "ITERATIONS=${iterations}" \
@@ -185,6 +188,7 @@ run_round() {
         "MKL_NUM_THREADS=${mkl_num_threads}" \
         "OPENBLAS_NUM_THREADS=${openblas_num_threads}" \
         "NUMEXPR_NUM_THREADS=${numexpr_num_threads}" \
+        "NCCL_IB_DISABLE=${nccl_ib_disable}" \
         "${diagnostic_env[@]}" \
         "RUN_ID=${gpt_naive_run_id}" \
         "ITERATIONS=${iterations}" \
@@ -212,6 +216,7 @@ run_round() {
         "MKL_NUM_THREADS=${mkl_num_threads}" \
         "OPENBLAS_NUM_THREADS=${openblas_num_threads}" \
         "NUMEXPR_NUM_THREADS=${numexpr_num_threads}" \
+        "NCCL_IB_DISABLE=${nccl_ib_disable}" \
         "NGPU=${ngpu}" \
         "USE_WANDB=${use_wandb}" \
         "WANDB_MODE=${wandb_mode}" \
@@ -240,6 +245,7 @@ run_round() {
         "MKL_NUM_THREADS=${mkl_num_threads}" \
         "OPENBLAS_NUM_THREADS=${openblas_num_threads}" \
         "NUMEXPR_NUM_THREADS=${numexpr_num_threads}" \
+        "NCCL_IB_DISABLE=${nccl_ib_disable}" \
         "NGPU=${ngpu}" \
         "USE_WANDB=${use_wandb}" \
         "WANDB_MODE=${wandb_mode}" \
@@ -268,6 +274,7 @@ run_round() {
         "MKL_NUM_THREADS=${mkl_num_threads}" \
         "OPENBLAS_NUM_THREADS=${openblas_num_threads}" \
         "NUMEXPR_NUM_THREADS=${numexpr_num_threads}" \
+        "NCCL_IB_DISABLE=${nccl_ib_disable}" \
         "NGPU=${ngpu}" \
         "USE_WANDB=${use_wandb}" \
         "WANDB_MODE=${wandb_mode}" \
@@ -301,6 +308,7 @@ run_round() {
         "MKL_NUM_THREADS=${mkl_num_threads}" \
         "OPENBLAS_NUM_THREADS=${openblas_num_threads}" \
         "NUMEXPR_NUM_THREADS=${numexpr_num_threads}" \
+        "NCCL_IB_DISABLE=${nccl_ib_disable}" \
         "NGPU=${ngpu}" \
         "USE_WANDB=${use_wandb}" \
         "WANDB_MODE=${wandb_mode}" \
@@ -362,6 +370,7 @@ build_bundle() {
         --mkl-num-threads "${mkl_num_threads}" \
         --openblas-num-threads "${openblas_num_threads}" \
         --numexpr-num-threads "${numexpr_num_threads}" \
+        --nccl-ib-disable "${nccl_ib_disable}" \
         --ngpu "${ngpu}" \
         --iterations "${iterations}" \
         --train-batch-tokens "${train_batch_tokens}" \

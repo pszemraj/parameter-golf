@@ -80,6 +80,14 @@ RUN_PREFIX_BASE=h100naive1 \
 bash scripts/run_h100_hgdn_naive_contract_round.sh
 ```
 
+The naive-contract helper now pins the direct `train_gpt.py` replay to the
+recorded baseline transport/data contract:
+
+- `NCCL_IB_DISABLE=1`
+- `DATA_PATH`
+- `TOKENIZER_PATH`
+- `VOCAB_SIZE`
+
 Details and open items live in [TODO.md](TODO.md).
 
 ## Launch entrypoints

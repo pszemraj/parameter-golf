@@ -339,6 +339,7 @@ def cmd_write_h100_bridge_manifest(args: argparse.Namespace) -> int:
             "mkl_num_threads": args.mkl_num_threads,
             "openblas_num_threads": args.openblas_num_threads,
             "numexpr_num_threads": args.numexpr_num_threads,
+            "nccl_ib_disable": args.nccl_ib_disable,
         },
         "runs": [
             {
@@ -755,6 +756,7 @@ def build_parser() -> argparse.ArgumentParser:
     h100_naive.add_argument("--mkl-num-threads", type=int, required=True)
     h100_naive.add_argument("--openblas-num-threads", type=int, required=True)
     h100_naive.add_argument("--numexpr-num-threads", type=int, required=True)
+    h100_naive.add_argument("--nccl-ib-disable", type=int, required=True)
     h100_naive.add_argument("--ngpu", type=int, required=True)
     h100_naive.add_argument("--iterations", type=int, required=True)
     h100_naive.add_argument("--train-batch-tokens", type=int, required=True)
