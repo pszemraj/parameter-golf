@@ -24,8 +24,14 @@ Last updated: 2026-04-21 03:01 EDT
     - bridge helper aligned with the same FA3 / distributed flags as the other
       exact-8x helpers
     - exact-8x bridge/tiebreak helpers default to `WANDB_WATCH=none`
-- Do not kill `selective` yet. Re-run the exact `8xH100` packed-HGDN tiebreak
-  under the same live14 finalist shell with the patched runtime surface:
+- The latest distributed compile follow-up suppresses top-level model compile
+  on multi-rank runs. On the exact `8xH100` `parallel_muon` surface,
+  `COMPILE_STRATEGY=hybrid` now normalizes to the same effective plan as
+  `selective`.
+- Re-run the exact `8xH100` packed-HGDN helper under the same live14 finalist
+  shell with the patched runtime surface. Treat the resulting bundle as the
+  new distributed-safe packed compile reference instead of a meaningful
+  `hybrid` vs `selective` tiebreak:
 
 ```bash
 USE_WANDB=1 WANDB_MODE=online \

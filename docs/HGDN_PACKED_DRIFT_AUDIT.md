@@ -219,6 +219,12 @@ Active packed-path changes after the core split:
      HGDN no longer computes every Muon bank on every rank
    - align the exact-8x bridge helper with the same FA3 / distributed flags and
      `WANDB_WATCH=none` default already used by the tiebreak path
+12. distributed compile follow-up (`2026-04-21`)
+   - suppress top-level model compile on multi-rank `train_gpt_hybrid.py` runs
+   - normalize `COMPILE_STRATEGY=hybrid` to the same effective distributed-safe
+     surface as `selective` on the exact `8xH100` `parallel_muon` helpers
+   - skip duplicate compile-strategy arms in the exact-8x helper instead of
+     relaunching a broken duplicate
 
 ## Current branch changes that do not count as packed drift
 

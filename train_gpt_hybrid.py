@@ -1335,11 +1335,12 @@ def main() -> None:
             seq_len=args.train_seq_len,
             dtype=torch.bfloat16,
         )
+    compile_top_level = not distributed
     compiled_model, compile_stats = prepare_hybrid_compile(
         base_model,
         enabled=args.compile,
         strategy=args.compile_strategy,
-        compile_top_level=not uses_ddp,
+        compile_top_level=compile_top_level,
     )
     model = (
         DDP(compiled_model, device_ids=[local_rank], broadcast_buffers=False)
@@ -1374,6 +1375,11 @@ def main() -> None:
         f"distributed_mode:{args.distributed_mode} uses_ddp:{int(uses_ddp)} "
         f"sdp_backends:cudnn=False flash=True mem_efficient=False math=False"
     )
+    if args.compile and distributed and args.compile_strategy in {"model", "hybrid"}:
+        log0(
+            "compile_top_level_suppressed:distributed_launch "
+            "top-level model compile disabled on distributed launches"
+        )
 
     if master_process and _USE_WANDB:
         wandb.config.update(

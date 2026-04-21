@@ -56,12 +56,39 @@ hgdn_kernel_config="${HGDN_KERNEL_CONFIG:-configs/hgdn/winner_20260405_19_live14
 declare -a run_ids=()
 declare -a run_strategies=()
 declare -a compile_strategy_list=()
+declare -a compile_strategy_requested=()
 
-read -r -a compile_strategy_list <<< "${compile_strategies}"
-if [[ "${#compile_strategy_list[@]}" -ne 2 ]]; then
-    echo "COMPILE_STRATEGIES must contain exactly two strategies, got: ${compile_strategies}" >&2
+read -r -a compile_strategy_requested <<< "${compile_strategies}"
+if [[ "${#compile_strategy_requested[@]}" -lt 1 ]]; then
+    echo "COMPILE_STRATEGIES must contain at least one strategy, got: ${compile_strategies}" >&2
     exit 1
 fi
+
+normalize_compile_strategy() {
+    local strategy="$1"
+    if [[ "${ngpu}" -gt 1 ]]; then
+        case "${strategy}" in
+        hybrid)
+            printf '%s\n' "selective"
+            return 0
+            ;;
+        esac
+    fi
+    printf '%s\n' "${strategy}"
+}
+
+declare -A seen_compile_strategy=()
+for requested_strategy in "${compile_strategy_requested[@]}"; do
+    normalized_strategy="$(normalize_compile_strategy "${requested_strategy}")"
+    if [[ "${normalized_strategy}" != "${requested_strategy}" ]]; then
+        echo "note: COMPILE_STRATEGY=${requested_strategy} normalizes to ${normalized_strategy} on distributed exact-8x runs because top-level model compile is disabled."
+    fi
+    if [[ -n "${seen_compile_strategy[${normalized_strategy}]:-}" ]]; then
+        continue
+    fi
+    seen_compile_strategy["${normalized_strategy}"]=1
+    compile_strategy_list+=("${normalized_strategy}")
+done
 
 hgdn_ensure_python_module "${python_bin}" py7zr py7zr
 
@@ -106,13 +133,14 @@ print_plan() {
     echo "compile=${compile}"
     echo "attn_use_flash_attn3=${attn_use_flash_attn3}"
     echo "distributed_mode=${distributed_mode}"
-    echo "compile_strategies=${compile_strategy_list[*]}"
+    echo "compile_strategies_requested=${compile_strategy_requested[*]}"
+    echo "compile_strategies_effective=${compile_strategy_list[*]}"
     echo "max_wallclock_seconds=${max_wallclock_seconds}"
     echo "hgdn_config=${hgdn_config}"
     echo "hgdn_kernel_config=${hgdn_kernel_config}"
     echo "archive_output=${archive_output}"
     echo "command_log=${command_log}"
-    echo "tiebreak_goal=run the exact 8x packed HGDN finalist under matched compile strategies before the final submission-time choice"
+    echo "tiebreak_goal=run the exact 8x packed HGDN finalist under the effective distributed-safe compile strategies before the final submission-time choice"
 }
 
 prepare_cuda() {

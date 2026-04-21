@@ -95,6 +95,13 @@ Branch: `exp/hgdn-k-core`
       `ATTN_USE_FLASH_ATTN3=1` / `DISTRIBUTED_MODE=parallel_muon` surface as the
       tiebreak and naive helpers
     - default exact-8x bridge/tiebreak helpers to `WANDB_WATCH=none`
+  - `2026-04-21` distributed compile follow-up:
+    - multi-rank `train_gpt_hybrid.py` now suppresses top-level model compile
+      and keeps only the selective submodule compile surface
+    - on the exact `8xH100` `parallel_muon` surface, `COMPILE_STRATEGY=hybrid`
+      therefore normalizes to the same effective compile plan as `selective`
+    - the exact-8x compile helper skips duplicate strategies after that
+      normalization instead of launching a broken duplicate arm
 
 Exact 8x packed tiebreak:
 
