@@ -17,6 +17,7 @@ import torch
 
 
 def main() -> None:
+    """Inspect or initialize a core/amplifier model directory."""
     p = argparse.ArgumentParser(description="Build and inspect a core/amplifier model")
     p.add_argument("command", help="'init' to create, or path to existing model dir")
     p.add_argument("model_dir", nargs="?", default=None, help="Model directory (after 'init')")

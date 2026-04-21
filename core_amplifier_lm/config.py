@@ -138,6 +138,11 @@ class ModelConfig:
     """Configuration backed by a model directory."""
 
     def __init__(self, model_dir: str | Path, data: dict[str, Any] | None = None):
+        """Initialize a config wrapper.
+
+        :param str | Path model_dir: Model directory for the configuration.
+        :param dict[str, Any] | None data: Optional preloaded configuration data.
+        """
         self.model_dir = Path(model_dir)
         self._data: dict[str, Any] = data or _deep_copy(DEFAULTS)
 
@@ -145,28 +150,56 @@ class ModelConfig:
 
     @property
     def config_path(self) -> Path:
+        """Return the config.json path.
+
+        Returns:
+            Path: The config.json path.
+        """
         return self.model_dir / "config.json"
 
     @property
     def spec_path(self) -> Path:
+        """Return the spec.pt path.
+
+        Returns:
+            Path: The spec.pt path.
+        """
         return self.model_dir / "spec.pt"
 
     @property
     def tokenizer_path(self) -> Optional[Path]:
+        """Return the first tokenizer model path in the model directory.
+
+        Returns:
+            Path | None: The first ``*.model`` file, if present.
+        """
         candidates = list(self.model_dir.glob("*.model"))
         return candidates[0] if candidates else None
 
     @property
     def metrics_path(self) -> Path:
+        """Return the metrics.jsonl path.
+
+        Returns:
+            Path: The metrics.jsonl path.
+        """
         return self.model_dir / "metrics.jsonl"
 
     def checkpoint_path(self, step: Optional[int] = None) -> Path:
+        """Return a checkpoint path for the requested step.
+
+        :param Optional[int] step: Optional checkpoint step number.
+        :return Path: The numbered checkpoint path or the default checkpoint.pt path.
+        """
         if step is not None:
             return self.model_dir / f"checkpoint_{step}.pt"
         return self.model_dir / "checkpoint.pt"
 
     def latest_checkpoint(self) -> Optional[Path]:
-        """Find the highest-numbered checkpoint, or checkpoint.pt."""
+        """Find the highest-numbered checkpoint.
+
+        :return Path | None: The latest numbered checkpoint, final.pt, or checkpoint.pt.
+        """
         numbered = sorted(self.model_dir.glob("checkpoint_*.pt"))
         if numbered:
             return numbered[-1]
@@ -180,31 +213,68 @@ class ModelConfig:
 
     @property
     def model(self) -> dict[str, Any]:
+        """Return the model section.
+
+        Returns:
+            dict[str, Any]: The ``model`` section.
+        """
         return self._data.setdefault("model", {})
 
     @property
     def training(self) -> dict[str, Any]:
+        """Return the training section.
+
+        Returns:
+            dict[str, Any]: The ``training`` section.
+        """
         return self._data.setdefault("training", {})
 
     @property
     def data(self) -> dict[str, Any]:
+        """Return the data section.
+
+        Returns:
+            dict[str, Any]: The ``data`` section.
+        """
         return self._data.setdefault("data", {})
 
     @property
     def spec(self) -> dict[str, Any]:
+        """Return the spec section.
+
+        Returns:
+            dict[str, Any]: The ``spec`` section.
+        """
         return self._data.setdefault("spec", {})
 
     @property
     def meta(self) -> dict[str, Any]:
+        """Return the meta section.
+
+        Returns:
+            dict[str, Any]: The ``meta`` section.
+        """
         return self._data.setdefault("meta", {})
 
     # -- Convenience getters that flatten the hierarchy --
 
     def get(self, section: str, key: str, default: Any = None) -> Any:
+        """Read a nested value from the loaded config.
+
+        :param str section: Top-level config section.
+        :param str key: Nested key within the section.
+        :param Any default: Value to return when the key is missing.
+        :return Any: The stored value or default.
+        """
         return self._data.get(section, {}).get(key, default)
 
     @property
     def branch_lags_tuple(self) -> tuple[int, ...]:
+        """Return branch lags normalized to a tuple of ints.
+
+        Returns:
+            tuple[int, ...]: Branch lags as a tuple of integers.
+        """
         v = self.model.get("branch_lags", DEFAULTS["model"]["branch_lags"])
         if isinstance(v, str):
             return tuple(int(x) for x in v.split(",") if x)
@@ -214,7 +284,12 @@ class ModelConfig:
 
     @classmethod
     def create(cls, model_dir: str | Path, **overrides: Any) -> "ModelConfig":
-        """Create a new config with defaults, applying any overrides."""
+        """Create a new config with defaults.
+
+        :param str | Path model_dir: Model directory to bind the config to.
+        :param Any overrides: Optional config overrides keyed by CLI arg names.
+        :return ModelConfig: A new config instance populated with defaults.
+        """
         cfg = cls(model_dir, _deep_copy(DEFAULTS))
         cfg.meta["created"] = datetime.now(timezone.utc).isoformat()
         for key, value in overrides.items():
@@ -227,7 +302,11 @@ class ModelConfig:
 
     @classmethod
     def load(cls, model_dir: str | Path) -> "ModelConfig":
-        """Load config from an existing model directory."""
+        """Load config from an existing model directory.
+
+        :param str | Path model_dir: Model directory to load from.
+        :return ModelConfig: The loaded config instance.
+        """
         p = Path(model_dir)
         config_path = p / "config.json"
         if not config_path.exists():
@@ -241,7 +320,12 @@ class ModelConfig:
 
     @classmethod
     def load_or_create(cls, model_dir: str | Path, **overrides: Any) -> "ModelConfig":
-        """Load if config.json exists, otherwise create with defaults."""
+        """Load existing config or create a new one.
+
+        :param str | Path model_dir: Model directory to load or create.
+        :param Any overrides: Optional config overrides keyed by CLI arg names.
+        :return ModelConfig: The loaded or newly created config instance.
+        """
         p = Path(model_dir)
         if (p / "config.json").exists():
             cfg = cls.load(p)
@@ -276,7 +360,11 @@ class ModelConfig:
     # -- Tokenizer management --
 
     def find_or_copy_tokenizer(self, search_paths: Optional[list[Path]] = None) -> Optional[Path]:
-        """Find tokenizer in model dir, or search externally and copy it in."""
+        """Find or copy a tokenizer model.
+
+        :param list[Path] | None search_paths: Optional extra roots to search first.
+        :return Path | None: Existing or copied tokenizer path, or None if not found.
+        """
         existing = self.tokenizer_path
         if existing is not None:
             return existing
@@ -303,6 +391,10 @@ class ModelConfig:
     # -- Display --
 
     def summary(self) -> str:
+        """Render a human-readable config summary.
+
+        :return str: A multi-line summary of the loaded config sections.
+        """
         lines = [f"ModelConfig @ {self.model_dir}"]
         for section in ("model", "training", "data", "spec", "meta"):
             d = self._data.get(section, {})
@@ -320,10 +412,20 @@ class ModelConfig:
 
 
 def _deep_copy(d: dict) -> dict:
+    """Deep-copy a JSON-compatible dict.
+
+    Returns:
+        dict: A deep-copied mapping.
+    """
     return json.loads(json.dumps(d, default=_json_default))
 
 
 def _deep_update(base: dict, override: dict) -> None:
+    """Recursively merge override into base.
+
+    :param dict base: Mapping to update in place.
+    :param dict override: Mapping whose values overwrite ``base``.
+    """
     for k, v in override.items():
         if isinstance(v, dict) and isinstance(base.get(k), dict):
             _deep_update(base[k], v)
@@ -332,6 +434,11 @@ def _deep_update(base: dict, override: dict) -> None:
 
 
 def _json_default(obj: Any) -> Any:
+    """Serialize paths and tuples for JSON output.
+
+    Returns:
+        Any: JSON-serializable fallback value.
+    """
     if isinstance(obj, tuple):
         return list(obj)
     if isinstance(obj, Path):

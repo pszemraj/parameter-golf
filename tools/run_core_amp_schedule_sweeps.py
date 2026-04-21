@@ -46,7 +46,10 @@ class SweepLaunch:
     description: str
 
     def merged_env(self) -> dict[str, str]:
-        """Return the full environment contract for this family."""
+        """Return the full environment contract for this family.
+
+        :return dict[str, str]: Environment variables for the delegated launch.
+        """
         merged = dict(DEFAULT_ENV)
         merged.update(self.env_overrides)
         merged["MODEL_ROOT"] = self.model_root
@@ -68,6 +71,21 @@ def _controller_family(
     log_state_every: int = 256,
     save_every: int = 2048,
 ) -> SweepLaunch:
+    """Build one delegated schedule family.
+
+    :param str name: Family name.
+    :param str model_root: Model root directory.
+    :param str shared_spec_dir: Shared spec directory.
+    :param str run_specs: Run specification block.
+    :param str description: Family description.
+    :param int num_blocks: Optional block count override.
+    :param int val_every: Validation cadence.
+    :param int val_steps: Validation steps.
+    :param int log_every: Logging cadence.
+    :param int log_state_every: State logging cadence.
+    :param int save_every: Save cadence.
+    :return SweepLaunch: Configured family launch.
+    """
     return SweepLaunch(
         name=name,
         model_root=model_root,
@@ -90,7 +108,11 @@ def _controller_family(
 
 
 def build_queue(repo_root: Path = REPO_ROOT) -> list[SweepLaunch]:
-    """Return the disciplined schedule-screen families in launch order."""
+    """Return the schedule families in launch order.
+
+    :param Path repo_root: Repository root.
+    :return list[SweepLaunch]: Ordered schedule family launches.
+    """
     schedule_root = repo_root / "experiments" / "5090_schedule"
     blocks0_shared = str(
         repo_root
@@ -221,12 +243,19 @@ blocks1_resid12_e10_h7000_1b  12 10.0 8 1 1 -3.0 0.003 100 7000 0.0003 8192 256 
 
 
 def family_names(queue: Iterable[SweepLaunch]) -> list[str]:
-    """Return queue family names in launch order."""
+    """Return queue family names in launch order.
+
+    :param Iterable[SweepLaunch] queue: Family launches.
+    :return list[str]: Launch names.
+    """
     return [launch.name for launch in queue]
 
 
 def parse_args() -> argparse.Namespace:
-    """Parse CLI arguments."""
+    """Parse CLI arguments.
+
+    :return argparse.Namespace: Parsed arguments.
+    """
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
         "--family",
@@ -253,7 +282,12 @@ def parse_args() -> argparse.Namespace:
 
 
 def launch_family(launch: SweepLaunch, *, dry_run: bool = False) -> int:
-    """Run one schedule family through the canonical sweep tool."""
+    """Run one schedule family through the canonical sweep tool.
+
+    :param SweepLaunch launch: Family launch to execute.
+    :param bool dry_run: Print the command without executing it.
+    :return int: Delegated process return code.
+    """
     env = os.environ.copy()
     env.update(launch.merged_env())
     cmd = [
@@ -277,7 +311,7 @@ def launch_family(launch: SweepLaunch, *, dry_run: bool = False) -> int:
 
 
 def main() -> None:
-    """Entry point."""
+    """Run the schedule sweep launcher."""
     args = parse_args()
     queue = build_queue(REPO_ROOT)
     known = {launch.name for launch in queue}

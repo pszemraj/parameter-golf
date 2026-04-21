@@ -119,6 +119,11 @@ INT8_CLIP_Q = INT8_CLIP_PERCENTILE / 100.0
 
 
 def _json_default(obj: Any) -> Any:
+    """Serialize paths and dtypes for JSON output.
+
+    Returns:
+        Any: JSON-serializable fallback value.
+    """
     if isinstance(obj, Path):
         return str(obj)
     if isinstance(obj, torch.dtype):
@@ -127,14 +132,22 @@ def _json_default(obj: Any) -> Any:
 
 
 def write_json(path: str | Path, payload: dict[str, Any]) -> None:
-    """Write JSON with stable formatting."""
+    """Write JSON with stable formatting.
+
+    :param str | Path path: Output file path.
+    :param dict[str, Any] payload: JSON-serializable payload.
+    """
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(payload, indent=2, sort_keys=True, default=_json_default) + "\n")
 
 
 def append_jsonl(path: str | Path, payload: dict[str, Any]) -> None:
-    """Append one JSON object to a JSONL file."""
+    """Append one JSON object to a JSONL file.
+
+    :param str | Path path: Output file path.
+    :param dict[str, Any] payload: JSON-serializable payload.
+    """
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
     with out.open("a", encoding="utf-8") as f:
@@ -142,7 +155,11 @@ def append_jsonl(path: str | Path, payload: dict[str, Any]) -> None:
 
 
 def read_json(path: str | Path) -> dict[str, Any]:
-    """Read JSON, returning an empty dict when missing."""
+    """Read JSON, returning an empty dict when missing.
+
+    :param str | Path path: Input file path.
+    :return dict[str, Any]: Parsed JSON content or an empty dict.
+    """
     p = Path(path)
     if not p.exists():
         return {}
@@ -153,7 +170,11 @@ def read_json(path: str | Path) -> dict[str, Any]:
 
 
 def read_jsonl(path: str | Path) -> list[dict[str, Any]]:
-    """Read JSONL rows, skipping malformed lines."""
+    """Read JSONL rows, skipping malformed lines.
+
+    :param str | Path path: Input file path.
+    :return list[dict[str, Any]]: Parsed rows, excluding malformed lines.
+    """
     p = Path(path)
     rows: list[dict[str, Any]] = []
     if not p.exists():
@@ -170,12 +191,20 @@ def read_jsonl(path: str | Path) -> list[dict[str, Any]]:
 
 
 def shell_join(argv: Iterable[str]) -> str:
-    """Quote a command line for reproducible logs."""
+    """Quote a command line for reproducible logs.
+
+    :param Iterable[str] argv: Command arguments.
+    :return str: Shell-quoted command string.
+    """
     return shlex.join([str(x) for x in argv])
 
 
 def git_commit(repo_root: str | Path) -> Optional[str]:
-    """Return HEAD commit for the repo, if available."""
+    """Return HEAD commit for the repo, if available.
+
+    :param str | Path repo_root: Repository root directory.
+    :return str | None: HEAD commit SHA or None if unavailable.
+    """
     try:
         res = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -191,7 +220,11 @@ def git_commit(repo_root: str | Path) -> Optional[str]:
 
 
 def nvidia_smi_metadata(device_index: Optional[int]) -> dict[str, Any]:
-    """Read GPU name/driver from nvidia-smi when available."""
+    """Read GPU name and driver version from nvidia-smi.
+
+    :param Optional[int] device_index: CUDA device index to query.
+    :return dict[str, Any]: GPU metadata when available.
+    """
     if device_index is None:
         return {}
     cmd = [
@@ -217,7 +250,11 @@ def nvidia_smi_metadata(device_index: Optional[int]) -> dict[str, Any]:
 
 
 def spec_size_bytes(spec_path: str | Path) -> tuple[Optional[int], Optional[int]]:
-    """Return raw and gzip-compressed spec.pt sizes."""
+    """Return raw and gzip-compressed spec.pt sizes.
+
+    :param str | Path spec_path: Path to spec.pt.
+    :return tuple[Optional[int], Optional[int]]: Raw and gzip-compressed sizes.
+    """
     p = Path(spec_path)
     if not p.exists():
         return None, None
@@ -227,7 +264,11 @@ def spec_size_bytes(spec_path: str | Path) -> tuple[Optional[int], Optional[int]
 
 
 def estimate_repo_code_bytes(repo_root: str | Path) -> int:
-    """Approximate code bytes for the maintained root code path."""
+    """Approximate code bytes for the maintained root code path.
+
+    :param str | Path repo_root: Repository root directory.
+    :return int: Total bytes of tracked Python source under the root path.
+    """
     root = Path(repo_root)
     total = 0
     for path in root.rglob("*.py"):
@@ -241,7 +282,11 @@ def estimate_repo_code_bytes(repo_root: str | Path) -> int:
 
 
 def tensor_nbytes(t: torch.Tensor) -> int:
-    """Return the raw storage bytes for a tensor."""
+    """Return the raw storage bytes for a tensor.
+
+    :param torch.Tensor t: Tensor to measure.
+    :return int: Tensor storage size in bytes.
+    """
     return int(t.numel()) * int(t.element_size())
 
 
@@ -250,6 +295,14 @@ def _keep_float_tensor(
     tensor: torch.Tensor,
     passthrough_orig_dtypes: dict[str, str],
 ) -> torch.Tensor:
+    """Keep a tensor in floating-point form for the int8 export path.
+
+    :param str name: Parameter name being exported.
+    :param torch.Tensor tensor: Tensor to preserve or downcast.
+    :param dict[str, str] passthrough_orig_dtypes: Original dtypes for passthrough values.
+    Returns:
+        torch.Tensor: Tensor prepared for the int8 export payload.
+    """
     if any(pattern in name for pattern in INT8_KEEP_FLOAT_FP32_NAME_PATTERNS):
         return tensor.float().contiguous()
     if tensor.dtype in {torch.float32, torch.bfloat16}:
@@ -259,6 +312,11 @@ def _keep_float_tensor(
 
 
 def _quantize_float_tensor(tensor: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Quantize a floating-point tensor with int8 payload and scale metadata.
+
+    Returns:
+        tuple[torch.Tensor, torch.Tensor]: Quantized tensor and scale tensor.
+    """
     tensor_f32 = tensor.float()
     if tensor_f32.ndim == 2:
         clip_abs = (
@@ -291,7 +349,11 @@ def _quantize_float_tensor(tensor: torch.Tensor) -> tuple[torch.Tensor, torch.Te
 def quantize_state_dict_int8(
     state_dict: dict[str, torch.Tensor],
 ) -> tuple[dict[str, object], dict[str, int]]:
-    """Mirror the record-side clean int8 export format for trainable weights."""
+    """Mirror the record-side clean int8 export format for trainable weights.
+
+    :param dict[str, torch.Tensor] state_dict: Trainable state dict to export.
+    :return tuple[dict[str, object], dict[str, int]]: Quantized payload and export stats.
+    """
     quantized: dict[str, torch.Tensor] = {}
     scales: dict[str, torch.Tensor] = {}
     dtypes: dict[str, str] = {}
@@ -351,7 +413,11 @@ def quantize_state_dict_int8(
 def serialize_trainable_int8_zlib(
     state_dict: dict[str, torch.Tensor],
 ) -> tuple[bytes, dict[str, int]]:
-    """Serialize a trainable state dict using the record-side int8+zlib convention."""
+    """Serialize a trainable state dict using the record-side int8+zlib convention.
+
+    :param dict[str, torch.Tensor] state_dict: Trainable state dict to export.
+    :return tuple[bytes, dict[str, int]]: Compressed payload and serialization stats.
+    """
     quantized, stats = quantize_state_dict_int8(state_dict)
     buf = io.BytesIO()
     torch.save(quantized, buf)
@@ -367,7 +433,12 @@ def export_trainable_int8_zlib(
     path: str | Path,
     state_dict: dict[str, torch.Tensor],
 ) -> dict[str, int]:
-    """Write the compressed trainable artifact blob and return serialization stats."""
+    """Write the compressed trainable artifact blob and return serialization stats.
+
+    :param str | Path path: Output file path.
+    :param dict[str, torch.Tensor] state_dict: Trainable state dict to export.
+    :return dict[str, int]: Serialization statistics.
+    """
     blob, stats = serialize_trainable_int8_zlib(state_dict)
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -376,7 +447,11 @@ def export_trainable_int8_zlib(
 
 
 def trainable_int8_zlib_bytes(state_dict: dict[str, torch.Tensor]) -> int:
-    """Return the compressed trainable artifact bytes using the record-side export path."""
+    """Return the compressed trainable artifact bytes using the record-side export path.
+
+    :param dict[str, torch.Tensor] state_dict: Trainable state dict to export.
+    :return int: Compressed artifact size in bytes.
+    """
     blob, _stats = serialize_trainable_int8_zlib(state_dict)
     return len(blob)
 
@@ -388,7 +463,14 @@ def artifact_estimate_bytes(
     trainable_payload_bytes: Optional[int] = None,
     repo_code_bytes: Optional[int] = None,
 ) -> Optional[int]:
-    """Estimate artifact size as code bytes plus frozen spec plus controller payload."""
+    """Estimate artifact size as code bytes plus frozen spec plus controller payload.
+
+    :param str | Path repo_root: Repository root directory.
+    :param str | Path spec_path: Path to spec.pt.
+    :param Optional[int] trainable_payload_bytes: Optional trainable artifact bytes.
+    :param Optional[int] repo_code_bytes: Optional precomputed code byte count.
+    :return Optional[int]: Estimated total artifact bytes, or None if unavailable.
+    """
     _, gz = spec_size_bytes(spec_path)
     if gz is None:
         return None
@@ -402,14 +484,22 @@ def artifact_estimate_bytes(
 
 
 def artifact_headroom_bytes(artifact_bytes: Optional[int]) -> Optional[int]:
-    """Return remaining artifact budget headroom against the 16 MB cap."""
+    """Return remaining artifact budget headroom against the 16 MB cap.
+
+    :param Optional[int] artifact_bytes: Estimated artifact bytes.
+    :return Optional[int]: Remaining bytes under the cap, or None if unknown.
+    """
     if artifact_bytes is None:
         return None
     return int(ARTIFACT_LIMIT_BYTES) - int(artifact_bytes)
 
 
 def artifact_status(artifact_bytes: Optional[int]) -> str:
-    """Classify artifact budget usage for summary/reporting."""
+    """Classify artifact budget usage for summary/reporting.
+
+    :param Optional[int] artifact_bytes: Estimated artifact bytes.
+    :return str: Budget classification string.
+    """
     if artifact_bytes is None:
         return "UNKNOWN"
     if int(artifact_bytes) > ARTIFACT_LIMIT_BYTES:
@@ -424,12 +514,22 @@ def compute_steady_state_tokens_per_sec(
     *,
     compile_trigger_step: Optional[int] = None,
 ) -> Optional[float]:
-    """Estimate steady-state throughput from recorded train rows."""
+    """Estimate steady-state throughput from recorded train rows.
+
+    :param Iterable[dict[str, Any]] rows: Metric rows to inspect.
+    :param Optional[int] compile_trigger_step: Optional compile warmup cutoff.
+    :return Optional[float]: Median steady-state tokens per second, or None.
+    """
     train_rows = [row for row in rows if row.get("kind") == "train"]
     if not train_rows:
         return None
 
     def _value(row: dict[str, Any]) -> Optional[float]:
+        """Parse a finite positive tokens/sec value from a row.
+
+        Returns:
+            Optional[float]: Parsed tokens/sec value or None.
+        """
         val = row.get("tokens_per_sec")
         try:
             f = float(val)
@@ -458,12 +558,21 @@ def compute_steady_state_tokens_per_sec(
 
 
 def best_and_last_eval(rows: Iterable[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Return best and last eval rows from a metrics stream."""
+    """Return best and last eval rows from a metrics stream.
+
+    :param Iterable[dict[str, Any]] rows: Metric rows to inspect.
+    :return tuple[dict[str, Any], dict[str, Any]]: Best and last eval rows.
+    """
     eval_rows = [row for row in rows if row.get("kind") == "eval"]
     if not eval_rows:
         return {}, {}
 
     def _loss(row: dict[str, Any]) -> float:
+        """Parse a comparable validation loss from a row.
+
+        Returns:
+            float: Comparable validation loss.
+        """
         try:
             return float(row.get("val_loss", math.inf))
         except (TypeError, ValueError):
@@ -475,6 +584,11 @@ def best_and_last_eval(rows: Iterable[dict[str, Any]]) -> tuple[dict[str, Any], 
 
 
 def _stringify(value: Any) -> str:
+    """Convert a value into a flat summary string.
+
+    Returns:
+        str: Stringified value or an empty string for ``None``.
+    """
     if value is None:
         return ""
     if isinstance(value, bool):
@@ -483,6 +597,11 @@ def _stringify(value: Any) -> str:
 
 
 def _parse_env_bool(value: Any) -> Optional[bool]:
+    """Parse a boolean-like environment value.
+
+    Returns:
+        Optional[bool]: Parsed boolean or None if the value is unknown.
+    """
     if value is None:
         return None
     normalized = str(value).strip().lower()
@@ -494,7 +613,11 @@ def _parse_env_bool(value: Any) -> Optional[bool]:
 
 
 def summarize_run_dir(run_dir: str | Path) -> dict[str, str]:
-    """Build one flat summary row from per-run artifacts."""
+    """Build one flat summary row from per-run artifacts.
+
+    :param str | Path run_dir: Run directory to summarize.
+    :return dict[str, str]: Flat summary row.
+    """
     root = Path(run_dir)
     resolved = read_json(root / "resolved_config.json")
     results = read_json(root / "run_results.json")
@@ -595,7 +718,11 @@ def summarize_run_dir(run_dir: str | Path) -> dict[str, str]:
 
 
 def collect_summary_rows(root: str | Path) -> list[dict[str, str]]:
-    """Collect flat summary rows for all run directories under a root."""
+    """Collect flat summary rows for all run directories under a root.
+
+    :param str | Path root: Directory containing run subdirectories.
+    :return list[dict[str, str]]: Summary rows for discovered runs.
+    """
     base = Path(root)
     rows: list[dict[str, str]] = []
     if not base.exists():
@@ -610,7 +737,11 @@ def collect_summary_rows(root: str | Path) -> list[dict[str, str]]:
 
 
 def write_summary_tsv(rows: list[dict[str, str]], out_path: str | Path) -> None:
-    """Write a deterministic summary TSV."""
+    """Write a deterministic summary TSV.
+
+    :param list[dict[str, str]] rows: Summary rows to write.
+    :param str | Path out_path: Output file path.
+    """
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     with out.open("w", encoding="utf-8") as f:
@@ -625,13 +756,23 @@ def write_summary_markdown(
     *,
     title: str = "Sweep Summary",
 ) -> None:
-    """Render a compact Markdown summary for human inspection."""
+    """Render a compact Markdown summary for human inspection.
+
+    :param list[dict[str, str]] rows: Summary rows to render.
+    :param str | Path out_path: Output file path.
+    :param str title: Markdown title line.
+    """
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
 
     completed = [row for row in rows if row.get("status") == "completed"]
 
     def _score(row: dict[str, str]) -> float:
+        """Parse a sortable validation score from a summary row.
+
+        Returns:
+            float: Comparable score for sorting.
+        """
         try:
             return float(row.get("best_val_bpb", "") or math.inf)
         except ValueError:
@@ -681,7 +822,11 @@ def write_summary_markdown(
 
 
 def runtime_device_index(device: torch.device) -> Optional[int]:
-    """Return the CUDA device index when applicable."""
+    """Return the CUDA device index when applicable.
+
+    :param torch.device device: Device to inspect.
+    :return Optional[int]: CUDA device index or None for non-CUDA devices.
+    """
     if device.type != "cuda":
         return None
     if device.index is not None:
@@ -690,7 +835,11 @@ def runtime_device_index(device: torch.device) -> Optional[int]:
 
 
 def current_peak_memory_mib(device: torch.device) -> tuple[Optional[float], Optional[float]]:
-    """Return peak allocated/reserved memory in MiB."""
+    """Return peak allocated and reserved memory in MiB.
+
+    :param torch.device device: Device to inspect.
+    :return tuple[Optional[float], Optional[float]]: Peak allocated and reserved MiB.
+    """
     if device.type != "cuda":
         return None, None
     idx = runtime_device_index(device)
@@ -710,7 +859,12 @@ def reset_peak_memory(device: torch.device) -> None:
 
 
 def command_context(script_path: str | Path, argv: list[str]) -> dict[str, Any]:
-    """Build reproducible command metadata for a Python entrypoint."""
+    """Build reproducible command metadata for a Python entrypoint.
+
+    :param str | Path script_path: Entry point script path.
+    :param list[str] argv: Command-line arguments.
+    :return dict[str, Any]: Reproducible command metadata.
+    """
     full_argv = [sys.executable, str(script_path), *argv]
     return {
         "argv": full_argv,

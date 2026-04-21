@@ -31,6 +31,11 @@ BranchTemporalState: TypeAlias = torch.Tensor | tuple[torch.Tensor, torch.Tensor
 
 
 def _to_numpy_1d(tokens: ArrayLike) -> np.ndarray:
+    """Convert tokens to a flat int64 NumPy array.
+
+    :param ArrayLike tokens: Token tensor or array.
+    :return np.ndarray: One-dimensional int64 token array.
+    """
     if isinstance(tokens, torch.Tensor):
         tokens = tokens.detach().cpu().numpy()
     arr = np.asarray(tokens)
@@ -40,6 +45,11 @@ def _to_numpy_1d(tokens: ArrayLike) -> np.ndarray:
 
 
 def _validate_tokens(tokens: np.ndarray, vocab_size: int) -> None:
+    """Validate token ids against the vocabulary size.
+
+    :param np.ndarray tokens: Token array to validate.
+    :param int vocab_size: Vocabulary size.
+    """
     if tokens.size == 0:
         raise ValueError("token array is empty")
     token_min = int(tokens.min())
@@ -51,6 +61,11 @@ def _validate_tokens(tokens: np.ndarray, vocab_size: int) -> None:
 
 
 def _normalize_branch_lags(branch_lags: Sequence[int]) -> tuple[int, ...]:
+    """Normalize and validate branch lag offsets.
+
+    :param Sequence[int] branch_lags: Requested lag offsets.
+    :return tuple[int, ...]: Normalized, unique, positive lag offsets.
+    """
     out = tuple(int(lag) for lag in branch_lags)
     if not out:
         raise ValueError("branch_lags must be non-empty")
@@ -62,6 +77,11 @@ def _normalize_branch_lags(branch_lags: Sequence[int]) -> tuple[int, ...]:
 
 
 def _normalize_branch_temporal_mode(mode: str) -> str:
+    """Normalize the branch temporal mode.
+
+    :param str mode: Requested mode string.
+    :return str: ``current``, ``lagged``, or ``hybrid``.
+    """
     normalized = str(mode).strip().lower()
     if normalized not in {"current", "lagged", "hybrid"}:
         raise ValueError(
@@ -71,20 +91,46 @@ def _normalize_branch_temporal_mode(mode: str) -> str:
 
 
 def _count_unigrams(tokens: np.ndarray, vocab_size: int) -> np.ndarray:
+    """Count token unigrams.
+
+    :param np.ndarray tokens: Token ids to count.
+    :param int vocab_size: Vocabulary size.
+    :return np.ndarray: Unigram counts as float64.
+    """
     return np.bincount(tokens, minlength=vocab_size).astype(np.float64, copy=False)
 
 
 def _count_pairs(left: np.ndarray, right: np.ndarray, vocab_size: int) -> np.ndarray:
+    """Count pair co-occurrences.
+
+    :param np.ndarray left: Left token ids.
+    :param np.ndarray right: Right token ids.
+    :param int vocab_size: Vocabulary size.
+    :return np.ndarray: Pair counts reshaped to ``[vocab, vocab]``.
+    """
     flat = left * vocab_size + right
     counts = np.bincount(flat, minlength=vocab_size * vocab_size)
     return counts.reshape(vocab_size, vocab_size).astype(np.float64, copy=False)
 
 
 def _count_bigrams(tokens: np.ndarray, vocab_size: int) -> np.ndarray:
+    """Count adjacent token pairs.
+
+    :param np.ndarray tokens: Token ids to count.
+    :param int vocab_size: Vocabulary size.
+    :return np.ndarray: Bigram counts as float64.
+    """
     return _count_pairs(tokens[:-1], tokens[1:], vocab_size=vocab_size)
 
 
 def _count_lag_pairs(tokens: np.ndarray, lag: int, vocab_size: int) -> np.ndarray:
+    """Count token pairs at a fixed lag.
+
+    :param np.ndarray tokens: Token ids to count.
+    :param int lag: Positive lag offset.
+    :param int vocab_size: Vocabulary size.
+    :return np.ndarray: Lag-pair counts as float64.
+    """
     if lag <= 0:
         raise ValueError(f"lag must be positive, got {lag}")
     if lag >= tokens.size:
@@ -93,12 +139,24 @@ def _count_lag_pairs(tokens: np.ndarray, lag: int, vocab_size: int) -> np.ndarra
 
 
 def _smoothed_log_conditional(counts: np.ndarray, alpha: float = 0.25) -> np.ndarray:
+    """Convert counts to smoothed log-conditionals.
+
+    :param np.ndarray counts: Count matrix.
+    :param float alpha: Additive smoothing factor.
+    :return np.ndarray: Row-normalized log probabilities.
+    """
     counts = counts + alpha
     probs = counts / counts.sum(axis=1, keepdims=True)
     return np.log(probs)
 
 
 def _spectral_scale(matrix: np.ndarray, target_radius: float = 0.95) -> np.ndarray:
+    """Rescale a matrix to the requested spectral radius.
+
+    :param np.ndarray matrix: Matrix to rescale.
+    :param float target_radius: Target top singular value.
+    :return np.ndarray: Rescaled matrix as float32.
+    """
     singular_values = np.linalg.svd(matrix, compute_uv=False)
     top = float(singular_values[0]) if singular_values.size > 0 else 1.0
     if top < 1e-8:
@@ -107,10 +165,21 @@ def _spectral_scale(matrix: np.ndarray, target_radius: float = 0.95) -> np.ndarr
 
 
 def _rms_norm(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    """Apply RMS normalization without a learned scale.
+
+    :param torch.Tensor x: Input tensor.
+    :param float eps: Numerical stability term.
+    :return torch.Tensor: RMS-normalized tensor.
+    """
     return x * torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + eps)
 
 
 def _effective_rank(singular_values: np.ndarray) -> float:
+    """Compute the entropy-based effective rank.
+
+    :param np.ndarray singular_values: Singular values to evaluate.
+    :return float: Effective rank estimate.
+    """
     s = np.asarray(singular_values, dtype=np.float64)
     s = s[s > 1e-12]
     if s.size == 0:
@@ -121,7 +190,12 @@ def _effective_rank(singular_values: np.ndarray) -> float:
 
 
 def _topk_row_sparsify(matrix: np.ndarray, k: int) -> np.ndarray:
-    """Keep the top-k off-diagonal entries per row, zeroing the rest."""
+    """Keep the top-k off-diagonal entries per row.
+
+    :param np.ndarray matrix: Input matrix.
+    :param int k: Number of entries to preserve per row.
+    :return np.ndarray: Row-sparsified matrix.
+    """
     n = matrix.shape[0]
     if k <= 0 or k >= n - 1:
         out = matrix.copy()
@@ -141,7 +215,14 @@ def _umap_style_spectral_basis(
     dim: int,
     neighbors: int = 64,
 ) -> tuple[np.ndarray, np.ndarray, int]:
-    """Approximate UMAP-style spectral initialization from the bigram graph."""
+    """Build a spectral basis from the bigram graph.
+
+    :param np.ndarray log_bigram: Log bigram transition matrix.
+    :param int dim: Requested basis dimension.
+    :param int neighbors: Neighborhood size for graph sparsification.
+    :return tuple[np.ndarray, np.ndarray, int]: Basis matrix, selected
+        eigenvalues, and the neighbor count used.
+    """
     n = log_bigram.shape[0]
     dim = max(1, min(int(dim), n - 1))
     neighbors = max(1, min(int(neighbors), n - 1))
@@ -183,11 +264,25 @@ def _factorize_bigram_residual(
     embedding_init: str = "spectral",
     spectral_neighbors: int = 64,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, object]]:
-    """Build token_embed / token_out from the bigram residual matrix."""
+    """Factorize the residual bigram matrix into token projections.
+
+    :param np.ndarray residual: Residual log-probability matrix.
+    :param np.ndarray log_bigram: Log bigram transition matrix.
+    :param int core_dim: Target core width.
+    :param str embedding_init: Embedding initialization strategy.
+    :param int spectral_neighbors: Neighbor count for spectral basis build.
+    :return tuple[np.ndarray, np.ndarray, dict[str, object]]: Token embedding,
+        token output projection, and metadata.
+    """
     embedding_init = str(embedding_init).lower()
     effective_core_dim = max(1, min(int(core_dim), residual.shape[0], residual.shape[1]))
 
     def _svd_factorization() -> tuple[np.ndarray, np.ndarray, dict[str, object]]:
+        """Factorize the residual with a direct SVD fallback.
+
+        :return tuple[np.ndarray, np.ndarray, dict[str, object]]: Token
+            embedding, token output projection, and metadata.
+        """
         u, s, vt = np.linalg.svd(residual, full_matrices=False)
         s = np.maximum(s[:effective_core_dim], 1e-8)
         token_embed = (u[:, :effective_core_dim] * np.sqrt(s)).astype(np.float32)
@@ -241,7 +336,14 @@ def _build_lag_operator(
     min_identity_blend: float = 0.01,
     target_radius: float = 0.95,
 ) -> tuple[np.ndarray, dict[str, float]]:
-    """Build one lag operator without tanh-squashing the spectrum."""
+    """Build one lag operator from a projected residual matrix.
+
+    :param np.ndarray projected: Projected lag residual matrix.
+    :param float identity_base: Base identity blend.
+    :param float min_identity_blend: Minimum identity blend.
+    :param float target_radius: Target spectral radius.
+    :return tuple[np.ndarray, dict[str, float]]: Lag operator and metadata.
+    """
     u2, s2, vt2 = np.linalg.svd(projected, full_matrices=False)
     if s2.size == 0:
         dim = projected.shape[0]
@@ -273,7 +375,13 @@ def _factorize_readout_matrix(
 ) -> tuple[
     Optional[np.ndarray], Optional[tuple[np.ndarray, np.ndarray]], dict[str, float | int | str]
 ]:
-    """Optionally factorize a [vocab, amp_dim] readout into two smaller matrices."""
+    """Optionally factorize the readout matrix.
+
+    :param np.ndarray weight: Readout weight matrix.
+    :param Optional[int] rank: Optional low-rank factorization rank.
+    :return tuple[Optional[np.ndarray], Optional[tuple[np.ndarray, np.ndarray]], dict[str, float | int | str]]: Dense
+        weight or low-rank factors plus metadata.
+    """
     if rank is None:
         return weight.astype(np.float32, copy=False), None, {"readout_type": "full"}
 
@@ -302,6 +410,8 @@ def _factorize_readout_matrix(
 
 @dataclass
 class AmplifierSpec:
+    """Frozen amplifier specification and its compact tensors."""
+
     vocab_size: int
     core_dim: int
     branch_lags: tuple[int, ...]
@@ -318,14 +428,26 @@ class AmplifierSpec:
 
     @property
     def num_branches(self) -> int:
+        """Number of branch paths.
+
+        :return int: Branch count.
+        """
         return len(self.branch_lags)
 
     @property
     def amp_dim(self) -> int:
+        """Total amplifier width.
+
+        :return int: ``num_branches * core_dim``.
+        """
         return self.num_branches * self.core_dim
 
     @property
     def fixed_nbytes(self) -> int:
+        """Return the fixed tensor storage footprint.
+
+        :return int: Total fixed tensor bytes.
+        """
         total = (
             self.token_embed.element_size() * self.token_embed.numel()
             + self.base_bigram_logits.element_size() * self.base_bigram_logits.numel()
@@ -343,11 +465,19 @@ class AmplifierSpec:
 
     @property
     def readout_rank(self) -> Optional[int]:
+        """Return the low-rank readout factorization rank, if any.
+
+        :return Optional[int]: Readout rank or ``None`` for a dense readout.
+        """
         if self.readout_in_proj is None:
             return None
         return int(self.readout_in_proj.shape[0])
 
     def summary(self) -> str:
+        """Return a compact human-readable spec summary.
+
+        :return str: Summary string.
+        """
         mb = self.fixed_nbytes / 1_000_000
         mib = self.fixed_nbytes / (1024 * 1024)
         requested_core_dim = self.metadata.get("requested_core_dim", self.core_dim)
@@ -362,6 +492,10 @@ class AmplifierSpec:
         )
 
     def save(self, path: str | Path) -> None:
+        """Save the spec to disk.
+
+        :param str | Path path: Destination path.
+        """
         payload = {
             "vocab_size": self.vocab_size,
             "core_dim": self.core_dim,
@@ -387,6 +521,12 @@ class AmplifierSpec:
         path: str | Path,
         map_location: str | torch.device = "cpu",
     ) -> "AmplifierSpec":
+        """Load a spec from disk.
+
+        :param str | Path path: Source path.
+        :param str | torch.device map_location: Torch load map location.
+        :return AmplifierSpec: Loaded spec.
+        """
         try:
             payload = torch.load(Path(path), map_location=map_location, weights_only=False)
         except TypeError:
@@ -425,6 +565,24 @@ def _build_spec_from_counts(
     readout_rank: Optional[int] = None,
     metadata: Optional[dict[str, object]] = None,
 ) -> AmplifierSpec:
+    """Build an ``AmplifierSpec`` from count matrices.
+
+    :param np.ndarray unigram: Token unigram counts.
+    :param np.ndarray bigram: Bigram count matrix.
+    :param dict[int, np.ndarray] lag_pair_counts: Lag-pair matrices.
+    :param int vocab_size: Vocabulary size.
+    :param int core_dim: Requested core width.
+    :param Sequence[int] branch_lags: Branch lag offsets.
+    :param int num_blocks: Number of amplifier blocks.
+    :param float smoothing: Additive smoothing factor.
+    :param torch.dtype fixed_dtype: Fixed tensor dtype.
+    :param str embedding_init: Token basis initialization strategy.
+    :param int spectral_neighbors: Neighbor count for spectral basis build.
+    :param float lag_identity_base: Base identity blend for lag operators.
+    :param Optional[int] readout_rank: Optional low-rank readout factorization.
+    :param Optional[dict[str, object]] metadata: Extra metadata to merge in.
+    :return AmplifierSpec: Built spec.
+    """
     branch_lags = _normalize_branch_lags(branch_lags)
     log_bigram = _smoothed_log_conditional(bigram, alpha=smoothing)
     unigram_probs = (unigram + smoothing) / (unigram.sum() + smoothing * vocab_size)
@@ -461,6 +619,12 @@ def _build_spec_from_counts(
     amp_dim = num_branches * effective_core_dim
 
     def make_block(offset: int, transpose: bool) -> np.ndarray:
+        """Build one amplifier block matrix.
+
+        :param int offset: Block offset used to permute lag operators.
+        :param bool transpose: Whether to use transposed lag operators.
+        :return np.ndarray: Block matrix.
+        """
         out = np.zeros((amp_dim, amp_dim), dtype=np.float32)
         for row in range(num_branches):
             for col in range(num_branches):
@@ -556,6 +720,22 @@ def build_amplifier_spec(
     lag_identity_base: float = 0.15,
     readout_rank: Optional[int] = None,
 ) -> AmplifierSpec:
+    """Build an ``AmplifierSpec`` directly from tokens.
+
+    :param ArrayLike tokens: Token sequence to summarize.
+    :param int vocab_size: Vocabulary size.
+    :param int core_dim: Requested core width.
+    :param Sequence[int] branch_lags: Branch lag offsets.
+    :param int num_blocks: Number of amplifier blocks.
+    :param float smoothing: Additive smoothing factor.
+    :param torch.dtype fixed_dtype: Fixed tensor dtype.
+    :param Optional[int] max_tokens: Optional token cap.
+    :param str embedding_init: Token basis initialization strategy.
+    :param int spectral_neighbors: Neighbor count for spectral basis build.
+    :param float lag_identity_base: Base identity blend for lag operators.
+    :param Optional[int] readout_rank: Optional low-rank readout factorization.
+    :return AmplifierSpec: Built spec.
+    """
     branch_lags = _normalize_branch_lags(branch_lags)
     tokens_np = _to_numpy_1d(tokens)
     if max_tokens is not None:
@@ -597,19 +777,32 @@ def build_amplifier_spec(
 
 
 def _heinsen_scan_log(log_coeffs: torch.Tensor, log_values: torch.Tensor) -> torch.Tensor:
-    """Associative scan in log space. Numerically stable for arbitrarily long sequences."""
+    """Run the Heinsen associative scan in log space.
+
+    :param torch.Tensor log_coeffs: Log coefficients.
+    :param torch.Tensor log_values: Log values.
+    :return torch.Tensor: Scanned values in the original space.
+    """
     a_star = log_coeffs.cumsum(dim=1)
     log_h0_plus_b_star = (log_values - a_star).logcumsumexp(dim=1)
     return (a_star + log_h0_plus_b_star).exp()
 
 
 def _g(x: torch.Tensor) -> torch.Tensor:
-    """Activation that maps to positive reals. Eq B.3 from minGRU paper."""
+    """Map activations to positive reals.
+
+    :param torch.Tensor x: Input tensor.
+    :return torch.Tensor: Positive-valued tensor.
+    """
     return torch.where(x >= 0, x + 0.5, x.sigmoid())
 
 
 def _log_g(x: torch.Tensor) -> torch.Tensor:
-    """Log of _g, numerically stable."""
+    """Compute the numerically stable log of ``_g``.
+
+    :param torch.Tensor x: Input tensor.
+    :return torch.Tensor: Log-transformed positive activation.
+    """
     return torch.where(x >= 0, (F.relu(x) + 0.5).log(), -F.softplus(-x))
 
 
@@ -622,6 +815,11 @@ class MinGRULayer(nn.Module):
     """
 
     def __init__(self, dim: int, expansion_factor: float = 1.0):
+        """Initialize a single minGRU layer.
+
+        :param int dim: Hidden width.
+        :param float expansion_factor: Inner-state expansion factor.
+        """
         super().__init__()
         self.dim = dim
         dim_inner = int(dim * expansion_factor)
@@ -634,13 +832,12 @@ class MinGRULayer(nn.Module):
     def forward(
         self, x: torch.Tensor, prev_hidden: Optional[torch.Tensor] = None
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Args:
-            x: [B, T, dim]
-            prev_hidden: [B, dim_inner] or None (positive values)
-        Returns:
-            out: [B, T, dim]
-            next_hidden: [B, dim_inner] (positive values, for carry)
+        """Run the layer in parallel or sequential mode.
+
+        :param torch.Tensor x: Input tensor of shape ``[B, T, dim]``.
+        :param Optional[torch.Tensor] prev_hidden: Optional positive carry state.
+        :return tuple[torch.Tensor, torch.Tensor]: Output tensor and next
+            hidden state.
         """
         seq_len = x.shape[1]
         hidden, gate = self.to_hidden_and_gate(x).chunk(2, dim=-1)
@@ -689,11 +886,21 @@ class LearnedRMSNorm(nn.Module):
     """
 
     def __init__(self, dim: int, eps: float = 1e-5):
+        """Initialize the learned RMS normalization layer.
+
+        :param int dim: Hidden width.
+        :param float eps: Numerical stability term.
+        """
         super().__init__()
         self.scale = nn.Parameter(torch.ones(dim))
         self.eps = eps
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Normalize and scale the input.
+
+        :param torch.Tensor x: Input tensor.
+        :return torch.Tensor: RMS-normalized tensor.
+        """
         return x * torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + self.eps) * self.scale
 
 
@@ -714,6 +921,13 @@ class ResidualMinGRUBlock(nn.Module):
         residual_init: float = -2.0,
         norm_eps: float = 1e-5,
     ):
+        """Initialize the residual minGRU block.
+
+        :param int dim: Hidden width.
+        :param float expansion_factor: Inner-state expansion factor.
+        :param float residual_init: Initial residual gate logit.
+        :param float norm_eps: Numerical stability term for RMSNorm.
+        """
         super().__init__()
         self.norm = LearnedRMSNorm(dim, eps=norm_eps)
         self.rnn = MinGRULayer(dim, expansion_factor=expansion_factor)
@@ -721,6 +935,10 @@ class ResidualMinGRUBlock(nn.Module):
 
     @property
     def dim_inner(self) -> int:
+        """Return the inner minGRU width.
+
+        :return int: Inner width.
+        """
         return self.rnn.dim_inner
 
     def forward(
@@ -728,6 +946,13 @@ class ResidualMinGRUBlock(nn.Module):
         x: torch.Tensor,
         prev_hidden: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Apply the residual block.
+
+        :param torch.Tensor x: Input tensor.
+        :param Optional[torch.Tensor] prev_hidden: Optional positive carry.
+        :return tuple[torch.Tensor, torch.Tensor]: Residual output and next
+            hidden state.
+        """
         y, next_h = self.rnn(self.norm(x), prev_hidden=prev_hidden)
         alpha = torch.sigmoid(self.resid_logit).to(dtype=y.dtype)
         return x + alpha * y, next_h
@@ -754,8 +979,21 @@ class MinGRUCore(nn.Module):
         residual_init: float = -2.0,
         norm_eps: float = 1e-5,
         gradient_checkpointing: bool = False,
-        **_kwargs,
+        **_kwargs: object,
     ):
+        """Initialize the multi-layer minGRU core.
+
+        :param int input_size: Input width.
+        :param int hidden_size: Hidden width.
+        :param int num_layers: Number of recurrent layers.
+        :param float expansion_factor: Inner-state expansion factor.
+        :param bool batch_first: Batch-first layout flag.
+        :param bool residual_blocks: Whether to use residual blocks.
+        :param float residual_init: Initial residual gate logit.
+        :param float norm_eps: Numerical stability term for RMSNorm.
+        :param bool gradient_checkpointing: Whether to checkpoint layers.
+        :param object _kwargs: Ignored compatibility keyword arguments.
+        """
         super().__init__()
         assert batch_first
         if input_size != hidden_size:
@@ -795,6 +1033,13 @@ class MinGRUCore(nn.Module):
         x: torch.Tensor,
         state: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run the recurrent core.
+
+        :param torch.Tensor x: Input tensor.
+        :param Optional[torch.Tensor] state: Optional hidden state.
+        :return tuple[torch.Tensor, torch.Tensor]: Output tensor and stacked
+            next state.
+        """
         B = x.shape[0]
         if state is None:
             state = x.new_full((self.num_layers, B, self.dim_inner), 0.5)
@@ -818,6 +1063,10 @@ class MinGRUCore(nn.Module):
 
     @torch.no_grad()
     def residual_gate_values(self) -> list[float]:
+        """Return the residual gate values for each block.
+
+        :return list[float]: Residual gate probabilities.
+        """
         if not self.residual_blocks:
             return []
         return [float(torch.sigmoid(block.resid_logit).item()) for block in self.blocks]
@@ -833,8 +1082,16 @@ class ScanCore(nn.Module):
         hidden_size: int,
         num_layers: int = 1,
         batch_first: bool = True,
-        **_kwargs,
+        **_kwargs: object,
     ):
+        """Initialize the simple scan core.
+
+        :param int input_size: Input width.
+        :param int hidden_size: Hidden width.
+        :param int num_layers: Number of recurrent layers.
+        :param bool batch_first: Batch-first layout flag.
+        :param object _kwargs: Ignored compatibility keyword arguments.
+        """
         super().__init__()
         assert batch_first
         self.hidden_size = hidden_size
@@ -851,7 +1108,11 @@ class ScanCore(nn.Module):
 
         self._scan = None
 
-    def _get_scan(self):
+    def _get_scan(self) -> object:
+        """Lazily construct the associative scan helper.
+
+        :return object: Cached scan helper.
+        """
         if self._scan is None:
             from assoc_scan import AssocScan
 
@@ -861,6 +1122,12 @@ class ScanCore(nn.Module):
     def forward(
         self, x: torch.Tensor, state: Optional[torch.Tensor] = None
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run the scan core.
+
+        :param torch.Tensor x: Input tensor.
+        :param Optional[torch.Tensor] state: Optional hidden state.
+        :return tuple[torch.Tensor, torch.Tensor]: Output tensor and next state.
+        """
         B, T, _ = x.shape
         if state is None:
             state = x.new_zeros(self.num_layers, B, self.hidden_size)
@@ -891,6 +1158,8 @@ class ScanCore(nn.Module):
 
 
 class CoreAmplifierLM(nn.Module):
+    """Core/amplifier language model with a frozen spec and trainable core."""
+
     def __init__(
         self,
         spec: AmplifierSpec,
@@ -907,6 +1176,21 @@ class CoreAmplifierLM(nn.Module):
         branch_temporal_lag_scale: float = 1.0,
         gradient_checkpointing: bool = False,
     ) -> None:
+        """Initialize the core/amplifier model.
+
+        :param AmplifierSpec spec: Frozen amplifier specification.
+        :param int core_layers: Number of core layers.
+        :param str core_type: Core implementation name.
+        :param float dropout: Dropout used by the GRU core.
+        :param bool learn_input_adapter: Whether to train the input adapter.
+        :param Optional[torch.dtype] amplifier_dtype: Preferred runtime dtype.
+        :param float core_expansion: Inner-state expansion factor for minGRU.
+        :param bool residual_core: Whether to use residual minGRU blocks.
+        :param float residual_core_init: Initial residual gate logit.
+        :param str branch_temporal_mode: Branch temporal mixing mode.
+        :param float branch_temporal_lag_scale: Lag mixing scale.
+        :param bool gradient_checkpointing: Whether to checkpoint amplifier work.
+        """
         super().__init__()
         self.vocab_size = spec.vocab_size
         self.core_dim = spec.core_dim
@@ -1011,14 +1295,26 @@ class CoreAmplifierLM(nn.Module):
         self._branch_temporal_lag_mix_runtime: Optional[torch.Tensor] = None
 
     def _use_gradient_checkpointing(self) -> bool:
+        """Return whether gradient checkpointing is active.
+
+        :return bool: ``True`` when checkpointing should be used.
+        """
         return bool(self.gradient_checkpointing and self.training and torch.is_grad_enabled())
 
     @property
     def trainable_parameters(self) -> int:
+        """Count trainable parameters.
+
+        :return int: Number of parameters with ``requires_grad=True``.
+        """
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
     @property
     def fixed_nbytes(self) -> int:
+        """Count fixed tensor storage bytes.
+
+        :return int: Total fixed tensor bytes.
+        """
         total = (
             self.token_embed.numel() * self.token_embed.element_size()
             + self.base_bigram_logits.numel() * self.base_bigram_logits.element_size()
@@ -1035,6 +1331,11 @@ class CoreAmplifierLM(nn.Module):
         return total
 
     def _resolve_amplifier_dtype(self, device: torch.device) -> torch.dtype:
+        """Resolve the runtime dtype for frozen amplifier tensors.
+
+        :param torch.device device: Target device.
+        :return torch.dtype: Compute dtype to use on that device.
+        """
         dtype = self.preferred_amplifier_dtype or self.amp_w1.dtype
         if device.type == "cpu" and dtype in (torch.float16, torch.bfloat16):
             return torch.float32
@@ -1046,6 +1347,11 @@ class CoreAmplifierLM(nn.Module):
         device: Optional[torch.device] = None,
         amplifier_dtype: Optional[torch.dtype] = None,
     ) -> None:
+        """Materialize runtime copies of the frozen amplifier tensors.
+
+        :param Optional[torch.device] device: Target device.
+        :param Optional[torch.dtype] amplifier_dtype: Requested runtime dtype.
+        """
         device = device or self.token_embed.device
         dtype = amplifier_dtype or self._resolve_amplifier_dtype(device)
         if device.type == "cpu" and dtype in (torch.float16, torch.bfloat16):
@@ -1076,6 +1382,7 @@ class CoreAmplifierLM(nn.Module):
         self._runtime_amp_dtype = dtype
 
     def _ensure_runtime_buffers(self) -> None:
+        """Ensure the cached runtime amplifier buffers are ready."""
         device = self.token_embed.device
         desired = self._resolve_amplifier_dtype(device)
         if (
@@ -1095,6 +1402,13 @@ class CoreAmplifierLM(nn.Module):
     def initial_state(
         self, batch_size: int, device: Optional[torch.device] = None
     ) -> BranchTemporalState:
+        """Build the initial recurrent state.
+
+        :param int batch_size: Batch size.
+        :param Optional[torch.device] device: Optional target device.
+        :return BranchTemporalState: Initial core state, and history when
+            temporal branches are enabled.
+        """
         if self.core_type == "mingru":
             # MinGRU needs positive hidden states for log-space stability
             core_state = (
@@ -1110,11 +1424,21 @@ class CoreAmplifierLM(nn.Module):
         return core_state, history
 
     def detach_state(self, state: BranchTemporalState) -> BranchTemporalState:
+        """Detach a recurrent state from autograd.
+
+        :param BranchTemporalState state: State to detach.
+        :return BranchTemporalState: Detached state.
+        """
         if isinstance(state, tuple):
             return tuple(part.detach() for part in state)  # type: ignore[return-value]
         return state.detach()
 
     def state_norms(self, state: BranchTemporalState) -> list[float]:
+        """Return average state norms per layer.
+
+        :param BranchTemporalState state: State to inspect.
+        :return list[float]: Mean norms by layer.
+        """
         core_state = state[0] if isinstance(state, tuple) else state
         return core_state.float().norm(dim=-1).mean(dim=1).detach().cpu().tolist()
 
@@ -1126,6 +1450,15 @@ class CoreAmplifierLM(nn.Module):
         device: torch.device,
         dtype: torch.dtype,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """Split a branching state into core and history buffers.
+
+        :param BranchTemporalState state: State to split.
+        :param int batch_size: Batch size.
+        :param torch.device device: Target device.
+        :param torch.dtype dtype: Target dtype.
+        :return tuple[torch.Tensor, Optional[torch.Tensor]]: Core state and
+            optional branch history.
+        """
         if self.branch_temporal_mode == "current":
             if isinstance(state, tuple):
                 return state[0].to(device=device, dtype=dtype), None
@@ -1147,6 +1480,11 @@ class CoreAmplifierLM(nn.Module):
         return core_state, history
 
     def _embed(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """Embed token ids with the configured input adapter.
+
+        :param torch.Tensor input_ids: Token ids.
+        :return torch.Tensor: Embedded tokens.
+        """
         emb = F.embedding(input_ids, self.token_embed)
         if isinstance(self.input_adapter, nn.Linear):
             emb = emb.to(dtype=self.input_adapter.weight.dtype)
@@ -1161,6 +1499,13 @@ class CoreAmplifierLM(nn.Module):
         core_out: torch.Tensor,
         history: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """Expand core activations into branch space.
+
+        :param torch.Tensor core_out: Core activations.
+        :param Optional[torch.Tensor] history: Optional branch history.
+        :return tuple[torch.Tensor, Optional[torch.Tensor]]: Branch tensor and
+            updated history.
+        """
         self._ensure_runtime_buffers()
         assert self._lag_ops_runtime is not None
         core_out = core_out.to(dtype=self._lag_ops_runtime.dtype)
@@ -1192,6 +1537,11 @@ class CoreAmplifierLM(nn.Module):
         return branches, next_history
 
     def _amplify(self, branches: torch.Tensor) -> torch.Tensor:
+        """Apply the amplifier stack.
+
+        :param torch.Tensor branches: Branch activations.
+        :return torch.Tensor: Amplified branch activations.
+        """
         self._ensure_runtime_buffers()
         assert self._amp_w1_runtime is not None and self._amp_w2_runtime is not None
         b, t, n, c = branches.shape
@@ -1242,6 +1592,19 @@ class CoreAmplifierLM(nn.Module):
         branch_count: int,
         core_dim: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Apply one amplifier block.
+
+        :param torch.Tensor branches: Branch activations.
+        :param torch.Tensor x: Flattened branch activations.
+        :param int block_idx: Block index.
+        :param torch.Tensor branch_scale: Per-block branch scale.
+        :param torch.Tensor branch_bias: Per-block branch bias.
+        :param torch.Tensor block_gain: Per-block gain values.
+        :param int branch_count: Number of branches.
+        :param int core_dim: Core width.
+        :return tuple[torch.Tensor, torch.Tensor]: Updated branches and flat
+            activations.
+        """
         y = branches * branch_scale[block_idx].view(1, 1, branch_count, 1)
         y = y + branch_bias[block_idx].view(1, 1, branch_count, 1)
         y = y.reshape(branches.shape[0], branches.shape[1], branch_count * core_dim)
@@ -1254,6 +1617,11 @@ class CoreAmplifierLM(nn.Module):
         return x.reshape(branches.shape[0], branches.shape[1], branch_count, core_dim), x
 
     def _residual_logits(self, branches: torch.Tensor) -> torch.Tensor:
+        """Project amplified branches to residual logits.
+
+        :param torch.Tensor branches: Branch activations.
+        :return torch.Tensor: Residual logits.
+        """
         self._ensure_runtime_buffers()
         n = self.num_branches
         c = self.core_dim
@@ -1272,6 +1640,12 @@ class CoreAmplifierLM(nn.Module):
     def base_path_logits(
         self, input_ids: torch.Tensor, *, dtype: Optional[torch.dtype] = None
     ) -> torch.Tensor:
+        """Look up the frozen base-path logits.
+
+        :param torch.Tensor input_ids: Token ids.
+        :param Optional[torch.dtype] dtype: Optional output dtype.
+        :return torch.Tensor: Base-path logits.
+        """
         self._ensure_runtime_buffers()
         assert self._base_bigram_logits_runtime is not None
         out = F.embedding(input_ids.long(), self._base_bigram_logits_runtime)
@@ -1286,6 +1660,14 @@ class CoreAmplifierLM(nn.Module):
         *,
         return_state: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, BranchTemporalState]:
+        """Run the model forward.
+
+        :param torch.Tensor input_ids: Token ids.
+        :param Optional[BranchTemporalState] state: Optional recurrent state.
+        :param bool return_state: Whether to return the updated state.
+        :return torch.Tensor | tuple[torch.Tensor, BranchTemporalState]: Logits
+            only, or logits plus next state.
+        """
         if input_ids.dtype not in (torch.int32, torch.int64):
             input_ids = input_ids.long()
         batch_size = input_ids.shape[0]
@@ -1322,6 +1704,10 @@ class CoreAmplifierLM(nn.Module):
 
     @torch.no_grad()
     def residual_gate_values(self) -> list[float]:
+        """Return residual gate values from the underlying core.
+
+        :return list[float]: Residual gate probabilities, if available.
+        """
         if hasattr(self.core, "residual_gate_values"):
             return self.core.residual_gate_values()
         return []
@@ -1332,6 +1718,13 @@ class CoreAmplifierLM(nn.Module):
         input_ids: torch.Tensor,
         state: Optional[BranchTemporalState] = None,
     ) -> tuple[torch.Tensor, BranchTemporalState]:
+        """Advance the model by one step.
+
+        :param torch.Tensor input_ids: Token ids.
+        :param Optional[BranchTemporalState] state: Optional recurrent state.
+        :return tuple[torch.Tensor, BranchTemporalState]: Final-step logits and
+            next state.
+        """
         if input_ids.ndim == 1:
             input_ids = input_ids[:, None]
         logits, next_state = self.forward(input_ids, state=state, return_state=True)
@@ -1346,6 +1739,14 @@ class CoreAmplifierLM(nn.Module):
         temperature: float = 1.0,
         top_k: Optional[int] = None,
     ) -> torch.Tensor:
+        """Generate tokens autoregressively.
+
+        :param torch.Tensor prompt: Prompt tokens.
+        :param int max_new_tokens: Number of tokens to sample.
+        :param float temperature: Sampling temperature.
+        :param Optional[int] top_k: Optional top-k filter.
+        :return torch.Tensor: Prompt plus generated tokens.
+        """
         if prompt.ndim == 1:
             prompt = prompt[None, :]
         device = next(self.parameters()).device
@@ -1378,6 +1779,16 @@ def estimate_storage_bytes(
     readout_rank: Optional[int] = None,
     fixed_dtype: torch.dtype = torch.bfloat16,
 ) -> int:
+    """Estimate fixed tensor storage bytes.
+
+    :param int vocab_size: Vocabulary size.
+    :param int core_dim: Core width.
+    :param int branch_count: Number of branches.
+    :param int num_blocks: Number of amplifier blocks.
+    :param Optional[int] readout_rank: Optional low-rank readout factorization.
+    :param torch.dtype fixed_dtype: Fixed tensor dtype.
+    :return int: Estimated storage bytes.
+    """
     bytes_per = torch.tensor([], dtype=fixed_dtype).element_size()
     amp_dim = core_dim * branch_count
     total_numel = 0
@@ -1395,6 +1806,10 @@ def estimate_storage_bytes(
 
 
 def default_16mb_recipe() -> dict[str, object]:
+    """Return the default 16 MB recipe.
+
+    :return dict[str, object]: Default recipe metadata.
+    """
     branch_lags = (1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64)
     bytes_ = estimate_storage_bytes(
         vocab_size=1024,

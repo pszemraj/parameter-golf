@@ -23,7 +23,7 @@ import sys
 import time
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, TypeVar
 
 import numpy as np
 import torch
@@ -80,9 +80,14 @@ _SHARD_MAGIC = 20240520
 _SHARD_VERSION = 1
 _HEADER_INTS = 256
 _HEADER_BYTES = _HEADER_INTS * np.dtype("<i4").itemsize
+T = TypeVar("T")
 
 
 def seed_everything(seed: int) -> None:
+    """Seed Python, NumPy, and Torch RNGs.
+
+    :param int seed: Seed value to apply.
+    """
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -91,10 +96,20 @@ def seed_everything(seed: int) -> None:
 
 
 def unwrap_model(model: torch.nn.Module) -> torch.nn.Module:
+    """Unwrap a compiled model if needed.
+
+    :param torch.nn.Module model: Model to unwrap.
+    :return torch.nn.Module: The original module when wrapped by ``torch.compile``.
+    """
     return model._orig_mod if hasattr(model, "_orig_mod") else model
 
 
 def parse_branch_lags(text: str) -> tuple[int, ...]:
+    """Parse a comma-separated branch-lag list.
+
+    :param str text: Comma-separated lag values.
+    :return tuple[int, ...]: Parsed lag tuple.
+    """
     values = tuple(int(x) for x in text.split(",") if x)
     if not values:
         raise ValueError("branch_lags must be non-empty")
@@ -111,6 +126,13 @@ def load_tokens(
     storage_dtype: str = "uint16",
     max_tokens: Optional[int] = None,
 ) -> np.ndarray:
+    """Load token ids from a file into a flat int32 array.
+
+    :param str | Path path: Token file path.
+    :param str storage_dtype: On-disk integer dtype for raw files.
+    :param Optional[int] max_tokens: Optional token cap.
+    :return np.ndarray: Flat int32 token array.
+    """
     path = Path(path)
     suffix = path.suffix.lower()
     np_dtype = NUMPY_DTYPE_MAP[storage_dtype]
@@ -151,11 +173,21 @@ def load_tokens(
 
 
 def _detect_has_header(path: Path) -> bool:
+    """Detect the competition shard header.
+
+    :param Path path: Candidate shard path.
+    :return bool: ``True`` when the magic header is present.
+    """
     header = np.fromfile(path, dtype="<i4", count=2)
     return header.size >= 2 and int(header[0]) == _SHARD_MAGIC and int(header[1]) == _SHARD_VERSION
 
 
 def _list_train_val_shards(source: str | Path) -> tuple[list[Path], list[Path]]:
+    """List train and validation shard files under a directory.
+
+    :param str | Path source: Data source path.
+    :return tuple[list[Path], list[Path]]: Train and validation shard lists.
+    """
     p = Path(source)
     if not p.is_dir():
         return [], []
@@ -168,6 +200,12 @@ def _list_train_val_shards(source: str | Path) -> tuple[list[Path], list[Path]]:
 
 
 def _memmap_token_file(path: str | Path, *, storage_dtype: str = "uint16") -> np.ndarray:
+    """Open a token file as a memory map when supported.
+
+    :param str | Path path: Token file path.
+    :param str storage_dtype: On-disk integer dtype for raw files.
+    :return np.ndarray: Memory-mapped token array.
+    """
     p = Path(path)
     suffix = p.suffix.lower()
     if suffix == ".npy":
@@ -188,6 +226,12 @@ def _memmap_token_file(path: str | Path, *, storage_dtype: str = "uint16") -> np
 def _sample_directory_tokens(
     arrays: list[np.ndarray], *, max_tokens: int = 1_000_000
 ) -> np.ndarray:
+    """Sample a bounded token prefix from a shard list.
+
+    :param list[np.ndarray] arrays: Token arrays to sample from.
+    :param int max_tokens: Maximum number of tokens to collect.
+    :return np.ndarray: Concatenated sampled tokens.
+    """
     chunks = []
     remaining = int(max_tokens)
     for arr in arrays:
@@ -203,6 +247,12 @@ def _sample_directory_tokens(
 
 
 def _truncate_array_views(arrays: list[np.ndarray], max_tokens: Optional[int]) -> list[np.ndarray]:
+    """Truncate a list of arrays without copying more than needed.
+
+    :param list[np.ndarray] arrays: Token arrays to truncate.
+    :param Optional[int] max_tokens: Token cap or ``None``.
+    :return list[np.ndarray]: Truncated array views.
+    """
     if max_tokens is None:
         return list(arrays)
     remaining = int(max_tokens)
@@ -220,6 +270,11 @@ def _truncate_array_views(arrays: list[np.ndarray], max_tokens: Optional[int]) -
 
 
 def validate_token_range(tokens: np.ndarray, vocab_size: int) -> None:
+    """Validate token ids against the vocabulary size.
+
+    :param np.ndarray tokens: Token array to validate.
+    :param int vocab_size: Vocabulary upper bound.
+    """
     if tokens.size == 0:
         raise ValueError("loaded zero tokens")
     token_min = int(tokens.min())
@@ -231,12 +286,24 @@ def validate_token_range(tokens: np.ndarray, vocab_size: int) -> None:
 
 
 def maybe_split_tokens(tokens: np.ndarray, train_frac: float) -> tuple[np.ndarray, np.ndarray]:
+    """Split a flat token array into train and validation views.
+
+    :param np.ndarray tokens: Token array to split.
+    :param float train_frac: Fraction assigned to training.
+    :return tuple[np.ndarray, np.ndarray]: Train and validation views.
+    """
     split = int(tokens.size * train_frac)
     split = max(1, min(tokens.size - 1, split))
     return tokens[:split], tokens[split:]
 
 
 def fingerprint_tokens(tokens: np.ndarray, *, max_tokens: int = 1_000_000) -> str:
+    """Fingerprint token data for spec validation.
+
+    :param np.ndarray tokens: Token array to fingerprint.
+    :param int max_tokens: Maximum prefix size included in the digest.
+    :return str: Stable hexadecimal fingerprint.
+    """
     sample = np.asarray(tokens[:max_tokens], dtype=np.int64)
     digest = hashlib.blake2b(digest_size=16)
     digest.update(np.asarray([tokens.size], dtype=np.int64).tobytes())
@@ -246,6 +313,11 @@ def fingerprint_tokens(tokens: np.ndarray, *, max_tokens: int = 1_000_000) -> st
 
 
 def get_device(force: Optional[str] = None) -> tuple[torch.device, str, torch.dtype]:
+    """Select the runtime device and default AMP dtype.
+
+    :param Optional[str] force: Optional explicit device string.
+    :return tuple[torch.device, str, torch.dtype]: Device, device type, and default AMP dtype.
+    """
     force = force or os.environ.get("FORCE_DEVICE")
     if force:
         device = torch.device(force)
@@ -264,6 +336,8 @@ def get_device(force: Optional[str] = None) -> tuple[torch.device, str, torch.dt
 
 
 class RandomStreamBatcher:
+    """Stream random training chunks from a flat token tensor."""
+
     def __init__(
         self,
         tokens: torch.Tensor,
@@ -274,6 +348,15 @@ class RandomStreamBatcher:
         carry_chunks: int,
         generator: Optional[torch.Generator] = None,
     ) -> None:
+        """Initialize a random streamed batcher.
+
+        :param torch.Tensor tokens: Flat token tensor.
+        :param int seq_len: Chunk length.
+        :param int batch_size: Batch size.
+        :param torch.device output_device: Target device for emitted batches.
+        :param int carry_chunks: Number of consecutive chunks per stream.
+        :param Optional[torch.Generator] generator: Optional RNG.
+        """
         self.tokens = tokens  # keep original dtype (int16/int32), do NOT .long()
         self.seq_len = int(seq_len)
         self.batch_size = int(batch_size)
@@ -298,6 +381,7 @@ class RandomStreamBatcher:
             )
 
     def _start_new_stream(self) -> None:
+        """Sample fresh stream starts for the next carry window."""
         self.starts = torch.randint(
             0,
             self.max_start + 1,
@@ -308,6 +392,10 @@ class RandomStreamBatcher:
         self.remaining = self.carry_chunks
 
     def next_batch(self) -> tuple[torch.Tensor, bool]:
+        """Return the next training batch and reset flag.
+
+        :return tuple[torch.Tensor, bool]: Batch tensor and whether the stream reset.
+        """
         reset_state = False
         if self.starts is None or self.remaining <= 0:
             self._start_new_stream()
@@ -339,6 +427,15 @@ class DirectoryRandomStreamBatcher:
         carry_chunks: int,
         generator: Optional[torch.Generator] = None,
     ) -> None:
+        """Initialize a random streamed batcher over shard arrays.
+
+        :param list[np.ndarray] shard_arrays: Memmapped shard arrays.
+        :param int seq_len: Chunk length.
+        :param int batch_size: Batch size.
+        :param torch.device output_device: Target device for emitted batches.
+        :param int carry_chunks: Number of consecutive chunks per stream.
+        :param Optional[torch.Generator] generator: Optional RNG.
+        """
         self.shard_arrays = list(shard_arrays)
         if not self.shard_arrays:
             raise ValueError("need at least one training shard")
@@ -373,6 +470,7 @@ class DirectoryRandomStreamBatcher:
         self.remaining = 0
 
     def _start_new_stream(self) -> None:
+        """Sample fresh shard/start pairs for the next carry window."""
         choice_idx = torch.multinomial(
             self.valid_start_weights,
             num_samples=self.batch_size,
@@ -393,6 +491,10 @@ class DirectoryRandomStreamBatcher:
         self.remaining = self.carry_chunks
 
     def next_batch(self) -> tuple[torch.Tensor, bool]:
+        """Return the next training batch and reset flag.
+
+        :return tuple[torch.Tensor, bool]: Batch tensor and whether the stream reset.
+        """
         reset_state = False
         if self.shard_ids is None or self.starts is None or self.remaining <= 0:
             self._start_new_stream()
@@ -423,6 +525,8 @@ class DirectoryRandomStreamBatcher:
 
 
 class SequentialStreamBatcher:
+    """Stream validation chunks in deterministic order."""
+
     def __init__(
         self,
         tokens: torch.Tensor,
@@ -431,6 +535,13 @@ class SequentialStreamBatcher:
         batch_size: int,
         output_device: torch.device,
     ) -> None:
+        """Initialize a sequential batcher over one token tensor.
+
+        :param torch.Tensor tokens: Flat token tensor.
+        :param int seq_len: Chunk length.
+        :param int batch_size: Batch size.
+        :param torch.device output_device: Target device for emitted batches.
+        """
         self.tokens = tokens  # keep original dtype, do NOT .long()
         self.seq_len = int(seq_len)
         self.batch_size = int(batch_size)
@@ -456,6 +567,10 @@ class SequentialStreamBatcher:
         self.position = 0
 
     def next_batch(self) -> tuple[torch.Tensor, bool]:
+        """Return the next validation batch and reset flag.
+
+        :return tuple[torch.Tensor, bool]: Batch tensor and whether the stream reset.
+        """
         reset_state = False
         if self.position + self.seq_len + 1 > self.stream_len:
             self.position = 0
@@ -477,14 +592,30 @@ class BasePathLookup(torch.nn.Module):
     """Tiny wrapper so the frozen bigram path can be compiled independently."""
 
     def __init__(self, core_model: CoreAmplifierLM) -> None:
+        """Wrap the core model's base path for separate compilation.
+
+        :param CoreAmplifierLM core_model: Core model to wrap.
+        """
         super().__init__()
         self.core_model = core_model
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """Compute base-path logits for the provided token ids.
+
+        :param torch.Tensor input_ids: Input token ids.
+        :return torch.Tensor: Base-path logits.
+        """
         return self.core_model.base_path_logits(input_ids)
 
 
 def maybe_move_tokens(tokens: torch.Tensor, device: torch.device, enabled: bool) -> torch.Tensor:
+    """Move tokens to a device when the transfer is enabled.
+
+    :param torch.Tensor tokens: Token tensor.
+    :param torch.device device: Destination device.
+    :param bool enabled: Whether device transfer is allowed.
+    :return torch.Tensor: Original or moved tensor.
+    """
     if not enabled or device.type == "cpu":
         return tokens
     return tokens.to(device=device, non_blocking=(device.type == "cuda"))
@@ -506,6 +637,11 @@ def _concat_shards_to_flat(
 
     Writes one shard at a time — peak RAM is one shard (~400 MB).
     Returns total number of tokens written.
+    :param list[Path] shard_paths: Shards to concatenate.
+    :param Path out_path: Output file path.
+    :param Optional[int] max_tokens: Optional token cap.
+    :param bool verbose: Whether to print progress.
+    :return int: Total tokens written.
     """
     from core_amplifier_lm.spec_builder import _detect_has_header, _load_shard_with_header
 
@@ -546,13 +682,15 @@ def mmap_train_val(
     cache_dir: Optional[str | Path] = None,
     verbose: bool = True,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Return memory-mapped train/val token arrays. Peak RAM ≈ 0.
+    """Return train and validation token views with minimal RAM use.
 
-    For shard directories: concatenates into flat int32 files under cache_dir
-    (default: <source>/.mmap_cache/), then mmaps them. The concatenation is
-    a one-time streaming write (~1 shard in RAM at a time).
-
-    For single files: mmaps directly if raw binary, otherwise writes a flat copy.
+    :param str | Path source: Data source path.
+    :param str storage_dtype: On-disk integer dtype for raw files.
+    :param float train_frac: Train split fraction for single-file fallback.
+    :param Optional[int] max_tokens: Optional token cap.
+    :param Optional[str | Path] cache_dir: Optional mmap cache directory.
+    :param bool verbose: Whether to print loading progress.
+    :return tuple[np.ndarray, np.ndarray]: Train and validation arrays.
     """
     p = Path(source)
 
@@ -631,7 +769,12 @@ def mmap_train_val(
     return train, val
 
 
-def assert_model_config_matches_spec(cfg, spec: AmplifierSpec) -> None:
+def assert_model_config_matches_spec(cfg: Any, spec: AmplifierSpec) -> None:
+    """Validate the saved config against the loaded spec.
+
+    :param Any cfg: Loaded model config object.
+    :param AmplifierSpec spec: Loaded amplifier spec.
+    """
     mismatches = []
     model_cfg = cfg.model
 
@@ -710,17 +853,34 @@ def resolve_runtime_amplifier_dtype(
     device_type: str,
     default_amp_dtype: torch.dtype,
 ) -> torch.dtype:
+    """Resolve the runtime amplifier dtype.
+
+    :param str name: User-facing dtype name.
+    :param str device_type: Runtime device type.
+    :param torch.dtype default_amp_dtype: Device default AMP dtype.
+    :return torch.dtype: Resolved amplifier dtype.
+    """
     if name == "auto":
         return torch.float32 if device_type == "cpu" else default_amp_dtype
     return DTYPE_MAP[name]
 
 
 def trainable_state_dict(model: torch.nn.Module) -> dict[str, torch.Tensor]:
+    """Collect the trainable parameters on CPU.
+
+    :param torch.nn.Module model: Model to snapshot.
+    :return dict[str, torch.Tensor]: Trainable parameter tensors.
+    """
     core_model = unwrap_model(model)
     return {name: p.detach().cpu() for name, p in core_model.named_parameters()}
 
 
 def load_trainable_state(model: torch.nn.Module, state: dict[str, torch.Tensor]) -> None:
+    """Load a trainable-parameter snapshot into a model.
+
+    :param torch.nn.Module model: Target model.
+    :param dict[str, torch.Tensor] state: Parameter snapshot.
+    """
     core_model = unwrap_model(model)
     param_map = dict(core_model.named_parameters())
     missing = []
@@ -742,6 +902,14 @@ def build_optimizer(
     weight_decay: float,
     device_type: str,
 ) -> AdamW:
+    """Build the AdamW optimizer with decay and no-decay groups.
+
+    :param torch.nn.Module model: Model to optimize.
+    :param float learning_rate: Base learning rate.
+    :param float weight_decay: Weight decay for decay parameters.
+    :param str device_type: Runtime device type.
+    :return AdamW: Configured optimizer.
+    """
     core_model = unwrap_model(model)
     decay_params = []
     no_decay_params = []
@@ -789,12 +957,15 @@ def get_lr(
     hold_steps: int,
     total_steps: int,
 ) -> float:
-    """Linear warmup, optional flat hold, then cosine decay to min_lr.
+    """Compute the warmup-hold-cosine learning rate.
 
-    The previous schedule started cooling immediately after warmup. For this
-    small recurrent controller that often leaves learning rate on the floor
-    while validation is still improving. `hold_steps` keeps the controller in
-    its useful high-LR regime before the cosine tail starts.
+    :param int step: Current step.
+    :param float max_lr: Peak learning rate.
+    :param float min_lr: Minimum learning rate.
+    :param int warmup_steps: Warmup duration.
+    :param int hold_steps: Flat hold duration after warmup.
+    :param int total_steps: Total step budget.
+    :return float: Learning rate for the current step.
     """
     if step < warmup_steps:
         return max_lr * (step + 1) / max(1, warmup_steps)
@@ -808,11 +979,22 @@ def get_lr(
 
 
 def set_lr(optimizer: AdamW, lr: float) -> None:
+    """Set the learning rate on every optimizer param group.
+
+    :param AdamW optimizer: Optimizer to update.
+    :param float lr: Learning rate to apply.
+    """
     for pg in optimizer.param_groups:
         pg["lr"] = lr
 
 
 def cross_entropy_per_token(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    """Compute token-wise cross entropy.
+
+    :param torch.Tensor logits: Model logits.
+    :param torch.Tensor targets: Target token ids.
+    :return torch.Tensor: Per-token loss tensor.
+    """
     per_token = F.cross_entropy(
         logits.float().reshape(-1, logits.size(-1)),
         targets.reshape(-1),
@@ -824,9 +1006,12 @@ def cross_entropy_per_token(logits: torch.Tensor, targets: torch.Tensor) -> torc
 def build_byte_count_lut(
     tokenizer_path: str | Path, vocab_size: int, device: torch.device
 ) -> torch.Tensor:
-    """Build a per-token byte count lookup table, matching competition's build_sentencepiece_luts.
+    """Build the competition byte-count lookup table.
 
-    Returns: int16 tensor of shape [vocab_size] where lut[token_id] = number of bytes that token represents.
+    :param str | Path tokenizer_path: SentencePiece tokenizer path.
+    :param int vocab_size: Vocabulary size.
+    :param torch.device device: Target device.
+    :return torch.Tensor: Per-token byte counts.
     """
     import sentencepiece as spm
 
@@ -864,6 +1049,16 @@ def compute_training_objective(
     hard_loss_gamma: float,
     hard_loss_cap: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, float]]:
+    """Compute weighted and raw training losses.
+
+    :param torch.nn.Module base_path_model: Base-path model for hard-loss weighting.
+    :param torch.Tensor logits: Current model logits.
+    :param torch.Tensor inputs: Input token ids.
+    :param torch.Tensor targets: Target token ids.
+    :param float hard_loss_gamma: Hard-loss exponent.
+    :param float hard_loss_cap: Optional weight cap.
+    :return tuple[torch.Tensor, torch.Tensor, dict[str, float]]: Weighted sum, raw sum, and stats.
+    """
     per_token = cross_entropy_per_token(logits, targets)
     raw_sum = per_token.sum()
     stats = {"base_loss": float("nan"), "weight_max": 1.0}
@@ -897,7 +1092,20 @@ def evaluate(
     use_autocast: bool,
     byte_count_lut: Optional[torch.Tensor] = None,
 ) -> tuple[float, float]:
-    """Returns (val_loss_nats, val_bpb). bpb matches competition formula exactly."""
+    """Evaluate loss and bits-per-byte on validation data.
+
+    :param torch.nn.Module model: Model to evaluate.
+    :param torch.Tensor val_tokens: Validation token tensor.
+    :param int seq_len: Chunk length.
+    :param int batch_size: Validation batch size.
+    :param torch.device device: Runtime device.
+    :param str device_type: Runtime device type.
+    :param torch.dtype amp_dtype: Autocast dtype.
+    :param int steps: Validation steps to run.
+    :param bool use_autocast: Whether to use autocast.
+    :param Optional[torch.Tensor] byte_count_lut: Optional exact byte-count lookup.
+    :return tuple[float, float]: Validation loss in nats and bits per byte.
+    """
     if steps <= 0:
         return float("nan"), float("nan")
     core_model = unwrap_model(model)
@@ -916,7 +1124,11 @@ def evaluate(
         output_device=device,
     )
 
-    def autocast_context():
+    def autocast_context() -> Any:
+        """Return the validation autocast context manager.
+
+        :return Any: Validation autocast context manager or ``nullcontext``.
+        """
         if use_autocast and device_type != "cpu":
             return torch.autocast(device_type=device_type, dtype=amp_dtype)
         return nullcontext()
@@ -953,6 +1165,13 @@ def build_expected_spec_metadata(
     train_tokens: np.ndarray,
     branch_lags: tuple[int, ...],
 ) -> dict[str, object]:
+    """Build the spec metadata expected for a run.
+
+    :param argparse.Namespace args: Parsed CLI arguments.
+    :param np.ndarray train_tokens: Training token array.
+    :param tuple[int, ...] branch_lags: Branch lag tuple.
+    :return dict[str, object]: Expected spec metadata.
+    """
     return {
         "spec_version": 2,
         "requested_core_dim": int(args.core_dim),
@@ -971,6 +1190,11 @@ def build_expected_spec_metadata(
 
 
 def assert_spec_matches(spec: AmplifierSpec, *, expected: dict[str, object]) -> None:
+    """Verify that a loaded spec matches the expected metadata.
+
+    :param AmplifierSpec spec: Loaded spec.
+    :param dict[str, object] expected: Expected metadata.
+    """
     errors = []
     if spec.vocab_size != int(expected["vocab_size"]):
         errors.append(
@@ -1032,6 +1256,13 @@ def build_spec_if_needed(
     *,
     data_source: Optional[str | Path] = None,
 ) -> AmplifierSpec:
+    """Load or build the fixed amplifier spec for a run.
+
+    :param argparse.Namespace args: Parsed CLI arguments.
+    :param np.ndarray train_tokens: Training token array.
+    :param Optional[str | Path] data_source: Optional source path for optimized spec building.
+    :return AmplifierSpec: Loaded or newly built spec.
+    """
     fixed_dtype = DTYPE_MAP[args.fixed_dtype]
     branch_lags = parse_branch_lags(args.branch_lags)
     expected = build_expected_spec_metadata(args, train_tokens, branch_lags)
@@ -1087,6 +1318,10 @@ def build_spec_if_needed(
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse training CLI arguments.
+
+    :return argparse.Namespace: Parsed arguments.
+    """
     parser = argparse.ArgumentParser(description="Train the core/amplifier language model")
     parser.add_argument("model_dir", help="Model directory (must contain config.json + spec.pt)")
 
@@ -1182,8 +1417,14 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _resolve(cli_val, config_val, default):
-    """CLI wins, then config, then hardcoded default."""
+def _resolve(cli_val: T | None, config_val: T | None, default: T) -> T:
+    """Resolve a value with CLI precedence.
+
+    :param T | None cli_val: CLI override.
+    :param T | None config_val: Config value.
+    :param T default: Fallback default.
+    :return T: Resolved value.
+    """
     if cli_val is not None:
         return cli_val
     if config_val is not None:
@@ -1192,21 +1433,34 @@ def _resolve(cli_val, config_val, default):
 
 
 def _format_debug_vector(values: list[float], *, precision: int = 3) -> str:
-    """Format per-layer debug values without truncating deeper controllers."""
+    """Format per-layer debug values.
+
+    :param list[float] values: Values to format.
+    :param int precision: Decimal precision.
+    :return str: Comma-separated formatted values or ``none``.
+    """
     if not values:
         return "none"
     return ",".join(f"{float(x):.{precision}f}" for x in values)
 
 
 def dtype_name(dtype: Optional[torch.dtype]) -> Optional[str]:
-    """Render torch dtypes as short strings."""
+    """Render a torch dtype as a short string.
+
+    :param Optional[torch.dtype] dtype: Torch dtype or ``None``.
+    :return Optional[str]: Short dtype name.
+    """
     if dtype is None:
         return None
     return str(dtype).replace("torch.", "")
 
 
 def parse_wandb_tags(raw: Optional[str]) -> list[str]:
-    """Parse comma-separated W&B tags into a stable, deduplicated list."""
+    """Parse comma-separated W&B tags.
+
+    :param Optional[str] raw: Raw tag string.
+    :return list[str]: Stable, deduplicated tags.
+    """
     if not raw:
         return []
     tags: list[str] = []
@@ -1225,7 +1479,12 @@ def build_wandb_config(
     resolved_config: dict[str, Any],
     run_metadata: dict[str, Any],
 ) -> dict[str, Any]:
-    """Build a static W&B config payload from resolved local metadata."""
+    """Build the static W&B config payload.
+
+    :param dict[str, Any] resolved_config: Resolved run configuration.
+    :param dict[str, Any] run_metadata: Static run metadata.
+    :return dict[str, Any]: W&B config payload.
+    """
     system = run_metadata.get("system", {})
     env = run_metadata.get("env", {})
     runtime = resolved_config.get("runtime", {})
@@ -1274,7 +1533,11 @@ def build_wandb_config(
 
 
 def normalize_wandb_run_path(run: Any) -> Optional[str]:
-    """Render a W&B run path consistently for local run metadata."""
+    """Normalize a W&B run path for local metadata.
+
+    :param Any run: W&B run object.
+    :return Optional[str]: Normalized run path.
+    """
     raw = getattr(run, "path", None)
     if raw is None:
         return None
@@ -1285,7 +1548,7 @@ def normalize_wandb_run_path(run: Any) -> Optional[str]:
 
 def build_resolved_config_payload(
     *,
-    cfg,
+    cfg: Any,
     model_dir: Path,
     args: argparse.Namespace,
     data_source: str | Path,
@@ -1347,7 +1610,71 @@ def build_resolved_config_payload(
     tok_path: Optional[Path],
     byte_count_lut: Optional[torch.Tensor],
 ) -> dict[str, Any]:
-    """Build a resolved run snapshot from config, CLI, and runtime decisions."""
+    """Build the resolved run snapshot.
+
+    :param Any cfg: Loaded config object.
+    :param Path model_dir: Model directory.
+    :param argparse.Namespace args: Parsed CLI arguments.
+    :param str | Path data_source: Resolved data source.
+    :param int train_tokens_count: Training token count.
+    :param int val_tokens_count: Validation token count.
+    :param str storage_dtype: Storage dtype.
+    :param float train_frac: Train split fraction.
+    :param Optional[int] data_max_tokens: Optional token cap.
+    :param int seq_len: Sequence length.
+    :param int batch_size: Batch size.
+    :param int grad_accum: Gradient accumulation steps.
+    :param int carry_chunks: Carry chunks.
+    :param int bptt_chunks: BPTT chunks.
+    :param int num_steps: Training steps.
+    :param float learning_rate: Learning rate.
+    :param str lr_schedule: LR schedule name.
+    :param float min_lr: Minimum learning rate.
+    :param int warmup_steps: Warmup steps.
+    :param int lr_hold_steps: Hold steps.
+    :param float weight_decay: Weight decay.
+    :param float hard_loss_gamma: Hard-loss gamma.
+    :param float hard_loss_cap: Hard-loss cap.
+    :param float grad_clip: Gradient clip value.
+    :param float dropout: Dropout rate.
+    :param int val_every: Validation cadence.
+    :param int val_steps: Validation step count.
+    :param int log_every: Log cadence.
+    :param int log_state_every: State log cadence.
+    :param int save_every: Save cadence.
+    :param torch.device device: Runtime device.
+    :param str device_type: Runtime device type.
+    :param torch.dtype default_amp_dtype: Default AMP dtype.
+    :param torch.dtype runtime_amp_dtype: Runtime AMP dtype.
+    :param bool use_autocast: Whether autocast is enabled.
+    :param AmplifierSpec spec: Loaded spec.
+    :param str core_type: Controller core type.
+    :param int core_layers: Controller layer count.
+    :param float core_expansion: Controller expansion.
+    :param bool residual_core: Whether residual core is enabled.
+    :param float residual_core_init: Residual core init value.
+    :param str branch_temporal_mode: Branch temporal mode.
+    :param float branch_temporal_lag_scale: Branch temporal lag scale.
+    :param int trainable_parameters: Trainable parameter count.
+    :param int fixed_buffer_bytes: Fixed buffer bytes.
+    :param bool compile_requested: Whether compile was requested.
+    :param int compile_after: Step to start compilation.
+    :param Optional[str] compile_mode: torch.compile mode.
+    :param bool compile_base_path: Whether to compile the base path.
+    :param bool gradient_checkpointing: Whether gradient checkpointing is enabled.
+    :param bool wandb_enabled: Whether W&B logging is enabled.
+    :param str wandb_project: W&B project name.
+    :param Optional[str] wandb_entity: W&B entity.
+    :param Optional[str] wandb_group: W&B group.
+    :param str wandb_run_name: W&B run name.
+    :param list[str] wandb_tags: W&B tags.
+    :param str wandb_watch: W&B watch mode.
+    :param int wandb_watch_log_freq: W&B watch log frequency.
+    :param Optional[str] wandb_mode: W&B mode.
+    :param Optional[Path] tok_path: Tokenizer path.
+    :param Optional[torch.Tensor] byte_count_lut: Byte-count LUT.
+    :return dict[str, Any]: Resolved configuration payload.
+    """
     spec_bytes, gzip_spec_bytes = spec_size_bytes(cfg.spec_path)
     local_step_tokens = int(batch_size * seq_len * bptt_chunks)
     effective_step_tokens = int(local_step_tokens * grad_accum)
@@ -1470,7 +1797,15 @@ def build_run_metadata(
     resolved_config: dict[str, Any],
     device: torch.device,
 ) -> dict[str, Any]:
-    """Collect static run metadata used for later audit and summary rebuilds."""
+    """Collect static metadata for audit and summary rebuilds.
+
+    :param Path repo_root: Repository root.
+    :param argparse.Namespace args: Parsed CLI arguments.
+    :param Path model_dir: Model directory.
+    :param dict[str, Any] resolved_config: Resolved run configuration.
+    :param torch.device device: Runtime device.
+    :return dict[str, Any]: Static run metadata.
+    """
     device_idx = runtime_device_index(device)
     system: dict[str, Any] = {
         "python": sys.version.split()[0],
@@ -1516,6 +1851,7 @@ def build_run_metadata(
 
 
 def main() -> None:
+    """Run core/amplifier training from the CLI."""
     args = parse_args()
     repo_root = Path(__file__).resolve().parent
 
@@ -1795,6 +2131,10 @@ def main() -> None:
     compiled_models = False
 
     def _compile_models(trigger_step: int) -> None:
+        """Compile the model stack after the warmup trigger.
+
+        :param int trigger_step: Step that triggered compilation.
+        """
         nonlocal model, base_path_model, compiled_models, compile_duration_sec, compile_trigger_step
         if compiled_models:
             return
@@ -1935,6 +2275,7 @@ def main() -> None:
     wandb_watch_attached = False
 
     def maybe_attach_wandb_watch() -> None:
+        """Attach W&B watch once the model is ready."""
         nonlocal wandb_watch_attached
         if wandb_run is None or wandb_watch_attached or wandb_watch == "off":
             return
@@ -1958,7 +2299,11 @@ def main() -> None:
         )
     maybe_attach_wandb_watch()
 
-    def autocast_context():
+    def autocast_context() -> Any:
+        """Return the training autocast context manager.
+
+        :return Any: Training autocast context manager or ``nullcontext``.
+        """
         if use_autocast and device_type != "cpu":
             return torch.autocast(device_type=device_type, dtype=default_amp_dtype)
         return nullcontext()

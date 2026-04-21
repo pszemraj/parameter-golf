@@ -34,7 +34,10 @@ NUMPY_DTYPE_MAP = {
 
 
 def _get_rss_gb() -> float:
-    """Current process RSS in GB (main process only, excludes child workers)."""
+    """Return the current process RSS in GB.
+
+    :return float: Main-process RSS in GB, excluding child workers.
+    """
     # resource.getrusage returns maxrss in KB on Linux, bytes on macOS
     maxrss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     if os.uname().sysname == "Darwin":
@@ -55,9 +58,10 @@ _HEADER_BYTES = _HEADER_INTS * np.dtype("<i4").itemsize  # 1024
 
 
 def _load_shard_with_header(path: Path) -> np.ndarray:
-    """Load a competition .bin shard, skipping the 1024-byte header.
+    """Load a competition shard and skip the 1024-byte header if present.
 
-    Returns tokens as int32.
+    :param Path path: Shard path to read.
+    :return np.ndarray: Token array as int32.
     """
     header = np.fromfile(path, dtype="<i4", count=_HEADER_INTS)
     if (
@@ -73,7 +77,11 @@ def _load_shard_with_header(path: Path) -> np.ndarray:
 
 
 def _detect_has_header(path: Path) -> bool:
-    """Check if a .bin file has the competition shard header."""
+    """Check whether a shard uses the competition header format.
+
+    :param Path path: Shard path to inspect.
+    :return bool: ``True`` when the expected header is present.
+    """
     header = np.fromfile(path, dtype="<i4", count=2)
     return header.size >= 2 and int(header[0]) == _SHARD_MAGIC and int(header[1]) == _SHARD_VERSION
 
@@ -84,9 +92,12 @@ def load_tokens_int32(
     storage_dtype: str = "uint16",
     max_tokens: Optional[int] = None,
 ) -> np.ndarray:
-    """Load tokens from a single file or a directory of shards as int32.
+    """Load tokens from a file or shard directory as int32.
 
-    Automatically detects and skips the competition shard header if present.
+    :param str | Path source: File or directory to load.
+    :param str storage_dtype: On-disk dtype to use for non-header shards.
+    :param Optional[int] max_tokens: Optional cap on returned tokens.
+    :return np.ndarray: Flattened token array as int32.
     """
     p = Path(source)
     np_dtype = NUMPY_DTYPE_MAP[storage_dtype]
@@ -132,7 +143,14 @@ def load_train_val_int32(
     train_frac: float = 0.98,
     max_tokens: Optional[int] = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Load train/val splits, respecting shard layout if present."""
+    """Load train and validation token splits.
+
+    :param str | Path source: File or directory to load.
+    :param str storage_dtype: On-disk dtype to use for non-header shards.
+    :param float train_frac: Fraction used for a single-file train split.
+    :param Optional[int] max_tokens: Optional cap on loaded train tokens.
+    :return tuple[np.ndarray, np.ndarray]: Train and validation token arrays.
+    """
     p = Path(source)
     np_dtype = NUMPY_DTYPE_MAP[storage_dtype]
 
@@ -191,14 +209,15 @@ def count_all(
     chunk_size: int = 200_000_000,
     verbose: bool = True,
 ) -> tuple[np.ndarray, np.ndarray, dict[int, np.ndarray]]:
-    """Count unigram, bigram, and all lag-pair matrices.
+    """Count unigram, bigram, and lag-pair matrices.
 
-    Processes in chunks to avoid allocating a flat-index buffer the size of
-    the full token array.  Peak RAM = token array + chunk_size*4 bytes + accumulators.
-    For 8B tokens with chunk_size=200M: ~32 GB tokens + 0.8 GB buffer = ~33 GB peak
-    (vs 64 GB without chunking).
-
-    Returns (unigram, bigram, {lag: counts}).
+    :param np.ndarray tokens: Token sequence to count.
+    :param int vocab_size: Vocabulary size.
+    :param tuple[int, ...] branch_lags: Lag offsets to count.
+    :param int chunk_size: Chunk size used to bound temporary buffers.
+    :param bool verbose: Whether to print progress.
+    :return tuple[np.ndarray, np.ndarray, dict[int, np.ndarray]]: Unigram,
+        bigram, and lag-pair counts.
     """
     n = tokens.shape[0]
     all_lags = sorted(set(branch_lags) | {1})
@@ -251,7 +270,14 @@ def count_all(
 def _count_one_shard(
     path: Path, vocab_size: int, all_lags: list[int]
 ) -> tuple[np.ndarray, dict[int, np.ndarray], int]:
-    """Count stats for a single shard. Standalone function for pickling."""
+    """Count unigram and lag-pair statistics for one shard.
+
+    :param Path path: Shard path to count.
+    :param int vocab_size: Vocabulary size.
+    :param list[int] all_lags: Lag offsets to count.
+    :return tuple[np.ndarray, dict[int, np.ndarray], int]: Unigram counts,
+        lag-pair counts, and token count.
+    """
     v32 = np.int32(vocab_size)
     vsq = vocab_size * vocab_size
     shard = (
@@ -284,10 +310,11 @@ def _count_one_shard(
 
 
 def _count_shard_batch(args: tuple) -> tuple[np.ndarray, dict[int, np.ndarray], int]:
-    """Process a batch of shards in one worker. Accumulates locally to minimize IPC.
+    """Process a shard batch in one worker.
 
-    Each worker holds: one shard at a time (~400 MB) + one set of accumulators (~104 MB).
-    IPC transfer on completion: one accumulated result (~104 MB) per worker.
+    :param tuple args: ``(shard_paths, vocab_size, all_lags)`` batch payload.
+    :return tuple[np.ndarray, dict[int, np.ndarray], int]: Accumulated unigram
+        counts, lag-pair counts, and token count.
     """
     shard_paths, vocab_size, all_lags = args
     uni_acc = np.zeros(vocab_size, dtype=np.float64)
@@ -303,7 +330,10 @@ def _count_shard_batch(args: tuple) -> tuple[np.ndarray, dict[int, np.ndarray], 
 
 
 def _default_num_workers() -> int:
-    """Sensible default: half of CPU cores, clamped to [1, 8]."""
+    """Return the default worker count.
+
+    :return int: Half the CPU cores, clamped to ``[1, 8]``.
+    """
     cpus = os.cpu_count() or 1
     return max(1, min(cpus // 2, 8))
 
@@ -318,17 +348,21 @@ _shared_vocab_size: int = 0
 
 
 def _init_shared_tokens(tokens: np.ndarray, vocab_size: int) -> None:
+    """Initialize the fork-shared token buffer for worker processes.
+
+    :param np.ndarray tokens: Shared token array.
+    :param int vocab_size: Vocabulary size for the shared buffer.
+    """
     global _shared_tokens, _shared_vocab_size
     _shared_tokens = tokens
     _shared_vocab_size = vocab_size
 
 
 def _count_lags_worker(lags: list[int]) -> dict[int, np.ndarray]:
-    """Count lag-pair matrices for a subset of lags on the shared token array.
+    """Count a subset of lags against the shared token array.
 
-    Pre-allocates two int32 buffers and reuses them across all lags and chunks.
-    Per-worker peak: 2 × chunk_size × 4 bytes + accumulators.
-    With chunk=200M: 2 × 0.8 GB = 1.6 GB per worker.
+    :param list[int] lags: Lag offsets assigned to this worker.
+    :return dict[int, np.ndarray]: Lag-pair matrices keyed by lag.
     """
     assert _shared_tokens is not None
     tokens = _shared_tokens
@@ -366,7 +400,13 @@ def _count_lags_worker(lags: list[int]) -> dict[int, np.ndarray]:
 def _load_all_shards_uint16(
     shard_paths: list[Path], *, max_tokens: Optional[int] = None, verbose: bool = True
 ) -> np.ndarray:
-    """Load all shards into a single contiguous uint16 array."""
+    """Load all shards into one contiguous uint16 array.
+
+    :param list[Path] shard_paths: Shard paths to load.
+    :param Optional[int] max_tokens: Optional token cap.
+    :param bool verbose: Whether to print progress.
+    :return np.ndarray: Concatenated token array.
+    """
     chunks = []
     total = 0
     for si, sp in enumerate(shard_paths):
@@ -406,14 +446,16 @@ def _count_preloaded(
     max_tokens: Optional[int] = None,
     verbose: bool = True,
 ) -> tuple[np.ndarray, dict[int, np.ndarray], int]:
-    """Load all tokens into RAM, then parallel-count with one worker per lag batch.
+    """Preload tokens into RAM and count lags in parallel.
 
-    Parallelizes across LAGS (not array slices), so there are no chunk-boundary
-    misses. Uses fork-based COW sharing: the token array exists once in physical
-    RAM, all workers read the same pages.
-
-    Peak RAM ≈ token_array + N × 2 × chunk_size × 4 bytes.
-    For 8B uint16 tokens, 12 workers, 200M chunk: 16 GB + 12 × 1.6 GB ≈ 35 GB.
+    :param list[Path] shard_paths: Shard paths to load.
+    :param int vocab_size: Vocabulary size.
+    :param list[int] all_lags: Lag offsets to count.
+    :param int num_workers: Worker count to use.
+    :param Optional[int] max_tokens: Optional token cap.
+    :param bool verbose: Whether to print progress.
+    :return tuple[np.ndarray, dict[int, np.ndarray], int]: Unigram counts,
+        lag-pair counts, and token count.
     """
     t0 = time.monotonic()
 
@@ -481,11 +523,15 @@ def _count_gpu(
     max_tokens: Optional[int] = None,
     verbose: bool = True,
 ) -> tuple[np.ndarray, dict[int, np.ndarray], int]:
-    """GPU-accelerated counting using cupy. Requires cupy and a CUDA GPU.
+    """Count statistics on GPU with CuPy.
 
-    Loads tokens as uint16 on GPU, processes each lag in chunks to avoid
-    allocating full-length int32 arrays. Peak VRAM ≈ tokens (uint16) + 2 × chunk (int32).
-    For 8B tokens with 500M chunk: ~16 GB + 2 × 2 GB = ~20 GB VRAM.
+    :param list[Path] shard_paths: Shard paths to load.
+    :param int vocab_size: Vocabulary size.
+    :param list[int] all_lags: Lag offsets to count.
+    :param Optional[int] max_tokens: Optional token cap.
+    :param bool verbose: Whether to print progress.
+    :return tuple[np.ndarray, dict[int, np.ndarray], int]: Unigram counts,
+        lag-pair counts, and token count.
     """
     import cupy as cp
 
@@ -545,17 +591,16 @@ def _count_shards_streamed(
     num_workers: int = 0,
     verbose: bool = True,
 ) -> tuple[np.ndarray, dict[int, np.ndarray], int]:
-    """Count statistics from shard files.
+    """Count shard statistics with optional streaming or multiprocessing.
 
-    Args:
-        num_workers: 0 = serial streaming (~500 MB peak RAM, slowest).
-                     N>0 = parallel with N processes. Each worker accumulates
-                     over its shard batch locally, so IPC is one set of
-                     accumulators per worker (~104 MB for V=1024, 13 lags).
-                     Peak RAM ≈ N × (shard_size + 104 MB).
-                     -1 = auto (half of CPU count, clamped to [1, 8]).
-
-    Note: max_tokens forces serial mode (needs running total to stop early).
+    :param list[Path] shard_paths: Shard paths to count.
+    :param int vocab_size: Vocabulary size.
+    :param list[int] all_lags: Lag offsets to count.
+    :param Optional[int] max_tokens: Optional token cap.
+    :param int num_workers: Worker count; ``0`` forces serial mode.
+    :param bool verbose: Whether to print progress.
+    :return tuple[np.ndarray, dict[int, np.ndarray], int]: Unigram counts,
+        lag-pair counts, and token count.
     """
     if max_tokens is not None:
         num_workers = 0
@@ -670,18 +715,25 @@ def build_spec_optimized(
     readout_rank: Optional[int] = None,
     verbose: bool = True,
 ) -> AmplifierSpec:
-    """Build an AmplifierSpec from a file or shard directory.
+    """Build an ``AmplifierSpec`` from a file or shard directory.
 
-    Args:
-        num_workers: Worker count for parallel/preload strategies.
-            -1 = auto (cpu_count // 2, clamped [1, 8]).
-        strategy: Counting strategy for shard directories.
-            'auto': tries gpu → parallel (safe default that avoids preload RAM blowups).
-            'stream': serial, one shard at a time (~500 MB RAM, slowest).
-            'parallel': parallel per-shard counting (moderate RAM, I/O bound).
-            'preload': load all tokens into RAM first, then parallel count
-                       on array slices (~16 GB + N×104 MB, fast).
-            'gpu': cupy GPU counting (~16 GB VRAM, fastest). Requires cupy.
+    :param str | Path source: File or directory to load.
+    :param int vocab_size: Vocabulary size.
+    :param int core_dim: Core width for the factorized spec.
+    :param Sequence[int] branch_lags: Lag offsets to include.
+    :param int num_blocks: Number of amplifier blocks.
+    :param float smoothing: Additive smoothing for count-derived logits.
+    :param torch.dtype fixed_dtype: Storage dtype for fixed spec tensors.
+    :param str storage_dtype: On-disk dtype for non-header shards.
+    :param Optional[int] max_tokens: Optional token cap.
+    :param int num_workers: Worker count for parallel/preload strategies.
+    :param str strategy: Counting strategy for shard directories.
+    :param str embedding_init: Initialization method for the token basis.
+    :param int spectral_neighbors: Neighbor count for spectral basis build.
+    :param float lag_identity_base: Base identity blend for lag operators.
+    :param Optional[int] readout_rank: Optional low-rank readout factorization.
+    :param bool verbose: Whether to print progress.
+    :return AmplifierSpec: Built spec.
     """
     if strategy not in SPEC_STRATEGIES:
         raise ValueError(f"unknown strategy {strategy!r}, must be one of {SPEC_STRATEGIES}")
