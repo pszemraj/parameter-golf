@@ -33,6 +33,7 @@ def test_build_queue_contains_expected_schedule_families():
         "blocks0_10x12_hold_edge_v2",
         "blocks0_12x10_hold_confirm1b_v1",
         "blocks0_10x12_hold_confirm1b_v1",
+        "blocks1_hold_confirm1b_v1",
     ]
 
 
@@ -77,3 +78,17 @@ def test_schedule_queue_exposes_1b_hold_confirmation_families():
 
     control_confirm = queue["blocks0_10x12_hold_confirm1b_v1"].merged_env()["RUN_SPECS"]
     assert "blocks0_resid10_e12_h7000_1b" in control_confirm
+
+
+def test_schedule_queue_exposes_blocks1_tuned_hold_family():
+    """The launcher should include the blocks1 guardrail confirmation family."""
+    module = load_module()
+    queue = {launch.name: launch for launch in module.build_queue(REPO_ROOT)}
+
+    blocks1 = queue["blocks1_hold_confirm1b_v1"]
+    env = blocks1.merged_env()
+    assert "fullspec_blocks1_radical_v1" in blocks1.shared_spec_dir
+    assert env["NUM_BLOCKS"] == "1"
+    assert "blocks1_resid12_e6_h7000_1b" in env["RUN_SPECS"]
+    assert "blocks1_resid10_e12_h7000_1b" in env["RUN_SPECS"]
+    assert "blocks1_resid12_e10_h7000_1b" in env["RUN_SPECS"]

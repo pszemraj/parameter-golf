@@ -99,6 +99,13 @@ def build_queue(repo_root: Path = REPO_ROOT) -> list[SweepLaunch]:
         / "fullspec_blocks0_radical_v1"
         / "blocks0_resid12_e6_c8t1_r3_current_512m"
     )
+    blocks1_shared = str(
+        repo_root
+        / "experiments"
+        / "5090_controller"
+        / "fullspec_blocks1_radical_v1"
+        / "blocks1_resid12_e6_c8t1_r3_current_512m"
+    )
     return [
         _controller_family(
             name="blocks0_12x10_hold_screen_v1",
@@ -187,6 +194,27 @@ blocks0_resid12_e10_h7000_1b  12 10.0 8 1 1 -3.0 0.003 100 7000 0.0003 8192 256 
             save_every=4096,
             run_specs="""
 blocks0_resid10_e12_h7000_1b  10 12.0 8 1 1 -3.0 0.003 100 7000 0.0003 8192 256 512
+""",
+        ),
+        _controller_family(
+            name="blocks1_hold_confirm1b_v1",
+            model_root=str(schedule_root / "blocks1_hold_confirm1b_v1"),
+            shared_spec_dir=blocks1_shared,
+            description=(
+                "1B tuned-hold confirmation for the one-block amplifier guardrail "
+                "family, including the 12x6 anchor plus the 10x12 and 12x10 "
+                "controller shapes."
+            ),
+            num_blocks=1,
+            val_every=512,
+            val_steps=8,
+            log_every=128,
+            log_state_every=512,
+            save_every=4096,
+            run_specs="""
+blocks1_resid12_e6_h7000_1b   12  6.0 8 1 1 -3.0 0.003 100 7000 0.0003 8192 256 512
+blocks1_resid10_e12_h7000_1b  10 12.0 8 1 1 -3.0 0.003 100 7000 0.0003 8192 256 512
+blocks1_resid12_e10_h7000_1b  12 10.0 8 1 1 -3.0 0.003 100 7000 0.0003 8192 256 512
 """,
         ),
     ]

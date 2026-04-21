@@ -145,11 +145,15 @@ That confirmation has now landed successfully.
 The next disciplined move is:
 
 - keep `h7000` as the working `1B` schedule default for this family
-- test the same tuned hold on the `blocks1` guardrail variants before touching frozen depth again
+- test the same tuned hold on the `blocks1` guardrail variants before touching frozen depth again:
+  - `blocks1 12x6 h7000 1b`
+  - `blocks1 10x12 h7000 1b`
+  - `blocks1 12x10 h7000 1b`
 - only after that move to `max_lr`, `warmup_steps`, `min_lr`, and `weight_decay`
 
 ## Questions This Sweep Should Answer
 - Does the same tuned hold help the `blocks1` guardrail family, or is the one-block frozen structure schedule-sensitive in a different way?
 - Does `blocks1 10x12 h7000` recover quality while preserving a nonzero amplifier block?
+- Does the `blocks1 12x6` anchor improve enough under the tuned hold to stay relevant as the lightweight transfer-control baseline?
 - Is `max_lr=3e-3` still the right peak LR once the hold is fixed late?
 - Is the current `min_lr` floor too conservative?

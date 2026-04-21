@@ -217,5 +217,6 @@ That is also why schedule sweeps should start on the two best `blocks0` points, 
 
 - Which of the top contenders responds best to schedule tuning?
 - Does the same tuned hold help the `blocks1` guardrail family?
+- Does `blocks1 10x12 h7000` become a viable transfer candidate, or does `blocks1` still lag too far behind the tuned `blocks0` winners?
 - Does `blocks1 12x6` keep its slight edge over `blocks0 12x6` once both get a tuned schedule instead of the inherited default?
 - Does longer context help the `12x10` / `10x12` pair more than the cheaper `12x6` anchors?
