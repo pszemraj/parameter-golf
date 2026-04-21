@@ -22,6 +22,14 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 from torch.nn import grad as nn_grad
 
+try:
+    from flash_attn_interface import flash_attn_func as flash_attn_3_func
+
+    _HAS_FLASH_ATTN_3 = True
+except ImportError:
+    flash_attn_3_func = None
+    _HAS_FLASH_ATTN_3 = False
+
 from hgdn_cuda import (
     HAS_FLA_GATED_DELTA_RULE,
     fla_chunk_gated_delta_rule_compile_visible,
@@ -62,6 +70,17 @@ _GDN_AUDIT_BOUNDARIES_PATH = os.environ.get("GDN_AUDIT_BOUNDARIES_PATH", "")
 _GDN_AUDIT_BOUNDARIES_REMAINING = int(os.environ.get("GDN_AUDIT_BOUNDARIES_LIMIT", "1"))
 _GDN_AUDIT_CALL_INDEX = 0
 _HAS_SPLIT_WITH_SIZES_COPY = hasattr(torch.ops.aten, "split_with_sizes_copy")
+_USE_FLASH_ATTN_3 = bool(int(os.environ.get("ATTN_USE_FLASH_ATTN3", "1")))
+
+
+def attention_backend_name() -> str:
+    """Return the active attention backend label for standard attention blocks.
+
+    :return str: `"fa3"` when FlashAttention 3 is enabled and importable, else `"sdpa_flash"`.
+    """
+    if _USE_FLASH_ATTN_3 and _HAS_FLASH_ATTN_3:
+        return "fa3"
+    return "sdpa_flash"
 
 
 def profile_range(name: str) -> AbstractContextManager[None]:
@@ -1729,8 +1748,8 @@ class Rotary(nn.Module):
         if self._cos is None or self._sin is None or self._cache_key != cache_key:
             t = torch.arange(seq_len, device=device, dtype=self.inv_freq.dtype)
             freqs = torch.outer(t, self.inv_freq.to(device))
-            cos = freqs.cos()[None, None, :, :]
-            sin = freqs.sin()[None, None, :, :]
+            cos = freqs.cos()[None, :, None, :]
+            sin = freqs.sin()[None, :, None, :]
             if dtype != torch.float32:
                 cos = cos.to(dtype)
                 sin = sin.to(dtype)
@@ -1796,40 +1815,40 @@ class CausalSelfAttention(nn.Module):
         B, T, D = x.shape
         with profile_range("attn.forward"):
             with profile_range("attn.project_qkv"):
-                q = (
-                    self.c_q(x)
-                    .reshape(B, T, self.num_heads, self.head_dim)
-                    .transpose(1, 2)
-                )
-                k = (
-                    self.c_k(x)
-                    .reshape(B, T, self.num_kv_heads, self.head_dim)
-                    .transpose(1, 2)
-                )
-                v = (
-                    self.c_v(x)
-                    .reshape(B, T, self.num_kv_heads, self.head_dim)
-                    .transpose(1, 2)
-                )
+                q = self.c_q(x).reshape(B, T, self.num_heads, self.head_dim)
+                k = self.c_k(x).reshape(B, T, self.num_kv_heads, self.head_dim)
+                v = self.c_v(x).reshape(B, T, self.num_kv_heads, self.head_dim)
 
             with profile_range("attn.norm_rope"):
                 q, k = F.rms_norm(q, (q.size(-1),)), F.rms_norm(k, (k.size(-1),))
                 cos, sin = self.rotary(T, x.device, q.dtype)
                 q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin)
-                q_gain = match_reference_tensor(self.q_gain, q)[None, :, None, None]
+                q_gain = match_reference_tensor(self.q_gain, q)[None, None, :, None]
                 q = q * q_gain
 
-            with profile_range("attn.sdpa"):
-                y = F.scaled_dot_product_attention(
-                    q,
-                    k,
-                    v,
-                    is_causal=True,
-                    enable_gqa=(self.num_kv_heads != self.num_heads),
-                )
+            use_fa3 = (
+                _USE_FLASH_ATTN_3
+                and _HAS_FLASH_ATTN_3
+                and x.is_cuda
+                and torch.cuda.get_device_capability(x.device) >= (9, 0)
+                and q.dtype in {torch.float16, torch.bfloat16}
+            )
+            if use_fa3:
+                with profile_range("attn.fa3"):
+                    assert flash_attn_3_func is not None
+                    y = flash_attn_3_func(q, k, v, causal=True)
+            else:
+                with profile_range("attn.sdpa"):
+                    y = F.scaled_dot_product_attention(
+                        q.transpose(1, 2),
+                        k.transpose(1, 2),
+                        v.transpose(1, 2),
+                        is_causal=True,
+                        enable_gqa=(self.num_kv_heads != self.num_heads),
+                    ).transpose(1, 2)
 
             with profile_range("attn.output_proj"):
-                return self.proj(y.transpose(1, 2).contiguous().reshape(B, T, D))
+                return self.proj(y.contiguous().reshape(B, T, D))
 
 
 # ── MLP ───────────────────────────────────────────────────────────────

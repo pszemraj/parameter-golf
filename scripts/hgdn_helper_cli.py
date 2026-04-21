@@ -455,6 +455,14 @@ def cmd_write_h100_naive_contract_manifest(args: argparse.Namespace) -> int:
             "mkl_num_threads": args.mkl_num_threads,
             "openblas_num_threads": args.openblas_num_threads,
             "numexpr_num_threads": args.numexpr_num_threads,
+            "attn_use_flash_attn3": args.attn_use_flash_attn3,
+            "distributed_mode": args.distributed_mode,
+        },
+        "provenance": {
+            "git_commit": args.git_commit,
+            "git_branch": args.git_branch,
+            "host_name": args.host_name,
+            "timestamp_utc": args.timestamp_utc,
         },
         "reference_record": {
             "name": args.naive_reference_name,
@@ -533,6 +541,14 @@ def cmd_write_h100_compile_tiebreak_manifest(args: argparse.Namespace) -> int:
             "mkl_num_threads": args.mkl_num_threads,
             "openblas_num_threads": args.openblas_num_threads,
             "numexpr_num_threads": args.numexpr_num_threads,
+            "attn_use_flash_attn3": args.attn_use_flash_attn3,
+            "distributed_mode": args.distributed_mode,
+        },
+        "provenance": {
+            "git_commit": args.git_commit,
+            "git_branch": args.git_branch,
+            "host_name": args.host_name,
+            "timestamp_utc": args.timestamp_utc,
         },
         "runs": [
             {
@@ -757,6 +773,10 @@ def build_parser() -> argparse.ArgumentParser:
     h100_naive.add_argument("--openblas-num-threads", type=int, required=True)
     h100_naive.add_argument("--numexpr-num-threads", type=int, required=True)
     h100_naive.add_argument("--nccl-ib-disable", type=int, required=True)
+    h100_naive.add_argument(
+        "--attn-use-flash-attn3", type=parse_bool_flag, required=True
+    )
+    h100_naive.add_argument("--distributed-mode", required=True)
     h100_naive.add_argument("--ngpu", type=int, required=True)
     h100_naive.add_argument("--iterations", type=int, required=True)
     h100_naive.add_argument("--train-batch-tokens", type=int, required=True)
@@ -781,6 +801,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--naive-reference-roundtrip-bpb", type=float, required=True
     )
     h100_naive.add_argument("--naive-reference-stop-bpb", type=float, required=True)
+    h100_naive.add_argument("--git-commit", default="")
+    h100_naive.add_argument("--git-branch", default="")
+    h100_naive.add_argument("--host-name", default="")
+    h100_naive.add_argument("--timestamp-utc", default="")
     h100_naive.set_defaults(func=cmd_write_h100_naive_contract_manifest)
 
     h100_compile_tiebreak = subparsers.add_parser(
@@ -804,6 +828,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--openblas-num-threads", type=int, required=True
     )
     h100_compile_tiebreak.add_argument("--numexpr-num-threads", type=int, required=True)
+    h100_compile_tiebreak.add_argument(
+        "--attn-use-flash-attn3", type=parse_bool_flag, required=True
+    )
+    h100_compile_tiebreak.add_argument("--distributed-mode", required=True)
     h100_compile_tiebreak.add_argument("--ngpu", type=int, required=True)
     h100_compile_tiebreak.add_argument("--iterations", type=int, required=True)
     h100_compile_tiebreak.add_argument("--train-batch-tokens", type=int, required=True)
@@ -823,6 +851,10 @@ def build_parser() -> argparse.ArgumentParser:
     h100_compile_tiebreak.add_argument(
         "--compile-strategy", action="append", default=[]
     )
+    h100_compile_tiebreak.add_argument("--git-commit", default="")
+    h100_compile_tiebreak.add_argument("--git-branch", default="")
+    h100_compile_tiebreak.add_argument("--host-name", default="")
+    h100_compile_tiebreak.add_argument("--timestamp-utc", default="")
     h100_compile_tiebreak.set_defaults(func=cmd_write_h100_compile_tiebreak_manifest)
 
     return parser

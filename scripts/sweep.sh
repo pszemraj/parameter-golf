@@ -23,7 +23,7 @@ export DATA_PATH="${DATA_PATH:-$HGDN_REPO_ROOT/data/datasets/fineweb10B_sp1024}"
 export TOKENIZER_PATH="${TOKENIZER_PATH:-$HGDN_REPO_ROOT/data/tokenizers/fineweb_1024_bpe.model}"
 export USE_WANDB="${USE_WANDB:-1}"
 export VOCAB_SIZE="${VOCAB_SIZE:-1024}"
-export COMPILE_STRATEGY="${COMPILE_STRATEGY:-model}"
+export COMPILE_STRATEGY="${COMPILE_STRATEGY:-hybrid}"
 chmod +x "$sweep_agent_path"
 
 setup_perf_env() {

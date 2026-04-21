@@ -28,7 +28,7 @@ import zlib
 import atexit
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 import numpy as np
 import sentencepiece as spm
@@ -49,7 +49,7 @@ from hgdn_runtime_utils import (
     restore_low_dim_params_to_fp32,
     serialize_quantized_state_dict_int8,
 )
-from model import _HAS_FLA, SCALAR_PARAM_PATTERNS, HybridGPT
+from model import _HAS_FLA, SCALAR_PARAM_PATTERNS, HybridGPT, attention_backend_name
 from profiler_report import (
     build_profile_report,
     build_profile_rows,
@@ -113,7 +113,8 @@ class Hyperparameters:
     compile = bool(int(os.environ.get("COMPILE", "1"))) and not bool(
         int(os.environ.get("TORCH_COMPILE_DISABLE", "0"))
     )
-    compile_strategy = os.environ.get("COMPILE_STRATEGY", "model").lower()
+    compile_strategy = os.environ.get("COMPILE_STRATEGY", "hybrid").lower()
+    distributed_mode = os.environ.get("DISTRIBUTED_MODE", "ddp").lower()
     perf_timing = bool(int(os.environ.get("PERF_TIMING", "0")))
     perf_ignore_steps = int(os.environ.get("PERF_IGNORE_STEPS", 0))
     perf_skip_final_eval = bool(int(os.environ.get("PERF_SKIP_FINAL_EVAL", "0")))
@@ -154,6 +155,7 @@ class Hyperparameters:
     # Model — attention blocks
     num_heads = int(os.environ.get("NUM_HEADS", 8))
     num_kv_heads = int(os.environ.get("NUM_KV_HEADS", 4))
+    attn_use_flash_attn3 = bool(int(os.environ.get("ATTN_USE_FLASH_ATTN3", "1")))
 
     # Model — GDN blocks
     gdn_n_heads = int(os.environ.get("GDN_N_HEADS", 8))
@@ -266,6 +268,7 @@ def build_wandb_config(
     n_gdn: int,
     n_params: int,
     sdp_backend: str,
+    attention_backend: str,
     wandb_watch_mode: str,
 ) -> dict[str, Any]:
     """Build the canonical W&B config schema for HGDN runs.
@@ -282,6 +285,7 @@ def build_wandb_config(
     :param int n_gdn: Number of GDN blocks in the instantiated model.
     :param int n_params: Total parameter count.
     :param str sdp_backend: Active SDPA backend label.
+    :param str attention_backend: Active standard-attention kernel label.
     :param str wandb_watch_mode: Normalized W&B watch mode.
     :return dict[str, Any]: Canonical HGDN W&B config mapping.
     """
@@ -317,6 +321,7 @@ def build_wandb_config(
         "ARTIFACT_LIMIT_BYTES": args.artifact_limit_bytes,
         "COMPILE": args.compile,
         "COMPILE_STRATEGY": args.compile_strategy,
+        "DISTRIBUTED_MODE": args.distributed_mode,
         "COMPILE_GDN_DISABLED": compile_stats["gdn_disabled"],
         "COMPILE_GDN_FLA_BLOCKS_COMPILED": compile_stats["gdn_fla_blocks_compiled"],
         "COMPILE_GDN_COREKERNEL_LEFT_ENABLED": compile_stats[
@@ -329,8 +334,10 @@ def build_wandb_config(
         "COMPILE_ATTN_BLOCKS_COMPILED": compile_stats["attn_blocks_compiled"],
         "COMPILE_MODEL_COMPILED": compile_stats["model_compiled"],
         "SDPA_BACKEND": sdp_backend,
+        "ATTENTION_BACKEND": attention_backend,
         "CUDNN_BENCHMARK": args.cudnn_benchmark,
         "FLA_AVAILABLE": _HAS_FLA,
+        "ATTN_USE_FLASH_ATTN3": args.attn_use_flash_attn3,
         "EMBED_LR": args.embed_lr,
         "HEAD_LR": args.head_lr,
         "TIED_EMBED_LR": args.tied_embed_lr,
@@ -543,7 +550,11 @@ def prewarm_rotary_caches(
 
 
 class Muon(torch.optim.Optimizer):
-    """Minimal Muon optimizer used for matrix-shaped parameters."""
+    """Parallel-capable Muon for matrix-shaped parameters.
+
+    In distributed runs this can overlap bank reduce-scatter/all-gather with the
+    scalar/token Adam steps when the trainer uses the no-DDP distributed path.
+    """
 
     def __init__(
         self,
@@ -573,6 +584,68 @@ class Muon(torch.optim.Optimizer):
                 weight_decay=weight_decay,
             ),
         )
+        self._built = False
+
+    def _build(self) -> None:
+        self._distributed = dist.is_available() and dist.is_initialized()
+        self._world_size = dist.get_world_size() if self._distributed else 1
+        self._rank = dist.get_rank() if self._distributed else 0
+        ws = self._world_size
+        self._bank_meta: list[dict[str, object]] = []
+        for group in self.param_groups:
+            for param in group["params"]:
+                rows = int(param.shape[0])
+                padded_rows = ((rows + ws - 1) // ws) * ws
+                shard_rows = padded_rows // ws
+                tail = tuple(param.shape[1:])
+                device = param.device
+                self._bank_meta.append(
+                    {
+                        "p": param,
+                        "rows": rows,
+                        "padded_grad": torch.zeros(
+                            padded_rows, *tail, device=device, dtype=torch.bfloat16
+                        ),
+                        "shard": torch.zeros(
+                            shard_rows, *tail, device=device, dtype=torch.bfloat16
+                        ),
+                        "shard_mom": torch.zeros(
+                            shard_rows, *tail, device=device, dtype=torch.bfloat16
+                        ),
+                        "full_update": torch.zeros(
+                            padded_rows, *tail, device=device, dtype=torch.bfloat16
+                        ),
+                        "scale": max(1, param.shape[-2] / param.shape[-1]) ** 0.5,
+                    }
+                )
+        self._bank_meta.sort(key=lambda meta: -cast(Tensor, meta["p"]).numel())
+        self._built = True
+
+    def launch_reduce_scatters(self) -> None:
+        """Launch async reduce-scatter ops for matrix params after backward."""
+        if not self._built:
+            self._build()
+        if not self._distributed:
+            return
+        self._rs_futures: list[dist.Work | None] = []
+        for meta in self._bank_meta:
+            param = cast(Tensor, meta["p"])
+            if param.grad is None:
+                self._rs_futures.append(None)
+                continue
+            padded_grad = cast(Tensor, meta["padded_grad"])
+            rows = cast(int, meta["rows"])
+            padded_grad[:rows].copy_(param.grad.bfloat16())
+            if padded_grad.shape[0] > rows:
+                padded_grad[rows:].zero_()
+            shard = cast(Tensor, meta["shard"])
+            work = dist.reduce_scatter_tensor(
+                shard,
+                padded_grad,
+                op=dist.ReduceOp.AVG,
+                async_op=True,
+            )
+            self._rs_futures.append(work)
 
     @torch.no_grad()
     def step(self, closure: Callable[[], Tensor] | None = None) -> Tensor | None:
@@ -585,43 +658,82 @@ class Muon(torch.optim.Optimizer):
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()
-        distributed = dist.is_available() and dist.is_initialized()
-        world_size = dist.get_world_size() if distributed else 1
-        rank = dist.get_rank() if distributed else 0
+
+        if not self._built:
+            self._build()
+
         for group in self.param_groups:
-            params = group["params"]
-            if not params:
-                continue
-            lr, momentum = group["lr"], group["momentum"]
-            backend_steps, nesterov = group["backend_steps"], group["nesterov"]
-            total_params = sum(int(p.numel()) for p in params)
-            updates_flat = torch.zeros(
-                total_params, device=params[0].device, dtype=torch.bfloat16
-            )
-            curr = 0
-            for i, p in enumerate(params):
-                if i % world_size == rank and p.grad is not None:
-                    g = p.grad
-                    state = self.state[p]
-                    if "momentum_buffer" not in state:
-                        state["momentum_buffer"] = torch.zeros_like(g)
-                    buf = state["momentum_buffer"]
-                    buf.mul_(momentum).add_(g)
-                    g = g.add(buf, alpha=momentum) if nesterov else buf
-                    g = zeropower_via_newtonschulz5(g, steps=backend_steps)
-                    g *= max(1, g.size(0) / g.size(1)) ** 0.5
-                    updates_flat[curr : curr + p.numel()] = g.reshape(-1)
-                curr += p.numel()
-            if distributed:
-                dist.all_reduce(updates_flat, op=dist.ReduceOp.SUM)
+            lr = group["lr"]
+            momentum = group["momentum"]
+            backend_steps = group["backend_steps"]
+            nesterov = group["nesterov"]
             wd = group.get("weight_decay", 0.0)
-            curr = 0
-            for p in params:
-                g = updates_flat[curr : curr + p.numel()].view_as(p).to(dtype=p.dtype)
-                if wd > 0:
-                    p.data.mul_(1.0 - lr * wd)
-                p.add_(g, alpha=-lr)
-                curr += p.numel()
+
+            prev_ag_handle: dist.Work | None = None
+            prev_meta: dict[str, object] | None = None
+            sharded = self._distributed and hasattr(self, "_rs_futures")
+
+            for index, meta in enumerate(self._bank_meta):
+                param = cast(Tensor, meta["p"])
+                if param.grad is None:
+                    continue
+
+                if prev_ag_handle is not None and prev_meta is not None:
+                    prev_ag_handle.wait()
+                    prev_param = cast(Tensor, prev_meta["p"])
+                    prev_rows = cast(int, prev_meta["rows"])
+                    update = cast(Tensor, prev_meta["full_update"])[:prev_rows]
+                    if wd > 0.0:
+                        prev_param.data.mul_(1.0 - lr * wd)
+                    prev_param.add_(
+                        update.to(dtype=prev_param.dtype),
+                        alpha=-lr * cast(float, prev_meta["scale"]),
+                    )
+
+                if sharded and self._rs_futures[index] is not None:
+                    self._rs_futures[index].wait()
+                    grad = cast(Tensor, meta["shard"])
+                    buf = cast(Tensor, meta["shard_mom"])
+                else:
+                    grad = param.grad.bfloat16()
+                    state = self.state[param]
+                    if "momentum_buffer" not in state:
+                        state["momentum_buffer"] = torch.zeros_like(grad)
+                    buf = cast(Tensor, state["momentum_buffer"])
+
+                buf.mul_(momentum).add_(grad)
+                update = grad.add(buf, alpha=momentum) if nesterov else buf
+                update = zeropower_via_newtonschulz5(update, steps=backend_steps)
+
+                if sharded:
+                    prev_ag_handle = dist.all_gather_into_tensor(
+                        cast(Tensor, meta["full_update"]), update, async_op=True
+                    )
+                    prev_meta = meta
+                else:
+                    if wd > 0.0:
+                        param.data.mul_(1.0 - lr * wd)
+                    param.add_(
+                        update.to(dtype=param.dtype),
+                        alpha=-lr * cast(float, meta["scale"]),
+                    )
+                    prev_ag_handle = None
+                    prev_meta = None
+
+            if prev_ag_handle is not None and prev_meta is not None:
+                prev_ag_handle.wait()
+                prev_param = cast(Tensor, prev_meta["p"])
+                prev_rows = cast(int, prev_meta["rows"])
+                update = cast(Tensor, prev_meta["full_update"])[:prev_rows]
+                if wd > 0.0:
+                    prev_param.data.mul_(1.0 - lr * wd)
+                prev_param.add_(
+                    update.to(dtype=prev_param.dtype),
+                    alpha=-lr * cast(float, prev_meta["scale"]),
+                )
+
+        if hasattr(self, "_rs_futures"):
+            del self._rs_futures
         return loss
 
 
@@ -773,6 +885,10 @@ def main() -> None:
     if distributed:
         dist.init_process_group(backend="nccl", device_id=device)
         dist.barrier()
+    use_parallel_muon_distributed = (
+        distributed and args.distributed_mode == "parallel_muon"
+    )
+    uses_ddp = distributed and not use_parallel_muon_distributed
     master_process = rank == 0
     stream_sync_event = make_stream_sync_event(device)
     perf_start_event = (
@@ -801,6 +917,7 @@ def main() -> None:
     enable_mem_efficient_sdp(False)
     enable_math_sdp(False)
     sdp_backend = "flash"
+    attention_backend = attention_backend_name()
 
     os.makedirs("logs", exist_ok=True)
     logfile = f"logs/{args.run_id}.txt" if master_process else None
@@ -896,10 +1013,22 @@ def main() -> None:
                 f"got={owned_runtime_rec_chunk_t} "
                 f"max={int(megakernel_status['rec_chunk_t_max'])}"
             )
+    if (
+        args.gdn_ratio > 0
+        and not args.gdn_use_cuda_corekernel
+        and not args.gdn_use_cuda_megakernel
+        and not _HAS_FLA
+    ):
+        raise RuntimeError(
+            "Packed HGDN training requires the FLA gated-delta fast path. "
+            "Refusing to silently fall back to the naive recurrence. "
+            "Install/repair FLA or use GDN_RATIO=0."
+        )
     log0(
         f"compile:{int(args.compile)} compile_strategy:{args.compile_strategy} "
         f"seed:{args.seed} pythonhashseed:{os.environ.get('PYTHONHASHSEED', '<unset>')} "
-        f"sdp_backend:{sdp_backend} fla_available:{int(_HAS_FLA)} "
+        f"sdp_backend:{sdp_backend} attention_backend:{attention_backend} "
+        f"fla_available:{int(_HAS_FLA)} "
         f"cudnn_benchmark:{int(args.cudnn_benchmark)} "
         f"wandb_watch:{wandb_watch_mode} wandb_watch_log_freq:{args.wandb_watch_log_freq} "
         f"perf_timing:{int(args.perf_timing)} perf_ignore_steps:{args.perf_ignore_steps} "
@@ -1069,14 +1198,14 @@ def main() -> None:
         base_model,
         enabled=args.compile,
         strategy=args.compile_strategy,
-        compile_top_level=not distributed,
+        compile_top_level=not uses_ddp,
     )
     model = (
         DDP(compiled_model, device_ids=[local_rank], broadcast_buffers=False)
-        if distributed
+        if uses_ddp
         else compiled_model
     )
-    if distributed and args.compile and args.compile_strategy in {"model", "hybrid"}:
+    if uses_ddp and args.compile and args.compile_strategy in {"model", "hybrid"}:
         model = maybe_compile(model, enabled=True, dynamic=False, fullgraph=False)
         compile_stats["model_compiled"] = 1
 
@@ -1101,6 +1230,7 @@ def main() -> None:
     )
     log0(
         f"world_size:{world_size} grad_accum_steps:{grad_accum_steps} "
+        f"distributed_mode:{args.distributed_mode} uses_ddp:{int(uses_ddp)} "
         f"sdp_backends:cudnn=False flash=True mem_efficient=False math=False"
     )
 
@@ -1116,6 +1246,7 @@ def main() -> None:
                 n_gdn=n_gdn,
                 n_params=n_params,
                 sdp_backend=sdp_backend,
+                attention_backend=attention_backend,
                 wandb_watch_mode=wandb_watch_mode,
             )
         )
@@ -1165,6 +1296,7 @@ def main() -> None:
         weight_decay=args.weight_decay,
         fused=True,
     )
+    optimizer_head = None
     optimizers = [optimizer_tok, optimizer_muon, optimizer_scalar]
     if base_model.lm_head is not None:
         optimizer_head = torch.optim.Adam(
@@ -1181,6 +1313,12 @@ def main() -> None:
             fused=True,
         )
         optimizers.insert(1, optimizer_head)
+    replicated_params: list[Tensor] = []
+    if use_parallel_muon_distributed:
+        replicated_params.extend(optimizer_tok.param_groups[0]["params"])
+        replicated_params.extend(scalar_params)
+        if optimizer_head is not None:
+            replicated_params.extend(optimizer_head.param_groups[0]["params"])
 
     muon_prewarm_count = 0
     if args.compile and device.type == "cuda":
@@ -1205,6 +1343,22 @@ def main() -> None:
         """Clear gradients across all optimizer groups."""
         for opt in optimizers:
             opt.zero_grad(set_to_none=True)
+
+    def apply_optimizer_step() -> None:
+        """Step optimizers using the active distributed synchronization strategy."""
+        if use_parallel_muon_distributed:
+            optimizer_muon.launch_reduce_scatters()
+            for param in replicated_params:
+                if param.grad is not None:
+                    dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
+            optimizer_tok.step()
+            optimizer_scalar.step()
+            if optimizer_head is not None:
+                optimizer_head.step()
+            optimizer_muon.step()
+            return
+        for opt in optimizers:
+            opt.step()
 
     def lr_mul(step: int, elapsed_ms: float) -> float:
         """Compute the warmdown multiplier for the current step.
@@ -1240,13 +1394,12 @@ def main() -> None:
         )
         for ws in range(args.warmup_steps):
             for ms in range(grad_accum_steps):
-                if distributed:
+                if uses_ddp:
                     model.require_backward_grad_sync = ms == grad_accum_steps - 1
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                     wl = model(warmup_x, warmup_y)
                 (wl * grad_scale).backward()
-            for o in optimizers:
-                o.step()
+            apply_optimizer_step()
             zero_grad_all()
             if ws + 1 == args.warmup_steps or (ws + 1) % 10 == 0:
                 log0(f"warmup_step:{ws + 1}/{args.warmup_steps}")
@@ -1367,7 +1520,7 @@ def main() -> None:
 
         with profile_ctx("train.step"):
             for ms in range(grad_accum_steps):
-                if distributed:
+                if uses_ddp:
                     model.require_backward_grad_sync = ms == grad_accum_steps - 1
                 with profile_ctx("train.load_batch"):
                     x, y = train_loader.next_batch(
@@ -1398,8 +1551,7 @@ def main() -> None:
                 torch.nn.utils.clip_grad_norm_(
                     base_model.parameters(), args.grad_clip_norm
                 )
-            for opt in optimizers:
-                opt.step()
+            apply_optimizer_step()
             zero_grad_all()
 
         step += 1

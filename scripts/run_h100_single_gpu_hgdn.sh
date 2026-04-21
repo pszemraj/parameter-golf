@@ -6,6 +6,7 @@ hgdn_setup_repo_root "${BASH_SOURCE[0]}"
 
 mode="${1:-perf}"
 python_bin="${PYTHON_BIN:-python}"
+attn_use_flash_attn3="${ATTN_USE_FLASH_ATTN3:-1}"
 run_stamp="$(date +%Y%m%d_%H%M%S)"
 run_prefix="${RUN_PREFIX:-h1001_${run_stamp}}"
 bundle_name="${run_prefix}_${mode}"
@@ -185,6 +186,7 @@ run_sweep() {
         "USE_WANDB=${USE_WANDB:-1}" \
         "WANDB_MODE=${WANDB_MODE:-online}" \
         "WANDB_WATCH=${WANDB_WATCH:-none}" \
+        "ATTN_USE_FLASH_ATTN3=${attn_use_flash_attn3}" \
         "COMPILE_STRATEGY=${COMPILE_STRATEGY:-hybrid}" \
         "$@"
 }

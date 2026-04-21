@@ -43,6 +43,12 @@ val_batch_size="${VAL_BATCH_SIZE:-524288}"
 max_wallclock_seconds="${MAX_WALLCLOCK_SECONDS:-600}"
 compile="${COMPILE:-1}"
 compile_strategies="${COMPILE_STRATEGIES:-hybrid selective}"
+attn_use_flash_attn3="${ATTN_USE_FLASH_ATTN3:-1}"
+distributed_mode="${DISTRIBUTED_MODE:-parallel_muon}"
+git_commit="$(git rev-parse HEAD)"
+git_branch="$(git rev-parse --abbrev-ref HEAD)"
+host_name="$(hostname)"
+timestamp_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 hgdn_config="${HGDN_CONFIG:-configs/hgdn/retune_trim_layers_14.toml}"
 hgdn_kernel_config="${HGDN_KERNEL_CONFIG:-configs/hgdn/winner_20260405_19_live14.toml}"
@@ -98,6 +104,8 @@ print_plan() {
     echo "train_log_every=${train_log_every}"
     echo "val_batch_size=${val_batch_size}"
     echo "compile=${compile}"
+    echo "attn_use_flash_attn3=${attn_use_flash_attn3}"
+    echo "distributed_mode=${distributed_mode}"
     echo "compile_strategies=${compile_strategy_list[*]}"
     echo "max_wallclock_seconds=${max_wallclock_seconds}"
     echo "hgdn_config=${hgdn_config}"
@@ -167,6 +175,8 @@ run_tiebreak() {
             "${diagnostic_env[@]}" \
             "COMPILE=${compile}" \
             "COMPILE_STRATEGY=${strategy}" \
+            "ATTN_USE_FLASH_ATTN3=${attn_use_flash_attn3}" \
+            "DISTRIBUTED_MODE=${distributed_mode}" \
             "RUN_ID=${run_id}" \
             "ITERATIONS=${iterations}" \
             "MAX_WALLCLOCK_SECONDS=${max_wallclock_seconds}" \
@@ -194,6 +204,8 @@ run_tiebreak() {
             "${diagnostic_env[@]}" \
             "COMPILE=${compile}" \
             "COMPILE_STRATEGY=${strategy}" \
+            "ATTN_USE_FLASH_ATTN3=${attn_use_flash_attn3}" \
+            "DISTRIBUTED_MODE=${distributed_mode}" \
             "RUN_ID=${run_id}" \
             "ITERATIONS=${iterations}" \
             "MAX_WALLCLOCK_SECONDS=${max_wallclock_seconds}" \
@@ -242,6 +254,8 @@ build_bundle() {
         --mkl-num-threads "${mkl_num_threads}"
         --openblas-num-threads "${openblas_num_threads}"
         --numexpr-num-threads "${numexpr_num_threads}"
+        --attn-use-flash-attn3 "${attn_use_flash_attn3}"
+        --distributed-mode "${distributed_mode}"
         --ngpu "${ngpu}"
         --iterations "${iterations}"
         --train-batch-tokens "${train_batch_tokens}"
@@ -253,6 +267,10 @@ build_bundle() {
         --compile-enabled "${compile}"
         --hgdn-config "${hgdn_config}"
         --hgdn-kernel-config "${hgdn_kernel_config}"
+        --git-commit "${git_commit}"
+        --git-branch "${git_branch}"
+        --host-name "${host_name}"
+        --timestamp-utc "${timestamp_utc}"
     )
     for idx in "${!run_ids[@]}"; do
         manifest_cmd+=(

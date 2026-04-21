@@ -1,6 +1,6 @@
 # HGDN Packed Drift Audit
 
-Last updated: 2026-04-20 13:40 CDT
+Last updated: 2026-04-21 10:35 EDT
 
 Branch: `exp/hgdn-k-core`
 
@@ -54,6 +54,18 @@ That fresh measurement now exists.
 This closes the "did the packed helper drift?" question for the corrected live14
 launch surface. The remaining open choice is now the exact `8xH100`
 submission-time tiebreak between `hybrid` and `selective`.
+
+The follow-up `8xH100` results on `2026-04-21 06:15 UTC` clarify the next
+question:
+
+- the exact packed-HGDN tiebreak was real and fair enough to answer
+  `hybrid` vs `selective`
+- the exact naive-contract sanity batch was real and fair enough to show that
+  packed HGDN is still behind the exact repo baseline from `train_gpt.py`
+
+So the packed-path audit is now closed. The remaining work is not
+"did the helper drift again?" It is "can the packed HGDN runtime close the
+exact-baseline gap?"
 
 ## Historical references
 
@@ -191,6 +203,15 @@ Active packed-path changes after the core split:
    - use `torch.no_grad()` on packed eval path to remove an extra dispatch-key
      recompile
    - packed compile cleanup
+10. local post-`2026-04-21 06:15 UTC` patchset
+   - use FA3 for standard attention on Hopper when available
+   - add `DISTRIBUTED_MODE=parallel_muon` to avoid the old DDP-plus-Muon stack
+   - default active packed helpers back to `COMPILE_STRATEGY=hybrid`
+   - hard-fail packed HGDN training if the FLA fast recurrence path is missing
+   - make the naive-contract helper fair by default with
+     `USE_WANDB=0` / `WANDB_WATCH=none`
+   - record git/branch/host/timestamp plus attention/distributed settings in
+     the exact-8x helper manifests
 
 ## Current branch changes that do not count as packed drift
 
@@ -236,13 +257,21 @@ What is closed:
 - the current branch no longer has that helper/config bug
 - the corrected live14 `1xH100` compile matrix says the packed path is back in
   the expected performance range on a valid contract
+- the exact `8xH100` packed tiebreak says the packed path is still alive, with
+  `selective` slightly stronger on final quality and `hybrid` faster on step
+  time
+- the exact naive-contract sanity batch says the branch-goal problem is now
+  clear: packed HGDN still loses to the exact repo baseline and the hybrid
+  attention-only control stays close enough to the baseline to make that
+  comparison believable
 
 What remains open:
 
-- the exact `8xH100` packed finalist still needs the compile-strategy tiebreak
-  between `hybrid` and `selective`
-- the exact repo naive baseline still needs the bounded sanity round under the
-  explicit direct-baseline replay pins
+- rerun the exact `8xH100` packed tiebreak on the patched runtime surface
+  (`ATTN_USE_FLASH_ATTN3=1`, `DISTRIBUTED_MODE=parallel_muon`)
+- rerun the exact naive-contract sanity batch on that same patched HGDN surface
+- quantify how much of the exact-baseline gap closes before spending H100 time
+  on any new HGDN ablation
 
 What this audit says today:
 
@@ -255,6 +284,8 @@ What this audit says today:
 - do use `hybrid` as the packed helper default unless a comparison explicitly
   says otherwise
 - do keep `selective` alive only for the exact-8x tiebreak, not as the default
+- do measure every new packed-path claim against the exact repo baseline from
+  `train_gpt.py`, not against HGDN-internal controls alone
 
 ## Next action after this audit
 
@@ -262,7 +293,9 @@ Use the corrected packed helper path, not the old kernel-only launch surface,
 for the exact `8xH100` packed compile tiebreak:
 
 ```bash
-USE_WANDB=0 WANDB_MODE=offline \
+USE_WANDB=1 WANDB_MODE=online \
+ATTN_USE_FLASH_ATTN3=1 \
+DISTRIBUTED_MODE=parallel_muon \
 RUN_PREFIX_BASE=h100packed_tiebreak \
 bash scripts/run_h100_hgdn_compile_tiebreak_round.sh
 ```

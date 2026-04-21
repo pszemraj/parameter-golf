@@ -196,7 +196,7 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--compile-strategy",
-        choices=("model", "hybrid"),
+        choices=("model", "selective", "hybrid"),
         help="Set COMPILE_STRATEGY.",
     )
     parser.add_argument("--iterations", type=int, help="Set ITERATIONS.")

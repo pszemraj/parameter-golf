@@ -15,10 +15,10 @@ hgdn_require_cmd torchrun
 hgdn_require_cmd python
 
 python_bin="${PYTHON_BIN:-python}"
-use_wandb="${USE_WANDB:-1}"
+use_wandb="${USE_WANDB:-0}"
 wandb_mode="${WANDB_MODE:-online}"
 wandb_project="${WANDB_PROJECT:-pg-hgdn-ablations}"
-wandb_watch="${WANDB_WATCH:-gradients}"
+wandb_watch="${WANDB_WATCH:-none}"
 wandb_watch_log_freq="${WANDB_WATCH_LOG_FREQ:-100}"
 run_prefix_base="${RUN_PREFIX_BASE:-h100naive1}"
 bundle_stage_dir="${BUNDLE_STAGE_DIR:-local-scratch/${run_prefix_base}_bundle}"
@@ -44,10 +44,16 @@ val_batch_size="${VAL_BATCH_SIZE:-524288}"
 max_wallclock_seconds="${MAX_WALLCLOCK_SECONDS:-600}"
 compile="${COMPILE:-1}"
 compile_strategy="${COMPILE_STRATEGY:-hybrid}"
+attn_use_flash_attn3="${ATTN_USE_FLASH_ATTN3:-1}"
+distributed_mode="${DISTRIBUTED_MODE:-parallel_muon}"
 weight_decay="${WEIGHT_DECAY:-0}"
 data_path="${DATA_PATH:-$HGDN_REPO_ROOT/data/datasets/fineweb10B_sp1024}"
 tokenizer_path="${TOKENIZER_PATH:-$HGDN_REPO_ROOT/data/tokenizers/fineweb_1024_bpe.model}"
 vocab_size="${VOCAB_SIZE:-1024}"
+git_commit="$(git rev-parse HEAD)"
+git_branch="$(git rev-parse --abbrev-ref HEAD)"
+host_name="$(hostname)"
+timestamp_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 hgdn_config="${HGDN_CONFIG:-configs/hgdn/retune_trim_layers_14.toml}"
 hgdn_kernel_config="${HGDN_KERNEL_CONFIG:-configs/hgdn/winner_20260405_19_live14.toml}"
@@ -102,6 +108,8 @@ print_plan() {
     echo "val_batch_size=${val_batch_size}"
     echo "compile=${compile}"
     echo "compile_strategy=${compile_strategy}"
+    echo "attn_use_flash_attn3=${attn_use_flash_attn3}"
+    echo "distributed_mode=${distributed_mode}"
     echo "weight_decay=${weight_decay}"
     echo "max_wallclock_seconds=${max_wallclock_seconds}"
     echo "data_path=${data_path}"
@@ -226,6 +234,8 @@ run_round() {
         "${diagnostic_env[@]}" \
         "COMPILE=${compile}" \
         "COMPILE_STRATEGY=${compile_strategy}" \
+        "ATTN_USE_FLASH_ATTN3=${attn_use_flash_attn3}" \
+        "DISTRIBUTED_MODE=${distributed_mode}" \
         "WEIGHT_DECAY=${weight_decay}" \
         "RUN_ID=${hgdn_run_id}" \
         "ITERATIONS=${iterations}" \
@@ -255,6 +265,8 @@ run_round() {
         "${diagnostic_env[@]}" \
         "COMPILE=${compile}" \
         "COMPILE_STRATEGY=${compile_strategy}" \
+        "ATTN_USE_FLASH_ATTN3=${attn_use_flash_attn3}" \
+        "DISTRIBUTED_MODE=${distributed_mode}" \
         "WEIGHT_DECAY=${weight_decay}" \
         "RUN_ID=${hgdn_run_id}" \
         "ITERATIONS=${iterations}" \
@@ -284,6 +296,8 @@ run_round() {
         "${diagnostic_env[@]}" \
         "COMPILE=${compile}" \
         "COMPILE_STRATEGY=${compile_strategy}" \
+        "ATTN_USE_FLASH_ATTN3=${attn_use_flash_attn3}" \
+        "DISTRIBUTED_MODE=${distributed_mode}" \
         "WEIGHT_DECAY=${weight_decay}" \
         "RUN_ID=${attn_run_id}" \
         "ITERATIONS=${iterations}" \
@@ -318,6 +332,8 @@ run_round() {
         "${diagnostic_env[@]}" \
         "COMPILE=${compile}" \
         "COMPILE_STRATEGY=${compile_strategy}" \
+        "ATTN_USE_FLASH_ATTN3=${attn_use_flash_attn3}" \
+        "DISTRIBUTED_MODE=${distributed_mode}" \
         "WEIGHT_DECAY=${weight_decay}" \
         "RUN_ID=${attn_run_id}" \
         "ITERATIONS=${iterations}" \
@@ -371,6 +387,8 @@ build_bundle() {
         --openblas-num-threads "${openblas_num_threads}" \
         --numexpr-num-threads "${numexpr_num_threads}" \
         --nccl-ib-disable "${nccl_ib_disable}" \
+        --attn-use-flash-attn3 "${attn_use_flash_attn3}" \
+        --distributed-mode "${distributed_mode}" \
         --ngpu "${ngpu}" \
         --iterations "${iterations}" \
         --train-batch-tokens "${train_batch_tokens}" \
@@ -392,7 +410,11 @@ build_bundle() {
         --attn-run-id "${attn_run_id}" \
         --naive-reference-name "${naive_reference_name}" \
         --naive-reference-roundtrip-bpb "${naive_reference_roundtrip_bpb}" \
-        --naive-reference-stop-bpb "${naive_reference_stop_bpb}"
+        --naive-reference-stop-bpb "${naive_reference_stop_bpb}" \
+        --git-commit "${git_commit}" \
+        --git-branch "${git_branch}" \
+        --host-name "${host_name}" \
+        --timestamp-utc "${timestamp_utc}"
 
     hgdn_create_7z_archive "${python_bin}" "${archive_output}" "${bundle_stage_dir}"
     echo "bundle_archive=${archive_output}"

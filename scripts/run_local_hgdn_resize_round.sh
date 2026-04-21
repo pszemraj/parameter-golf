@@ -38,7 +38,7 @@ train_log_every="${TRAIN_LOG_EVERY:-25}"
 val_batch_size="${VAL_BATCH_SIZE:-524288}"
 max_wallclock_seconds="${MAX_WALLCLOCK_SECONDS:-0}"
 compile="${COMPILE:-1}"
-compile_strategy="${COMPILE_STRATEGY:-model}"
+compile_strategy="${COMPILE_STRATEGY:-hybrid}"
 
 hgdn_ensure_python_module "${python_bin}" py7zr py7zr
 

@@ -1,6 +1,6 @@
 # HGDN Branch Status
 
-Last updated: 2026-04-20 13:40 CDT
+Last updated: 2026-04-21 10:05 EDT
 
 Branch: `exp/hgdn-k-core`
 
@@ -55,19 +55,43 @@ Branch: `exp/hgdn-k-core`
 - Packed-path default stays `hybrid` for speed-sensitive helpers.
 - `selective` stays alive for the exact `8xH100` tiebreak.
 
-- The next packed-path H100 steps are:
-  - exact `8xH100` live14 packed tiebreak: `hybrid` vs `selective`
+- `2026-04-21 06:15 UTC` bundle set:
+  - exact `8xH100` live14 packed tiebreak:
+    - `hybrid`: `373.13 ms/step`, final exact roundtrip `2.39929889`
+    - `selective`: `403.46 ms/step`, final exact roundtrip `2.39044828`
+    - both `UNDER_LIMIT`
   - bounded naive-contract sanity batch:
-    - exact repo baseline from `train_gpt.py`
-    - live HGDN finalist
-    - hybrid-trainer attention-only control
-    - direct baseline leg explicitly pins `DATA_PATH`, `TOKENIZER_PATH`, and
-      `VOCAB_SIZE`
+    - exact repo baseline from `train_gpt.py`: `44.00 ms/step`, exact
+      roundtrip `1.23710448`, `UNDER_LIMIT`
+    - live HGDN finalist: `98.08 ms/step`, exact roundtrip `1.24735121`,
+      `OVER_LIMIT`
+    - hybrid-trainer attention-only control: `46.09 ms/step`, exact roundtrip
+      `1.24098267`, `OVER_LIMIT`
+  - the comparison surface was fair enough to show the real problem:
+    packed HGDN is still behind the exact baseline, but the helper manifests
+    for those two runs did not yet record git provenance.
+
+- Post-`2026-04-21` local patchset before the next rerun:
+  - standard attention blocks now use the FA3 fast path when available on
+    Hopper and only fall back to SDPA otherwise
+  - distributed HGDN runs can use `DISTRIBUTED_MODE=parallel_muon` to avoid the
+    old DDP-plus-Muon communication stack
+  - `train_gpt_hybrid.py` and `scripts/sweep.sh` now default to
+    `COMPILE_STRATEGY=hybrid`
+  - packed HGDN training now refuses the silent non-FLA recurrence fallback
+  - the naive-contract helper defaults to `USE_WANDB=0` / `WANDB_WATCH=none`
+    so timed baseline comparisons are not paying W&B overhead only on the HGDN
+    legs
+  - the structured launcher now accepts `--compile-strategy selective`
+  - new tiebreak and naive-contract manifests include git commit, branch, host,
+    timestamp, attention-backend flag, and distributed mode
 
 Exact 8x packed tiebreak:
 
 ```bash
-USE_WANDB=0 WANDB_MODE=offline \
+USE_WANDB=1 WANDB_MODE=online \
+ATTN_USE_FLASH_ATTN3=1 \
+DISTRIBUTED_MODE=parallel_muon \
 RUN_PREFIX_BASE=h100packed_tiebreak \
 bash scripts/run_h100_hgdn_compile_tiebreak_round.sh
 ```
@@ -76,6 +100,8 @@ Naive-contract sanity batch:
 
 ```bash
 USE_WANDB=0 WANDB_MODE=offline \
+ATTN_USE_FLASH_ATTN3=1 \
+DISTRIBUTED_MODE=parallel_muon \
 RUN_PREFIX_BASE=h100naive1 \
 bash scripts/run_h100_hgdn_naive_contract_round.sh
 ```
