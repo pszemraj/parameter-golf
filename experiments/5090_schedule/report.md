@@ -4,10 +4,13 @@
 - Harness ready
 - Controller frontier is now stable enough to start schedule isolation
 - Phase 1 hold sweep, edge follow-up, and `1B` hold confirmation are complete on the two best completed `blocks0` controllers
+- The tuned-hold `blocks1` family is now also complete on the `1B` contract
 - Working schedule defaults are now:
   - `lr_hold_steps=3500` for the `4096`-step / `512M` screening contract
   - `lr_hold_steps=7000` for the `8192`-step / `1B` contract
-- The tuned hold changed the top local ranking: `blocks0 10x12` is now ahead of `blocks0 12x10`
+- The tuned hold changed the top local ranking twice:
+  - inside `blocks0`, `10x12` moved ahead of `12x10`
+  - once `blocks1` inherited the same tuned hold, `blocks1 12x10` became the best completed single-seed local point overall
 
 ## What Was Verified
 - Warmup-hold-cosine is the real root schedule path.
@@ -85,6 +88,29 @@ Important systems note:
 - throughput stayed effectively unchanged relative to the inherited `1B` schedule runs
 - this is genuine optimization gain, not a speed artifact
 
+## Blocks1 Tuned-Hold Result
+
+The same late-tail schedule also helped the one-block frozen-amplifier family enough to change the current local frontier.
+
+| Controller | tuned `h7000` @ `1B` | Throughput | Artifact bytes | Comparison note |
+|---|---:|---:|---:|---|
+| `blocks1 12x10` | `2.1831753851` | `374,227` | `4,791,890` | best completed single-seed point overall |
+| `blocks1 10x12` | `2.1935951525` | `372,809` | `4,790,848` | beats `blocks0 12x10 h7000` by about `0.00187` bpb |
+| `blocks1 12x6` | `2.2132622271` | `588,014` | `4,167,982` | improved over old `blocks1 12x6 h1500` by about `0.02241` bpb |
+
+Key direct comparisons:
+
+- `blocks1 12x10 h7000 1b` beats `blocks0 10x12 h7000 1b` by about `0.00463` bpb
+- `blocks1 10x12 h7000 1b` beats `blocks0 12x10 h7000 1b` by about `0.00187` bpb
+- `blocks1 12x6 h7000 1b` is now the best fast anchor and improved over the inherited-hold `blocks1 12x6` point by about `0.02241` bpb
+
+Interpretation:
+
+- the late hold is not a `blocks0`-only effect
+- one frozen amplifier block is now earning its bytes at the current single-seed frontier
+- the next optimization work should center `blocks1`, with `blocks0 10x12 h7000` retained as the lean control
+- this is still a single-seed ranking change; multi-seed confirmation is still required before treating the new order as final
+
 ## Phase 1 Screening Contract
 
 - same frozen structure: corrected full-dataset `blocks0` shared spec
@@ -140,20 +166,19 @@ blocks0_10x12_hold_confirm1b_v1:
   h7000 @ 1B
 ```
 
-That confirmation has now landed successfully.
+That confirmation has now landed successfully for both `blocks0` leaders and the follow-up `blocks1` family.
 
 The next disciplined move is:
 
 - keep `h7000` as the working `1B` schedule default for this family
-- test the same tuned hold on the `blocks1` guardrail variants before touching frozen depth again:
-  - `blocks1 12x6 h7000 1b`
-  - `blocks1 10x12 h7000 1b`
-  - `blocks1 12x10 h7000 1b`
-- only after that move to `max_lr`, `warmup_steps`, `min_lr`, and `weight_decay`
+- treat `blocks1 12x10 h7000` as the current single-seed quality leader
+- run multi-seed confirmation on the leading `blocks1` and `blocks0` contenders before making stronger architecture claims
+- then move to `max_lr`, `min_lr`, and only afterward to `warmup_steps` and `weight_decay`
+- do not go back to extra frozen depth before the `blocks1` optimization lane is exhausted
 
-## Questions This Sweep Should Answer
-- Does the same tuned hold help the `blocks1` guardrail family, or is the one-block frozen structure schedule-sensitive in a different way?
-- Does `blocks1 10x12 h7000` recover quality while preserving a nonzero amplifier block?
-- Does the `blocks1 12x6` anchor improve enough under the tuned hold to stay relevant as the lightweight transfer-control baseline?
-- Is `max_lr=3e-3` still the right peak LR once the hold is fixed late?
-- Is the current `min_lr` floor too conservative?
+## Open Schedule Questions
+- Does `blocks1 12x10 h7000` stay ahead across seeds, or is the current lead fragile?
+- Is `max_lr=3e-3` still the right peak LR now that `blocks1` is the frontier family?
+- Is the current `min_lr=3e-4` floor leaving quality on the table on the one-block structure?
+- Once LR is retuned, does `blocks1 10x12` close the remaining gap to `blocks1 12x10`, or is deeper geometry now the stable winner?
+- After schedule work, does longer context help `blocks1` more than the leaner `blocks0` control?
