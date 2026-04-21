@@ -23,7 +23,8 @@
   - `blocks1 12x6` slightly beat `blocks0 12x6` on the longer budget
 - The first real schedule result also changed the recommendation:
   - on the `512M` screen, the edge follow-up moved the best tested hold from `2500` to `3500` for both `blocks0 12x10` and `blocks0 10x12`
-  - the schedule is still decaying too early under the inherited root default
+  - the `1B` confirmation then held up with `h7000`
+  - the schedule was decaying too early under the inherited root default, and the tuned hold materially changed the top local ranking
 - The regression-to-transformer guardrail is still intact:
   - no attention
   - no token-token mixing
@@ -33,57 +34,53 @@
 
 These are the three most useful completed local contenders right now.
 
-1. `blocks0_resid12_e10_c8t1_r3_current_1b`
-   - best completed pure-quality point
-   - final `val_bpb = 2.2113941366`
-   - steady `tok/s = 386,200`
+1. `blocks0_resid10_e12_h7000_1b`
+   - best completed overall point
+   - final `val_bpb = 2.1878016930`
+   - steady `tok/s = 384,758`
    - trainable params `= 839,129`
-   - artifact estimate `= 3,879,987`
+   - artifact estimate `= 3,899,812`
    - why it is in:
-     - best corrected completed local quality result
-     - still comfortably inside the artifact cap
+     - best corrected completed local quality result after schedule tuning
+     - strong gain from the tuned late-tail schedule without a throughput penalty
 
-2. `blocks0_resid10_e12_c8t1_r3_current_1b`
-   - geometry control and near-tie
-   - final `val_bpb = 2.2128156660`
-   - steady `tok/s = 384,622`
-   - trainable params `= 839,031`
-   - artifact estimate `= 3,878,440`
+2. `blocks0_resid12_e10_h7000_1b`
+   - second-best completed overall point
+   - final `val_bpb = 2.1954688682`
+   - steady `tok/s = 386,106`
+   - trainable params `= 839,129`
+   - artifact estimate `= 3,900,555`
    - why it is in:
-     - only about `0.00142` bpb behind `12 x 10.0` on the same `1B` budget
-     - same controller mass, nearly same speed
-     - strongest evidence that controller geometry matters
+     - it stayed strong after the tuned hold transfer
+     - it is still a close second and keeps the deeper geometry alive as a real alternate shape
 
-3. `blocks0_resid16_e8_c8t1_r3_current_1b_gc1`
-   - best completed larger-controller stress point
-   - final `val_bpb = 2.2177299568`
-   - steady `tok/s = 274,683`
-   - trainable params `= 895,005`
-   - artifact estimate `= 3,995,273`
+3. `blocks1_resid12_e6_c8t1_r3_current_1b`
+   - best completed nonzero-amplifier guardrail
+   - final `val_bpb = 2.2356768287`
+   - steady `tok/s = 590,071`
+   - trainable params `= 505,049`
+   - artifact estimate `= 4,102,717`
    - why it is in:
-     - it proves larger checkpointed parallel-minGRU controllers can improve quality without changing the family
-     - it finished clearly ahead of the `12x6` quality-speed anchors
-     - it still stays well inside the artifact budget
+     - it is still the cleanest transfer-control architecture with one frozen amplifier block
+     - it is the next architecture family that should inherit the tuned schedule
 
 Important nuance:
 
-- `blocks1_resid12_e6_c8t1_r3_current_1b` remains the best nonzero-amplifier guardrail:
-  - `final val_bpb = 2.2356768287`
-  - `steady tok/s = 590,071`
-  - artifact estimate `= 4,102,717`
+- `blocks0_resid16_e8_c8t1_r3_current_1b_gc1` remains the third-best pure-quality point at `2.2177299568`, but it is no longer the most useful next contender because it is slower and still not schedule-tuned.
 - `blocks0_resid12_e6_c8t1_r3_current_1b` is still the cleanest quality-speed anchor:
   - `final val_bpb = 2.2363421409`
   - `steady tok/s = 618,833`
-- The `16 x 8.0` point is real, but it is not the default next candidate because the extra quality costs a large throughput hit.
+- The tuned schedule changed the ranking of the top two `blocks0` shapes:
+  - `10x12 h7000` now beats `12x10 h7000` by about `0.00767` bpb
 
 ## Exact Reproduction Commands
 
-### 1. `blocks0_resid12_e10_c8t1_r3_current_1b`
+### 1. `blocks0_resid10_e12_h7000_1b`
 
 ```bash
 env CUDA_VISIBLE_DEVICES=0 TORCH_BLAS_PREFER_CUBLASLT=1 \
   SHARED_SPEC_DIR=experiments/5090_structure/fullspec_blocks0_radical_v1/blocks0_resid12_e6_c8t1_r3_current_512m \
-  MODEL_ROOT=experiments/5090_controller/fullspec_blocks0_confirm1b_v1 \
+  MODEL_ROOT=experiments/5090_schedule/blocks0_10x12_hold_confirm1b_v1 \
   PRESET=controller_default \
   COMPILE=0 \
   VAL_EVERY=512 \
@@ -93,16 +90,16 @@ env CUDA_VISIBLE_DEVICES=0 TORCH_BLAS_PREFER_CUBLASLT=1 \
   SAVE_EVERY=4096 \
   TRAIN_FRAC=0.98 \
   BRANCH_TEMPORAL_MODE=current \
-  RUN_SPECS=$'blocks0_resid12_e10_c8t1_r3_current_1b 12 10.0 8 1 1 -3.0 0.003 100 1500 0.0003 8192 256 512' \
+  RUN_SPECS=$'blocks0_resid10_e12_h7000_1b 10 12.0 8 1 1 -3.0 0.003 100 7000 0.0003 8192 256 512' \
   conda run -s --name train python tools/run_core_amp_sweep.py controller
 ```
 
-### 2. `blocks0_resid10_e12_c8t1_r3_current_1b`
+### 2. `blocks0_resid12_e10_h7000_1b`
 
 ```bash
 env CUDA_VISIBLE_DEVICES=0 TORCH_BLAS_PREFER_CUBLASLT=1 \
   SHARED_SPEC_DIR=experiments/5090_structure/fullspec_blocks0_radical_v1/blocks0_resid12_e6_c8t1_r3_current_512m \
-  MODEL_ROOT=experiments/5090_controller/fullspec_blocks0_confirm1b_v1 \
+  MODEL_ROOT=experiments/5090_schedule/blocks0_12x10_hold_confirm1b_v1 \
   PRESET=controller_default \
   COMPILE=0 \
   VAL_EVERY=512 \
@@ -112,16 +109,16 @@ env CUDA_VISIBLE_DEVICES=0 TORCH_BLAS_PREFER_CUBLASLT=1 \
   SAVE_EVERY=4096 \
   TRAIN_FRAC=0.98 \
   BRANCH_TEMPORAL_MODE=current \
-  RUN_SPECS=$'blocks0_resid10_e12_c8t1_r3_current_1b 10 12.0 8 1 1 -3.0 0.003 100 1500 0.0003 8192 256 512' \
+  RUN_SPECS=$'blocks0_resid12_e10_h7000_1b 12 10.0 8 1 1 -3.0 0.003 100 7000 0.0003 8192 256 512' \
   conda run -s --name train python tools/run_core_amp_sweep.py controller
 ```
 
-### 3. `blocks0_resid16_e8_c8t1_r3_current_1b_gc1`
+### 3. `blocks1_resid12_e6_c8t1_r3_current_1b`
 
 ```bash
 env CUDA_VISIBLE_DEVICES=0 TORCH_BLAS_PREFER_CUBLASLT=1 \
-  SHARED_SPEC_DIR=experiments/5090_structure/fullspec_blocks0_radical_v1/blocks0_resid12_e6_c8t1_r3_current_512m \
-  MODEL_ROOT=experiments/5090_controller/fullspec_blocks0_large_checkpointed_confirm1b_v1 \
+  SHARED_SPEC_DIR=experiments/5090_controller/fullspec_blocks1_radical_v1/blocks1_resid12_e6_c8t1_r3_current_512m \
+  MODEL_ROOT=experiments/5090_controller/fullspec_blocks1_confirm1b_v1 \
   PRESET=controller_default \
   COMPILE=0 \
   VAL_EVERY=512 \
@@ -130,9 +127,9 @@ env CUDA_VISIBLE_DEVICES=0 TORCH_BLAS_PREFER_CUBLASLT=1 \
   LOG_STATE_EVERY=512 \
   SAVE_EVERY=4096 \
   TRAIN_FRAC=0.98 \
-  GRADIENT_CHECKPOINTING=1 \
+  NUM_BLOCKS=1 \
   BRANCH_TEMPORAL_MODE=current \
-  RUN_SPECS=$'blocks0_resid16_e8_c8t1_r3_current_1b_gc1 16 8.0 8 1 1 -3.0 0.003 100 1500 0.0003 8192 256 512' \
+  RUN_SPECS=$'blocks1_resid12_e6_c8t1_r3_current_1b 12 6.0 8 1 1 -3.0 0.003 100 1500 0.0003 8192 256 512' \
   conda run -s --name train python tools/run_core_amp_sweep.py controller
 ```
 
@@ -140,7 +137,7 @@ env CUDA_VISIBLE_DEVICES=0 TORCH_BLAS_PREFER_CUBLASLT=1 \
 
 Best pure-quality contender:
 
-- `blocks0_resid12_e10_c8t1_r3_current_1b`
+- `blocks0_resid10_e12_h7000_1b`
 
 Best quality-speed tradeoff on the 5090:
 
@@ -153,12 +150,12 @@ Best quality-speed tradeoff on the 5090:
 Most likely to transfer cleanly to `1x H100`:
 
 - `blocks1_resid12_e6_c8t1_r3_current_1b` as the structural guardrail candidate
-- `blocks0_resid12_e10_c8t1_r3_current_1b` as the pure-quality candidate
+- `blocks0_resid10_e12_h7000_1b` as the pure-quality candidate
 
 Why that split:
 
 - `blocks1_resid12_e6...` preserves one frozen amplifier block and now has a completed `1B` result that is slightly better than the matching `blocks0 12x6` anchor.
-- `blocks0_resid12_e10...` is still the best local quality point, so it deserves confirmation even if it is the more aggressive candidate.
+- `blocks0_resid10_e12_h7000...` is now the best local quality point after schedule tuning, so it is the right pure-quality transfer candidate.
 
 ## Findings Likely To Be 5090-Specific
 
@@ -189,14 +186,14 @@ Code improvements:
 Pure hyperparameter / architecture findings:
 
 - `blocks0` is the best corrected structure so far
-- `12 x 10.0` is the current pure-quality leader at `1B`
-- `10 x 12.0` remains the strongest geometry control at `1B`
+- `10 x 12.0` with `h7000` is now the current pure-quality leader at `1B`
+- `12 x 10.0` with `h7000` remains the strongest close alternate shape
 - `16 x 8.0` is now the strongest larger-controller checkpointed point at `1B`
 - `12 x 6.0` remains the quality-speed anchor at `1B`
 - `blocks1 12 x 6.0` is the best current nonzero-amplifier guardrail point and slightly beat the matching `blocks0 12x6` run at `1B`
 - naive lag-heavy temporal variants are not winning
 - first schedule evidence says the current default `lr_hold_steps=1500` is too short for the top radical `blocks0` controllers on the `512M` screen
-- current best tested `512M` screening hold is `3500`, and the next confirmation candidate for the `1B` budget is the proportional transfer `7000`
+- current working schedule defaults are `3500` for the `512M` screen and `7000` for the `1B` contract
 
 ## Regression-To-Transformer Guardrail
 
@@ -219,6 +216,6 @@ That is also why schedule sweeps should start on the two best `blocks0` points, 
 ## Unresolved Questions
 
 - Which of the top contenders responds best to schedule tuning?
-- Does the `h3500 -> h7000` transfer hold up on the `1B` budget?
+- Does the same tuned hold help the `blocks1` guardrail family?
 - Does `blocks1 12x6` keep its slight edge over `blocks0 12x6` once both get a tuned schedule instead of the inherited default?
 - Does longer context help the `12x10` / `10x12` pair more than the cheaper `12x6` anchors?

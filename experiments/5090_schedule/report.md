@@ -3,9 +3,11 @@
 ## Status
 - Harness ready
 - Controller frontier is now stable enough to start schedule isolation
-- Phase 1 hold sweep and edge follow-up are complete on the two best completed `blocks0` `1B` controllers
-- The best tested `512M` screening hold is currently `3500` for both leaders
-- No fully promoted global default yet because `3500` is still screening evidence until the corresponding `1B` confirmation lands
+- Phase 1 hold sweep, edge follow-up, and `1B` hold confirmation are complete on the two best completed `blocks0` controllers
+- Working schedule defaults are now:
+  - `lr_hold_steps=3500` for the `4096`-step / `512M` screening contract
+  - `lr_hold_steps=7000` for the `8192`-step / `1B` contract
+- The tuned hold changed the top local ranking: `blocks0 10x12` is now ahead of `blocks0 12x10`
 
 ## What Was Verified
 - Warmup-hold-cosine is the real root schedule path.
@@ -63,6 +65,26 @@ What cannot yet be stated:
 - whether `h3500` is the right transferred hold for the `1B` budget
 - whether `min_lr` is too high or too low once hold is tuned farther out
 
+## 1B Hold Confirmation Result
+
+The proportional transfer held up and materially improved the two leading `blocks0` controllers.
+
+| Controller | inherited `h1500` @ `1B` | tuned `h7000` @ `1B` | Delta |
+|---|---:|---:|---:|
+| `blocks0 12x10` | `2.2113941366` | `2.1954688682` | `-0.0159252684` |
+| `blocks0 10x12` | `2.2128156660` | `2.1878016930` | `-0.0250139730` |
+
+Direct comparison at the tuned `1B` schedule:
+
+- `blocks0 10x12 h7000 1b = 2.1878016930`
+- `blocks0 12x10 h7000 1b = 2.1954688682`
+- `blocks0 10x12` now leads `blocks0 12x10` by about `0.00767` bpb
+
+Important systems note:
+
+- throughput stayed effectively unchanged relative to the inherited `1B` schedule runs
+- this is genuine optimization gain, not a speed artifact
+
 ## Phase 1 Screening Contract
 
 - same frozen structure: corrected full-dataset `blocks0` shared spec
@@ -105,7 +127,7 @@ blocks0_10x12_hold_screen_v1:
 
 ## Phase 2 Confirmation
 
-Because `4096` no-decay lost cleanly and `3500` won for both families, the next disciplined move is a budget-matched `1B` confirmation using the scaled hold:
+Because `4096` no-decay lost cleanly and `3500` won for both families, the next disciplined move was a budget-matched `1B` confirmation using the scaled hold:
 
 - `4096 -> 8192` total steps is an exact 2x step-budget increase
 - so the direct proportional transfer of `h3500` is `h7000`
@@ -118,11 +140,16 @@ blocks0_10x12_hold_confirm1b_v1:
   h7000 @ 1B
 ```
 
-Only after that `1B` confirmation lands should the next isolated sweeps move to `max_lr`, `warmup_steps`, `min_lr`, and `weight_decay`.
+That confirmation has now landed successfully.
+
+The next disciplined move is:
+
+- keep `h7000` as the working `1B` schedule default for this family
+- test the same tuned hold on the `blocks1` guardrail variants before touching frozen depth again
+- only after that move to `max_lr`, `warmup_steps`, `min_lr`, and `weight_decay`
 
 ## Questions This Sweep Should Answer
-- Does the `h3500 -> h7000` transfer hold up on the `1B` budget?
-- Does the same late-tail schedule remain best for both `12 x 10.0` and `10 x 12.0` after the budget change?
-- Is hold-then-cosine actually helping this recurrent-controller family?
-- Are we decaying too early for the chosen local token budget?
+- Does the same tuned hold help the `blocks1` guardrail family, or is the one-block frozen structure schedule-sensitive in a different way?
+- Does `blocks1 10x12 h7000` recover quality while preserving a nonzero amplifier block?
+- Is `max_lr=3e-3` still the right peak LR once the hold is fixed late?
 - Is the current `min_lr` floor too conservative?
