@@ -59,7 +59,7 @@ Do not change these unless the experiment explicitly studies that knob.
   - no attention-style changes
   - no token-token mixing
 
-## Phase A: Seed Confirmation
+## Phase A: Seed Confirmation And Structural Control
 
 This is the most important immediate next step because the current frontier change is still single-seed.
 
@@ -73,6 +73,18 @@ Preferred set:
 - `blocks1_resid10_e12_h7000_1b`
 - `blocks0_resid12_e10_h7000_1b`
 
+Add this structural comparison arm:
+
+- `blocks2_resid12_e8_h7000_1b`
+
+Important nuance:
+
+- `blocks2_resid12_e8_h7000_1b` is not a replay of an existing tuned `1B` result.
+- It is a promoted `blocks2` structural control arm because the strongest completed `blocks2` point on disk is still the `512M` `blocks2_resid12_e8_c8t1_r3_current_512m` screen.
+- That makes the widened batch a mix of:
+  - true multi-seed confirmation on `blocks0` and `blocks1`
+  - first fair tuned-`1B` structural comparison on `blocks2`
+
 Seed set:
 
 - `1337`
@@ -83,6 +95,7 @@ Success criteria:
 
 - if `blocks1 12x10` stays ahead on mean `val_bpb`, promote it from single-seed leader to working winner
 - if the lead collapses, keep `blocks0 10x12` as the lean default and treat `blocks1` as a promising but not yet stable branch
+- if `blocks2 12x8 h7000` lands unexpectedly close, keep `blocks2` alive as a real structural branch instead of closing the door on deeper frozen stacks too early
 
 ## Phase B: Max-LR Screen On The One-Block Family
 
