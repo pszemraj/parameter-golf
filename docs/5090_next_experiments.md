@@ -2,24 +2,29 @@
 
 Last updated: `2026-04-21`
 
-This note is the working next-step plan after the tuned-hold `blocks1` family finished and changed the single-seed local frontier.
+This note is the working next-step plan after the wide `blocks0` / `blocks1` / `blocks2` multi-seed confirmation finished.
 
 ## Frontier Snapshot
 
-Current best completed local points:
+Current best completed local points by three-seed mean:
 
-| Rank | Run | `val_bpb` | Steady tok/s | Artifact bytes | Note |
-|---|---|---:|---:|---:|---|
-| 1 | `blocks1_resid12_e10_h7000_1b` | `2.1831753851` | `374,227` | `4,791,890` | best completed single-seed point |
-| 2 | `blocks0_resid10_e12_h7000_1b` | `2.1878016930` | `384,758` | `3,899,812` | lean best-control point |
-| 3 | `blocks1_resid10_e12_h7000_1b` | `2.1935951525` | `372,809` | `4,790,848` | second one-block geometry |
-| 4 | `blocks0_resid12_e10_h7000_1b` | `2.1954688682` | `386,106` | `3,900,555` | close `blocks0` alternate |
-| 5 | `blocks1_resid12_e6_h7000_1b` | `2.2132622271` | `588,014` | `4,167,982` | best fast anchor |
+| Rank | Run | Mean `val_bpb` | Std | Mean steady tok/s | Mean artifact bytes | Note |
+|---|---|---:|---:|---:|---:|---|
+| 1 | `blocks1_resid10_e12_h7000_1b` | `2.1865341393` | `0.0052472581` | `372,888` | `4,790,559` | best mean; one-block quality rep |
+| 2 | `blocks1_resid12_e10_h7000_1b` | `2.1866023565` | `0.0051325073` | `374,271` | `4,791,951` | effectively tied with rank 1 |
+| 3 | `blocks0_resid12_e10_h7000_1b` | `2.1899359311` | `0.0039254056` | `386,331` | `3,945,168` | best zero-block control |
+| 4 | `blocks0_resid10_e12_h7000_1b` | `2.1947452986` | `0.0061822180` | `384,669` | `3,943,662` | earlier single-seed leader did not hold up |
+| 5 | `blocks2_resid12_e8_h7000_1b` | `2.2005760974` | `0.0018741094` | `442,062` | `5,326,970` | fastest and most stable structural control |
 
 Main takeaways:
 
-- one frozen amplifier block is now competitive enough to be the current single-seed winner
-- the late hold is helping both `blocks0` and `blocks1`
+- the two `blocks1` geometries are effectively tied on mean:
+  - `12x10 - 10x12 = +0.0000682172` bpb
+- the best zero-block representative is now `blocks0 12x10`, not `blocks0 10x12`
+- `blocks2 12x8` is behind on quality but still matters:
+  - fastest of the confirmed structural reps
+  - lowest seed variance in the batch
+- the known schedule lever is still larger than the remaining architecture gaps
 - this is still not a transformer drift story:
   - no attention
   - no token-token mixing
@@ -40,14 +45,17 @@ Do not change these unless the experiment explicitly studies that knob.
   - `branch_temporal_mode=current`
 - screening contract:
   - `seq_len=512`
-  - effective step tokens `= 131,072`
+  - `TARGET_EFFECTIVE_STEP_TOKENS=131072`
   - `4096` steps = `512M` tokens
-  - `lr_hold_steps=3500`
+  - `VAL_EVERY=256`
+  - `VAL_STEPS=8`
+  - `LOG_EVERY=64`
+  - `LOG_STATE_EVERY=256`
+  - `SAVE_EVERY=2048`
 - confirmation contract:
   - `seq_len=512`
-  - effective step tokens `= 131,072`
+  - `TARGET_EFFECTIVE_STEP_TOKENS=131072`
   - `8192` steps = `1B` tokens
-  - `lr_hold_steps=7000`
 - optimization defaults until explicitly changed:
   - `max_lr=3e-3`
   - `min_lr=3e-4`
@@ -59,82 +67,68 @@ Do not change these unless the experiment explicitly studies that knob.
   - no attention-style changes
   - no token-token mixing
 
-## Phase A: Seed Confirmation And Structural Control
+## Phase A: Hold-Transfer Retune Screen
 
-This is the most important immediate next step because the current frontier change is still single-seed.
+This is the highest-value immediate next step because the wide confirmation showed that:
+
+- `blocks1` is best on mean, but its two controller geometries are still tied
+- `blocks2` has never had a proper hold screen on the same disciplined contract
+- schedule moved quality more than the current architecture gaps
 
 Convenience launcher:
 
-- `bash scripts/run_5090_wide_confirm.sh`
-- optional overrides:
-  - `SEEDS="1337 2027 3141"`
-  - `RUN_BLOCKS2=0` to skip the structural control arm
-  - `DRY_RUN=1` to print commands without launching training
+- `bash scripts/run_5090_schedule_retune.sh`
+- useful overrides:
+  - `SEEDS="1337 2027"`
+  - `HOLDS="2500 3500 4096"`
+  - `RUN_BLOCKS2=0`
+  - `DRY_RUN=1`
 
-Minimum set:
+Representative configs for this batch:
 
-- `blocks1_resid12_e10_h7000_1b`
-- `blocks0_resid10_e12_h7000_1b`
+- `blocks1_resid10_e12`
+- `blocks0_resid12_e10`
+- `blocks2_resid12_e8`
 
-Preferred set:
+Why these reps:
 
-- `blocks1_resid10_e12_h7000_1b`
-- `blocks0_resid12_e10_h7000_1b`
+- `blocks1 10x12` has the best three-seed mean and slightly smaller artifact bytes than `blocks1 12x10`
+- `blocks0 12x10` is now the best zero-block control on mean
+- `blocks2 12x8` is the fairest surviving two-block structural control
 
-Add this structural comparison arm:
+Grid:
 
-- `blocks2_resid12_e8_h7000_1b`
-
-Important nuance:
-
-- `blocks2_resid12_e8_h7000_1b` is not a replay of an existing tuned `1B` result.
-- It is a promoted `blocks2` structural control arm because the strongest completed `blocks2` point on disk is still the `512M` `blocks2_resid12_e8_c8t1_r3_current_512m` screen.
-- That makes the widened batch a mix of:
-  - true multi-seed confirmation on `blocks0` and `blocks1`
-  - first fair tuned-`1B` structural comparison on `blocks2`
-
-Seed set:
-
-- `1337`
-- `2027`
-- `3141`
+- seeds: `1337`, `2027`
+- holds: `2500`, `3500`, `4096`
 
 Success criteria:
 
-- if `blocks1 12x10` stays ahead on mean `val_bpb`, promote it from single-seed leader to working winner
-- if the lead collapses, keep `blocks0 10x12` as the lean default and treat `blocks1` as a promising but not yet stable branch
-- if `blocks2 12x8 h7000` lands unexpectedly close, keep `blocks2` alive as a real structural branch instead of closing the door on deeper frozen stacks too early
+- keep the best hold per representative by two-seed mean `val_bpb`
+- if `blocks2` closes to within about `0.006` bpb of the best rep, keep it fully alive
+- if `4096` wins on any rep, confirm that at `1B` before assuming the no-decay edge generalizes
 
-## Phase B: Max-LR Screen On The One-Block Family
+## Phase B: Max-LR Screen
 
-Only do this after at least the top two runs above have multi-seed coverage.
+Only do this after the hold-transfer screen lands.
 
-Models:
+Use:
 
-- `blocks1 12x10`
-- `blocks1 10x12`
+- the best two representatives from Phase A
 
 Contract:
 
 - `512M`
-- `h3500`
+- best hold from Phase A per representative
 - same effective step tokens
-- one seed for broad screening
+- seeds `1337`, `2027`
 
 Grid:
 
 - `max_lr in {2.5e-3, 3.0e-3, 3.5e-3, 4.0e-3}`
 
-Reason:
-
-- `blocks1` is now the frontier family
-- `3e-3` was inherited from the earlier `blocks0`-centered schedule lane
-- the next disciplined question is whether the one-block winner wants a different peak LR
-
 Promotion rule:
 
-- rerun the best 2 `max_lr` points at `1B`
-- keep `blocks0 10x12` as the lean control when interpreting whether the gain is real or architecture-specific
+- only move forward points that beat the inherited `3e-3` setting clearly on mean `val_bpb`, or that tie while materially improving throughput or memory
 
 ## Phase C: Min-LR Follow-Up
 
@@ -142,7 +136,7 @@ Only do this after `max_lr` is narrowed.
 
 Primary target:
 
-- the best `blocks1` shape from Phase B
+- the best representative from Phase B
 
 Grid:
 
@@ -150,71 +144,61 @@ Grid:
 
 Keep fixed:
 
+- best hold from Phase A
+- best `max_lr` from Phase B
 - `warmup_steps=100`
 - `weight_decay=1e-3`
 
-Reason:
+## Phase D: 1B Confirmation
 
-- the late hold moved the optimum
-- the new leader may want a lower floor than the inherited `3e-4`
+Once the schedule lane is narrowed, rerun the top two tuned configs at:
 
-## Phase D: Controller-Up Neighborhood
+- `8192` steps
+- `1B` planned tokens
+- seeds `1337`, `2027`, `3141`
 
-Only do this after schedule tuning settles enough that we are not mixing controller and optimizer confounds.
+This is the batch that should decide the new working winner.
+
+## Phase E: Controller-Up Neighborhood
+
+Only do this after schedule tuning is no longer a confound.
 
 Primary points:
 
 - `blocks1 14x10`
 - `blocks1 12x12`
 
-Optional stretch if memory is acceptable:
+Optional stretch:
 
-- `blocks1 14x12`
+- `blocks2 12x10` if the tuned schedule keeps `blocks2` alive and memory remains comfortable
 
 Rules:
 
-- keep `num_blocks=1`
+- keep `num_blocks` fixed per family
 - keep `core_dim` fixed
-- use smaller local microbatch plus derived `grad_accum` if the 5090 needs it
-- turn on gradient checkpointing only if necessary, and keep it explicit in summaries
-
-Reason:
-
-- the user explicitly wants controller-only capacity before changing frozen width
-- these points push depth and width around the current `blocks1 12x10` winner without drifting toward a transformer
-
-## Phase E: Longer Context
-
-Only do this after schedule and controller shape are reasonably settled.
-
-Compare:
-
-- best tuned `blocks1` winner
-- `blocks0 10x12` as lean control
-
-Grid:
-
-- `seq_len in {768, 1024}`
-
-Rules:
-
-- match total train tokens
-- preserve the same effective-step-token discipline
-- report both quality and throughput
+- use smaller local microbatch plus derived `grad_accum` only if the 5090 needs it
+- turn on gradient checkpointing only if necessary and keep it explicit in summaries
 
 ## What Not To Do Next
 
-- do not add more frozen blocks before the one-block lane is exhausted
+- do not add more frozen blocks beyond `blocks2` yet
 - do not touch `core_dim` yet
 - do not re-open lag-heavy frozen temporal variants yet
 - do not add attention or token-token mixing
-- do not mix multi-seed confirmation and schedule screening into one noisy batch
+- do not mix schedule screening and controller-up architecture changes into one batch
 
 ## Practical Recommendation
 
 If only one experiment batch can be run next, make it this:
 
-1. three-seed confirmation of `blocks1_resid12_e10_h7000_1b`
-2. three-seed confirmation of `blocks0_resid10_e12_h7000_1b`
+1. `bash scripts/run_5090_schedule_retune.sh`
+2. keep the default reps:
+   - `blocks1 10x12`
+   - `blocks0 12x10`
+   - `blocks2 12x8`
+3. keep the default two-seed hold grid:
+   - `2500`
+   - `3500`
+   - `4096`
 
-That is the highest-value evidence upgrade available right now.
+That is the cleanest way to test whether the current `h7000` transfer is actually optimal for the true post-confirmation frontier.
