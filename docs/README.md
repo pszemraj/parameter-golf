@@ -1,6 +1,6 @@
 # HGDN Branch Status
 
-Last updated: 2026-04-21 10:05 EDT
+Last updated: 2026-04-21 03:01 EDT
 
 Branch: `exp/hgdn-k-core`
 
@@ -85,6 +85,16 @@ Branch: `exp/hgdn-k-core`
   - the structured launcher now accepts `--compile-strategy selective`
   - new tiebreak and naive-contract manifests include git commit, branch, host,
     timestamp, attention-backend flag, and distributed mode
+  - `cb026ab` (2026-04-21 07:01 UTC / 2026-04-21 03:01 EDT): packed trainer
+    distributed cleanup
+    - bucket replicated non-Muon grad averaging instead of launching one
+      `all_reduce` per replicated parameter in `parallel_muon` mode
+    - restore baseline-style Muon bank sharding on the DDP path instead of
+      computing every Muon bank on every rank
+    - align the exact-8x bridge helper with the same
+      `ATTN_USE_FLASH_ATTN3=1` / `DISTRIBUTED_MODE=parallel_muon` surface as the
+      tiebreak and naive helpers
+    - default exact-8x bridge/tiebreak helpers to `WANDB_WATCH=none`
 
 Exact 8x packed tiebreak:
 
@@ -92,6 +102,7 @@ Exact 8x packed tiebreak:
 USE_WANDB=1 WANDB_MODE=online \
 ATTN_USE_FLASH_ATTN3=1 \
 DISTRIBUTED_MODE=parallel_muon \
+WANDB_WATCH=none \
 RUN_PREFIX_BASE=h100packed_tiebreak \
 bash scripts/run_h100_hgdn_compile_tiebreak_round.sh
 ```
@@ -102,6 +113,7 @@ Naive-contract sanity batch:
 USE_WANDB=0 WANDB_MODE=offline \
 ATTN_USE_FLASH_ATTN3=1 \
 DISTRIBUTED_MODE=parallel_muon \
+WANDB_WATCH=none \
 RUN_PREFIX_BASE=h100naive1 \
 bash scripts/run_h100_hgdn_naive_contract_round.sh
 ```

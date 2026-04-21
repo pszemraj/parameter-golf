@@ -26,7 +26,7 @@ import time
 import uuid
 import zlib
 import atexit
-from contextlib import AbstractContextManager
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Callable, cast
 
@@ -73,19 +73,6 @@ try:
 except ImportError:
     _USE_WANDB = False
     wandb = None
-
-
-class _NoOpContext(AbstractContextManager[None]):
-    """Shared no-op context to avoid per-call nullcontext allocation."""
-
-    def __enter__(self) -> None:
-        return None
-
-    def __exit__(self, exc_type, exc, tb) -> None:
-        return None
-
-
-_NOOP_CONTEXT = _NoOpContext()
 
 
 # =====================================================================
@@ -1097,11 +1084,10 @@ def main() -> None:
         args, args.run_id, master_process
     )
     profile_ctx: Callable[[str], Any]
-    no_profile_ctx = _NOOP_CONTEXT
     profile_ctx = (
         torch.autograd.profiler.record_function
         if args.profile
-        else lambda _n: no_profile_ctx
+        else lambda _n: nullcontext()
     )
 
     # ── wandb init ────────────────────────────────────────────────────

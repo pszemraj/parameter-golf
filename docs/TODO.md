@@ -1,6 +1,6 @@
 # HGDN Next Steps
 
-Last updated: 2026-04-21 10:35 EDT
+Last updated: 2026-04-21 03:01 EDT
 
 ## 1. Re-run the exact 8x packed HGDN tiebreak on the patched surface
 
@@ -18,6 +18,12 @@ Last updated: 2026-04-21 10:35 EDT
   - `DISTRIBUTED_MODE=parallel_muon`
   - hard FLA fast-path preflight
   - manifest provenance fields
+  - `cb026ab` distributed-runtime cleanup:
+    - bucketed replicated-grad all-reduces in `parallel_muon`
+    - baseline-style Muon bank sharding restored on the DDP path
+    - bridge helper aligned with the same FA3 / distributed flags as the other
+      exact-8x helpers
+    - exact-8x bridge/tiebreak helpers default to `WANDB_WATCH=none`
 - Do not kill `selective` yet. Re-run the exact `8xH100` packed-HGDN tiebreak
   under the same live14 finalist shell with the patched runtime surface:
 
@@ -25,6 +31,7 @@ Last updated: 2026-04-21 10:35 EDT
 USE_WANDB=1 WANDB_MODE=online \
 ATTN_USE_FLASH_ATTN3=1 \
 DISTRIBUTED_MODE=parallel_muon \
+WANDB_WATCH=none \
 RUN_PREFIX_BASE=h100packed_tiebreak \
 bash scripts/run_h100_hgdn_compile_tiebreak_round.sh
 ```
@@ -58,6 +65,7 @@ bash scripts/run_h100_hgdn_compile_tiebreak_round.sh
 USE_WANDB=0 WANDB_MODE=offline \
 ATTN_USE_FLASH_ATTN3=1 \
 DISTRIBUTED_MODE=parallel_muon \
+WANDB_WATCH=none \
 RUN_PREFIX_BASE=h100naive1 \
 bash scripts/run_h100_hgdn_naive_contract_round.sh
 ```
@@ -89,6 +97,9 @@ bash scripts/run_h100_hgdn_naive_contract_round.sh
   - `--compile-strategy selective` in the structured launcher
   - W&B-off default for the naive-contract helper
   - helper manifests with git/branch/host/timestamp/attention/distributed fields
+  - bucketed replicated-grad sync for the non-Muon params in `parallel_muon`
+  - baseline-style Muon bank sharding on the DDP path
+  - `WANDB_WATCH=none` default on the exact-8x bridge and tiebreak helpers
 - Use explicit overrides instead of changing shared defaults again when running
   controlled comparisons.
 
@@ -117,6 +128,8 @@ bash scripts/run_h100_hgdn_naive_contract_round.sh
 - `2026-04-21 06:15 UTC`: first exact `8xH100` packed tiebreak and first fair
   naive-contract sanity batch. Those runs are now historical references, not
   the final patched-runtime answer.
+- `cb026ab` (2026-04-21 07:01 UTC / 2026-04-21 03:01 EDT): packed distributed
+  runtime cleanup before the next exact-8x rerun.
 
 ## References
 

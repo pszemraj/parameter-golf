@@ -1,6 +1,6 @@
 # HGDN Packed Drift Audit
 
-Last updated: 2026-04-21 10:35 EDT
+Last updated: 2026-04-21 03:01 EDT
 
 Branch: `exp/hgdn-k-core`
 
@@ -212,6 +212,13 @@ Active packed-path changes after the core split:
      `USE_WANDB=0` / `WANDB_WATCH=none`
    - record git/branch/host/timestamp plus attention/distributed settings in
      the exact-8x helper manifests
+11. `cb026ab` (2026-04-21 07:01 UTC / 2026-04-21 03:01 EDT)
+   - bucket replicated non-Muon grad averaging in `parallel_muon` mode instead
+     of one `all_reduce` per replicated parameter
+   - restore baseline-style Muon bank sharding on the DDP path so distributed
+     HGDN no longer computes every Muon bank on every rank
+   - align the exact-8x bridge helper with the same FA3 / distributed flags and
+     `WANDB_WATCH=none` default already used by the tiebreak path
 
 ## Current branch changes that do not count as packed drift
 
@@ -296,6 +303,7 @@ for the exact `8xH100` packed compile tiebreak:
 USE_WANDB=1 WANDB_MODE=online \
 ATTN_USE_FLASH_ATTN3=1 \
 DISTRIBUTED_MODE=parallel_muon \
+WANDB_WATCH=none \
 RUN_PREFIX_BASE=h100packed_tiebreak \
 bash scripts/run_h100_hgdn_compile_tiebreak_round.sh
 ```
