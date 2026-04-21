@@ -63,6 +63,14 @@ Do not change these unless the experiment explicitly studies that knob.
 
 This is the most important immediate next step because the current frontier change is still single-seed.
 
+Convenience launcher:
+
+- `bash scripts/run_5090_wide_confirm.sh`
+- optional overrides:
+  - `SEEDS="1337 2027 3141"`
+  - `RUN_BLOCKS2=0` to skip the structural control arm
+  - `DRY_RUN=1` to print commands without launching training
+
 Minimum set:
 
 - `blocks1_resid12_e10_h7000_1b`
