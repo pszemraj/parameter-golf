@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import os
-from contextlib import AbstractContextManager, nullcontext
+from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -83,6 +83,19 @@ def attention_backend_name() -> str:
     return "sdpa_flash"
 
 
+class _NoOpContext(AbstractContextManager[None]):
+    """Shared no-op context to avoid per-call nullcontext allocation."""
+
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        return None
+
+
+_NOOP_CONTEXT = _NoOpContext()
+
+
 def profile_range(name: str) -> AbstractContextManager[None]:
     """Return a profiling context manager when range capture is enabled.
 
@@ -91,7 +104,7 @@ def profile_range(name: str) -> AbstractContextManager[None]:
     """
     if _PROFILE_RANGES:
         return torch.autograd.profiler.record_function(name)
-    return nullcontext()
+    return _NOOP_CONTEXT
 
 
 def _tensor_layout_summary(name: str, tensor: Tensor) -> str:

@@ -340,6 +340,14 @@ def cmd_write_h100_bridge_manifest(args: argparse.Namespace) -> int:
             "openblas_num_threads": args.openblas_num_threads,
             "numexpr_num_threads": args.numexpr_num_threads,
             "nccl_ib_disable": args.nccl_ib_disable,
+            "attn_use_flash_attn3": args.attn_use_flash_attn3,
+            "distributed_mode": args.distributed_mode,
+        },
+        "provenance": {
+            "git_commit": args.git_commit,
+            "git_branch": args.git_branch,
+            "host_name": args.host_name,
+            "timestamp_utc": args.timestamp_utc,
         },
         "runs": [
             {
@@ -707,6 +715,10 @@ def build_parser() -> argparse.ArgumentParser:
     h100_bridge.add_argument("--mkl-num-threads", type=int, required=True)
     h100_bridge.add_argument("--openblas-num-threads", type=int, required=True)
     h100_bridge.add_argument("--numexpr-num-threads", type=int, required=True)
+    h100_bridge.add_argument(
+        "--attn-use-flash-attn3", type=parse_bool_flag, required=True
+    )
+    h100_bridge.add_argument("--distributed-mode", required=True)
     h100_bridge.add_argument("--ngpu", type=int, required=True)
     h100_bridge.add_argument("--iterations", type=int, required=True)
     h100_bridge.add_argument("--train-batch-tokens", type=int, required=True)
@@ -722,6 +734,10 @@ def build_parser() -> argparse.ArgumentParser:
     h100_bridge.add_argument("--hgdn-kernel-config", required=True)
     h100_bridge.add_argument("--hgdn-run-id", required=True)
     h100_bridge.add_argument("--attn-run-id", required=True)
+    h100_bridge.add_argument("--git-commit", default="")
+    h100_bridge.add_argument("--git-branch", default="")
+    h100_bridge.add_argument("--host-name", default="")
+    h100_bridge.add_argument("--timestamp-utc", default="")
     h100_bridge.set_defaults(func=cmd_write_h100_bridge_manifest)
 
     h100_resize = subparsers.add_parser(

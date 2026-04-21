@@ -26,7 +26,7 @@ import time
 import uuid
 import zlib
 import atexit
-from contextlib import nullcontext
+from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Any, Callable, cast
 
@@ -73,6 +73,19 @@ try:
 except ImportError:
     _USE_WANDB = False
     wandb = None
+
+
+class _NoOpContext(AbstractContextManager[None]):
+    """Shared no-op context to avoid per-call nullcontext allocation."""
+
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        return None
+
+
+_NOOP_CONTEXT = _NoOpContext()
 
 
 # =====================================================================
@@ -592,6 +605,7 @@ class Muon(torch.optim.Optimizer):
         self._rank = dist.get_rank() if self._distributed else 0
         ws = self._world_size
         self._bank_meta: list[dict[str, object]] = []
+        total_numel = 0
         for group in self.param_groups:
             for param in group["params"]:
                 rows = int(param.shape[0])
@@ -599,10 +613,13 @@ class Muon(torch.optim.Optimizer):
                 shard_rows = padded_rows // ws
                 tail = tuple(param.shape[1:])
                 device = param.device
+                numel = int(param.numel())
                 self._bank_meta.append(
                     {
                         "p": param,
                         "rows": rows,
+                        "numel": numel,
+                        "offset": total_numel,
                         "padded_grad": torch.zeros(
                             padded_rows, *tail, device=device, dtype=torch.bfloat16
                         ),
@@ -618,7 +635,18 @@ class Muon(torch.optim.Optimizer):
                         "scale": max(1, param.shape[-2] / param.shape[-1]) ** 0.5,
                     }
                 )
+                total_numel += numel
         self._bank_meta.sort(key=lambda meta: -cast(Tensor, meta["p"]).numel())
+        if self._bank_meta:
+            offset = 0
+            for meta in self._bank_meta:
+                meta["offset"] = offset
+                offset += cast(int, meta["numel"])
+            self._packed_updates = torch.zeros(
+                offset,
+                device=cast(Tensor, self._bank_meta[0]["p"]).device,
+                dtype=torch.bfloat16,
+            )
         self._built = True
 
     def launch_reduce_scatters(self) -> None:
@@ -672,6 +700,39 @@ class Muon(torch.optim.Optimizer):
             prev_ag_handle: dist.Work | None = None
             prev_meta: dict[str, object] | None = None
             sharded = self._distributed and hasattr(self, "_rs_futures")
+            packed_distributed = self._distributed and not sharded
+
+            if packed_distributed:
+                packed_updates = self._packed_updates
+                packed_updates.zero_()
+                for index, meta in enumerate(self._bank_meta):
+                    param = cast(Tensor, meta["p"])
+                    if index % self._world_size != self._rank or param.grad is None:
+                        continue
+                    grad = param.grad
+                    state = self.state[param]
+                    if "momentum_buffer" not in state:
+                        state["momentum_buffer"] = torch.zeros_like(grad)
+                    buf = cast(Tensor, state["momentum_buffer"])
+                    buf.mul_(momentum).add_(grad)
+                    update = grad.add(buf, alpha=momentum) if nesterov else buf
+                    update = zeropower_via_newtonschulz5(update, steps=backend_steps)
+                    offset = cast(int, meta["offset"])
+                    numel = cast(int, meta["numel"])
+                    packed_updates[offset : offset + numel].copy_(update.reshape(-1))
+                dist.all_reduce(packed_updates, op=dist.ReduceOp.SUM)
+                for meta in self._bank_meta:
+                    param = cast(Tensor, meta["p"])
+                    if wd > 0.0:
+                        param.data.mul_(1.0 - lr * wd)
+                    offset = cast(int, meta["offset"])
+                    numel = cast(int, meta["numel"])
+                    update = packed_updates[offset : offset + numel].view_as(param)
+                    param.add_(
+                        update.to(dtype=param.dtype),
+                        alpha=-lr * cast(float, meta["scale"]),
+                    )
+                continue
 
             for index, meta in enumerate(self._bank_meta):
                 param = cast(Tensor, meta["p"])
@@ -735,6 +796,99 @@ class Muon(torch.optim.Optimizer):
         if hasattr(self, "_rs_futures"):
             del self._rs_futures
         return loss
+
+
+class ReplicatedGradSync:
+    """Bucket replicated grads so non-Muon sync uses fewer NCCL collectives."""
+
+    def __init__(self, params: list[Tensor]):
+        """Initialize the replicated-gradient synchronization helper.
+
+        :param list[Tensor] params: Replicated parameters whose grads must be averaged.
+        """
+        self._params = [param for param in params if param.requires_grad]
+        self._built = False
+
+    def _build(self) -> None:
+        self._distributed = dist.is_available() and dist.is_initialized()
+        self._buckets: list[dict[str, object]] = []
+        if not self._distributed or not self._params:
+            self._built = True
+            return
+        seen: set[tuple[torch.device, torch.dtype]] = set()
+        ordered_keys: list[tuple[torch.device, torch.dtype]] = []
+        for param in self._params:
+            key = (param.device, param.dtype)
+            if key in seen:
+                continue
+            seen.add(key)
+            ordered_keys.append(key)
+        for key in ordered_keys:
+            bucket_params = [
+                param for param in self._params if (param.device, param.dtype) == key
+            ]
+            bucket_params.sort(key=lambda param: -param.numel())
+            total_numel = sum(int(param.numel()) for param in bucket_params)
+            if total_numel <= 0:
+                continue
+            self._buckets.append(
+                {
+                    "params": bucket_params,
+                    "flat": torch.empty(
+                        total_numel,
+                        device=key[0],
+                        dtype=key[1],
+                    ),
+                }
+            )
+        self._built = True
+
+    def launch_all_reduces(self) -> None:
+        """Pack available grads into flat buckets and launch async all-reduces."""
+        if not self._built:
+            self._build()
+        self._pending: list[dict[str, object]] = []
+        if not self._distributed:
+            return
+        for bucket in self._buckets:
+            flat = cast(Tensor, bucket["flat"])
+            active: list[tuple[Tensor, int, int]] = []
+            offset = 0
+            for param in cast(list[Tensor], bucket["params"]):
+                grad = param.grad
+                if grad is None:
+                    continue
+                numel = int(grad.numel())
+                flat[offset : offset + numel].copy_(grad.reshape(-1))
+                active.append((grad, offset, numel))
+                offset += numel
+            if offset <= 0:
+                continue
+            work = dist.all_reduce(
+                flat[:offset],
+                op=dist.ReduceOp.AVG,
+                async_op=True,
+            )
+            self._pending.append(
+                {
+                    "work": work,
+                    "flat": flat,
+                    "active": active,
+                }
+            )
+
+    def wait(self) -> None:
+        """Wait for in-flight all-reduces and unpack averaged grads in-place."""
+        if not hasattr(self, "_pending"):
+            return
+        for item in self._pending:
+            cast(dist.Work, item["work"]).wait()
+            flat = cast(Tensor, item["flat"])
+            for grad, offset, numel in cast(
+                list[tuple[Tensor, int, int]], item["active"]
+            ):
+                grad.copy_(flat[offset : offset + numel].view_as(grad))
+        self._pending.clear()
 
 
 # =====================================================================
@@ -943,10 +1097,11 @@ def main() -> None:
         args, args.run_id, master_process
     )
     profile_ctx: Callable[[str], Any]
+    no_profile_ctx = _NOOP_CONTEXT
     profile_ctx = (
         torch.autograd.profiler.record_function
         if args.profile
-        else lambda _n: nullcontext()
+        else lambda _n: no_profile_ctx
     )
 
     # ── wandb init ────────────────────────────────────────────────────
@@ -1314,11 +1469,13 @@ def main() -> None:
         )
         optimizers.insert(1, optimizer_head)
     replicated_params: list[Tensor] = []
+    replicated_grad_sync = None
     if use_parallel_muon_distributed:
         replicated_params.extend(optimizer_tok.param_groups[0]["params"])
         replicated_params.extend(scalar_params)
         if optimizer_head is not None:
             replicated_params.extend(optimizer_head.param_groups[0]["params"])
+        replicated_grad_sync = ReplicatedGradSync(replicated_params)
 
     muon_prewarm_count = 0
     if args.compile and device.type == "cuda":
@@ -1347,10 +1504,10 @@ def main() -> None:
     def apply_optimizer_step() -> None:
         """Step optimizers using the active distributed synchronization strategy."""
         if use_parallel_muon_distributed:
+            assert replicated_grad_sync is not None
+            replicated_grad_sync.launch_all_reduces()
             optimizer_muon.launch_reduce_scatters()
-            for param in replicated_params:
-                if param.grad is not None:
-                    dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
+            replicated_grad_sync.wait()
             optimizer_tok.step()
             optimizer_scalar.step()
             if optimizer_head is not None:

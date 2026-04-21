@@ -18,7 +18,7 @@ python_bin="${PYTHON_BIN:-python}"
 use_wandb="${USE_WANDB:-1}"
 wandb_mode="${WANDB_MODE:-online}"
 wandb_project="${WANDB_PROJECT:-pg-hgdn-ablations}"
-wandb_watch="${WANDB_WATCH:-gradients}"
+wandb_watch="${WANDB_WATCH:-none}"
 wandb_watch_log_freq="${WANDB_WATCH_LOG_FREQ:-100}"
 run_prefix_base="${RUN_PREFIX_BASE:-h100bridge1}"
 bundle_stage_dir="${BUNDLE_STAGE_DIR:-local-scratch/${run_prefix_base}_bundle}"
@@ -44,6 +44,12 @@ max_wallclock_seconds="${MAX_WALLCLOCK_SECONDS:-600}"
 compile="${COMPILE:-1}"
 compile_strategy="${COMPILE_STRATEGY:-hybrid}"
 depth_mlp_mult="${DEPTH_MLP_MULT:-4.0}"
+attn_use_flash_attn3="${ATTN_USE_FLASH_ATTN3:-1}"
+distributed_mode="${DISTRIBUTED_MODE:-parallel_muon}"
+git_commit="$(git rev-parse HEAD)"
+git_branch="$(git rev-parse --abbrev-ref HEAD)"
+host_name="$(hostname)"
+timestamp_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 hgdn_config="${HGDN_CONFIG:-configs/hgdn/retune_trim_layers_14.toml}"
 hgdn_kernel_config="${HGDN_KERNEL_CONFIG:-configs/hgdn/winner_20260405_19_live14.toml}"
@@ -92,6 +98,8 @@ print_plan() {
     echo "val_batch_size=${val_batch_size}"
     echo "compile=${compile}"
     echo "compile_strategy=${compile_strategy}"
+    echo "attn_use_flash_attn3=${attn_use_flash_attn3}"
+    echo "distributed_mode=${distributed_mode}"
     echo "max_wallclock_seconds=${max_wallclock_seconds}"
     echo "hgdn_config=${hgdn_config}"
     echo "hgdn_kernel_config=${hgdn_kernel_config}"
@@ -157,6 +165,8 @@ run_bridge() {
         "${diagnostic_env[@]}" \
         "COMPILE=${compile}" \
         "COMPILE_STRATEGY=${compile_strategy}" \
+        "ATTN_USE_FLASH_ATTN3=${attn_use_flash_attn3}" \
+        "DISTRIBUTED_MODE=${distributed_mode}" \
         "RUN_ID=${hgdn_run_id}" \
         "ITERATIONS=${iterations}" \
         "MAX_WALLCLOCK_SECONDS=${max_wallclock_seconds}" \
@@ -184,6 +194,8 @@ run_bridge() {
         "${diagnostic_env[@]}" \
         "COMPILE=${compile}" \
         "COMPILE_STRATEGY=${compile_strategy}" \
+        "ATTN_USE_FLASH_ATTN3=${attn_use_flash_attn3}" \
+        "DISTRIBUTED_MODE=${distributed_mode}" \
         "RUN_ID=${hgdn_run_id}" \
         "ITERATIONS=${iterations}" \
         "MAX_WALLCLOCK_SECONDS=${max_wallclock_seconds}" \
@@ -211,6 +223,8 @@ run_bridge() {
         "${diagnostic_env[@]}" \
         "COMPILE=${compile}" \
         "COMPILE_STRATEGY=${compile_strategy}" \
+        "ATTN_USE_FLASH_ATTN3=${attn_use_flash_attn3}" \
+        "DISTRIBUTED_MODE=${distributed_mode}" \
         "RUN_ID=${attn_run_id}" \
         "ITERATIONS=${iterations}" \
         "MAX_WALLCLOCK_SECONDS=${max_wallclock_seconds}" \
@@ -238,6 +252,8 @@ run_bridge() {
         "${diagnostic_env[@]}" \
         "COMPILE=${compile}" \
         "COMPILE_STRATEGY=${compile_strategy}" \
+        "ATTN_USE_FLASH_ATTN3=${attn_use_flash_attn3}" \
+        "DISTRIBUTED_MODE=${distributed_mode}" \
         "RUN_ID=${attn_run_id}" \
         "ITERATIONS=${iterations}" \
         "MAX_WALLCLOCK_SECONDS=${max_wallclock_seconds}" \
@@ -284,6 +300,8 @@ build_bundle() {
         --mkl-num-threads "${mkl_num_threads}" \
         --openblas-num-threads "${openblas_num_threads}" \
         --numexpr-num-threads "${numexpr_num_threads}" \
+        --attn-use-flash-attn3 "${attn_use_flash_attn3}" \
+        --distributed-mode "${distributed_mode}" \
         --ngpu "${ngpu}" \
         --iterations "${iterations}" \
         --train-batch-tokens "${train_batch_tokens}" \
@@ -298,7 +316,11 @@ build_bundle() {
         --hgdn-config "${hgdn_config}" \
         --hgdn-kernel-config "${hgdn_kernel_config}" \
         --hgdn-run-id "${hgdn_run_id}" \
-        --attn-run-id "${attn_run_id}"
+        --attn-run-id "${attn_run_id}" \
+        --git-commit "${git_commit}" \
+        --git-branch "${git_branch}" \
+        --host-name "${host_name}" \
+        --timestamp-utc "${timestamp_utc}"
 
     hgdn_create_7z_archive "${python_bin}" "${archive_output}" "${bundle_stage_dir}"
     echo "bundle_archive=${archive_output}"
