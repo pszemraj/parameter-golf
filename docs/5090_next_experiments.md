@@ -30,6 +30,22 @@ Main takeaways:
   - no token-token mixing
   - still parallel minGRU over a frozen statistical basis
 
+## Go-Forward Training Budget Policy
+
+This is the working iteration policy for this family.
+
+- full-dataset frozen spec/statistics build is always required
+- `512M` is the default serious screening budget
+- `1B` is the confirmation budget for finalists and stronger claims
+- below `512M` is only for smoke tests, wiring checks, or obvious loser screens
+- any `512M` result should be labeled as screening unless it is later confirmed at `1B`
+
+Reason:
+
+- the full-dataset spec build materially changed conclusions, so that part is non-negotiable
+- the finished schedule work shows that `512M` is long enough to be directionally useful
+- the finished wide confirmation also shows that close architecture rankings can move around, so the final calls still need `1B`
+
 ## Locked Comparison Contract
 
 Do not change these unless the experiment explicitly studies that knob.

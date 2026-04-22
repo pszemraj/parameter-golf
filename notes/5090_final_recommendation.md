@@ -24,6 +24,11 @@
   - the two `blocks1` finalists are effectively tied on mean
   - `blocks0 12x10` is now the best zero-block control
   - `blocks2 12x8` is slower on quality but remains the fastest and most seed-stable structural control
+- Go-forward training-budget policy is now explicit:
+  - full-dataset frozen spec build always
+  - `512M` for serious screening
+  - `1B` for confirmations and stronger claims
+  - shorter than `512M` only for smoke or harness checks
 
 ## Top 3 Current Contenders
 

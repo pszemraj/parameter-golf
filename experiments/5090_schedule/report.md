@@ -10,6 +10,19 @@
   - `lr_hold_steps=7000` for the `8192`-step / `1B` contract
 - Those defaults are now proven for the old `blocks0` lane, but they are not yet fully revalidated on the true post-confirmation frontier.
 
+## Training Budget Policy
+
+- Full-dataset frozen spec/statistics build is mandatory.
+- `512M` is the default schedule-screening budget.
+- `1B` is the confirmation budget for the winning schedule points.
+- Anything shorter than `512M` is only for smoke tests or obvious harness checks.
+
+This is the current best speed/rigor compromise:
+
+- `512M` was predictive enough to move the hold default in the earlier `blocks0` lane.
+- `1B` confirmation then proved that the gain was real.
+- Close post-confirmation rankings are now small enough that the final claims still need the `1B` pass.
+
 ## What Was Verified
 
 - Warmup-hold-cosine is the real root schedule path.
@@ -96,6 +109,9 @@ Contract:
 - `TORCH_BLAS_PREFER_CUBLASLT=1`
 - seeds `1337`, `2027`
 - `lr_hold_steps in {2500, 3500, 4096}`
+
+This batch should be interpreted as screening only.
+Only the winning hold settings should be promoted to the `1B` contract for stronger claims.
 
 Convenience launcher:
 
