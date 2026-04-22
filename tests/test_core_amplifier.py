@@ -26,6 +26,7 @@ from core_amplifier_lm.model import (
     _count_unigrams,
 )
 from core_amplifier_lm.spec_builder import count_all
+from train_core_amplifier import mmap_train_val
 
 VOCAB = 256
 LAGS = (1, 2, 4, 8)
@@ -54,6 +55,21 @@ def _make_shard_dir(tmpdir: Path) -> tuple[np.ndarray, Path]:
         offset = end
         idx += 1
     tokens[train_split:].astype(np.uint16).tofile(shard_dir / "fineweb_val_000000.bin")
+    return tokens, shard_dir
+
+
+def _make_train_only_shard_dir(tmpdir: Path) -> tuple[np.ndarray, Path]:
+    """Create a fineweb-style shard directory without validation shards."""
+    rng = np.random.default_rng(SEED)
+    tokens = rng.integers(0, VOCAB, size=TOTAL, dtype=np.int32)
+    shard_dir = tmpdir / "train_only_shards"
+    shard_dir.mkdir()
+    offset, idx = 0, 0
+    while offset < TOTAL:
+        end = min(offset + 12_000, TOTAL)
+        tokens[offset:end].astype(np.uint16).tofile(shard_dir / f"fineweb_train_{idx:06d}.bin")
+        offset = end
+        idx += 1
     return tokens, shard_dir
 
 
@@ -425,6 +441,48 @@ def test_train_val_split():
             np.int32
         )
         assert np.array_equal(val, val_direct)
+
+
+def test_train_val_split_requires_explicit_val_shard():
+    """Directory fineweb shards should fail without the provided validation shard."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir = Path(tmpdir)
+        _, shard_dir = _make_train_only_shard_dir(tmpdir)
+        try:
+            load_train_val_int32(shard_dir, storage_dtype="uint16")
+        except FileNotFoundError as exc:
+            assert "fineweb_val_*" in str(exc)
+        else:
+            raise AssertionError("expected explicit validation shard requirement")
+
+
+def test_train_val_split_can_fallback_when_explicitly_allowed():
+    """Train-split fallback should require an explicit opt-in."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir = Path(tmpdir)
+        tokens, shard_dir = _make_train_only_shard_dir(tmpdir)
+        train, val = load_train_val_int32(
+            shard_dir,
+            storage_dtype="uint16",
+            allow_train_frac_val_split=True,
+        )
+        split = int(TOTAL * 0.98)
+        split = max(1, min(TOTAL - 1, split))
+        assert np.array_equal(train, tokens[:split].astype(np.int32))
+        assert np.array_equal(val, tokens[split:].astype(np.int32))
+
+
+def test_mmap_train_val_requires_explicit_val_shard():
+    """Mmap loader should also reject train-only shard directories by default."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir = Path(tmpdir)
+        _, shard_dir = _make_train_only_shard_dir(tmpdir)
+        try:
+            mmap_train_val(shard_dir, storage_dtype="uint16", verbose=False)
+        except FileNotFoundError as exc:
+            assert "fineweb_val_*" in str(exc)
+        else:
+            raise AssertionError("expected explicit validation shard requirement")
 
 
 def test_spec_save_load_roundtrip():

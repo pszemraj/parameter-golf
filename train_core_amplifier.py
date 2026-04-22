@@ -678,6 +678,7 @@ def mmap_train_val(
     *,
     storage_dtype: str = "uint16",
     train_frac: float = 0.98,
+    allow_train_frac_val_split: bool = False,
     max_tokens: Optional[int] = None,
     cache_dir: Optional[str | Path] = None,
     verbose: bool = True,
@@ -687,6 +688,8 @@ def mmap_train_val(
     :param str | Path source: Data source path.
     :param str storage_dtype: On-disk integer dtype for raw files.
     :param float train_frac: Train split fraction for single-file fallback.
+    :param bool allow_train_frac_val_split: Whether directory data may fall back
+        to splitting train tokens when explicit validation shards are missing.
     :param Optional[int] max_tokens: Optional token cap.
     :param Optional[str | Path] cache_dir: Optional mmap cache directory.
     :param bool verbose: Whether to print loading progress.
@@ -700,6 +703,13 @@ def mmap_train_val(
         if not train_shards:
             train_shards = sorted(p.glob("*.bin"))
             val_shards = []
+        elif not val_shards and not allow_train_frac_val_split:
+            raise FileNotFoundError(
+                f"{p} has fineweb_train_* shards but no fineweb_val_* shards. "
+                "Official-style runs must use the provided validation shard. "
+                "For a deliberate local smoke fallback, pass "
+                "--allow-train-frac-val-split."
+            )
 
         if not train_shards:
             raise FileNotFoundError(f"no .bin files in {p}")
@@ -1350,6 +1360,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--save-every", type=int, default=None)
     parser.add_argument("--log-every", type=int, default=None)
     parser.add_argument("--train-frac", type=float, default=None)
+    parser.add_argument("--allow-train-frac-val-split", action="store_true")
     parser.add_argument(
         "--storage-dtype", type=str, default=None, choices=["uint8", "uint16", "int32", "int64"]
     )
@@ -1556,6 +1567,8 @@ def build_resolved_config_payload(
     val_tokens_count: int,
     storage_dtype: str,
     train_frac: float,
+    allow_train_frac_val_split: bool,
+    validation_source: str,
     data_max_tokens: Optional[int],
     seq_len: int,
     batch_size: int,
@@ -1620,6 +1633,9 @@ def build_resolved_config_payload(
     :param int val_tokens_count: Validation token count.
     :param str storage_dtype: Storage dtype.
     :param float train_frac: Train split fraction.
+    :param bool allow_train_frac_val_split: Whether directory data may fall back
+        to splitting train tokens for validation.
+    :param str validation_source: Source of validation tokens.
     :param Optional[int] data_max_tokens: Optional token cap.
     :param int seq_len: Sequence length.
     :param int batch_size: Batch size.
@@ -1742,6 +1758,8 @@ def build_resolved_config_payload(
             "source": str(data_source),
             "storage_dtype": storage_dtype,
             "train_frac": float(train_frac),
+            "allow_train_frac_val_split": bool(allow_train_frac_val_split),
+            "validation_source": validation_source,
             "data_max_tokens": None if data_max_tokens is None else int(data_max_tokens),
             "train_tokens": int(train_tokens_count),
             "val_tokens": int(val_tokens_count),
@@ -1879,6 +1897,13 @@ def main() -> None:
 
     storage_dtype = _resolve(args.storage_dtype, cfg.data.get("storage_dtype"), "uint16")
     train_frac = _resolve(args.train_frac, cfg.data.get("train_frac"), 0.98)
+    allow_train_frac_val_split = bool(
+        _resolve(
+            args.allow_train_frac_val_split,
+            cfg.data.get("allow_train_frac_val_split"),
+            False,
+        )
+    )
     data_max_tokens = _resolve(args.data_max_tokens, cfg.data.get("max_tokens"), None)
 
     seq_len = _resolve(args.seq_len, t.get("seq_len"), td["seq_len"])
@@ -1972,6 +1997,7 @@ def main() -> None:
     print(f"  data: {data_source}")
     if data_max_tokens is not None:
         print(f"  data_max_tokens={int(data_max_tokens):,}")
+    print(f"  allow_train_frac_val_split={allow_train_frac_val_split}")
     print(
         f"  batch_size={batch_size} seq_len={seq_len} steps={num_steps} lr={learning_rate} "
         f"warmup={warmup_steps} hold={lr_hold_steps} min_lr={min_lr}"
@@ -2014,6 +2040,7 @@ def main() -> None:
     train_batcher: Optional[object] = None
     train_tokens_count = 0
     val_tokens_count = 0
+    validation_source = "unknown"
 
     train_shards, val_shards = _list_train_val_shards(data_source)
     use_direct_shard_streaming = (
@@ -2047,6 +2074,7 @@ def main() -> None:
         total_train = sum(int(arr.shape[0]) for arr in train_arrays)
         train_tokens_count = total_train
         val_tokens_count = int(val_tokens_np.shape[0])
+        validation_source = "explicit_val_shard"
         print(
             f"Direct shard streaming: {len(train_arrays)} train shard views | "
             f"train={total_train:,} | val={val_tokens_np.shape[0]:,}"
@@ -2057,6 +2085,7 @@ def main() -> None:
                 data_source,
                 storage_dtype=storage_dtype,
                 train_frac=train_frac,
+                allow_train_frac_val_split=allow_train_frac_val_split,
                 max_tokens=data_max_tokens,
             )
             _sample = np.array(train_tokens_np[: min(1_000_000, len(train_tokens_np))])
@@ -2067,6 +2096,7 @@ def main() -> None:
                 data_source,
                 storage_dtype=storage_dtype,
                 train_frac=train_frac,
+                allow_train_frac_val_split=allow_train_frac_val_split,
                 max_tokens=data_max_tokens,
                 cache_dir=args.mmap_cache_dir,
                 verbose=True,
@@ -2081,11 +2111,19 @@ def main() -> None:
         val_tokens = torch.from_numpy(np.asarray(val_tokens_np))
         train_tokens_count = int(train_tokens.shape[0])
         val_tokens_count = int(val_tokens.shape[0])
+        if train_shards and val_shards:
+            validation_source = "explicit_val_shard"
+        elif train_shards and not val_shards:
+            validation_source = "train_split_fallback"
+        else:
+            validation_source = "single_file_split"
         if args.tokens_on_device:
             if not args.no_mmap:
                 print("WARNING: --tokens-on-device copies all tokens to GPU, defeating mmap")
             train_tokens = train_tokens.to(device=device, non_blocking=True)
             val_tokens = val_tokens.to(device=device, non_blocking=True)
+
+    print(f"  validation_source={validation_source}")
 
     # --- Model ---
     model = CoreAmplifierLM(
@@ -2186,6 +2224,8 @@ def main() -> None:
         val_tokens_count=val_tokens_count,
         storage_dtype=storage_dtype,
         train_frac=train_frac,
+        allow_train_frac_val_split=allow_train_frac_val_split,
+        validation_source=validation_source,
         data_max_tokens=data_max_tokens,
         seq_len=seq_len,
         batch_size=batch_size,

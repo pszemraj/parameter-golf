@@ -203,7 +203,7 @@ VAL_BATCH_SIZE=8192 \
 python3 train_gpt_mlx.py
 ```
 
-Validation always runs on the full `fineweb_val_*` split, which is the fixed first-50k-document set. The smoke command above skips periodic validation and just prints the final `val_loss` and `val_bpb` once at the end.
+Validation always runs on the full `fineweb_val_*` split, which is the fixed first-50k-document set. Directory-style FineWeb runs now fail if those validation shards are missing, rather than silently splitting training tokens. If you intentionally want a local smoke fallback on a train-only directory, pass `--allow-train-frac-val-split`. The smoke command above skips periodic validation and just prints the final `val_loss` and `val_bpb` once at the end.
 
 ### Scaling Up to a Remote Machine
 

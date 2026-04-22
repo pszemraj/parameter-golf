@@ -141,6 +141,7 @@ def load_train_val_int32(
     *,
     storage_dtype: str = "uint16",
     train_frac: float = 0.98,
+    allow_train_frac_val_split: bool = False,
     max_tokens: Optional[int] = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Load train and validation token splits.
@@ -148,6 +149,8 @@ def load_train_val_int32(
     :param str | Path source: File or directory to load.
     :param str storage_dtype: On-disk dtype to use for non-header shards.
     :param float train_frac: Fraction used for a single-file train split.
+    :param bool allow_train_frac_val_split: Whether directory data may fall back
+        to splitting train tokens when explicit validation shards are missing.
     :param Optional[int] max_tokens: Optional cap on loaded train tokens.
     :return tuple[np.ndarray, np.ndarray]: Train and validation token arrays.
     """
@@ -158,6 +161,13 @@ def load_train_val_int32(
         train_shards = sorted(p.glob("fineweb_train_*.bin"))
         val_shards = sorted(p.glob("fineweb_val_*.bin"))
         if train_shards:
+            if not val_shards and not allow_train_frac_val_split:
+                raise FileNotFoundError(
+                    f"{p} has fineweb_train_* shards but no fineweb_val_* shards. "
+                    "Official-style runs must use the provided validation shard. "
+                    "For a deliberate local smoke fallback, set "
+                    "allow_train_frac_val_split=True."
+                )
             has_header = _detect_has_header(train_shards[0])
             if has_header:
                 train = np.concatenate([_load_shard_with_header(s) for s in train_shards])
