@@ -20,6 +20,7 @@ gdn_q_conv_output_contiguous = true
 gdn_k_conv_output_contiguous = true
 gdn_v_conv_output_contiguous = true
 gdn_control_proj_fp32 = false
+gdn_w_g_optimizer = "matrix"
 gdn_gates_fp32 = true
 gdn_output_norm_fp32 = true
 mlp_mult = 2.0

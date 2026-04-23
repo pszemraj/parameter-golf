@@ -134,6 +134,10 @@ bash scripts/run_h100_hgdn_compile_tiebreak_round.sh
 USE_WANDB=0 WANDB_MODE=offline \
 ATTN_USE_FLASH_ATTN3=1 \
 DISTRIBUTED_MODE=parallel_muon \
+MUON_DISTRIBUTED_MODE=packed_allreduce \
+GDN_W_G_OPTIMIZER=matrix \
+HGDN_CONFIG=configs/hgdn/<promoted_hgdn_candidate>.toml \
+ATTN_CONFIG=configs/hgdn/<matched_attention_control>.toml \
 WANDB_WATCH=none \
 RUN_PREFIX_BASE=h100naive1 \
 bash scripts/run_h100_hgdn_naive_contract_round.sh
