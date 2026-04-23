@@ -149,7 +149,7 @@ print_plan() {
     echo "naive_reference_name=${naive_reference_name}"
     echo "naive_reference_roundtrip_bpb=${naive_reference_roundtrip_bpb}"
     echo "naive_reference_stop_bpb=${naive_reference_stop_bpb}"
-    echo "goal=measure whether the exact repo naive baseline, the exact-contract HGDN candidate, and the same-shell attention-only control can all be compared on the official naive-baseline contract"
+    echo "goal=measure whether the exact repo naive baseline, the exact-contract HGDN candidate, and the same-shell attention-only baseline diagnostic control can all be compared on the official naive-baseline contract"
 }
 
 prepare_cuda() {
@@ -308,7 +308,7 @@ run_round() {
         "${config_env[@]}"
 
     echo
-    echo ">>> naive-contract attention-only control"
+    echo ">>> naive-contract attention-only baseline diagnostic control"
     load_config_env "${attn_config}"
     hgdn_append_command \
         "${command_log}" \
@@ -343,7 +343,7 @@ run_round() {
         bash scripts/sweep.sh single
 
     hgdn_run_sweep \
-        "naive-contract attention-only control" \
+        "naive-contract attention-only baseline diagnostic control" \
         single \
         "OMP_NUM_THREADS=${omp_num_threads}" \
         "MKL_NUM_THREADS=${mkl_num_threads}" \

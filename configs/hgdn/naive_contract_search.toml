@@ -45,9 +45,22 @@ mlp_mult = 1.75
 notes = "Same sparse 8L shell with a smaller MLP."
 
 [[candidates]]
+name = "l8_d512_mid2_dk48_v1p5_m1p75"
+mlp_mult = 1.75
+gdn_expand_v = 1.5
+notes = "Same 8L two-GDN shell with wider value recurrence state."
+
+[[candidates]]
 name = "l8_d512_boundary2_dk48_m2"
 block_pattern = ["attn", "attn", "attn", "gdn", "gdn", "attn", "attn", "attn"]
 notes = "Two-GDN cluster straddling the encoder/decoder boundary."
+
+[[candidates]]
+name = "l8_d512_mid3_dk48_m1p75"
+mlp_mult = 1.75
+gdn_ratio = 2
+block_pattern = ["attn", "gdn", "attn", "gdn", "attn", "gdn", "attn", "attn"]
+notes = "8L sparse hybrid with three distributed GDN islands."
 
 [[candidates]]
 name = "l9_d512_mid2_dk48_m1p75"
@@ -55,6 +68,14 @@ num_layers = 9
 mlp_mult = 1.75
 block_pattern = ["attn", "attn", "gdn", "attn", "attn", "gdn", "attn", "attn", "attn"]
 notes = "9L sparse hybrid with two GDN islands on the baseline depth."
+
+[[candidates]]
+name = "l9_d512_mid2_dk48_v1p5_m1p75"
+num_layers = 9
+mlp_mult = 1.75
+gdn_expand_v = 1.5
+block_pattern = ["attn", "attn", "gdn", "attn", "attn", "gdn", "attn", "attn", "attn"]
+notes = "9L two-GDN shell with wider value recurrence state."
 
 [[candidates]]
 name = "l9_d512_mid2_dk48_m2"
@@ -70,6 +91,15 @@ block_pattern = ["attn", "gdn", "attn", "attn", "gdn", "attn", "attn", "gdn", "a
 notes = "9L sparse hybrid with three distributed GDN islands."
 
 [[candidates]]
+name = "l9_d512_mid3_dk48_v1p5_m1p75"
+num_layers = 9
+mlp_mult = 1.75
+gdn_expand_v = 1.5
+gdn_ratio = 2
+block_pattern = ["attn", "gdn", "attn", "attn", "gdn", "attn", "attn", "gdn", "attn"]
+notes = "9L three-GDN shell with wider value recurrence state."
+
+[[candidates]]
 name = "l9_d512_tail2_dk48_m1p75"
 num_layers = 9
 mlp_mult = 1.75
@@ -81,13 +111,13 @@ name = "l8_d512_r0_m1p75"
 mlp_mult = 1.75
 gdn_ratio = 0
 block_pattern = ["attn", "attn", "attn", "attn", "attn", "attn", "attn", "attn"]
-notes = "Attention-only control matching the 8L sparse-HGDN shell at mlp1.75."
+notes = "Attention-only baseline diagnostic control matching the 8L sparse-HGDN shell at mlp1.75."
 
 [[candidates]]
 name = "l8_d512_r0_m2"
 gdn_ratio = 0
 block_pattern = ["attn", "attn", "attn", "attn", "attn", "attn", "attn", "attn"]
-notes = "Attention-only control matching the 8Lx512d sparse-HGDN shell."
+notes = "Attention-only baseline diagnostic control matching the 8Lx512d sparse-HGDN shell."
 
 [[candidates]]
 name = "l9_d512_r0_m1p75"
@@ -95,11 +125,11 @@ num_layers = 9
 mlp_mult = 1.75
 gdn_ratio = 0
 block_pattern = ["attn", "attn", "attn", "attn", "attn", "attn", "attn", "attn", "attn"]
-notes = "Attention-only control matching the 9L sparse-HGDN shell."
+notes = "Attention-only baseline diagnostic control matching the 9L sparse-HGDN shell."
 
 [[candidates]]
 name = "l9_d512_r0_m2"
 num_layers = 9
 gdn_ratio = 0
 block_pattern = ["attn", "attn", "attn", "attn", "attn", "attn", "attn", "attn", "attn"]
-notes = "Attention-only control matching the 9L sparse-HGDN shell at mlp2.0."
+notes = "Attention-only baseline diagnostic control matching the 9L sparse-HGDN shell at mlp2.0."

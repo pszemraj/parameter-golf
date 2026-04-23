@@ -184,7 +184,7 @@ def restore_low_dim_params_to_fp32(
 
     :param nn.Module module: Module whose parameters should be restored in place.
     :param bool gdn_control_proj_fp32: Whether to also restore HGDN control
-        projections `w_a/w_b/w_g` to fp32, defaults to True.
+        projections selected by the scalar-routing policy to fp32, defaults to True.
     :param str gdn_w_g_optimizer: Whether `w_g` should ride Adam or Muon,
         defaults to `"scalar"`.
     """

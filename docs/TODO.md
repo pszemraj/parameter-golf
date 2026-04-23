@@ -1,6 +1,6 @@
 # HGDN Next Steps
 
-Last updated: 2026-04-23 13:45 EDT
+Last updated: 2026-04-23 15:27 EDT
 
 ## 1. Run the local sparse exact-contract HGDN search before more H100 spend
 
@@ -27,6 +27,7 @@ Last updated: 2026-04-23 13:45 EDT
   search surface is:
   - sparse `BLOCK_PATTERN` hybrids instead of periodic `GDN_RATIO=1`
   - `GDN_HEAD_K_DIM=48`
+  - `DISTRIBUTED_MODE=parallel_muon`
   - `MUON_DISTRIBUTED_MODE=packed_allreduce`
   - `GDN_W_G_OPTIMIZER=matrix`
   - exact-contract profiler / CUDA preflight / size-screen helpers now follow
@@ -34,25 +35,33 @@ Last updated: 2026-04-23 13:45 EDT
 - Current active candidate set:
   - `l8_d512_mid2_dk48_m2`
   - `l8_d512_mid2_dk48_m1p75`
+  - `l8_d512_mid2_dk48_v1p5_m1p75`
   - `l8_d512_boundary2_dk48_m2`
+  - `l8_d512_mid3_dk48_m1p75`
   - `l9_d512_mid2_dk48_m1p75`
+  - `l9_d512_mid2_dk48_v1p5_m1p75`
   - `l9_d512_mid2_dk48_m2`
   - `l9_d512_mid3_dk48_m1p75`
+  - `l9_d512_mid3_dk48_v1p5_m1p75`
   - `l9_d512_tail2_dk48_m1p75`
-  - attention-only controls:
+  - attention-only baselines (diagnostic controls):
     - `l8_d512_r0_m1p75`
     - `l8_d512_r0_m2`
     - `l9_d512_r0_m1p75`
     - `l9_d512_r0_m2`
 - The helper now defaults `PERF_SKIP_FINAL_EVAL=1` for local screening so the
   size screen handles artifact triage and the local run is not dominated by the
-  quantized roundtrip tail.
-- The attention-only controls exist only to isolate the HGDN tax on the exact
-  challenge shell. They are not replacement baselines.
+  quantized roundtrip tail. It also writes the full command snapshot before
+  training, refuses pre-existing run logs unless `ALLOW_EXISTING_LOGS=1`, and
+  bundles partial/interrupted runs on exit.
+- The attention-only baselines are diagnostic controls that exist only to
+  isolate the HGDN tax on the exact challenge shell. They are not replacements
+  for the exact `train_gpt.py` baseline.
 
 ```bash
 USE_WANDB=0 WANDB_MODE=offline \
-RUN_PREFIX_BASE=localnaivehgdn1 \
+DISTRIBUTED_MODE=parallel_muon \
+RUN_PREFIX_BASE=localnaivehgdn_sparse3 \
 bash scripts/run_local_hgdn_naive_contract_search.sh
 ```
 
@@ -107,13 +116,14 @@ bash scripts/run_h100_hgdn_compile_tiebreak_round.sh
 - Include exactly three legs:
   - exact repo baseline from `train_gpt.py`
   - exact-contract HGDN candidate
-  - same-shell attention-only control
+  - same-shell attention-only baseline diagnostic control
 - The first fair naive-contract run on `2026-04-21 06:15 UTC` said:
   - exact repo baseline: `44.00 ms/step`, exact roundtrip `1.23710448`,
     `UNDER_LIMIT`
   - live14 HGDN replay shell: `98.08 ms/step`, exact roundtrip `1.24735121`,
     `OVER_LIMIT`
-  - hybrid attention-only control: `46.09 ms/step`, exact roundtrip
+  - hybrid attention-only baseline diagnostic control: `46.09 ms/step`, exact
+    roundtrip
     `1.24098267`, `OVER_LIMIT`
 - That is the branch-goal comparison. Packed HGDN lost badly on the exact
   baseline contract.

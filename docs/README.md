@@ -35,7 +35,7 @@ Branch: `exp/hgdn-k-core`
 
 - Keep HGDN as the live record-path family.
 - Keep `train_gpt.py` as the absolute baseline reference; the hybrid-trainer
-  attention-only control is diagnostic only.
+  attention-only baseline only serves as a diagnostic control.
 - The next HGDN work is contract-native shell search on the exact
   baseline-shaped surface, not more blind replay of the live14 shell against
   the naive baseline contract.
@@ -68,8 +68,8 @@ Branch: `exp/hgdn-k-core`
       roundtrip `1.23710448`, `UNDER_LIMIT`
     - live14 HGDN replay shell: `98.08 ms/step`, exact roundtrip `1.24735121`,
       `OVER_LIMIT`
-    - hybrid-trainer attention-only control: `46.09 ms/step`, exact roundtrip
-      `1.24098267`, `OVER_LIMIT`
+    - hybrid-trainer attention-only baseline diagnostic control:
+      `46.09 ms/step`, exact roundtrip `1.24098267`, `OVER_LIMIT`
   - the comparison surface was fair enough to show the real problem:
     the trainer/runtime shell is close to the exact repo baseline, but the
     live14 HGDN replay shell is the wrong candidate for the exact
@@ -117,6 +117,7 @@ Branch: `exp/hgdn-k-core`
   search surface is:
   - sparse `BLOCK_PATTERN` hybrids instead of periodic `GDN_RATIO=1`
   - `GDN_HEAD_K_DIM=48` instead of `64/60`
+  - `DISTRIBUTED_MODE=parallel_muon`
   - `MUON_DISTRIBUTED_MODE=packed_allreduce`
   - `GDN_W_G_OPTIMIZER=matrix`
   - profiler, CUDA preflight, and size-screen/quantization helpers now follow
@@ -125,12 +126,16 @@ Branch: `exp/hgdn-k-core`
 - Current active exact-contract candidates:
   - `l8_d512_mid2_dk48_m2`
   - `l8_d512_mid2_dk48_m1p75`
+  - `l8_d512_mid2_dk48_v1p5_m1p75`
   - `l8_d512_boundary2_dk48_m2`
+  - `l8_d512_mid3_dk48_m1p75`
   - `l9_d512_mid2_dk48_m1p75`
+  - `l9_d512_mid2_dk48_v1p5_m1p75`
   - `l9_d512_mid2_dk48_m2`
   - `l9_d512_mid3_dk48_m1p75`
+  - `l9_d512_mid3_dk48_v1p5_m1p75`
   - `l9_d512_tail2_dk48_m1p75`
-  - same-shell attention-only controls:
+  - same-shell attention-only baselines (diagnostic controls):
     - `l8_d512_r0_m1p75`
     - `l8_d512_r0_m2`
     - `l9_d512_r0_m1p75`
@@ -138,8 +143,19 @@ Branch: `exp/hgdn-k-core`
 - The helper defaults `PERF_SKIP_FINAL_EVAL=1` for local broad screens so the
   size screen handles artifact triage and the local loop is not dominated by
   the quantized roundtrip tail.
-- The helper runs the size screen first, then a fixed-contract local batch,
-  then bundles configs/logs/commands with `py7zr`.
+- The helper writes the full command snapshot before training, refuses
+  pre-existing run logs unless `ALLOW_EXISTING_LOGS=1`, and bundles
+  configs/logs/commands with `py7zr` on exit, including partial/interrupted
+  runs.
+
+Clean local sparse search:
+
+```bash
+USE_WANDB=0 WANDB_MODE=offline \
+DISTRIBUTED_MODE=parallel_muon \
+RUN_PREFIX_BASE=localnaivehgdn_sparse3 \
+bash scripts/run_local_hgdn_naive_contract_search.sh
+```
 
 Exact 8x packed tiebreak:
 

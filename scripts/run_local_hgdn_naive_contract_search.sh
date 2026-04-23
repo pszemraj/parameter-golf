@@ -30,6 +30,7 @@ torchinductor_max_autotune="${TORCHINDUCTOR_MAX_AUTOTUNE:-0}"
 torchinductor_max_autotune_gemm="${TORCHINDUCTOR_MAX_AUTOTUNE_GEMM:-0}"
 torch_logs="${TORCH_LOGS:-}"
 torch_trace="${TORCH_TRACE:-}"
+allow_existing_logs="${ALLOW_EXISTING_LOGS:-0}"
 
 ngpu="${NGPU:-1}"
 iterations="${ITERATIONS:-500}"
@@ -40,9 +41,11 @@ train_log_every="${TRAIN_LOG_EVERY:-25}"
 max_wallclock_seconds="${MAX_WALLCLOCK_SECONDS:-0}"
 compile="${COMPILE:-1}"
 compile_strategy="${COMPILE_STRATEGY:-hybrid}"
+distributed_mode="${DISTRIBUTED_MODE:-parallel_muon}"
 weight_decay="${WEIGHT_DECAY:-0}"
 perf_skip_final_eval="${PERF_SKIP_FINAL_EVAL:-1}"
 grad_accum_steps_override="${GRAD_ACCUM_STEPS:-}"
+bundle_written=0
 
 hgdn_ensure_python_module "${python_bin}" py7zr py7zr
 
@@ -81,10 +84,14 @@ esac
 configs=(
     "configs/hgdn/naive_contract_l8_d512_mid2_dk48_m2.toml"
     "configs/hgdn/naive_contract_l8_d512_mid2_dk48_m1p75.toml"
+    "configs/hgdn/naive_contract_l8_d512_mid2_dk48_v1p5_m1p75.toml"
     "configs/hgdn/naive_contract_l8_d512_boundary2_dk48_m2.toml"
+    "configs/hgdn/naive_contract_l8_d512_mid3_dk48_m1p75.toml"
     "configs/hgdn/naive_contract_l9_d512_mid2_dk48_m1p75.toml"
+    "configs/hgdn/naive_contract_l9_d512_mid2_dk48_v1p5_m1p75.toml"
     "configs/hgdn/naive_contract_l9_d512_mid2_dk48_m2.toml"
     "configs/hgdn/naive_contract_l9_d512_mid3_dk48_m1p75.toml"
+    "configs/hgdn/naive_contract_l9_d512_mid3_dk48_v1p5_m1p75.toml"
     "configs/hgdn/naive_contract_l9_d512_tail2_dk48_m1p75.toml"
     "configs/hgdn/naive_contract_l8_d512_r0_m1p75.toml"
     "configs/hgdn/naive_contract_l8_d512_r0_m2.toml"
@@ -95,15 +102,19 @@ configs=(
 labels=(
     "HGDN 8Lx512d mid2 dk48 mlp2.0"
     "HGDN 8Lx512d mid2 dk48 mlp1.75"
+    "HGDN 8Lx512d mid2 dk48 v1.5 mlp1.75"
     "HGDN 8Lx512d boundary2 dk48 mlp2.0"
+    "HGDN 8Lx512d mid3 dk48 mlp1.75"
     "HGDN 9Lx512d mid2 dk48 mlp1.75"
+    "HGDN 9Lx512d mid2 dk48 v1.5 mlp1.75"
     "HGDN 9Lx512d mid2 dk48 mlp2.0"
     "HGDN 9Lx512d mid3 dk48 mlp1.75"
+    "HGDN 9Lx512d mid3 dk48 v1.5 mlp1.75"
     "HGDN 9Lx512d tail2 dk48 mlp1.75"
-    "Attention-only 8Lx512d mlp1.75"
-    "Attention-only 8Lx512d mlp2.0"
-    "Attention-only 9Lx512d mlp1.75"
-    "Attention-only 9Lx512d mlp2.0"
+    "Attention-only baseline 8Lx512d mlp1.75"
+    "Attention-only baseline 8Lx512d mlp2.0"
+    "Attention-only baseline 9Lx512d mlp1.75"
+    "Attention-only baseline 9Lx512d mlp2.0"
 )
 
 default_prefixes=()
@@ -155,6 +166,95 @@ load_config_env() {
     )
 }
 
+resolve_run_ids() {
+    resolved_run_ids=()
+    local i
+    for ((i = 0; i < ${#configs[@]}; i++)); do
+        local config_stem
+        config_stem="$(basename "${configs[$i]}" .toml)"
+        resolved_run_ids+=("${run_prefixes[$i]}_${config_stem}_seq${train_seq_len}_it${iterations}")
+    done
+}
+
+diagnostic_env=()
+if [[ -n "${torch_logs}" ]]; then
+    diagnostic_env+=("TORCH_LOGS=${torch_logs}")
+fi
+if [[ -n "${torch_trace}" ]]; then
+    diagnostic_env+=("TORCH_TRACE=${torch_trace}")
+fi
+
+append_train_command() {
+    local config_path="$1"
+    local run_id="$2"
+    load_config_env "${config_path}"
+    hgdn_append_command \
+        "${command_log}" \
+        "NGPU=${ngpu}" \
+        "USE_WANDB=${use_wandb}" \
+        "WANDB_MODE=${wandb_mode}" \
+        "WANDB_PROJECT=${wandb_project}" \
+        "WANDB_WATCH=${wandb_watch}" \
+        "WANDB_WATCH_LOG_FREQ=${wandb_watch_log_freq}" \
+        "${diagnostic_env[@]}" \
+        "TORCHINDUCTOR_MAX_AUTOTUNE=${torchinductor_max_autotune}" \
+        "TORCHINDUCTOR_MAX_AUTOTUNE_GEMM=${torchinductor_max_autotune_gemm}" \
+        "COMPILE=${compile}" \
+        "COMPILE_STRATEGY=${compile_strategy}" \
+        "DISTRIBUTED_MODE=${distributed_mode}" \
+        "RUN_ID=${run_id}" \
+        "GRAD_ACCUM_STEPS=${grad_accum_steps}" \
+        "ITERATIONS=${iterations}" \
+        "MAX_WALLCLOCK_SECONDS=${max_wallclock_seconds}" \
+        "TRAIN_BATCH_TOKENS=${train_batch_tokens}" \
+        "TRAIN_SEQ_LEN=${train_seq_len}" \
+        "VAL_LOSS_EVERY=${val_loss_every}" \
+        "TRAIN_LOG_EVERY=${train_log_every}" \
+        "VAL_BATCH_SIZE=${val_batch_size}" \
+        "WEIGHT_DECAY=${weight_decay}" \
+        "PERF_SKIP_FINAL_EVAL=${perf_skip_final_eval}" \
+        "${config_env[@]}" \
+        bash scripts/sweep.sh single
+}
+
+write_command_log() {
+    mkdir -p "$(dirname "${command_log}")"
+    {
+        echo "#!/bin/bash"
+        echo "set -euo pipefail"
+    } >"${command_log}"
+
+    hgdn_append_plain_command \
+        "${command_log}" \
+        "${python_bin}" scripts/screen_hgdn_arch_sizes.py \
+        --config "${size_screen_config}" \
+        --output-dir "${size_screen_output}"
+
+    local i
+    for ((i = 0; i < ${#configs[@]}; i++)); do
+        append_train_command "${configs[$i]}" "${resolved_run_ids[$i]}"
+    done
+}
+
+check_planned_logs_are_fresh() {
+    if [[ "${allow_existing_logs}" == "1" ]]; then
+        return
+    fi
+    local conflict=0
+    local run_id
+    for run_id in "${resolved_run_ids[@]}"; do
+        local log_path="logs/${run_id}.txt"
+        if [[ -e "${log_path}" ]]; then
+            echo "Refusing to append to existing run log: ${log_path}" >&2
+            conflict=1
+        fi
+    done
+    if (( conflict )); then
+        echo "Use a fresh RUN_PREFIX_BASE, or set ALLOW_EXISTING_LOGS=1 only for an intentional append." >&2
+        exit 1
+    fi
+}
+
 print_plan() {
     echo
     echo ">>> Local HGDN naive-contract search (sparse exact-contract candidate screen)"
@@ -180,6 +280,8 @@ print_plan() {
     echo "perf_skip_final_eval=${perf_skip_final_eval}"
     echo "compile=${compile}"
     echo "compile_strategy=${compile_strategy}"
+    echo "distributed_mode=${distributed_mode}"
+    echo "allow_existing_logs=${allow_existing_logs}"
     echo "max_wallclock_seconds=${max_wallclock_seconds}"
     echo "size_screen_config=${size_screen_config}"
     echo "size_screen_output=${size_screen_output}"
@@ -192,18 +294,6 @@ print_plan() {
 }
 
 run_size_screen() {
-    mkdir -p "$(dirname "${command_log}")"
-    {
-        echo "#!/bin/bash"
-        echo "set -euo pipefail"
-    } >"${command_log}"
-
-    hgdn_append_plain_command \
-        "${command_log}" \
-        "${python_bin}" scripts/screen_hgdn_arch_sizes.py \
-        --config "${size_screen_config}" \
-        --output-dir "${size_screen_output}"
-
     echo
     echo ">>> artifact-size screen"
     "${python_bin}" scripts/screen_hgdn_arch_sizes.py \
@@ -212,54 +302,16 @@ run_size_screen() {
 }
 
 run_batch() {
-    local diagnostic_env=()
-    if [[ -n "${torch_logs}" ]]; then
-        diagnostic_env+=("TORCH_LOGS=${torch_logs}")
-    fi
-    if [[ -n "${torch_trace}" ]]; then
-        diagnostic_env+=("TORCH_TRACE=${torch_trace}")
-    fi
-
     local i
     for ((i = 0; i < ${#configs[@]}; i++)); do
         local config_path="${configs[$i]}"
-        local config_stem
-        config_stem="$(basename "${config_path}" .toml)"
-        local run_id="${run_prefixes[$i]}_${config_stem}_seq${train_seq_len}_it${iterations}"
+        local run_id="${resolved_run_ids[$i]}"
 
         load_config_env "${config_path}"
-        resolved_run_ids+=("${run_id}")
 
         echo
         echo ">>> local naive-contract search: ${labels[$i]}"
         echo "run_id=${run_id}"
-
-        hgdn_append_command \
-            "${command_log}" \
-            "NGPU=${ngpu}" \
-            "USE_WANDB=${use_wandb}" \
-            "WANDB_MODE=${wandb_mode}" \
-            "WANDB_PROJECT=${wandb_project}" \
-            "WANDB_WATCH=${wandb_watch}" \
-            "WANDB_WATCH_LOG_FREQ=${wandb_watch_log_freq}" \
-            "${diagnostic_env[@]}" \
-            "TORCHINDUCTOR_MAX_AUTOTUNE=${torchinductor_max_autotune}" \
-            "TORCHINDUCTOR_MAX_AUTOTUNE_GEMM=${torchinductor_max_autotune_gemm}" \
-            "COMPILE=${compile}" \
-            "COMPILE_STRATEGY=${compile_strategy}" \
-            "RUN_ID=${run_id}" \
-            "GRAD_ACCUM_STEPS=${grad_accum_steps}" \
-            "ITERATIONS=${iterations}" \
-            "MAX_WALLCLOCK_SECONDS=${max_wallclock_seconds}" \
-            "TRAIN_BATCH_TOKENS=${train_batch_tokens}" \
-            "TRAIN_SEQ_LEN=${train_seq_len}" \
-            "VAL_LOSS_EVERY=${val_loss_every}" \
-            "TRAIN_LOG_EVERY=${train_log_every}" \
-            "VAL_BATCH_SIZE=${val_batch_size}" \
-            "WEIGHT_DECAY=${weight_decay}" \
-            "PERF_SKIP_FINAL_EVAL=${perf_skip_final_eval}" \
-            "${config_env[@]}" \
-            bash scripts/sweep.sh single
 
         hgdn_run_sweep \
             "local naive-contract search: ${labels[$i]}" \
@@ -275,6 +327,7 @@ run_batch() {
             "TORCHINDUCTOR_MAX_AUTOTUNE_GEMM=${torchinductor_max_autotune_gemm}" \
             "COMPILE=${compile}" \
             "COMPILE_STRATEGY=${compile_strategy}" \
+            "DISTRIBUTED_MODE=${distributed_mode}" \
             "RUN_ID=${run_id}" \
             "GRAD_ACCUM_STEPS=${grad_accum_steps}" \
             "ITERATIONS=${iterations}" \
@@ -291,6 +344,12 @@ run_batch() {
 }
 
 build_bundle() {
+    local exit_status="${1:-0}"
+    if [[ "${bundle_written}" == "1" ]]; then
+        return
+    fi
+    bundle_written=1
+
     echo
     echo ">>> bundle outputs"
 
@@ -302,21 +361,35 @@ build_bundle() {
 
     local config_path
     for config_path in "${configs[@]}" "${size_screen_config}"; do
-        cp "${config_path}" "${bundle_stage_dir}/configs/"
+        if [[ -f "${config_path}" ]]; then
+            cp "${config_path}" "${bundle_stage_dir}/configs/"
+        fi
     done
 
-    cp "${command_log}" "${bundle_stage_dir}/commands.sh"
-    cp -R "${size_screen_output}/." "${bundle_stage_dir}/size_screen/"
+    if [[ -f "${command_log}" ]]; then
+        cp "${command_log}" "${bundle_stage_dir}/commands.sh"
+    fi
+    if [[ -d "${size_screen_output}" ]]; then
+        cp -R "${size_screen_output}/." "${bundle_stage_dir}/size_screen/"
+    fi
 
-    local matched_logs=0
+    local matched_logs=1
+    local completed_log_count=0
+    local missing_run_ids=()
     local run_id
     for run_id in "${resolved_run_ids[@]}"; do
         local log_path="logs/${run_id}.txt"
         if [[ -f "${log_path}" ]]; then
             cp "${log_path}" "${bundle_stage_dir}/logs/"
-            matched_logs=1
+            completed_log_count=$((completed_log_count + 1))
+        else
+            matched_logs=0
+            missing_run_ids+=("${run_id}")
         fi
     done
+    if [[ "${#resolved_run_ids[@]}" -eq 0 ]]; then
+        matched_logs=0
+    fi
 
     local -a manifest_cmd
     manifest_cmd=(
@@ -326,7 +399,9 @@ build_bundle() {
         --wandb-project "${wandb_project}"
         --wandb-mode "${wandb_mode}"
         --archive-output "${archive_output}"
+        --exit-status "${exit_status}"
         --matched-logs "${matched_logs}"
+        --completed-log-count "${completed_log_count}"
         --size-screen-config "${size_screen_config}"
         --size-screen-output "${size_screen_output}"
         --torch-logs "${torch_logs}"
@@ -344,7 +419,8 @@ build_bundle() {
         --perf-skip-final-eval "${perf_skip_final_eval}"
         --compile-enabled "${compile}"
         --compile-strategy "${compile_strategy}"
-        --muon-distributed-mode "packed_allreduce"
+        --distributed-mode "${distributed_mode}"
+        --muon-distributed-mode "per_config"
         --gdn-w-g-optimizer "per_config"
     )
     local i
@@ -356,13 +432,32 @@ build_bundle() {
     for run_id in "${resolved_run_ids[@]}"; do
         manifest_cmd+=(--run-id "${run_id}")
     done
+    for run_id in "${missing_run_ids[@]}"; do
+        manifest_cmd+=(--missing-run-id "${run_id}")
+    done
     "${manifest_cmd[@]}"
 
     hgdn_create_7z_archive "${python_bin}" "${archive_output}" "${bundle_stage_dir}"
     echo "bundle_archive=${archive_output}"
 }
 
-print_plan
-run_size_screen
-run_batch
-build_bundle
+on_exit() {
+    local status="$1"
+    trap - EXIT
+    if [[ -f "${command_log}" || -d "${size_screen_output}" ]]; then
+        build_bundle "${status}" || status=$?
+    fi
+    exit "${status}"
+}
+
+main() {
+    print_plan
+    resolve_run_ids
+    write_command_log
+    check_planned_logs_are_fresh
+    trap 'on_exit $?' EXIT
+    run_size_screen
+    run_batch
+}
+
+main

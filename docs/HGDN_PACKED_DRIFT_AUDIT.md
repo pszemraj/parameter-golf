@@ -275,7 +275,8 @@ What is closed:
   time
 - the exact naive-contract sanity batch says the branch-goal problem is now
   clear: packed HGDN still loses to the exact repo baseline and the hybrid
-  attention-only control stays close enough to the baseline to make that
+  attention-only baseline diagnostic control stays close enough to the baseline
+  to make that
   comparison believable
 
 What remains open:

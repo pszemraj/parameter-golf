@@ -3,7 +3,7 @@ GDN Hybrid Model for Parameter Golf — v3
 =========================================
 P0 fixes from code review:
   - Single n_heads for Q/K/V (matches FLA chunk_gated_delta_rule API)
-  - Split projections: w_q/w_k/w_v (Muon) vs w_a/w_b/w_g (Adam)
+  - Split projections: w_q/w_k/w_v (Muon) vs scalar/control routing
   - Correct naive recurrence (no broken grouped-key averaging)
   - kernels.py removed from submission
   - attention-only baseline preset added
@@ -805,8 +805,8 @@ def gdn_recurrent_naive(
 #
 # Matches FLA API: q, k, v all have n_heads heads.
 # head_v_dim = head_k_dim * expand_v controls state capacity.
-# Projections split: w_q/w_k/w_v are proper feature maps (→ Muon),
-# w_a/w_b are tiny scalar controls, w_g is a sigmoid gate (→ Adam).
+# Projections split: w_q/w_k/w_v are proper feature maps (→ Muon);
+# w_a/w_b are tiny scalar controls, and w_g follows GDN_W_G_OPTIMIZER.
 
 
 class GatedDeltaNet(nn.Module):

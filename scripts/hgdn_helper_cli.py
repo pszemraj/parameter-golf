@@ -332,7 +332,10 @@ def cmd_write_local_naive_contract_search_manifest(
         "wandb_project": args.wandb_project,
         "wandb_mode": args.wandb_mode,
         "archive_output": str(args.archive_output),
+        "exit_status": args.exit_status,
         "matched_logs": args.matched_logs,
+        "completed_log_count": args.completed_log_count,
+        "missing_run_ids": args.missing_run_id,
         "size_screen": {
             "config": args.size_screen_config,
             "output_dir": args.size_screen_output,
@@ -359,6 +362,7 @@ def cmd_write_local_naive_contract_search_manifest(
             "perf_skip_final_eval": args.perf_skip_final_eval,
             "compile": args.compile_enabled,
             "compile_strategy": args.compile_strategy,
+            "distributed_mode": args.distributed_mode,
             "muon_distributed_mode": args.muon_distributed_mode,
             "gdn_w_g_optimizer": args.gdn_w_g_optimizer,
         },
@@ -560,7 +564,7 @@ def cmd_write_h100_naive_contract_manifest(args: argparse.Namespace) -> int:
                 "config": args.hgdn_config,
             },
             {
-                "label": "attention-only control on naive-baseline contract",
+                "label": "attention-only baseline diagnostic control on naive-baseline contract",
                 "trainer": "train_gpt_hybrid.py",
                 "mode": "single",
                 "run_id": args.attn_run_id,
@@ -761,9 +765,11 @@ def build_parser() -> argparse.ArgumentParser:
     local_naive_search.add_argument("--wandb-project", required=True)
     local_naive_search.add_argument("--wandb-mode", required=True)
     local_naive_search.add_argument("--archive-output", type=Path, required=True)
+    local_naive_search.add_argument("--exit-status", type=int, required=True)
     local_naive_search.add_argument(
         "--matched-logs", type=parse_bool_flag, required=True
     )
+    local_naive_search.add_argument("--completed-log-count", type=int, required=True)
     local_naive_search.add_argument("--size-screen-config", required=True)
     local_naive_search.add_argument("--size-screen-output", required=True)
     local_naive_search.add_argument("--torch-logs", default="")
@@ -791,11 +797,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--compile-enabled", type=parse_bool_flag, required=True
     )
     local_naive_search.add_argument("--compile-strategy", required=True)
+    local_naive_search.add_argument("--distributed-mode", required=True)
     local_naive_search.add_argument("--muon-distributed-mode", required=True)
     local_naive_search.add_argument("--gdn-w-g-optimizer", required=True)
     local_naive_search.add_argument("--config", action="append", default=[])
     local_naive_search.add_argument("--label", action="append", default=[])
     local_naive_search.add_argument("--run-id", action="append", default=[])
+    local_naive_search.add_argument("--missing-run-id", action="append", default=[])
     local_naive_search.set_defaults(func=cmd_write_local_naive_contract_search_manifest)
 
     h100_bridge = subparsers.add_parser(
