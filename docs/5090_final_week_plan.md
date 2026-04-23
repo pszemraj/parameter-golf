@@ -198,6 +198,14 @@ Replay rule:
   - `blocks2_resid12_e8`
 - start with seed `1337` only for the control replays
 
+Current status:
+
+- completed on seed `1337` for the primary `blocks1` lane
+- `ema` was worse than the matching `current` baseline by about `0.00457` bpb
+- `ema_hybrid` was worse by about `0.01230` bpb
+- this lane is flat/negative under the promotion rules
+- do not replay temporal variants on `blocks0` or `blocks2`
+
 ### 4. Stretch lane: branch routing
 
 Script:
@@ -220,6 +228,11 @@ Promotion rule:
 - confirm on seed `2027` only if the first pass clears the bar
 - invalidate and rerun any point that does not satisfy the protocol invariants above
 
+Current status:
+
+- skipped
+- the primary EMA lane did not yield a winner
+
 ### 5. Finalist `1B` confirmations
 
 Script:
@@ -230,8 +243,8 @@ bash scripts/run_5090_finalist_confirm1b.sh
 
 Default finalists:
 
-- `blocks1_resid10_e12_final`
-- `blocks0_resid12_e10_final`
+- `blocks1_resid10_e12_lr0035_final`
+- `blocks0_resid12_e10_lr0035_final`
 
 Default contract:
 
@@ -243,18 +256,25 @@ Default contract:
 - `1B` planned tokens
 - `lr_hold_steps=7000`
 - all protocol invariants above still apply
+- current queued launcher uses `learning_rate=3.5e-3`
 
 Custom finalist format:
 
 ```text
-name shared_spec_dir core_layers core_expansion gate_mode temporal_mode router_mode
+name shared_spec_dir core_layers core_expansion gate_mode temporal_mode router_mode learning_rate
 ```
 
 Example:
 
 ```bash
-FINALIST_SPECS=$'blocks1_gate_base_ema /abs/path/to/shared 10 12.0 base ema none\nblocks1_gate_base_ema_router /abs/path/to/shared 10 12.0 base ema softmax' \
+FINALIST_SPECS=$'blocks1_gate_base_ema /abs/path/to/shared 10 12.0 base ema none 0.003\nblocks1_gate_base_ema_router /abs/path/to/shared 10 12.0 base ema softmax 0.003' \
 bash scripts/run_5090_finalist_confirm1b.sh
+```
+
+Queued next batch:
+
+```bash
+bash scripts/run_5090_post_temporal_queue.sh
 ```
 
 ## Stop Rules

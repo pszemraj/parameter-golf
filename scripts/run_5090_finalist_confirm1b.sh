@@ -6,7 +6,12 @@ REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 PYTHON_BIN="${PYTHON:-/home/pszemraj/miniforge3/envs/train/bin/python}"
 
 SEEDS="${SEEDS:-1337 2027 3141}"
-FINALIST_SPECS="${FINALIST_SPECS:-$'blocks1_resid10_e12_final '"${REPO_ROOT}"$'/experiments/5090_schedule/blocks1_hold_confirm1b_v1/blocks1_resid10_e12_h7000_1b 10 12.0 none current none\nblocks0_resid12_e10_final '"${REPO_ROOT}"$'/experiments/5090_schedule/blocks0_12x10_hold_confirm1b_v1/blocks0_resid12_e10_h7000_1b 12 10.0 none current none'}"
+DEFAULT_LEARNING_RATE="${DEFAULT_LEARNING_RATE:-0.003}"
+DEFAULT_WARMUP_STEPS="${DEFAULT_WARMUP_STEPS:-100}"
+DEFAULT_LR_HOLD_STEPS="${DEFAULT_LR_HOLD_STEPS:-7000}"
+DEFAULT_MIN_LR="${DEFAULT_MIN_LR:-0.0003}"
+DEFAULT_NUM_STEPS="${DEFAULT_NUM_STEPS:-8192}"
+FINALIST_SPECS="${FINALIST_SPECS:-$'blocks1_resid10_e12_final '"${REPO_ROOT}"$'/experiments/5090_schedule/blocks1_hold_confirm1b_v1/blocks1_resid10_e12_h7000_1b 10 12.0 none current none 0.003\nblocks0_resid12_e10_final '"${REPO_ROOT}"$'/experiments/5090_schedule/blocks0_12x10_hold_confirm1b_v1/blocks0_resid12_e10_h7000_1b 12 10.0 none current none 0.003'}"
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export TORCH_BLAS_PREFER_CUBLASLT="${TORCH_BLAS_PREFER_CUBLASLT:-1}"
@@ -51,6 +56,8 @@ print_header() {
   echo "seeds=${SEEDS}"
   echo "finalist_specs:"
   printf '%s\n' "${FINALIST_SPECS}"
+  echo "default_learning_rate=${DEFAULT_LEARNING_RATE} default_warmup_steps=${DEFAULT_WARMUP_STEPS}"
+  echo "default_lr_hold_steps=${DEFAULT_LR_HOLD_STEPS} default_min_lr=${DEFAULT_MIN_LR} default_num_steps=${DEFAULT_NUM_STEPS}"
   echo "compile=${COMPILE} gradient_checkpointing=${GRADIENT_CHECKPOINTING} skip_done=${SKIP_DONE}"
   echo "target_effective_step_tokens=${TARGET_EFFECTIVE_STEP_TOKENS}"
   echo "scan_backend=${SCAN_BACKEND} wandb_project=${WANDB_PROJECT} cublaslt=${TORCH_BLAS_PREFER_CUBLASLT} py_unbuffered=${PYTHONUNBUFFERED}"
@@ -68,17 +75,18 @@ run_finalist_seed() {
   local gate_mode="$6"
   local temporal_mode="$7"
   local router_mode="$8"
+  local learning_rate="$9"
   local model_root="${REPO_ROOT}/experiments/5090_architecture/finalist_confirm1b_seed${seed}_v1"
   local run_name="${name}_h7000_1b_s${seed}"
   local run_specs
 
   require_dir "${shared_spec_dir}"
   read -r -d '' run_specs <<EOF || true
-${run_name} ${core_layers} ${core_expansion} 8 1 1 -3.0 0.003 100 7000 0.0003 8192 256 512
+${run_name} ${core_layers} ${core_expansion} 8 1 1 -3.0 ${learning_rate} ${DEFAULT_WARMUP_STEPS} ${DEFAULT_LR_HOLD_STEPS} ${DEFAULT_MIN_LR} ${DEFAULT_NUM_STEPS} 256 512
 EOF
 
   echo
-  echo "[finalist] seed=${seed} run=${run_name} gate=${gate_mode} temporal=${temporal_mode} router=${router_mode}"
+  echo "[finalist] seed=${seed} run=${run_name} gate=${gate_mode} temporal=${temporal_mode} router=${router_mode} lr=${learning_rate}"
   env \
     SEED="${seed}" \
     RESIDUAL_TOKEN_GATE_MODE="${gate_mode}" \
@@ -94,7 +102,7 @@ EOF
 
 main() {
   local seed line
-  local name shared_spec_dir core_layers core_expansion gate_mode temporal_mode router_mode
+  local name shared_spec_dir core_layers core_expansion gate_mode temporal_mode router_mode learning_rate
   print_header
 
   for seed in ${SEEDS}; do
@@ -104,7 +112,8 @@ main() {
       if [[ -z "${line}" || "${line}" == \#* ]]; then
         continue
       fi
-      read -r name shared_spec_dir core_layers core_expansion gate_mode temporal_mode router_mode <<<"${line}"
+      read -r name shared_spec_dir core_layers core_expansion gate_mode temporal_mode router_mode learning_rate <<<"${line}"
+      learning_rate="${learning_rate:-${DEFAULT_LEARNING_RATE}}"
       if [[ -z "${router_mode:-}" ]]; then
         echo "Invalid FINALIST_SPECS line: ${line}" >&2
         exit 1
@@ -117,7 +126,8 @@ main() {
         "${core_expansion}" \
         "${gate_mode}" \
         "${temporal_mode}" \
-        "${router_mode}"
+        "${router_mode}" \
+        "${learning_rate}"
     done <<<"${FINALIST_SPECS}"
   done
 }

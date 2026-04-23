@@ -99,6 +99,15 @@ Completed so far in the final-week lane:
       - `gate=base` clears the promotion bar on the lean control
   - `core_base` did not clear the bar on either rep
 
+- temporal screen:
+  - primary lane ran on `blocks1 10x12` with `gate=none`
+  - `ema` was worse than the matching `current` baseline by about `0.00457` bpb on seed `1337`
+  - `ema_hybrid` was worse by about `0.01230` bpb on seed `1337`
+  - decision:
+    - EMA lane is flat/negative
+    - skip router
+    - move straight to queued `1B` finalist confirmations
+
 ## Plan Delta From The No-Fallback Audit
 
 The high-level batch order did not change.
@@ -118,22 +127,22 @@ Practical consequence:
 
 ## Immediate Next Commands
 
-First close the safe lane:
+Safe-lane and temporal read now imply the next serious batch is the queued `1B` confirmation set:
 
 ```bash
-SEEDS="2027" LRS="0.0035" bash scripts/run_5090_safe_maxlr_probe.sh
+bash scripts/run_5090_post_temporal_queue.sh
 ```
 
-Then advance the primary architecture lane with the blocks1 gating result interpreted correctly as flat:
+This queues:
 
-```bash
-GATE_MODE=none SEEDS="1337" bash scripts/run_5090_architecture_temporal_screen.sh
-```
+- `blocks1_resid10_e12_lr0035_final`
+- `blocks0_resid12_e10_lr0035_final`
+- seeds `1337 2027 3141`
 
-Interpretation note:
+Sidecar note:
 
-- `blocks0 gate=base` stays alive as a sidecar aggressive-lane result
-- but it should not displace the primary `blocks1` temporal lane yet, because the plan prioritizes the quality rep for temporal screening
+- `blocks0 gate=base` remains the one aggressive-lane result that actually cleared a promotion bar
+- but because the primary EMA lane failed, it is now a secondary follow-up candidate rather than the main next batch
 
 ## Why The Architecture Lane Changed
 

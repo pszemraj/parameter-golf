@@ -29,6 +29,9 @@
   - safe `max_lr` screening promoted `lr=3.5e-3` on both primary reps from seed `1337`
   - two-seed gating was flat on `blocks1 10x12`
   - two-seed gating promoted `gate=base` on `blocks0 12x10`
+  - `blocks1` temporal screening with `gate=none` was negative for both `ema` and `ema_hybrid`
+  - router is now skipped under the plan stop rules
+  - next queued serious batch is the `1B` safe-lane confirmation set at `lr=3.5e-3`
 
 ## Top 3 Current Contenders
 
