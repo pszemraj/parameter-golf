@@ -366,7 +366,7 @@ def test_ema_temporal_mode_chunk_carry_matches_full_forward():
 
 
 def test_mingru_assoc_scan_matches_heinsen_reference():
-    """Assoc-scan should match the Heinsen minGRU reference path on CPU."""
+    """Repo-local assoc scan should match the Heinsen minGRU reference path on CPU."""
     rng = np.random.default_rng(SEED)
     tokens = rng.integers(0, VOCAB, size=20_000, dtype=np.int64)
     spec = build_amplifier_spec(
@@ -413,15 +413,13 @@ def test_mingru_assoc_scan_matches_heinsen_reference():
 
 def test_auto_scan_backend_requires_accelerated_cuda_stack(monkeypatch):
     """CUDA auto backend should fail loudly when accelerated scan deps are missing."""
-    monkeypatch.setattr("core_amplifier_lm.scan_backend.assoc_scan_installed", lambda: True)
     monkeypatch.setattr("core_amplifier_lm.scan_backend.accelerated_scan_installed", lambda: False)
-    with pytest.raises(RuntimeError, match="requires both assoc-scan and accelerated-scan"):
+    with pytest.raises(RuntimeError, match="requires accelerated-scan"):
         resolve_scan_backend("auto", device=torch.device("cuda"), allow_heinsen=True)
 
 
-def test_min_gru_active_scan_backend_resolves_before_first_forward(monkeypatch):
+def test_auto_scan_backend_uses_repo_assoc_on_cpu(monkeypatch):
     """The reported active backend should resolve before the first training step."""
-    monkeypatch.setattr("core_amplifier_lm.scan_backend.assoc_scan_installed", lambda: True)
     monkeypatch.setattr("core_amplifier_lm.scan_backend.accelerated_scan_installed", lambda: False)
     rng = np.random.default_rng(SEED)
     tokens = rng.integers(0, VOCAB, size=20_000, dtype=np.int64)
@@ -462,6 +460,46 @@ def test_assoc_accel_direct_scalar_path_matches_sequential_with_prev(monkeypatch
 
     assert backend == "assoc_accel"
     assert torch.allclose(out, ref, atol=1e-6, rtol=1e-6)
+
+
+def test_scan_core_repo_assoc_matches_sequential_reference():
+    """ScanCore should use the repo-local assoc path without changing semantics."""
+    rng = np.random.default_rng(SEED)
+    tokens = rng.integers(0, VOCAB, size=20_000, dtype=np.int64)
+    spec = build_amplifier_spec(
+        tokens,
+        vocab_size=VOCAB,
+        core_dim=8,
+        branch_lags=(1, 2, 4),
+        num_blocks=1,
+        fixed_dtype=torch.float16,
+    )
+    from core_amplifier_lm import CoreAmplifierLM
+
+    reference = CoreAmplifierLM(
+        spec,
+        core_type="scan",
+        core_layers=3,
+        scan_backend="sequential",
+        amplifier_dtype=torch.float32,
+    )
+    candidate = CoreAmplifierLM(
+        spec,
+        core_type="scan",
+        core_layers=3,
+        scan_backend="assoc",
+        amplifier_dtype=torch.float32,
+    )
+    candidate.load_state_dict(reference.state_dict())
+
+    x = torch.randint(0, VOCAB, (2, 17))
+    with torch.no_grad():
+        ref_logits, ref_state = reference(x, return_state=True)
+        out_logits, out_state = candidate(x, return_state=True)
+    assert reference.active_scan_backend_name() == "sequential"
+    assert candidate.active_scan_backend_name() == "assoc"
+    assert torch.allclose(ref_logits, out_logits, atol=1e-4, rtol=1e-4)
+    assert torch.allclose(ref_state, out_state, atol=1e-4, rtol=1e-4)
 
 
 def test_ema_hybrid_temporal_mode_chunk_carry_matches_full_forward():

@@ -17,7 +17,7 @@ Root-level changes:
   - `tests/test_core_amplifier.py`
 
 Core dependency note:
-- the maintained Core/Amplifier path now treats `assoc-scan` and `accelerated-scan` as core dependencies
+- the maintained Core/Amplifier path now treats `accelerated-scan` plus the repo-local Torch associative scan as core infrastructure
 - install the repo requirements before running the root trainer:
 
 ```bash
@@ -27,9 +27,10 @@ pip install -r requirements.txt
 - `scan_backend=auto` is still the default config value, but on CUDA it now means:
   - use accelerated scan
   - fail loudly if the accelerated scan stack is missing
+- on CPU and other non-CUDA checks, `scan_backend=auto` resolves to the repo-local `assoc` path
 - if you intentionally want a slower fallback for debugging, choose it explicitly with:
   - `--scan-backend heinsen`
-  - `--scan-backend assoc`
+  - `--scan-backend assoc`   # repo-local Torch associative scan
   - `--scan-backend sequential`
 
 Recommended root workflow:

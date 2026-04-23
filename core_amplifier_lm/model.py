@@ -1172,6 +1172,7 @@ class ScanCore(nn.Module):
         input_size: int,
         hidden_size: int,
         num_layers: int = 1,
+        scan_backend: str = "auto",
         batch_first: bool = True,
         **_kwargs: object,
     ):
@@ -1180,6 +1181,7 @@ class ScanCore(nn.Module):
         :param int input_size: Input width.
         :param int hidden_size: Hidden width.
         :param int num_layers: Number of recurrent layers.
+        :param str scan_backend: Parallel scan backend.
         :param bool batch_first: Batch-first layout flag.
         :param object _kwargs: Ignored compatibility keyword arguments.
         """
@@ -1187,6 +1189,8 @@ class ScanCore(nn.Module):
         assert batch_first
         self.hidden_size = hidden_size
         self.num_layers = num_layers
+        self.scan_backend_requested = normalize_scan_backend(scan_backend, allow_heinsen=False)
+        self.scan_backend_active: Optional[str] = None
 
         self.layers = nn.ModuleList()
         for i in range(num_layers):
@@ -1196,19 +1200,6 @@ class ScanCore(nn.Module):
         for layer in self.layers:
             with torch.no_grad():
                 layer.bias[:hidden_size].fill_(2.0)
-
-        self._scan = None
-
-    def _get_scan(self) -> object:
-        """Lazily construct the associative scan helper.
-
-        :return object: Cached scan helper.
-        """
-        if self._scan is None:
-            from assoc_scan import AssocScan
-
-            self._scan = AssocScan(use_accelerated=True)
-        return self._scan
 
     def forward(
         self, x: torch.Tensor, state: Optional[torch.Tensor] = None
@@ -1237,12 +1228,18 @@ class ScanCore(nn.Module):
                 h = h_new.unsqueeze(1)
                 new_states.append(h_new)
             else:
-                scan = self._get_scan()
-                prev = state[i].unsqueeze(1)
-                gates_with_prev = torch.cat([gates.new_ones(B, 1, self.hidden_size), gates], dim=1)
-                inputs_with_prev = torch.cat([prev, inputs], dim=1)
-                h_all = scan(gates_with_prev, inputs_with_prev)
-                h = h_all[:, 1:]
+                backend = resolve_scan_backend(
+                    self.scan_backend_requested,
+                    device=gates.device,
+                    allow_heinsen=False,
+                )
+                h, active_backend = apply_affine_scan(
+                    gates,
+                    inputs,
+                    prev=state[i],
+                    backend=backend,
+                )
+                self.scan_backend_active = active_backend
                 new_states.append(h[:, -1])
 
         return h, torch.stack(new_states, dim=0)
@@ -1375,6 +1372,7 @@ class CoreAmplifierLM(nn.Module):
                 input_size=self.core_dim,
                 hidden_size=self.core_dim,
                 num_layers=core_layers,
+                scan_backend=self.scan_backend_requested,
                 batch_first=True,
             )
         elif core_type == "gru":

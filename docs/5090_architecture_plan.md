@@ -129,10 +129,10 @@ Behavior:
 `auto` behavior:
 
 - CUDA + required scan deps installed: `assoc_accel`
-- non-CUDA + `assoc-scan` installed: `assoc`
+- non-CUDA: `assoc` via the repo-local Torch associative scan
 - otherwise: fail loudly instead of silently downgrading the maintained CUDA path
 
-The accelerated scan dependencies are now treated as part of the core path, not optional extras.
+The accelerated CUDA scan dependency is now treated as part of the core path, and the slower associative fallback is owned in-repo rather than delegated to a wrapper package.
 
 This backend is now used in:
 
