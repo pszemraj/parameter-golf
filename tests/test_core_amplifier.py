@@ -26,7 +26,11 @@ from core_amplifier_lm.model import (
     _count_lag_pairs,
     _count_unigrams,
 )
-from core_amplifier_lm.scan_backend import resolve_scan_backend
+from core_amplifier_lm.scan_backend import (
+    apply_affine_scan,
+    resolve_scan_backend,
+    sequential_affine_scan,
+)
 from core_amplifier_lm.spec_builder import count_all
 from train_core_amplifier import mmap_train_val
 
@@ -433,6 +437,31 @@ def test_min_gru_active_scan_backend_resolves_before_first_forward(monkeypatch):
 
     model = CoreAmplifierLM(spec, core_layers=2, scan_backend="auto", amplifier_dtype=torch.float32)
     assert model.active_scan_backend_name() == "assoc"
+
+
+def test_assoc_accel_direct_scalar_path_matches_sequential_with_prev(monkeypatch):
+    """The direct accelerated scalar path should preserve scan semantics."""
+
+    def fake_scalar_scan(gates_bct: torch.Tensor, inputs_bct: torch.Tensor) -> torch.Tensor:
+        gates_btd = gates_bct.permute(0, 2, 1).contiguous()
+        inputs_btd = inputs_bct.permute(0, 2, 1).contiguous()
+        outputs_btd = sequential_affine_scan(gates_btd, inputs_btd)
+        return outputs_btd.permute(0, 2, 1).contiguous()
+
+    monkeypatch.setattr(
+        "core_amplifier_lm.scan_backend._get_accelerated_scalar_scan",
+        lambda: fake_scalar_scan,
+    )
+
+    gates = torch.sigmoid(torch.randn(2, 5, 3))
+    inputs = torch.randn(2, 5, 3)
+    prev = torch.randn(2, 3)
+
+    out, backend = apply_affine_scan(gates, inputs, prev=prev, backend="assoc_accel")
+    ref = sequential_affine_scan(gates, inputs, prev=prev)
+
+    assert backend == "assoc_accel"
+    assert torch.allclose(out, ref, atol=1e-6, rtol=1e-6)
 
 
 def test_ema_hybrid_temporal_mode_chunk_carry_matches_full_forward():
