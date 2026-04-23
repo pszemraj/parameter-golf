@@ -11,6 +11,7 @@ rechecking promising changes on H100. It isolates three useful views:
 from __future__ import annotations
 
 import argparse
+import inspect
 import os
 from pathlib import Path
 from typing import Callable, Iterable
@@ -26,6 +27,7 @@ from _repo_bootstrap import ensure_repo_root_on_sys_path
 REPO_ROOT = ensure_repo_root_on_sys_path()
 
 from hgdn_runtime_utils import (  # noqa: E402
+    maybe_freeze_gdn_conv_weights,
     prepare_cuda_module,
     restore_low_dim_params_to_fp32 as restore_fp32,
 )
@@ -34,7 +36,8 @@ from local_env import env_flag  # noqa: E402
 GatedDeltaNet = None
 HybridGPT = None
 Muon = None
-SCALAR_PARAM_PATTERNS = ()
+uses_scalar_optimizer = None
+validate_gdn_w_g_optimizer = None
 build_profile_report = None
 build_profile_rows = None
 write_profile_report = None
@@ -43,13 +46,14 @@ write_profile_report = None
 def load_repo_symbols() -> None:
     """Import repo modules after env-backed profiling knobs are finalized."""
     global GatedDeltaNet, HybridGPT, Muon
-    global SCALAR_PARAM_PATTERNS
+    global uses_scalar_optimizer, validate_gdn_w_g_optimizer
 
     if GatedDeltaNet is not None:
         return
     from model import GatedDeltaNet as gdn_cls  # noqa: WPS433
     from model import HybridGPT as hybrid_cls  # noqa: WPS433
-    from model import SCALAR_PARAM_PATTERNS as scalar_patterns  # noqa: WPS433
+    from model import uses_scalar_optimizer as uses_scalar_optimizer_fn  # noqa: WPS433
+    from model import validate_gdn_w_g_optimizer as validate_w_g_optimizer_fn  # noqa: WPS433
     from profiler_report import (  # noqa: WPS433
         build_profile_report,
         build_profile_rows,
@@ -59,7 +63,8 @@ def load_repo_symbols() -> None:
 
     globals()["GatedDeltaNet"] = gdn_cls
     globals()["HybridGPT"] = hybrid_cls
-    globals()["SCALAR_PARAM_PATTERNS"] = scalar_patterns
+    globals()["uses_scalar_optimizer"] = uses_scalar_optimizer_fn
+    globals()["validate_gdn_w_g_optimizer"] = validate_w_g_optimizer_fn
     globals()["Muon"] = muon_cls
     globals()["build_profile_report"] = build_profile_report
     globals()["build_profile_rows"] = build_profile_rows
@@ -78,7 +83,7 @@ def parse_args() -> argparse.Namespace:
         default="all",
     )
     parser.add_argument("--batch-size", type=int, default=2)
-    parser.add_argument("--seq-len", type=int, default=2048)
+    parser.add_argument("--seq-len", type=int, default=1024)
     parser.add_argument("--seed", type=int, default=1337)
     parser.add_argument("--row-limit", type=int, default=40)
     parser.add_argument(
@@ -135,11 +140,112 @@ def prepare_model(module: torch.nn.Module) -> torch.nn.Module:
     :return torch.nn.Module: CUDA bf16 module with low-dimensional params restored to fp32.
     """
     load_repo_symbols()
-    return prepare_cuda_module(
-        module,
-        restore_low_dim_params_to_fp32=restore_fp32,
-        freeze_conv_weights=env_flag("GDN_FREEZE_CONV_WEIGHTS"),
+    gdn_control_proj_fp32 = env_flag("GDN_CONTROL_PROJ_FP32", True)
+    gdn_w_g_optimizer = validate_gdn_w_g_optimizer(
+        os.environ.get("GDN_W_G_OPTIMIZER", "scalar")
     )
+    prepare_kwargs: dict[str, object] = {
+        "restore_low_dim_params_to_fp32": restore_fp32,
+        "freeze_conv_weights": env_flag("GDN_FREEZE_CONV_WEIGHTS"),
+        "gdn_control_proj_fp32": gdn_control_proj_fp32,
+    }
+    if "gdn_w_g_optimizer" in inspect.signature(prepare_cuda_module).parameters:
+        prepare_kwargs["gdn_w_g_optimizer"] = gdn_w_g_optimizer
+        return prepare_cuda_module(module, **prepare_kwargs)
+
+    module = module.cuda().bfloat16()
+    restore_fp32(
+        module,
+        gdn_control_proj_fp32=gdn_control_proj_fp32,
+        gdn_w_g_optimizer=gdn_w_g_optimizer,
+    )
+    maybe_freeze_gdn_conv_weights(
+        module, enabled=bool(prepare_kwargs["freeze_conv_weights"])
+    )
+    return module
+
+
+def env_int(name: str, default: int) -> int:
+    """Read one integer environment variable with a typed default.
+
+    :param str name: Environment variable name.
+    :param int default: Default value when unset.
+    :return int: Parsed integer value.
+    """
+    return int(os.environ.get(name, str(default)))
+
+
+def env_float(name: str, default: float) -> float:
+    """Read one float environment variable with a typed default.
+
+    :param str name: Environment variable name.
+    :param float default: Default value when unset.
+    :return float: Parsed float value.
+    """
+    return float(os.environ.get(name, str(default)))
+
+
+def resolve_block_pattern(*, num_layers: int) -> str | None:
+    """Resolve the exact-contract block pattern for local profiling.
+
+    :param int num_layers: Requested depth.
+    :return str | None: Explicit block pattern when configured, else `None`.
+    """
+    block_pattern = os.environ.get("BLOCK_PATTERN", "").strip()
+    if block_pattern:
+        return block_pattern
+    if num_layers == 8:
+        return "attn,attn,gdn,attn,gdn,attn,attn,attn"
+    if num_layers == 9:
+        return "attn,attn,gdn,attn,attn,gdn,attn,attn,attn"
+    return None
+
+
+def build_gdn_kwargs() -> dict[str, object]:
+    """Build the shared HGDN frontend/runtime kwargs from the environment.
+
+    :return dict[str, object]: Keyword arguments shared by local GDN model builders.
+    """
+    return {
+        "expand_v": env_float("GDN_EXPAND_V", 1.0),
+        "allow_neg_eigval": env_flag("GDN_ALLOW_NEG_EIGVAL", True),
+        "conv_size": env_int("GDN_CONV_SIZE", 4),
+        "use_fla": True,
+        "use_packed_qkv_conv": env_flag("GDN_USE_PACKED_QKV_CONV"),
+        "use_packed_qkv_proj": env_flag("GDN_USE_PACKED_QKV_PROJ"),
+        "use_q_conv": env_flag("GDN_USE_Q_CONV", True),
+        "use_k_conv": env_flag("GDN_USE_K_CONV", True),
+        "use_v_conv": env_flag("GDN_USE_V_CONV", True),
+        "conv_output_contiguous": env_flag("GDN_CONV_OUTPUT_CONTIGUOUS"),
+        "q_conv_output_contiguous": env_flag(
+            "GDN_Q_CONV_OUTPUT_CONTIGUOUS",
+            env_flag("GDN_CONV_OUTPUT_CONTIGUOUS"),
+        ),
+        "k_conv_output_contiguous": env_flag(
+            "GDN_K_CONV_OUTPUT_CONTIGUOUS",
+            env_flag("GDN_CONV_OUTPUT_CONTIGUOUS"),
+        ),
+        "v_conv_output_contiguous": env_flag(
+            "GDN_V_CONV_OUTPUT_CONTIGUOUS",
+            env_flag("GDN_CONV_OUTPUT_CONTIGUOUS"),
+        ),
+        "gates_fp32": env_flag("GDN_GATES_FP32", True),
+        "output_norm_fp32": env_flag("GDN_OUTPUT_NORM_FP32", True),
+        "use_cuda_frontend_nct": env_flag("GDN_USE_CUDA_FRONTEND_NCT"),
+        "use_cuda_packed_conv": env_flag("GDN_USE_CUDA_PACKED_CONV"),
+        "use_cuda_packed_conv_aten_backward": env_flag(
+            "GDN_USE_CUDA_PACKED_CONV_ATEN_BACKWARD"
+        ),
+        "use_cuda_packed_conv_aten_weight_backward": env_flag(
+            "GDN_USE_CUDA_PACKED_CONV_ATEN_WEIGHT_BACKWARD"
+        ),
+        "use_cuda_split_norm": env_flag("GDN_USE_CUDA_SPLIT_NORM"),
+        "use_packed_qkv_conv_custom_backward": env_flag(
+            "GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD"
+        ),
+        "use_packed_qkv_single_contig": env_flag("GDN_PACKED_QKV_SINGLE_CONTIG"),
+        "use_packed_qkv_split_copy": env_flag("GDN_PACKED_QKV_SPLIT_COPY"),
+    }
 
 
 def build_hybrid_model() -> HybridGPT:
@@ -147,22 +253,26 @@ def build_hybrid_model() -> HybridGPT:
 
     :return HybridGPT: Prepared hybrid model.
     """
+    load_repo_symbols()
+    num_layers = env_int("NUM_LAYERS", 8)
+    block_pattern = resolve_block_pattern(num_layers=num_layers)
     return prepare_model(
         HybridGPT(
-            vocab_size=1024,
-            num_layers=16,
-            d_model=384,
-            attn_heads=8,
-            attn_kv_heads=2,
-            gdn_n_heads=8,
-            gdn_head_k_dim=48,
-            gdn_expand_v=1.0,
-            gdn_allow_neg_eigval=True,
-            gdn_use_packed_qkv_conv=env_flag("GDN_USE_PACKED_QKV_CONV"),
-            gdn_use_packed_qkv_proj=env_flag("GDN_USE_PACKED_QKV_PROJ"),
+            vocab_size=env_int("VOCAB_SIZE", 1024),
+            num_layers=num_layers,
+            d_model=env_int("MODEL_DIM", 512),
+            attn_heads=env_int("NUM_HEADS", 8),
+            attn_kv_heads=env_int("NUM_KV_HEADS", 4),
+            gdn_n_heads=env_int("GDN_N_HEADS", env_int("NUM_HEADS", 8)),
+            gdn_head_k_dim=env_int("GDN_HEAD_K_DIM", 48),
+            gdn_expand_v=env_float("GDN_EXPAND_V", 1.0),
+            gdn_allow_neg_eigval=env_flag("GDN_ALLOW_NEG_EIGVAL", True),
+            gdn_conv_size=env_int("GDN_CONV_SIZE", 4),
             gdn_use_q_conv=env_flag("GDN_USE_Q_CONV", True),
             gdn_use_k_conv=env_flag("GDN_USE_K_CONV", True),
             gdn_use_v_conv=env_flag("GDN_USE_V_CONV", True),
+            gdn_use_packed_qkv_conv=env_flag("GDN_USE_PACKED_QKV_CONV"),
+            gdn_use_packed_qkv_proj=env_flag("GDN_USE_PACKED_QKV_PROJ"),
             gdn_conv_output_contiguous=env_flag("GDN_CONV_OUTPUT_CONTIGUOUS"),
             gdn_q_conv_output_contiguous=env_flag(
                 "GDN_Q_CONV_OUTPUT_CONTIGUOUS",
@@ -192,9 +302,10 @@ def build_hybrid_model() -> HybridGPT:
             ),
             gdn_use_packed_qkv_single_contig=env_flag("GDN_PACKED_QKV_SINGLE_CONTIG"),
             gdn_use_packed_qkv_split_copy=env_flag("GDN_PACKED_QKV_SPLIT_COPY"),
-            gdn_ratio=1,
-            mlp_mult=3.25,
-            norm_style="pre",
+            gdn_ratio=env_int("GDN_RATIO", 1),
+            block_pattern=block_pattern,
+            mlp_mult=env_float("MLP_MULT", 2.0),
+            norm_style=os.environ.get("NORM_STYLE", "pre"),
         )
     )
 
@@ -205,16 +316,19 @@ def build_optimizers(model: HybridGPT) -> list[torch.optim.Optimizer]:
     :param HybridGPT model: Hybrid model to optimize.
     :return list[torch.optim.Optimizer]: Optimizers in trainer order.
     """
+    load_repo_symbols()
+    w_g_mode = validate_gdn_w_g_optimizer(os.environ.get("GDN_W_G_OPTIMIZER", "scalar"))
     block_named_params = list(model.blocks.named_parameters())
     matrix_params = [
         p
         for n, p in block_named_params
-        if p.ndim == 2 and not any(pat in n for pat in SCALAR_PARAM_PATTERNS)
+        if p.ndim == 2
+        and not uses_scalar_optimizer(n, param_ndim=p.ndim, gdn_w_g_optimizer=w_g_mode)
     ]
     scalar_params = [
         p
         for n, p in block_named_params
-        if p.ndim < 2 or any(pat in n for pat in SCALAR_PARAM_PATTERNS)
+        if uses_scalar_optimizer(n, param_ndim=p.ndim, gdn_w_g_optimizer=w_g_mode)
     ]
     if model.skip_weights.numel() > 0:
         scalar_params.append(model.skip_weights)
@@ -234,6 +348,9 @@ def build_optimizers(model: HybridGPT) -> list[torch.optim.Optimizer]:
             momentum=0.95,
             backend_steps=5,
             weight_decay=0.0,
+            distributed_mode=os.environ.get(
+                "MUON_DISTRIBUTED_MODE", "packed_allreduce"
+            ),
         ),
         torch.optim.Adam(
             scalar_params,
@@ -340,55 +457,21 @@ def profile_gdn(
     :param int row_limit: Table row limit.
     :param Path output_dir: Output directory.
     """
+    load_repo_symbols()
+    d_model = env_int("MODEL_DIM", 512)
+    n_heads = env_int("GDN_N_HEADS", env_int("NUM_HEADS", 8))
     layer = prepare_model(
         GatedDeltaNet(
-            d_model=384,
-            n_heads=8,
-            head_k_dim=48,
-            expand_v=1.0,
-            allow_neg_eigval=True,
-            conv_size=4,
-            use_fla=True,
-            use_packed_qkv_conv=env_flag("GDN_USE_PACKED_QKV_CONV"),
-            use_packed_qkv_proj=env_flag("GDN_USE_PACKED_QKV_PROJ"),
-            use_q_conv=env_flag("GDN_USE_Q_CONV", True),
-            use_k_conv=env_flag("GDN_USE_K_CONV", True),
-            use_v_conv=env_flag("GDN_USE_V_CONV", True),
-            conv_output_contiguous=env_flag("GDN_CONV_OUTPUT_CONTIGUOUS"),
-            q_conv_output_contiguous=env_flag(
-                "GDN_Q_CONV_OUTPUT_CONTIGUOUS",
-                env_flag("GDN_CONV_OUTPUT_CONTIGUOUS"),
-            ),
-            k_conv_output_contiguous=env_flag(
-                "GDN_K_CONV_OUTPUT_CONTIGUOUS",
-                env_flag("GDN_CONV_OUTPUT_CONTIGUOUS"),
-            ),
-            v_conv_output_contiguous=env_flag(
-                "GDN_V_CONV_OUTPUT_CONTIGUOUS",
-                env_flag("GDN_CONV_OUTPUT_CONTIGUOUS"),
-            ),
-            gates_fp32=env_flag("GDN_GATES_FP32", True),
-            output_norm_fp32=env_flag("GDN_OUTPUT_NORM_FP32", True),
-            use_cuda_frontend_nct=env_flag("GDN_USE_CUDA_FRONTEND_NCT"),
-            use_cuda_packed_conv=env_flag("GDN_USE_CUDA_PACKED_CONV"),
-            use_cuda_packed_conv_aten_backward=env_flag(
-                "GDN_USE_CUDA_PACKED_CONV_ATEN_BACKWARD"
-            ),
-            use_cuda_packed_conv_aten_weight_backward=env_flag(
-                "GDN_USE_CUDA_PACKED_CONV_ATEN_WEIGHT_BACKWARD"
-            ),
-            use_cuda_split_norm=env_flag("GDN_USE_CUDA_SPLIT_NORM"),
-            use_packed_qkv_conv_custom_backward=env_flag(
-                "GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD"
-            ),
-            use_packed_qkv_single_contig=env_flag("GDN_PACKED_QKV_SINGLE_CONTIG"),
-            use_packed_qkv_split_copy=env_flag("GDN_PACKED_QKV_SPLIT_COPY"),
+            d_model=d_model,
+            n_heads=n_heads,
+            head_k_dim=env_int("GDN_HEAD_K_DIM", 48),
+            **build_gdn_kwargs(),
         )
     )
     x = torch.randn(
         batch_size,
         seq_len,
-        384,
+        d_model,
         device="cuda",
         dtype=torch.bfloat16,
         requires_grad=True,
