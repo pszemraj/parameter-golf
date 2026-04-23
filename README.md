@@ -16,6 +16,22 @@ Root-level changes:
   - `tools/estimate_artifact_bytes.py`
   - `tests/test_core_amplifier.py`
 
+Core dependency note:
+- the maintained Core/Amplifier path now treats `assoc-scan` and `accelerated-scan` as core dependencies
+- install the repo requirements before running the root trainer:
+
+```bash
+pip install -r requirements.txt
+```
+
+- `scan_backend=auto` is still the default config value, but on CUDA it now means:
+  - use accelerated scan
+  - fail loudly if the accelerated scan stack is missing
+- if you intentionally want a slower fallback for debugging, choose it explicitly with:
+  - `--scan-backend heinsen`
+  - `--scan-backend assoc`
+  - `--scan-backend sequential`
+
 Recommended root workflow:
 
 ```bash

@@ -124,9 +124,11 @@ Behavior:
 
 `auto` behavior:
 
-- CUDA + optional deps installed: `assoc_accel`
-- CPU + `assoc-scan` only: `assoc`
-- otherwise: `heinsen` for minGRU or `sequential` for general affine scans
+- CUDA + required scan deps installed: `assoc_accel`
+- non-CUDA + `assoc-scan` installed: `assoc`
+- otherwise: fail loudly instead of silently downgrading the maintained CUDA path
+
+The accelerated scan dependencies are now treated as part of the core path, not optional extras.
 
 This backend is now used in:
 

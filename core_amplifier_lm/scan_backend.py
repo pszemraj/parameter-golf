@@ -1,9 +1,10 @@
-"""Parallel first-order scan helpers with optional accelerated backends.
+"""Parallel first-order scan helpers with required accelerated CUDA backends.
 
 This module centralizes the optional ``assoc-scan`` / ``accelerated-scan``
 integration used by the parallel minGRU path and by experimental temporal tap
 modes. The goal is to keep recurrence semantics stable while making the active
-backend explicit and easy to summarize.
+backend explicit, fast by default on CUDA, and impossible to silently
+downgrade when the active Core/Amplifier path expects acceleration.
 """
 
 from __future__ import annotations
@@ -11,14 +12,10 @@ from __future__ import annotations
 from functools import lru_cache
 import importlib.util
 from typing import Optional
-import warnings
 
 import torch
 
 SCAN_BACKEND_CHOICES = ("auto", "heinsen", "assoc", "assoc_accel", "sequential")
-
-_WARNED_ACCEL_FALLBACK = False
-_WARNED_ASSOC_FALLBACK = False
 
 
 def normalize_scan_backend(backend: str, *, allow_heinsen: bool) -> str:
@@ -68,18 +65,37 @@ def resolve_scan_backend(
     :return str: Active backend name.
     """
     requested = normalize_scan_backend(requested, allow_heinsen=allow_heinsen)
+    assoc_available = assoc_scan_installed()
+    accel_available = accelerated_scan_installed()
     if requested == "auto":
-        if assoc_scan_installed():
-            if device.type == "cuda" and accelerated_scan_installed():
-                return "assoc_accel"
-            return "assoc"
-        return "heinsen" if allow_heinsen else "sequential"
-    if requested == "assoc_accel" and device.type != "cuda":
-        return "assoc" if assoc_scan_installed() else ("heinsen" if allow_heinsen else "sequential")
-    if requested in {"assoc", "assoc_accel"} and not assoc_scan_installed():
-        return "heinsen" if allow_heinsen else "sequential"
-    if requested == "assoc_accel" and not accelerated_scan_installed():
-        return "assoc" if assoc_scan_installed() else ("heinsen" if allow_heinsen else "sequential")
+        if device.type == "cuda":
+            if not assoc_available or not accel_available:
+                raise RuntimeError(
+                    "scan_backend=auto on CUDA requires both assoc-scan and accelerated-scan. "
+                    "Install the repo requirements or choose an explicit slower backend."
+                )
+            return "assoc_accel"
+        if not assoc_available:
+            raise RuntimeError(
+                "scan_backend=auto requires assoc-scan on non-CUDA devices. "
+                "Install the repo requirements or choose an explicit backend."
+            )
+        return "assoc"
+    if requested == "assoc":
+        if not assoc_available:
+            raise RuntimeError(
+                "scan_backend=assoc requires assoc-scan. Install the repo requirements."
+            )
+        return "assoc"
+    if requested == "assoc_accel":
+        if device.type != "cuda":
+            raise RuntimeError("scan_backend=assoc_accel requires a CUDA device; use assoc on CPU.")
+        if not assoc_available or not accel_available:
+            raise RuntimeError(
+                "scan_backend=assoc_accel requires both assoc-scan and accelerated-scan. "
+                "Install the repo requirements."
+            )
+        return "assoc_accel"
     return requested
 
 
@@ -128,7 +144,7 @@ def apply_affine_scan(
     prev: Optional[torch.Tensor] = None,
     backend: str,
 ) -> tuple[torch.Tensor, str]:
-    """Apply a first-order affine scan with backend fallback.
+    """Apply a first-order affine scan.
 
     The recurrence is ``x[t] = gates[t] * x[t-1] + inputs[t]``.
 
@@ -138,7 +154,6 @@ def apply_affine_scan(
     :param str backend: Requested active backend; may not be ``heinsen``.
     :return tuple[torch.Tensor, str]: Scanned outputs and the backend actually used.
     """
-    global _WARNED_ACCEL_FALLBACK, _WARNED_ASSOC_FALLBACK
 
     backend = normalize_scan_backend(backend, allow_heinsen=False)
     if backend == "sequential":
@@ -149,28 +164,8 @@ def apply_affine_scan(
         scan = _get_assoc_scan_module(use_accelerated)
         return scan(gates, inputs, prev=prev), backend
     except Exception as exc:
-        if use_accelerated:
-            if not _WARNED_ACCEL_FALLBACK:
-                warnings.warn(
-                    f"accelerated scan backend failed ({exc!r}); falling back to assoc-scan",
-                    stacklevel=2,
-                )
-                _WARNED_ACCEL_FALLBACK = True
-            try:
-                scan = _get_assoc_scan_module(False)
-                return scan(gates, inputs, prev=prev), "assoc"
-            except Exception as ref_exc:
-                if not _WARNED_ASSOC_FALLBACK:
-                    warnings.warn(
-                        f"assoc-scan fallback failed ({ref_exc!r}); using sequential scan",
-                        stacklevel=2,
-                    )
-                    _WARNED_ASSOC_FALLBACK = True
-                return sequential_affine_scan(gates, inputs, prev=prev), "sequential"
-        if not _WARNED_ASSOC_FALLBACK:
-            warnings.warn(
-                f"assoc-scan backend failed ({exc!r}); using sequential scan",
-                stacklevel=2,
-            )
-            _WARNED_ASSOC_FALLBACK = True
-        return sequential_affine_scan(gates, inputs, prev=prev), "sequential"
+        raise RuntimeError(
+            f"scan backend {backend!r} failed. "
+            "The active Core/Amplifier path no longer falls back silently; "
+            "either fix the accelerated scan install or choose an explicit slower backend."
+        ) from exc

@@ -10,6 +10,7 @@ import tempfile
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 
 from core_amplifier_lm import (
@@ -25,6 +26,7 @@ from core_amplifier_lm.model import (
     _count_lag_pairs,
     _count_unigrams,
 )
+from core_amplifier_lm.scan_backend import resolve_scan_backend
 from core_amplifier_lm.spec_builder import count_all
 from train_core_amplifier import mmap_train_val
 
@@ -403,6 +405,34 @@ def test_mingru_assoc_scan_matches_heinsen_reference():
     assert candidate.active_scan_backend_name() == "assoc"
     assert torch.allclose(ref_logits, out_logits, atol=1e-4, rtol=1e-4)
     assert torch.allclose(ref_state, out_state, atol=1e-4, rtol=1e-4)
+
+
+def test_auto_scan_backend_requires_accelerated_cuda_stack(monkeypatch):
+    """CUDA auto backend should fail loudly when accelerated scan deps are missing."""
+    monkeypatch.setattr("core_amplifier_lm.scan_backend.assoc_scan_installed", lambda: True)
+    monkeypatch.setattr("core_amplifier_lm.scan_backend.accelerated_scan_installed", lambda: False)
+    with pytest.raises(RuntimeError, match="requires both assoc-scan and accelerated-scan"):
+        resolve_scan_backend("auto", device=torch.device("cuda"), allow_heinsen=True)
+
+
+def test_min_gru_active_scan_backend_resolves_before_first_forward(monkeypatch):
+    """The reported active backend should resolve before the first training step."""
+    monkeypatch.setattr("core_amplifier_lm.scan_backend.assoc_scan_installed", lambda: True)
+    monkeypatch.setattr("core_amplifier_lm.scan_backend.accelerated_scan_installed", lambda: False)
+    rng = np.random.default_rng(SEED)
+    tokens = rng.integers(0, VOCAB, size=20_000, dtype=np.int64)
+    spec = build_amplifier_spec(
+        tokens,
+        vocab_size=VOCAB,
+        core_dim=8,
+        branch_lags=(1, 2, 4),
+        num_blocks=1,
+        fixed_dtype=torch.float16,
+    )
+    from core_amplifier_lm import CoreAmplifierLM
+
+    model = CoreAmplifierLM(spec, core_layers=2, scan_backend="auto", amplifier_dtype=torch.float32)
+    assert model.active_scan_backend_name() == "assoc"
 
 
 def test_ema_hybrid_temporal_mode_chunk_carry_matches_full_forward():

@@ -10,3 +10,5 @@ tiktoken
 sentencepiece
 pytest
 pyarrow
+assoc-scan==0.0.4
+accelerated-scan==0.3.1

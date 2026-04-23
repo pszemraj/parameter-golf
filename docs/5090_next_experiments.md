@@ -100,10 +100,11 @@ That means the next order is:
 
 ## Fast-Scan Note
 
-`scan_backend=auto` is now wired through the active Core/Amplifier path.
+`scan_backend=auto` is now wired through the active Core/Amplifier path as the fail-loud default.
 
-- on CUDA it resolves to `assoc_accel` when `assoc-scan` and `accelerated-scan` are available
-- otherwise it falls back cleanly to `assoc`, `heinsen`, or `sequential`
+- on CUDA it requires `assoc-scan` and `accelerated-scan`, then resolves to `assoc_accel`
+- on non-CUDA devices it requires `assoc-scan`, then resolves to `assoc`
+- it no longer silently downgrades to a slower backend on the maintained CUDA path
 
 Local 5090 microbenchmarks on representative recurrence shapes:
 
@@ -114,4 +115,4 @@ Local 5090 microbenchmarks on representative recurrence shapes:
   - `sequential`: `95.314 ms`
   - `assoc_accel`: `2.844 ms`
 
-Those are local primitive-level checks, not end-to-end training claims, but they are strong enough to keep `scan_backend=auto` as the working default for the new architecture lane.
+Those are local primitive-level checks, not end-to-end training claims, but they are strong enough to keep `scan_backend=auto` as the working default for the new architecture lane, with the scan dependencies treated as core requirements rather than optional extras.

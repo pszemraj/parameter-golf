@@ -888,9 +888,8 @@ class MinGRULayer(nn.Module):
             else:
                 out = hidden * gate
         else:
-            # Parallel mode. We prefer assoc-scan / accelerated-scan when
-            # available, but keep the Heinsen reference path for stability and
-            # environments without the optional dependency.
+            # Parallel mode. The maintained CUDA path is accelerated scan by
+            # default; Heinsen remains available only as an explicit fallback.
             orig_dtype = hidden.dtype
             hidden = hidden.float()
             gate = gate.float()
@@ -1153,7 +1152,14 @@ class MinGRUCore(nn.Module):
         if self.residual_blocks:
             layer = self.blocks[0].rnn
         if hasattr(layer, "scan_backend_active"):
-            return layer.scan_backend_active or self.scan_backend_requested
+            if layer.scan_backend_active:
+                return layer.scan_backend_active
+            device = next(layer.parameters()).device
+            return resolve_scan_backend(
+                self.scan_backend_requested,
+                device=device,
+                allow_heinsen=True,
+            )
         return None
 
 
