@@ -277,14 +277,14 @@ Queued next batch:
 bash scripts/run_5090_post_temporal_queue.sh
 ```
 
-Optional queue wrapper:
+To run the sidecar immediately after the safe finalists in the same bash session:
 
 ```bash
-bash scripts/run_5090_final_week_pueue.sh enqueue
+RUN_GATE_LR_SIDECAR_AFTER_FINALISTS=1 bash scripts/run_5090_post_temporal_queue.sh
 ```
 
-This keeps the safe finalists as the primary batch and automatically places the remaining
-`gate=base x lr=3.5e-3` sidecar behind them.
+This keeps the safe finalists as the primary batch and then runs the remaining
+`gate=base x lr=3.5e-3` sidecar without introducing a second queue system.
 
 ## Stop Rules
 

@@ -151,17 +151,11 @@ Exact sidecar command:
 bash scripts/run_5090_gate_lr_sidecar.sh
 ```
 
-Optional queueing wrapper:
+To run the safe finalists and then the sidecar in one plain bash flow:
 
 ```bash
-bash scripts/run_5090_final_week_pueue.sh enqueue
+RUN_GATE_LR_SIDECAR_AFTER_FINALISTS=1 bash scripts/run_5090_post_temporal_queue.sh
 ```
-
-That helper:
-
-- boots a dedicated `pueue` daemon under `${HOME}/.cache/parameter-golf/pueue/5090_final_week`
-- queues the safe finalist `1B` batch first
-- queues the `gate=base x lr=3.5e-3` sidecar second with a success dependency
 
 ## Why The Architecture Lane Changed
 
