@@ -71,6 +71,7 @@ DEFAULT_MODEL_KWARGS: dict[str, Any] = {
 ALLOWED_CONFIG_KEYS = set(DEFAULT_MODEL_KWARGS) | {
     "artifact_limit_bytes",
     "gdn_control_proj_fp32",
+    "gdn_w_g_optimizer",
 }
 
 
@@ -209,6 +210,12 @@ def candidate_metrics(
             base_cfg.get("gdn_control_proj_fp32", True),
         )
     )
+    gdn_w_g_optimizer = str(
+        override.get(
+            "gdn_w_g_optimizer",
+            base_cfg.get("gdn_w_g_optimizer", "scalar"),
+        )
+    )
     artifact_limit_bytes = int(
         override.get(
             "artifact_limit_bytes",
@@ -217,13 +224,19 @@ def candidate_metrics(
     )
 
     model = HybridGPT(**model_kwargs).bfloat16()
-    restore_low_dim_params_to_fp32(model, gdn_control_proj_fp32=gdn_control_proj_fp32)
+    restore_low_dim_params_to_fp32(
+        model,
+        gdn_control_proj_fp32=gdn_control_proj_fp32,
+        gdn_w_g_optimizer=gdn_w_g_optimizer,
+    )
 
     state_dict = model.state_dict()
     raw_buf = io.BytesIO()
     torch.save(state_dict, raw_buf)
     raw_model_bytes = len(raw_buf.getvalue())
-    _, quant_blob, audit = serialize_quantized_state_dict_int8(state_dict)
+    _, quant_blob, audit = serialize_quantized_state_dict_int8(
+        state_dict, gdn_w_g_optimizer=gdn_w_g_optimizer
+    )
     int8_zlib_bytes = len(quant_blob)
     total_init_bytes = int8_zlib_bytes + code_bytes
     headroom_bytes = artifact_limit_bytes - total_init_bytes

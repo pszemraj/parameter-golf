@@ -32,10 +32,14 @@ def normalize_wandb_watch_mode(mode: str) -> str:
 
 def quantize_state_dict_int8(
     state_dict: dict[str, Tensor],
+    *,
+    gdn_w_g_optimizer: str = "scalar",
 ) -> tuple[dict[str, Any], dict[str, int]]:
     """Quantize a state dict with per-row int8 weights where possible.
 
     :param dict[str, Tensor] state_dict: Floating-point state dict.
+    :param str gdn_w_g_optimizer: Whether `w_g` should ride Adam or Muon,
+        defaults to `"scalar"`.
     :return tuple[dict[str, Any], dict[str, int]]: Quantized payload object and serialization stats.
     """
     quantized, scales, dtypes, passthrough = {}, {}, {}, {}
@@ -43,6 +47,7 @@ def quantize_state_dict_int8(
     stats = dict.fromkeys(
         ("param_count", "num_tensors", "baseline_tensor_bytes", "int8_payload_bytes"), 0
     )
+    active_scalar_patterns = scalar_param_patterns(gdn_w_g_optimizer=gdn_w_g_optimizer)
     for name, tensor in state_dict.items():
         t = tensor.detach().cpu().contiguous()
         stats["param_count"] += t.numel()
@@ -53,7 +58,7 @@ def quantize_state_dict_int8(
             stats["int8_payload_bytes"] += t.numel() * t.element_size()
             continue
         if t.numel() <= INT8_KEEP_FLOAT_MAX_NUMEL:
-            if any(pattern in name for pattern in scalar_param_patterns()):
+            if any(pattern in name for pattern in active_scalar_patterns):
                 kept = t.float().contiguous()
             else:
                 passthrough_orig_dtypes[name] = str(t.dtype).removeprefix("torch.")
@@ -133,15 +138,22 @@ def dequantize_state_dict_int8(obj: dict[str, Any]) -> dict[str, Tensor]:
 
 
 def serialize_quantized_state_dict_int8(
-    state_dict: dict[str, Tensor], zlib_level: int = 9
+    state_dict: dict[str, Tensor],
+    zlib_level: int = 9,
+    *,
+    gdn_w_g_optimizer: str = "scalar",
 ) -> tuple[dict[str, Any], bytes, dict[str, int | float]]:
     """Quantize, serialize, and compress a state dict with byte-level audit stats.
 
     :param dict[str, Tensor] state_dict: Floating-point state dict to pack.
     :param int zlib_level: Compression level for the final zlib payload, defaults to 9.
+    :param str gdn_w_g_optimizer: Whether `w_g` should ride Adam or Muon,
+        defaults to `"scalar"`.
     :return tuple[dict[str, Any], bytes, dict[str, int | float]]: Quantized object, compressed blob, and byte audit metrics.
     """
-    quant_obj, quant_stats = quantize_state_dict_int8(state_dict)
+    quant_obj, quant_stats = quantize_state_dict_int8(
+        state_dict, gdn_w_g_optimizer=gdn_w_g_optimizer
+    )
     quant_buf = io.BytesIO()
     torch.save(quant_obj, quant_buf)
     quant_raw = quant_buf.getvalue()
@@ -217,6 +229,7 @@ def prepare_cuda_module(
     restore_low_dim_params_to_fp32: Any,
     freeze_conv_weights: bool = False,
     gdn_control_proj_fp32: bool | None = None,
+    gdn_w_g_optimizer: str = "scalar",
 ) -> nn.Module:
     """Apply the shared mixed-precision policy used by HGDN helper scripts.
 
@@ -228,15 +241,15 @@ def prepare_cuda_module(
     :param bool | None gdn_control_proj_fp32: Optional override for the HGDN
         control-projection fp32 policy. When omitted, uses the restore helper's
         default behavior.
+    :param str gdn_w_g_optimizer: Whether `w_g` should ride Adam or Muon,
+        defaults to `"scalar"`.
     :return nn.Module: Prepared CUDA bf16 module.
     """
     module = module.cuda().bfloat16()
-    if gdn_control_proj_fp32 is None:
-        restore_low_dim_params_to_fp32(module)
-    else:
-        restore_low_dim_params_to_fp32(
-            module, gdn_control_proj_fp32=gdn_control_proj_fp32
-        )
+    restore_kwargs: dict[str, Any] = {"gdn_w_g_optimizer": gdn_w_g_optimizer}
+    if gdn_control_proj_fp32 is not None:
+        restore_kwargs["gdn_control_proj_fp32"] = gdn_control_proj_fp32
+    restore_low_dim_params_to_fp32(module, **restore_kwargs)
     maybe_freeze_gdn_conv_weights(module, enabled=freeze_conv_weights)
     return module
 

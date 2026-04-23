@@ -1891,7 +1891,8 @@ def main() -> None:
         log0(f"raw_model_bytes:{raw_model_bytes}")
 
     quant_obj, quant_blob, quant_audit = serialize_quantized_state_dict_int8(
-        base_model.state_dict()
+        base_model.state_dict(),
+        gdn_w_g_optimizer=args.gdn_w_g_optimizer,
     )
     if master_process:
         with open("final_model.int8.ptz", "wb") as f:

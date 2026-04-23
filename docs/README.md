@@ -1,6 +1,6 @@
 # HGDN Branch Status
 
-Last updated: 2026-04-22 15:00 EDT
+Last updated: 2026-04-23 13:45 EDT
 
 Branch: `exp/hgdn-k-core`
 
@@ -119,13 +119,22 @@ Branch: `exp/hgdn-k-core`
   - `GDN_HEAD_K_DIM=48` instead of `64/60`
   - `MUON_DISTRIBUTED_MODE=packed_allreduce`
   - `GDN_W_G_OPTIMIZER=matrix`
+  - profiler, CUDA preflight, and size-screen/quantization helpers now follow
+    the same `GDN_W_G_OPTIMIZER` policy as the trainer instead of drifting back
+    to the old scalar/live14 defaults
 - Current active exact-contract candidates:
   - `l8_d512_mid2_dk48_m2`
   - `l8_d512_mid2_dk48_m1p75`
+  - `l8_d512_boundary2_dk48_m2`
   - `l9_d512_mid2_dk48_m1p75`
+  - `l9_d512_mid2_dk48_m2`
   - `l9_d512_mid3_dk48_m1p75`
-  - same-shell attention-only controls `l8_d512_r0_m2` and
-    `l9_d512_r0_m1p75`
+  - `l9_d512_tail2_dk48_m1p75`
+  - same-shell attention-only controls:
+    - `l8_d512_r0_m1p75`
+    - `l8_d512_r0_m2`
+    - `l9_d512_r0_m1p75`
+    - `l9_d512_r0_m2`
 - The helper defaults `PERF_SKIP_FINAL_EVAL=1` for local broad screens so the
   size screen handles artifact triage and the local loop is not dominated by
   the quantized roundtrip tail.
@@ -164,6 +173,9 @@ instead of replaying `single-live14` by default:
 - `VOCAB_SIZE`
 - exact-contract HGDN config path
 - same-shell attention-only config path
+- when `ATTN_CONFIG` is omitted, the helper now infers the matched
+  same-shell attention control from `HGDN_CONFIG` instead of silently falling
+  back to the old 8-layer default pair
 
 Details and open items live in [TODO.md](TODO.md).
 

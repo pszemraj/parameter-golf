@@ -1,6 +1,6 @@
 # HGDN Next Steps
 
-Last updated: 2026-04-22 15:00 EDT
+Last updated: 2026-04-23 13:45 EDT
 
 ## 1. Run the local sparse exact-contract HGDN search before more H100 spend
 
@@ -29,12 +29,21 @@ Last updated: 2026-04-22 15:00 EDT
   - `GDN_HEAD_K_DIM=48`
   - `MUON_DISTRIBUTED_MODE=packed_allreduce`
   - `GDN_W_G_OPTIMIZER=matrix`
+  - exact-contract profiler / CUDA preflight / size-screen helpers now follow
+    the same `w_g` routing policy as the trainer
 - Current active candidate set:
   - `l8_d512_mid2_dk48_m2`
   - `l8_d512_mid2_dk48_m1p75`
+  - `l8_d512_boundary2_dk48_m2`
   - `l9_d512_mid2_dk48_m1p75`
+  - `l9_d512_mid2_dk48_m2`
   - `l9_d512_mid3_dk48_m1p75`
-  - attention-only controls `l8_d512_r0_m2` and `l9_d512_r0_m1p75`
+  - `l9_d512_tail2_dk48_m1p75`
+  - attention-only controls:
+    - `l8_d512_r0_m1p75`
+    - `l8_d512_r0_m2`
+    - `l9_d512_r0_m1p75`
+    - `l9_d512_r0_m2`
 - The helper now defaults `PERF_SKIP_FINAL_EVAL=1` for local screening so the
   size screen handles artifact triage and the local run is not dominated by the
   quantized roundtrip tail.
@@ -111,6 +120,9 @@ bash scripts/run_h100_hgdn_compile_tiebreak_round.sh
 - The next rerun should keep the same comparison surface but use the new
   config-driven HGDN candidate path. Pin the hybrid-trainer legs to
   `WEIGHT_DECAY=0`.
+- The helper now infers the matched same-shell attention control from
+  `HGDN_CONFIG` when `ATTN_CONFIG` is not set, but promotion runs should still
+  pass both configs explicitly once local screening picks the top shells.
 - Pin the direct baseline leg explicitly to:
   - `DATA_PATH`
   - `TOKENIZER_PATH`

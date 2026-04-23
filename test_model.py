@@ -43,6 +43,7 @@ from profiler_report import (
 )
 from hgdn_runtime_utils import (
     normalize_wandb_watch_mode,
+    quantize_state_dict_int8,
     restore_low_dim_params_to_fp32,
     serialize_quantized_state_dict_int8,
 )
@@ -1435,6 +1436,23 @@ def test_restore_low_dim_params_to_fp32_matrix_w_g() -> None:
     assert layer.w_b.weight.dtype == torch.float32
     assert layer.w_g.weight.dtype == torch.bfloat16
     print("  ✓ matrix-routed w_g stays bf16 in fp32 restore helper")
+
+
+def test_quantize_state_dict_int8_respects_w_g_optimizer_policy() -> None:
+    """Keep `w_g` on the same small-tensor packing policy as the trainer."""
+    layer = _make_bf16_gdn()
+    scalar_quant, _ = quantize_state_dict_int8(
+        layer.state_dict(), gdn_w_g_optimizer="scalar"
+    )
+    matrix_quant, _ = quantize_state_dict_int8(
+        layer.state_dict(), gdn_w_g_optimizer="matrix"
+    )
+
+    scalar_w_g = scalar_quant["passthrough"]["w_g.weight"]
+    matrix_w_g = matrix_quant["passthrough"]["w_g.weight"]
+    assert scalar_w_g.dtype == torch.float32
+    assert matrix_w_g.dtype == torch.float16
+    print("  ✓ quantized artifact policy follows w_g optimizer routing")
 
 
 def test_hybrid_fwd_bwd() -> None:

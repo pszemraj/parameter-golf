@@ -11,7 +11,6 @@ rechecking promising changes on H100. It isolates three useful views:
 from __future__ import annotations
 
 import argparse
-import inspect
 import os
 from pathlib import Path
 from typing import Callable, Iterable
@@ -27,7 +26,6 @@ from _repo_bootstrap import ensure_repo_root_on_sys_path
 REPO_ROOT = ensure_repo_root_on_sys_path()
 
 from hgdn_runtime_utils import (  # noqa: E402
-    maybe_freeze_gdn_conv_weights,
     prepare_cuda_module,
     restore_low_dim_params_to_fp32 as restore_fp32,
 )
@@ -144,25 +142,13 @@ def prepare_model(module: torch.nn.Module) -> torch.nn.Module:
     gdn_w_g_optimizer = validate_gdn_w_g_optimizer(
         os.environ.get("GDN_W_G_OPTIMIZER", "scalar")
     )
-    prepare_kwargs: dict[str, object] = {
-        "restore_low_dim_params_to_fp32": restore_fp32,
-        "freeze_conv_weights": env_flag("GDN_FREEZE_CONV_WEIGHTS"),
-        "gdn_control_proj_fp32": gdn_control_proj_fp32,
-    }
-    if "gdn_w_g_optimizer" in inspect.signature(prepare_cuda_module).parameters:
-        prepare_kwargs["gdn_w_g_optimizer"] = gdn_w_g_optimizer
-        return prepare_cuda_module(module, **prepare_kwargs)
-
-    module = module.cuda().bfloat16()
-    restore_fp32(
+    return prepare_cuda_module(
         module,
+        restore_low_dim_params_to_fp32=restore_fp32,
+        freeze_conv_weights=env_flag("GDN_FREEZE_CONV_WEIGHTS"),
         gdn_control_proj_fp32=gdn_control_proj_fp32,
         gdn_w_g_optimizer=gdn_w_g_optimizer,
     )
-    maybe_freeze_gdn_conv_weights(
-        module, enabled=bool(prepare_kwargs["freeze_conv_weights"])
-    )
-    return module
 
 
 def env_int(name: str, default: int) -> int:

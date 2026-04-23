@@ -78,38 +78,45 @@ online | offline) ;;
     ;;
 esac
 
-default_prefixes=(
-    "${run_prefix_base}_a"
-    "${run_prefix_base}_b"
-    "${run_prefix_base}_c"
-    "${run_prefix_base}_d"
-    "${run_prefix_base}_e"
-    "${run_prefix_base}_f"
+configs=(
+    "configs/hgdn/naive_contract_l8_d512_mid2_dk48_m2.toml"
+    "configs/hgdn/naive_contract_l8_d512_mid2_dk48_m1p75.toml"
+    "configs/hgdn/naive_contract_l8_d512_boundary2_dk48_m2.toml"
+    "configs/hgdn/naive_contract_l9_d512_mid2_dk48_m1p75.toml"
+    "configs/hgdn/naive_contract_l9_d512_mid2_dk48_m2.toml"
+    "configs/hgdn/naive_contract_l9_d512_mid3_dk48_m1p75.toml"
+    "configs/hgdn/naive_contract_l9_d512_tail2_dk48_m1p75.toml"
+    "configs/hgdn/naive_contract_l8_d512_r0_m1p75.toml"
+    "configs/hgdn/naive_contract_l8_d512_r0_m2.toml"
+    "configs/hgdn/naive_contract_l9_d512_r0_m1p75.toml"
+    "configs/hgdn/naive_contract_l9_d512_r0_m2.toml"
 )
+
+labels=(
+    "HGDN 8Lx512d mid2 dk48 mlp2.0"
+    "HGDN 8Lx512d mid2 dk48 mlp1.75"
+    "HGDN 8Lx512d boundary2 dk48 mlp2.0"
+    "HGDN 9Lx512d mid2 dk48 mlp1.75"
+    "HGDN 9Lx512d mid2 dk48 mlp2.0"
+    "HGDN 9Lx512d mid3 dk48 mlp1.75"
+    "HGDN 9Lx512d tail2 dk48 mlp1.75"
+    "Attention-only 8Lx512d mlp1.75"
+    "Attention-only 8Lx512d mlp2.0"
+    "Attention-only 9Lx512d mlp1.75"
+    "Attention-only 9Lx512d mlp2.0"
+)
+
+default_prefixes=()
+for idx in "${!configs[@]}"; do
+    printf -v suffix '%b' "\\$(printf '%03o' $((97 + idx)))"
+    default_prefixes+=("${run_prefix_base}_${suffix}")
+done
 
 if [[ -n "${RUN_PREFIXES:-}" ]]; then
     IFS=',' read -r -a run_prefixes <<<"${RUN_PREFIXES}"
 else
     run_prefixes=("${default_prefixes[@]}")
 fi
-
-configs=(
-    "configs/hgdn/naive_contract_l8_d512_mid2_dk48_m2.toml"
-    "configs/hgdn/naive_contract_l8_d512_mid2_dk48_m1p75.toml"
-    "configs/hgdn/naive_contract_l9_d512_mid2_dk48_m1p75.toml"
-    "configs/hgdn/naive_contract_l9_d512_mid3_dk48_m1p75.toml"
-    "configs/hgdn/naive_contract_l8_d512_r0_m2.toml"
-    "configs/hgdn/naive_contract_l9_d512_r0_m1p75.toml"
-)
-
-labels=(
-    "HGDN 8Lx512d mid2 dk48 mlp2.0"
-    "HGDN 8Lx512d mid2 dk48 mlp1.75"
-    "HGDN 9Lx512d mid2 dk48 mlp1.75"
-    "HGDN 9Lx512d mid3 dk48 mlp1.75"
-    "Attention-only 8Lx512d mlp2.0"
-    "Attention-only 9Lx512d mlp1.75"
-)
 
 if [[ -n "${CANDIDATE_INDEXES:-}" ]]; then
     IFS=',' read -r -a selected_indexes <<<"${CANDIDATE_INDEXES}"
