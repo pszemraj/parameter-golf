@@ -2,37 +2,42 @@
 
 ## Status
 
-- The original `blocks0` hold sweep, edge follow-up, and `1B` transfer confirmation are complete.
-- The tuned-hold `blocks1` family is complete at `1B`.
-- The wide `blocks0` / `blocks1` / `blocks2` multi-seed confirmation is now complete.
-- Working schedule defaults are still:
-  - `lr_hold_steps=3500` for the `4096`-step / `512M` screening contract
-  - `lr_hold_steps=7000` for the `8192`-step / `1B` contract
-- Those defaults are now proven for the old `blocks0` lane, but they are not yet fully revalidated on the true post-confirmation frontier.
+The schedule lane is effectively closed for the current local architecture frontier.
+
+Completed:
+
+- original `blocks0` hold sweep
+- hold-edge follow-up
+- `1B` hold transfer confirmation
+- wide `blocks0` / `blocks1` / `blocks2` multi-seed confirmation
+- post-confirmation two-seed hold-retune screen
+
+Working schedule defaults:
+
+- `lr_hold_steps=3500` for the `4096`-step / `512M` screening contract
+- `lr_hold_steps=7000` for the `8192`-step / `1B` contract
+
+Next move:
+
+- architecture, not more hold work
 
 ## Training Budget Policy
 
-- Full-dataset frozen spec/statistics build is mandatory.
-- `512M` is the default schedule-screening budget.
-- `1B` is the confirmation budget for the winning schedule points.
-- Anything shorter than `512M` is only for smoke tests or obvious harness checks.
-
-This is the current best speed/rigor compromise:
-
-- `512M` was predictive enough to move the hold default in the earlier `blocks0` lane.
-- `1B` confirmation then proved that the gain was real.
-- Close post-confirmation rankings are now small enough that the final claims still need the `1B` pass.
+- full-dataset frozen spec/statistics build is mandatory
+- `512M` is the default schedule-screening budget
+- `1B` is the confirmation budget
+- shorter than `512M` is only for smoke tests or harness checks
 
 ## What Was Verified
 
-- Warmup-hold-cosine is the real root schedule path.
-- `lr_hold_steps` is wired end to end.
-- The trainer records structured train/eval metrics and final run results, so schedule comparisons do not depend on ad hoc log parsing.
-- The sweep harness supports a fixed effective-step-token contract, so local batch changes can preserve apples-to-apples optimizer-step semantics with derived `grad_accum`.
+- warmup-hold-cosine is the active training path
+- `lr_hold_steps` is wired end to end
+- the trainer records exact `val_bpb`, throughput, memory, and artifact estimates in structured outputs
+- sweep comparisons can preserve a fixed effective-step-token contract even when local microbatch changes
 
-## Blocks0 Hold Sweep Result
+## Blocks0 Hold Result
 
-There is strong evidence that the inherited `1500`-step hold was too short for the radical `blocks0` controllers on the `512M` screen.
+The inherited `1500`-step hold was too short for the zero-block radical controllers.
 
 | Controller | `h0` | `h500` | `h1500` | `h2500` | `h3500` | `h4096` | Best tested |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -41,24 +46,21 @@ There is strong evidence that the inherited `1500`-step hold was too short for t
 
 Interpretation:
 
-- hold-then-cosine is real signal for this family
-- the schedule wants a very late tail, not no decay
-- `h4096` was clearly worse, so “never decay” is not the answer here
+- later decay helped materially
+- no-decay was clearly worse
 
-## 1B Hold Transfer Result
+## `1B` Hold Transfer Result
 
-The proportional `h3500 -> h7000` transfer held up on the `1B` budget for the `blocks0` finalists.
+The proportional `h3500 -> h7000` transfer held on the `1B` contract for the zero-block finalists.
 
 | Controller | inherited `h1500` @ `1B` | tuned `h7000` @ `1B` | Delta |
 |---|---:|---:|---:|
 | `blocks0 12x10` | `2.2113941366` | `2.1954688682` | `-0.0159252684` |
 | `blocks0 10x12` | `2.2128156660` | `2.1878016930` | `-0.0250139730` |
 
-This was genuine optimization gain. Throughput stayed effectively unchanged.
+## Wide Multi-Seed Confirmation
 
-## Wide Multi-Seed Confirmation Result
-
-The finished three-seed batch changed the interpretation of the schedule frontier.
+The three-seed `1B` batch changed the frontier interpretation.
 
 | Run | Mean `val_bpb` | Std | Mean steady tok/s | Mean artifact bytes |
 |---|---:|---:|---:|---:|
@@ -70,68 +72,37 @@ The finished three-seed batch changed the interpretation of the schedule frontie
 
 Key read:
 
-- inside `blocks1`, `10x12` and `12x10` are effectively tied:
-  - mean delta `= -0.0000682172` bpb for `10x12 - 12x10`
-- inside `blocks0`, `12x10` is now the better mean representative:
-  - mean delta `= -0.0048093676` bpb for `12x10 - 10x12`
-- `blocks2 12x8` is still worse on quality, but:
-  - fastest of the structural controls
-  - lowest seed variance in the batch
+- the two top `blocks1` geometries are effectively tied
+- `blocks0 12x10` is the correct zero-block control
+- `blocks2 12x8` remains useful as the fast, stable structural control
 
-Implication:
+## Post-Confirmation Hold Retune
 
-- the original “`blocks1 12x10` is the clear winner” single-seed story was too strong
-- the original “`blocks0 10x12` is the lean default” story is now also stale
-- schedule is still the next highest-value lever, because the remaining architecture gaps are small relative to the gains already observed from hold tuning
+The two-seed `512M` retune screen rechecked the hold default on the true representatives.
 
-## Next Schedule Batch
+| Representative | `h2500` mean | `h3500` mean | `h4096` mean | Winner |
+|---|---:|---:|---:|---|
+| `blocks1 10x12` | `2.2724088059` | `2.2680191476` | `2.2892407482` | `h3500` |
+| `blocks0 12x10` | `2.2732337556` | `2.2716177172` | `2.2823704208` | `h3500` |
+| `blocks2 12x8` | `2.2821037577` | `2.2801177077` | `2.2941590571` | `h3500` |
 
-The right immediate next move is a hold-transfer retune screen on the true post-confirmation representatives.
+Interpretation:
 
-Use:
+- `h3500` won on every representative
+- `h4096` lost on every representative
+- the schedule story is stable enough now that more hold work is not the best use of the GPU
 
-- `blocks1_resid10_e12`
-- `blocks0_resid12_e10`
-- `blocks2_resid12_e8`
+## Conclusion
 
-Contract:
+The schedule lane delivered real gains and reduced uncertainty, but it is no longer the bottleneck.
 
-- `512M`
-- `seq_len=512`
-- `TARGET_EFFECTIVE_STEP_TOKENS=131072`
-- `carry_chunks=8`
-- `bptt_chunks=1`
-- `max_lr=3e-3`
-- `min_lr=3e-4`
-- `warmup_steps=100`
-- `weight_decay=1e-3`
-- `COMPILE=0`
-- `TORCH_BLAS_PREFER_CUBLASLT=1`
-- seeds `1337`, `2027`
-- `lr_hold_steps in {2500, 3500, 4096}`
+The next question is architectural:
 
-This batch should be interpreted as screening only.
-Only the winning hold settings should be promoted to the `1B` contract for stronger claims.
+- can the controller intervene more selectively on hard tokens?
+- can real causal multi-timescale taps beat `current`?
+- can per-token routing help without drifting toward a transformer?
 
-Convenience launcher:
+See:
 
-```bash
-bash scripts/run_5090_schedule_retune.sh
-```
-
-Useful overrides:
-
-```bash
-SEEDS="1337 2027" bash scripts/run_5090_schedule_retune.sh
-HOLDS="2500 3500 4096" bash scripts/run_5090_schedule_retune.sh
-RUN_BLOCKS2=0 bash scripts/run_5090_schedule_retune.sh
-DRY_RUN=1 bash scripts/run_5090_schedule_retune.sh
-```
-
-## Open Schedule Questions
-
-- Does the inherited `h3500 / h7000` transfer still hold on `blocks1 10x12`, or was that mostly a `blocks0` lane optimum?
-- Does `blocks2 12x8` want a different hold because its frozen side is deeper and its controller is smaller?
-- After hold is rechecked, is `max_lr=3e-3` still the right peak LR for the one-block winner?
-- Once LR is retuned, does one of the tied `blocks1` geometries separate cleanly, or do they remain interchangeable?
-- After the schedule lane is settled, does longer context help the tuned one-block family more than the lean zero-block control?
+- [docs/5090_architecture_plan.md](/home/pszemraj/workspace/projects/parameter-golf/docs/5090_architecture_plan.md)
+- [docs/5090_next_experiments.md](/home/pszemraj/workspace/projects/parameter-golf/docs/5090_next_experiments.md)
