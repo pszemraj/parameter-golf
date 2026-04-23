@@ -15,6 +15,7 @@ RUN_BLOCKS2="${RUN_BLOCKS2:-0}"
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export TORCH_BLAS_PREFER_CUBLASLT="${TORCH_BLAS_PREFER_CUBLASLT:-1}"
+export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
 export PRESET="${PRESET:-controller_default}"
 export COMPILE="${COMPILE:-0}"
 export GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-0}"
@@ -74,7 +75,7 @@ print_header() {
   echo "compile=${COMPILE} gradient_checkpointing=${GRADIENT_CHECKPOINTING} skip_done=${SKIP_DONE}"
   echo "target_effective_step_tokens=${TARGET_EFFECTIVE_STEP_TOKENS}"
   echo "branch_router_mode=${BRANCH_ROUTER_MODE} scan_backend=${SCAN_BACKEND}"
-  echo "wandb_project=${WANDB_PROJECT} cublaslt=${TORCH_BLAS_PREFER_CUBLASLT}"
+  echo "wandb_project=${WANDB_PROJECT} cublaslt=${TORCH_BLAS_PREFER_CUBLASLT} py_unbuffered=${PYTHONUNBUFFERED}"
   if [[ "${INCLUDE_CURRENT}" != "1" ]]; then
     echo "note=reuse current baseline from gate screen or prior temporal baseline"
   fi

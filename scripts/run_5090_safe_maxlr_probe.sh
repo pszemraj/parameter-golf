@@ -12,6 +12,7 @@ RUN_BLOCKS0="${RUN_BLOCKS0:-1}"
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export TORCH_BLAS_PREFER_CUBLASLT="${TORCH_BLAS_PREFER_CUBLASLT:-1}"
+export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
 export PRESET="${PRESET:-controller_default}"
 export COMPILE="${COMPILE:-0}"
 export GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-0}"
@@ -66,7 +67,7 @@ print_header() {
   echo "target_effective_step_tokens=${TARGET_EFFECTIVE_STEP_TOKENS}"
   echo "branch_temporal_mode=${BRANCH_TEMPORAL_MODE} residual_token_gate_mode=${RESIDUAL_TOKEN_GATE_MODE}"
   echo "branch_router_mode=${BRANCH_ROUTER_MODE} scan_backend=${SCAN_BACKEND}"
-  echo "wandb_project=${WANDB_PROJECT} cublaslt=${TORCH_BLAS_PREFER_CUBLASLT}"
+  echo "wandb_project=${WANDB_PROJECT} cublaslt=${TORCH_BLAS_PREFER_CUBLASLT} py_unbuffered=${PYTHONUNBUFFERED}"
   if [[ "${DRY_RUN:-0}" == "1" ]]; then
     echo "dry_run=1"
   fi

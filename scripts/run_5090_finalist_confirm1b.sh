@@ -10,6 +10,7 @@ FINALIST_SPECS="${FINALIST_SPECS:-$'blocks1_resid10_e12_final '"${REPO_ROOT}"$'/
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export TORCH_BLAS_PREFER_CUBLASLT="${TORCH_BLAS_PREFER_CUBLASLT:-1}"
+export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
 export PRESET="${PRESET:-controller_default}"
 export COMPILE="${COMPILE:-0}"
 export GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-0}"
@@ -52,7 +53,7 @@ print_header() {
   printf '%s\n' "${FINALIST_SPECS}"
   echo "compile=${COMPILE} gradient_checkpointing=${GRADIENT_CHECKPOINTING} skip_done=${SKIP_DONE}"
   echo "target_effective_step_tokens=${TARGET_EFFECTIVE_STEP_TOKENS}"
-  echo "scan_backend=${SCAN_BACKEND} wandb_project=${WANDB_PROJECT} cublaslt=${TORCH_BLAS_PREFER_CUBLASLT}"
+  echo "scan_backend=${SCAN_BACKEND} wandb_project=${WANDB_PROJECT} cublaslt=${TORCH_BLAS_PREFER_CUBLASLT} py_unbuffered=${PYTHONUNBUFFERED}"
   if [[ "${DRY_RUN:-0}" == "1" ]]; then
     echo "dry_run=1"
   fi
