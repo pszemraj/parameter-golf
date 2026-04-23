@@ -48,7 +48,7 @@ from hgdn_megakernel import run_from_gated_delta_net
 _HAS_FLA = HAS_FLA_GATED_DELTA_RULE
 
 # Parameters routed to Adam (not Muon). Muon is for 2D feature maps only.
-SCALAR_PARAM_PATTERNS = (
+_BASE_SCALAR_PARAM_PATTERNS = (
     "attn_scale",
     "mlp_scale",
     "resid_mix",
@@ -56,10 +56,12 @@ SCALAR_PARAM_PATTERNS = (
     "skip_weight",
     "w_a.",
     "w_b.",
-    "w_g.",  # GDN control projections → Adam
     "A_log",
     "dt_bias",  # GDN decay params → Adam
 )
+_W_G_SCALAR_PARAM_PATTERN = "w_g."
+_VALID_GDN_W_G_OPTIMIZERS = {"scalar", "matrix"}
+SCALAR_PARAM_PATTERNS = _BASE_SCALAR_PARAM_PATTERNS + (_W_G_SCALAR_PARAM_PATTERN,)
 
 NormStyle = Literal["pre", "post", "keel"]
 _PROFILE_RANGES = bool(int(os.environ.get("PROFILE_RANGES", "0")))
@@ -81,6 +83,93 @@ def attention_backend_name() -> str:
     if _USE_FLASH_ATTN_3 and _HAS_FLASH_ATTN_3:
         return "fa3"
     return "sdpa_flash"
+
+
+def validate_gdn_w_g_optimizer(gdn_w_g_optimizer: str) -> str:
+    """Normalize and validate the `w_g` optimizer-routing mode.
+
+    :param str gdn_w_g_optimizer: Requested `w_g` routing mode.
+    :raises ValueError: If the mode is unsupported.
+    :return str: Validated routing mode.
+    """
+    normalized = gdn_w_g_optimizer.strip().lower()
+    if normalized not in _VALID_GDN_W_G_OPTIMIZERS:
+        raise ValueError(
+            f"gdn_w_g_optimizer must be 'scalar' or 'matrix', got {gdn_w_g_optimizer!r}"
+        )
+    return normalized
+
+
+def scalar_param_patterns(*, gdn_w_g_optimizer: str = "scalar") -> tuple[str, ...]:
+    """Return the active scalar-optimizer name patterns.
+
+    :param str gdn_w_g_optimizer: Whether `w_g` should ride Adam or Muon,
+        defaults to `"scalar"`.
+    :return tuple[str, ...]: Active scalar-pattern tuple.
+    """
+    normalized = validate_gdn_w_g_optimizer(gdn_w_g_optimizer)
+    if normalized == "scalar":
+        return _BASE_SCALAR_PARAM_PATTERNS + (_W_G_SCALAR_PARAM_PATTERN,)
+    return _BASE_SCALAR_PARAM_PATTERNS
+
+
+def uses_scalar_optimizer(
+    param_name: str,
+    *,
+    param_ndim: int,
+    gdn_w_g_optimizer: str = "scalar",
+) -> bool:
+    """Return whether one parameter should ride the scalar optimizer path.
+
+    :param str param_name: Fully-qualified parameter name.
+    :param int param_ndim: Parameter rank.
+    :param str gdn_w_g_optimizer: Whether `w_g` should ride Adam or Muon,
+        defaults to `"scalar"`.
+    :return bool: `True` when the parameter belongs on the scalar path.
+    """
+    return param_ndim < 2 or any(
+        pat in param_name
+        for pat in scalar_param_patterns(gdn_w_g_optimizer=gdn_w_g_optimizer)
+    )
+
+
+def normalize_block_pattern(
+    block_pattern: str | list[str] | None,
+    *,
+    num_layers: int,
+    gdn_ratio: int,
+) -> list[str]:
+    """Resolve the model block schedule from an explicit pattern or ratio.
+
+    :param str | list[str] | None block_pattern: Optional explicit block pattern.
+    :param int num_layers: Total block count.
+    :param int gdn_ratio: Legacy periodic GDN-to-attention ratio.
+    :raises ValueError: If the pattern length or tokens are invalid.
+    :return list[str]: Normalized block-type list.
+    """
+    if isinstance(block_pattern, str):
+        normalized = [part.strip().lower() for part in block_pattern.split(",")]
+        pattern = [part for part in normalized if part]
+    elif block_pattern is None:
+        pattern = []
+    else:
+        pattern = [
+            str(part).strip().lower() for part in block_pattern if str(part).strip()
+        ]
+    if pattern:
+        if len(pattern) != num_layers:
+            raise ValueError(
+                f"BLOCK_PATTERN length {len(pattern)} != num_layers {num_layers}"
+            )
+        invalid = sorted({part for part in pattern if part not in {"attn", "gdn"}})
+        if invalid:
+            raise ValueError(
+                f"BLOCK_PATTERN entries must be only attn/gdn, got {invalid}"
+            )
+        return pattern
+
+    period = gdn_ratio + 1
+    return ["attn" if (i + 1) % period == 0 else "gdn" for i in range(num_layers)]
 
 
 def profile_range(name: str) -> AbstractContextManager[None]:
@@ -2172,6 +2261,7 @@ class HybridGPT(nn.Module):
         mlp_mult: float = 3.0,
         leaky_slope: float = 0.5,
         gdn_ratio: int = 3,
+        block_pattern: str | list[str] | None = None,
         rope_base: float = 10000.0,
         qk_gain_init: float = 1.5,
         logit_softcap: float = 30.0,
@@ -2220,6 +2310,9 @@ class HybridGPT(nn.Module):
         :param float mlp_mult: MLP expansion factor, defaults to 3.0.
         :param float leaky_slope: LeakyReLU slope, defaults to 0.5.
         :param int gdn_ratio: Number of GDN layers per attention layer, defaults to 3.
+        :param str | list[str] | None block_pattern: Optional explicit
+            comma-separated or list-valued block schedule using `attn`/`gdn`
+            tokens, defaults to None.
         :param float rope_base: Rotary frequency base, defaults to 10000.0.
         :param float qk_gain_init: Initial attention query gain, defaults to 1.5.
         :param float logit_softcap: Tanh logit softcap, defaults to 30.0.
@@ -2240,10 +2333,12 @@ class HybridGPT(nn.Module):
         )
         self.tok_emb = nn.Embedding(vocab_size, d_model)
 
-        period = gdn_ratio + 1
+        pattern = normalize_block_pattern(
+            block_pattern, num_layers=num_layers, gdn_ratio=gdn_ratio
+        )
         blocks, self.block_types = [], []
-        for i in range(num_layers):
-            if (i + 1) % period == 0:
+        for i, block_type in enumerate(pattern):
+            if block_type == "attn":
                 blocks.append(
                     AttnBlock(
                         d_model,
@@ -2259,7 +2354,7 @@ class HybridGPT(nn.Module):
                     )
                 )
                 self.block_types.append("attn")
-            else:
+            elif block_type == "gdn":
                 blocks.append(
                     GDNBlock(
                         d_model,
@@ -2301,6 +2396,8 @@ class HybridGPT(nn.Module):
                     )
                 )
                 self.block_types.append("gdn")
+            else:  # pragma: no cover - normalize_block_pattern guards this
+                raise ValueError(f"Unknown block type {block_type!r}")
         self.blocks = nn.ModuleList(blocks)
 
         self.num_encoder_layers = num_layers // 2

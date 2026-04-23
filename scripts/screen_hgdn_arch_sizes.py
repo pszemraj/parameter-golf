@@ -58,6 +58,7 @@ DEFAULT_MODEL_KWARGS: dict[str, Any] = {
     "mlp_mult": 3.25,
     "leaky_slope": 0.5,
     "gdn_ratio": 1,
+    "block_pattern": None,
     "rope_base": 10000.0,
     "qk_gain_init": 1.5,
     "logit_softcap": 30.0,

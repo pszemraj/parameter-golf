@@ -46,6 +46,8 @@ compile="${COMPILE:-1}"
 compile_strategy="${COMPILE_STRATEGY:-hybrid}"
 attn_use_flash_attn3="${ATTN_USE_FLASH_ATTN3:-1}"
 distributed_mode="${DISTRIBUTED_MODE:-parallel_muon}"
+muon_distributed_mode="${MUON_DISTRIBUTED_MODE:-packed_allreduce}"
+gdn_w_g_optimizer="${GDN_W_G_OPTIMIZER:-matrix}"
 weight_decay="${WEIGHT_DECAY:-0}"
 data_path="${DATA_PATH:-$HGDN_REPO_ROOT/data/datasets/fineweb10B_sp1024}"
 tokenizer_path="${TOKENIZER_PATH:-$HGDN_REPO_ROOT/data/tokenizers/fineweb_1024_bpe.model}"
@@ -55,11 +57,11 @@ git_branch="$(git rev-parse --abbrev-ref HEAD)"
 host_name="$(hostname)"
 timestamp_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-hgdn_config="${HGDN_CONFIG:-configs/hgdn/retune_trim_layers_14.toml}"
-hgdn_kernel_config="${HGDN_KERNEL_CONFIG:-configs/hgdn/winner_20260405_19_live14.toml}"
+hgdn_config="${HGDN_CONFIG:-configs/hgdn/naive_contract_l8_d512_mid2_dk48_m2.toml}"
+attn_config="${ATTN_CONFIG:-configs/hgdn/naive_contract_l8_d512_r0_m2.toml}"
 gpt_naive_run_id="${GPT_NAIVE_RUN_ID:-${run_prefix_base}_gpt_naive_baseline_seq${train_seq_len}}"
 hgdn_run_id="${HGDN_RUN_ID:-${run_prefix_base}_hybrid_naive_contract_seq${train_seq_len}}"
-attn_run_id="${ATTN_RUN_ID:-${run_prefix_base}_depth_naive_contract_seq${train_seq_len}}"
+attn_run_id="${ATTN_RUN_ID:-${run_prefix_base}_attn_naive_contract_seq${train_seq_len}}"
 
 naive_reference_name="${NAIVE_REFERENCE_NAME:-2026-03-17_NaiveBaseline}"
 naive_reference_roundtrip_bpb="${NAIVE_REFERENCE_ROUNDTRIP_BPB:-1.22436570}"
@@ -110,20 +112,22 @@ print_plan() {
     echo "compile_strategy=${compile_strategy}"
     echo "attn_use_flash_attn3=${attn_use_flash_attn3}"
     echo "distributed_mode=${distributed_mode}"
+    echo "muon_distributed_mode=${muon_distributed_mode}"
+    echo "gdn_w_g_optimizer=${gdn_w_g_optimizer}"
     echo "weight_decay=${weight_decay}"
     echo "max_wallclock_seconds=${max_wallclock_seconds}"
     echo "data_path=${data_path}"
     echo "tokenizer_path=${tokenizer_path}"
     echo "vocab_size=${vocab_size}"
     echo "hgdn_config=${hgdn_config}"
-    echo "hgdn_kernel_config=${hgdn_kernel_config}"
+    echo "attn_config=${attn_config}"
     echo "gpt_naive_run_id=${gpt_naive_run_id}"
     echo "hgdn_run_id=${hgdn_run_id}"
     echo "attention_run_id=${attn_run_id}"
     echo "naive_reference_name=${naive_reference_name}"
     echo "naive_reference_roundtrip_bpb=${naive_reference_roundtrip_bpb}"
     echo "naive_reference_stop_bpb=${naive_reference_stop_bpb}"
-    echo "goal=measure whether the exact repo naive baseline, the hybrid-trainer attention-only control, and the live HGDN finalist can all be compared on the official naive-baseline contract"
+    echo "goal=measure whether the exact repo naive baseline, the exact-contract HGDN candidate, and the same-shell attention-only control can all be compared on the official naive-baseline contract"
 }
 
 prepare_cuda() {
@@ -160,8 +164,6 @@ run_round() {
     if [[ -n "${torch_trace}" ]]; then
         diagnostic_env+=("TORCH_TRACE=${torch_trace}")
     fi
-
-    load_config_env "${hgdn_kernel_config}" "${hgdn_config}"
 
     echo
     echo ">>> exact repo naive baseline"
@@ -217,7 +219,8 @@ run_round() {
         torchrun --standalone --nproc_per_node="${ngpu}" train_gpt.py
 
     echo
-    echo ">>> naive-contract HGDN finalist"
+    echo ">>> naive-contract HGDN candidate"
+    load_config_env "${hgdn_config}"
     hgdn_append_command \
         "${command_log}" \
         "OMP_NUM_THREADS=${omp_num_threads}" \
@@ -236,6 +239,8 @@ run_round() {
         "COMPILE_STRATEGY=${compile_strategy}" \
         "ATTN_USE_FLASH_ATTN3=${attn_use_flash_attn3}" \
         "DISTRIBUTED_MODE=${distributed_mode}" \
+        "MUON_DISTRIBUTED_MODE=${muon_distributed_mode}" \
+        "GDN_W_G_OPTIMIZER=${gdn_w_g_optimizer}" \
         "WEIGHT_DECAY=${weight_decay}" \
         "RUN_ID=${hgdn_run_id}" \
         "ITERATIONS=${iterations}" \
@@ -246,11 +251,11 @@ run_round() {
         "TRAIN_LOG_EVERY=${train_log_every}" \
         "VAL_BATCH_SIZE=${val_batch_size}" \
         "${config_env[@]}" \
-        bash scripts/sweep.sh single-live14
+        bash scripts/sweep.sh single
 
     hgdn_run_sweep \
-        "naive-contract HGDN finalist" \
-        single-live14 \
+        "naive-contract HGDN candidate" \
+        single \
         "OMP_NUM_THREADS=${omp_num_threads}" \
         "MKL_NUM_THREADS=${mkl_num_threads}" \
         "OPENBLAS_NUM_THREADS=${openblas_num_threads}" \
@@ -267,6 +272,8 @@ run_round() {
         "COMPILE_STRATEGY=${compile_strategy}" \
         "ATTN_USE_FLASH_ATTN3=${attn_use_flash_attn3}" \
         "DISTRIBUTED_MODE=${distributed_mode}" \
+        "MUON_DISTRIBUTED_MODE=${muon_distributed_mode}" \
+        "GDN_W_G_OPTIMIZER=${gdn_w_g_optimizer}" \
         "WEIGHT_DECAY=${weight_decay}" \
         "RUN_ID=${hgdn_run_id}" \
         "ITERATIONS=${iterations}" \
@@ -280,6 +287,7 @@ run_round() {
 
     echo
     echo ">>> naive-contract attention-only control"
+    load_config_env "${attn_config}"
     hgdn_append_command \
         "${command_log}" \
         "OMP_NUM_THREADS=${omp_num_threads}" \
@@ -298,6 +306,8 @@ run_round() {
         "COMPILE_STRATEGY=${compile_strategy}" \
         "ATTN_USE_FLASH_ATTN3=${attn_use_flash_attn3}" \
         "DISTRIBUTED_MODE=${distributed_mode}" \
+        "MUON_DISTRIBUTED_MODE=${muon_distributed_mode}" \
+        "GDN_W_G_OPTIMIZER=${gdn_w_g_optimizer}" \
         "WEIGHT_DECAY=${weight_decay}" \
         "RUN_ID=${attn_run_id}" \
         "ITERATIONS=${iterations}" \
@@ -307,17 +317,12 @@ run_round() {
         "VAL_LOSS_EVERY=${val_loss_every}" \
         "TRAIN_LOG_EVERY=${train_log_every}" \
         "VAL_BATCH_SIZE=${val_batch_size}" \
-        "NUM_LAYERS=9" \
-        "MODEL_DIM=512" \
-        "NUM_HEADS=8" \
-        "NUM_KV_HEADS=4" \
-        "GDN_RATIO=0" \
-        "MLP_MULT=2" \
-        bash scripts/sweep.sh depth
+        "${config_env[@]}" \
+        bash scripts/sweep.sh single
 
     hgdn_run_sweep \
         "naive-contract attention-only control" \
-        depth \
+        single \
         "OMP_NUM_THREADS=${omp_num_threads}" \
         "MKL_NUM_THREADS=${mkl_num_threads}" \
         "OPENBLAS_NUM_THREADS=${openblas_num_threads}" \
@@ -334,6 +339,8 @@ run_round() {
         "COMPILE_STRATEGY=${compile_strategy}" \
         "ATTN_USE_FLASH_ATTN3=${attn_use_flash_attn3}" \
         "DISTRIBUTED_MODE=${distributed_mode}" \
+        "MUON_DISTRIBUTED_MODE=${muon_distributed_mode}" \
+        "GDN_W_G_OPTIMIZER=${gdn_w_g_optimizer}" \
         "WEIGHT_DECAY=${weight_decay}" \
         "RUN_ID=${attn_run_id}" \
         "ITERATIONS=${iterations}" \
@@ -343,12 +350,7 @@ run_round() {
         "VAL_LOSS_EVERY=${val_loss_every}" \
         "TRAIN_LOG_EVERY=${train_log_every}" \
         "VAL_BATCH_SIZE=${val_batch_size}" \
-        "NUM_LAYERS=9" \
-        "MODEL_DIM=512" \
-        "NUM_HEADS=8" \
-        "NUM_KV_HEADS=4" \
-        "GDN_RATIO=0" \
-        "MLP_MULT=2"
+        "${config_env[@]}"
 }
 
 build_bundle() {
@@ -359,7 +361,7 @@ build_bundle() {
     mkdir -p "${bundle_stage_dir}/logs" "${bundle_stage_dir}/configs"
 
     cp "${hgdn_config}" "${bundle_stage_dir}/configs/"
-    cp "${hgdn_kernel_config}" "${bundle_stage_dir}/configs/"
+    cp "${attn_config}" "${bundle_stage_dir}/configs/"
     cp "${command_log}" "${bundle_stage_dir}/commands.sh"
 
     local matched_logs=0
@@ -399,13 +401,15 @@ build_bundle() {
         --max-wallclock-seconds "${max_wallclock_seconds}" \
         --compile-enabled "${compile}" \
         --compile-strategy "${compile_strategy}" \
+        --muon-distributed-mode "${muon_distributed_mode}" \
+        --gdn-w-g-optimizer "${gdn_w_g_optimizer}" \
         --weight-decay "${weight_decay}" \
         --baseline-data-path "${data_path}" \
         --baseline-tokenizer-path "${tokenizer_path}" \
         --baseline-vocab-size "${vocab_size}" \
         --gpt-naive-run-id "${gpt_naive_run_id}" \
         --hgdn-config "${hgdn_config}" \
-        --hgdn-kernel-config "${hgdn_kernel_config}" \
+        --attn-config "${attn_config}" \
         --hgdn-run-id "${hgdn_run_id}" \
         --attn-run-id "${attn_run_id}" \
         --naive-reference-name "${naive_reference_name}" \

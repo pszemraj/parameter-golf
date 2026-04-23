@@ -9,11 +9,10 @@ from typing import Any
 import torch
 from torch import Tensor, nn
 
-from model import SCALAR_PARAM_PATTERNS
+from model import scalar_param_patterns, uses_scalar_optimizer
 
 INT8_CLIP_Q = 99.99984 / 100.0
 INT8_KEEP_FLOAT_MAX_NUMEL = 65_536
-_GDN_CONTROL_PATTERNS = ("w_a.", "w_b.", "w_g.")
 
 
 def normalize_wandb_watch_mode(mode: str) -> str:
@@ -54,7 +53,7 @@ def quantize_state_dict_int8(
             stats["int8_payload_bytes"] += t.numel() * t.element_size()
             continue
         if t.numel() <= INT8_KEEP_FLOAT_MAX_NUMEL:
-            if any(pattern in name for pattern in SCALAR_PARAM_PATTERNS):
+            if any(pattern in name for pattern in scalar_param_patterns()):
                 kept = t.float().contiguous()
             else:
                 passthrough_orig_dtypes[name] = str(t.dtype).removeprefix("torch.")
@@ -164,23 +163,34 @@ def serialize_quantized_state_dict_int8(
 
 
 def restore_low_dim_params_to_fp32(
-    module: nn.Module, *, gdn_control_proj_fp32: bool = True
+    module: nn.Module,
+    *,
+    gdn_control_proj_fp32: bool = True,
+    gdn_w_g_optimizer: str = "scalar",
 ) -> None:
     """Restore low-dimensional or scalar parameters to fp32.
 
     :param nn.Module module: Module whose parameters should be restored in place.
     :param bool gdn_control_proj_fp32: Whether to also restore HGDN control
         projections `w_a/w_b/w_g` to fp32, defaults to True.
+    :param str gdn_w_g_optimizer: Whether `w_g` should ride Adam or Muon,
+        defaults to `"scalar"`.
     """
+    control_patterns = scalar_param_patterns(gdn_w_g_optimizer=gdn_w_g_optimizer)
     with torch.no_grad():
         for name, param in module.named_parameters():
             if not gdn_control_proj_fp32 and any(
-                pattern in name for pattern in _GDN_CONTROL_PATTERNS
+                pattern in name for pattern in control_patterns
             ):
                 continue
             if (
-                param.ndim < 2 or any(p in name for p in SCALAR_PARAM_PATTERNS)
-            ) and param.dtype != torch.float32:
+                uses_scalar_optimizer(
+                    name,
+                    param_ndim=param.ndim,
+                    gdn_w_g_optimizer=gdn_w_g_optimizer,
+                )
+                and param.dtype != torch.float32
+            ):
                 param.data = param.data.float()
 
 

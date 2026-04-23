@@ -84,6 +84,7 @@ default_prefixes=(
     "${run_prefix_base}_c"
     "${run_prefix_base}_d"
     "${run_prefix_base}_e"
+    "${run_prefix_base}_f"
 )
 
 if [[ -n "${RUN_PREFIXES:-}" ]]; then
@@ -93,19 +94,21 @@ else
 fi
 
 configs=(
-    "configs/hgdn/naive_contract_l9_d512_r1_m2.toml"
-    "configs/hgdn/naive_contract_l9_d512_r1_m1p75.toml"
-    "configs/hgdn/naive_contract_l8_d512_r1_m2.toml"
-    "configs/hgdn/naive_contract_l9_d480_r1_m2.toml"
-    "configs/hgdn/naive_contract_l9_d512_r0_m2.toml"
+    "configs/hgdn/naive_contract_l8_d512_mid2_dk48_m2.toml"
+    "configs/hgdn/naive_contract_l8_d512_mid2_dk48_m1p75.toml"
+    "configs/hgdn/naive_contract_l9_d512_mid2_dk48_m1p75.toml"
+    "configs/hgdn/naive_contract_l9_d512_mid3_dk48_m1p75.toml"
+    "configs/hgdn/naive_contract_l8_d512_r0_m2.toml"
+    "configs/hgdn/naive_contract_l9_d512_r0_m1p75.toml"
 )
 
 labels=(
-    "HGDN 9Lx512d mlp2.0"
-    "HGDN 9Lx512d mlp1.75"
-    "HGDN 8Lx512d mlp2.0"
-    "HGDN 9Lx480d mlp2.0"
-    "Attention-only 9Lx512d mlp2.0"
+    "HGDN 8Lx512d mid2 dk48 mlp2.0"
+    "HGDN 8Lx512d mid2 dk48 mlp1.75"
+    "HGDN 9Lx512d mid2 dk48 mlp1.75"
+    "HGDN 9Lx512d mid3 dk48 mlp1.75"
+    "Attention-only 8Lx512d mlp2.0"
+    "Attention-only 9Lx512d mlp1.75"
 )
 
 if [[ -n "${CANDIDATE_INDEXES:-}" ]]; then
@@ -147,7 +150,7 @@ load_config_env() {
 
 print_plan() {
     echo
-    echo ">>> Local HGDN naive-contract search (baseline-shaped candidate screen)"
+    echo ">>> Local HGDN naive-contract search (sparse exact-contract candidate screen)"
     echo "python_bin=${python_bin}"
     echo "use_wandb=${use_wandb}"
     echo "wandb_mode=${wandb_mode}"
@@ -334,7 +337,14 @@ build_bundle() {
         --perf-skip-final-eval "${perf_skip_final_eval}"
         --compile-enabled "${compile}"
         --compile-strategy "${compile_strategy}"
+        --muon-distributed-mode "packed_allreduce"
+        --gdn-w-g-optimizer "per_config"
     )
+    local i
+    for ((i = 0; i < ${#configs[@]}; i++)); do
+        manifest_cmd+=(--config "${configs[$i]}")
+        manifest_cmd+=(--label "${labels[$i]}")
+    done
     local run_id
     for run_id in "${resolved_run_ids[@]}"; do
         manifest_cmd+=(--run-id "${run_id}")

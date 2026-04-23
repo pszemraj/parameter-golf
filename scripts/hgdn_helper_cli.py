@@ -53,6 +53,14 @@ def load_toml_env(path: Path, *, alias_aware: bool) -> dict[str, str]:
     for key, value in env.items():
         if isinstance(value, bool):
             value = "1" if value else "0"
+        elif isinstance(value, list):
+            items = []
+            for item in value:
+                if isinstance(item, bool):
+                    items.append("1" if item else "0")
+                else:
+                    items.append(str(item))
+            value = ",".join(items)
         merged[str(key)] = str(value)
     return merged
 
@@ -317,6 +325,8 @@ def cmd_write_local_naive_contract_search_manifest(
     :param argparse.Namespace args: Parsed CLI arguments.
     :return int: Shell-style exit code.
     """
+    if not (len(args.config) == len(args.label) == len(args.run_id)):
+        raise SystemExit("config/label/run-id counts must match")
     manifest = {
         "run_prefix_base": args.run_prefix_base,
         "wandb_project": args.wandb_project,
@@ -327,6 +337,12 @@ def cmd_write_local_naive_contract_search_manifest(
             "config": args.size_screen_config,
             "output_dir": args.size_screen_output,
         },
+        "candidates": [
+            {"config": config, "label": label, "run_id": run_id}
+            for config, label, run_id in zip(
+                args.config, args.label, args.run_id, strict=True
+            )
+        ],
         "contract": {
             "torch_logs": args.torch_logs or None,
             "torch_trace": args.torch_trace or None,
@@ -343,8 +359,9 @@ def cmd_write_local_naive_contract_search_manifest(
             "perf_skip_final_eval": args.perf_skip_final_eval,
             "compile": args.compile_enabled,
             "compile_strategy": args.compile_strategy,
+            "muon_distributed_mode": args.muon_distributed_mode,
+            "gdn_w_g_optimizer": args.gdn_w_g_optimizer,
         },
-        "run_ids": args.run_id,
     }
     write_json(args.output, manifest)
     return 0
@@ -383,6 +400,8 @@ def cmd_write_h100_bridge_manifest(args: argparse.Namespace) -> int:
             "nccl_ib_disable": args.nccl_ib_disable,
             "attn_use_flash_attn3": args.attn_use_flash_attn3,
             "distributed_mode": args.distributed_mode,
+            "muon_distributed_mode": args.muon_distributed_mode,
+            "gdn_w_g_optimizer": args.gdn_w_g_optimizer,
         },
         "provenance": {
             "git_commit": args.git_commit,
@@ -534,24 +553,18 @@ def cmd_write_h100_naive_contract_manifest(args: argparse.Namespace) -> int:
                 "mlp_mult": 2,
             },
             {
-                "label": "HGDN finalist on naive-baseline contract",
+                "label": "HGDN candidate on naive-baseline contract",
                 "trainer": "train_gpt_hybrid.py",
                 "mode": "single",
                 "run_id": args.hgdn_run_id,
                 "config": args.hgdn_config,
-                "kernel_config": args.hgdn_kernel_config,
             },
             {
                 "label": "attention-only control on naive-baseline contract",
                 "trainer": "train_gpt_hybrid.py",
-                "mode": "depth",
+                "mode": "single",
                 "run_id": args.attn_run_id,
-                "num_layers": 9,
-                "model_dim": 512,
-                "num_heads": 8,
-                "num_kv_heads": 4,
-                "gdn_ratio": 0,
-                "mlp_mult": 2,
+                "config": args.attn_config,
             },
         ],
     }
@@ -778,6 +791,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--compile-enabled", type=parse_bool_flag, required=True
     )
     local_naive_search.add_argument("--compile-strategy", required=True)
+    local_naive_search.add_argument("--muon-distributed-mode", required=True)
+    local_naive_search.add_argument("--gdn-w-g-optimizer", required=True)
+    local_naive_search.add_argument("--config", action="append", default=[])
+    local_naive_search.add_argument("--label", action="append", default=[])
     local_naive_search.add_argument("--run-id", action="append", default=[])
     local_naive_search.set_defaults(func=cmd_write_local_naive_contract_search_manifest)
 
@@ -886,13 +903,15 @@ def build_parser() -> argparse.ArgumentParser:
     h100_naive.add_argument("--max-wallclock-seconds", type=float, required=True)
     h100_naive.add_argument("--compile-enabled", type=parse_bool_flag, required=True)
     h100_naive.add_argument("--compile-strategy", required=True)
+    h100_naive.add_argument("--muon-distributed-mode", required=True)
+    h100_naive.add_argument("--gdn-w-g-optimizer", required=True)
     h100_naive.add_argument("--weight-decay", type=float, required=True)
     h100_naive.add_argument("--baseline-data-path", required=True)
     h100_naive.add_argument("--baseline-tokenizer-path", required=True)
     h100_naive.add_argument("--baseline-vocab-size", type=int, required=True)
     h100_naive.add_argument("--gpt-naive-run-id", required=True)
     h100_naive.add_argument("--hgdn-config", required=True)
-    h100_naive.add_argument("--hgdn-kernel-config", required=True)
+    h100_naive.add_argument("--attn-config", required=True)
     h100_naive.add_argument("--hgdn-run-id", required=True)
     h100_naive.add_argument("--attn-run-id", required=True)
     h100_naive.add_argument("--naive-reference-name", required=True)

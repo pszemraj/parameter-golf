@@ -2,16 +2,16 @@
 
 Last updated: 2026-04-22 15:00 EDT
 
-## 1. Run the local baseline-shaped HGDN search before more H100 spend
+## 1. Run the local sparse exact-contract HGDN search before more H100 spend
 
 - The fair exact naive-contract batch already answered the branch-goal
   question for the current live14 replay shell:
   - exact repo baseline: `44.00 ms/step`, exact roundtrip `1.23710448`,
     `UNDER_LIMIT`
-  - live HGDN finalist: `98.08 ms/step`, exact roundtrip `1.24735121`,
+  - live14 HGDN replay shell: `98.08 ms/step`, exact roundtrip `1.24735121`,
     `OVER_LIMIT`
 - That means the next work is **not** another blind H100 rerun of live14.
-  The next work is a contract-native HGDN shell search on the baseline-shaped
+  The next work is a contract-native HGDN shell search on the exact
   surface:
   - `TRAIN_SEQ_LEN=1024`
   - `TRAIN_BATCH_TOKENS=65536`
@@ -23,32 +23,23 @@ Last updated: 2026-04-22 15:00 EDT
   [`../scripts/run_local_hgdn_naive_contract_search.sh`](../scripts/run_local_hgdn_naive_contract_search.sh)
 - New size-screen config:
   [`../configs/hgdn/naive_contract_search.toml`](../configs/hgdn/naive_contract_search.toml)
-- Initial artifact-size screen (`2026-04-22`) says all five first-pass
-  baseline-shaped candidates are under the init-time proxy cap:
-  - `l9_d512_r1_m2`
-  - `l9_d512_r1_m1p75`
-  - `l8_d512_r1_m2`
-  - `l9_d480_r1_m2`
-  - `l9_d512_r0_m2`
-- Local `4070` GPU screen (`2026-04-23`, `300` steps, `seq=1024`,
-  `65536` tokens/step, `WEIGHT_DECAY=0`) now ranks the baseline-shaped shells:
-  - `l8_d512_r1_m2`: `560.56 ms/step`, `val_bpb=1.8709`
-  - `l9_d512_r1_m1p75`: `630.64 ms/step`, `val_bpb=1.8758`
-  - `l9_d480_r1_m2`: `631.19 ms/step`, `val_bpb=1.8803`
-  - `l9_d512_r1_m2`: `646.60 ms/step`, `val_bpb=1.8515`
-  - same-shell anchor `l9_d512_r0_m2`: `452.26 ms/step`,
-    `val_bpb=1.9459`
-- Same-shell winner-shell control on the same local contract:
-  - `l8_d512_r1_m2`: `560.56 ms/step`, `val_bpb=1.8709`
-  - `l8_d512_r0_m2`: `407.30 ms/step`, `val_bpb=1.9888`
-- So the current contract-native HGDN leader is `l8_d512_r1_m2`.
-  It pays about `1.38x` step time versus the same-shell attention-only control
-  while buying back about `0.118` bpb at step `300`.
+- The first baseline-shaped local pass is now superseded. The active local
+  search surface is:
+  - sparse `BLOCK_PATTERN` hybrids instead of periodic `GDN_RATIO=1`
+  - `GDN_HEAD_K_DIM=48`
+  - `MUON_DISTRIBUTED_MODE=packed_allreduce`
+  - `GDN_W_G_OPTIMIZER=matrix`
+- Current active candidate set:
+  - `l8_d512_mid2_dk48_m2`
+  - `l8_d512_mid2_dk48_m1p75`
+  - `l9_d512_mid2_dk48_m1p75`
+  - `l9_d512_mid3_dk48_m1p75`
+  - attention-only controls `l8_d512_r0_m2` and `l9_d512_r0_m1p75`
 - The helper now defaults `PERF_SKIP_FINAL_EVAL=1` for local screening so the
   size screen handles artifact triage and the local run is not dominated by the
   quantized roundtrip tail.
-- The attention-only `l9_d512_r0_m2` shell exists only to isolate the HGDN tax
-  on the exact baseline-shaped architecture. It is not a replacement baseline.
+- The attention-only controls exist only to isolate the HGDN tax on the exact
+  challenge shell. They are not replacement baselines.
 
 ```bash
 USE_WANDB=0 WANDB_MODE=offline \
@@ -57,10 +48,9 @@ bash scripts/run_local_hgdn_naive_contract_search.sh
 ```
 
 - Immediate local follow-up from this screen:
-  - trim around `l8_d512_r1_m2`, not around the old live14 replay shell
-  - compare the provisional `l8_d512_r1_m2` HGDN winner against the exact repo
-    baseline only after one more bounded local trim pass or a targeted `1xH100`
-    sanity run
+  - run the sparse `Dk=48` screen before spending more H100 time
+  - promote only the best sparse exact-contract shell to the next exact
+    repo-baseline comparison
 
 ## 2. Re-run the exact 8x packed HGDN tiebreak on the patched surface
 
@@ -107,19 +97,20 @@ bash scripts/run_h100_hgdn_compile_tiebreak_round.sh
 - Use [`../scripts/run_h100_hgdn_naive_contract_round.sh`](../scripts/run_h100_hgdn_naive_contract_round.sh).
 - Include exactly three legs:
   - exact repo baseline from `train_gpt.py`
-  - live HGDN finalist
-  - hybrid-trainer attention-only control
+  - exact-contract HGDN candidate
+  - same-shell attention-only control
 - The first fair naive-contract run on `2026-04-21 06:15 UTC` said:
   - exact repo baseline: `44.00 ms/step`, exact roundtrip `1.23710448`,
     `UNDER_LIMIT`
-  - live HGDN finalist: `98.08 ms/step`, exact roundtrip `1.24735121`,
+  - live14 HGDN replay shell: `98.08 ms/step`, exact roundtrip `1.24735121`,
     `OVER_LIMIT`
   - hybrid attention-only control: `46.09 ms/step`, exact roundtrip
     `1.24098267`, `OVER_LIMIT`
 - That is the branch-goal comparison. Packed HGDN lost badly on the exact
   baseline contract.
-- The next rerun should keep the same comparison surface but include the
-  patched HGDN runtime stack. Pin the hybrid-trainer legs to `WEIGHT_DECAY=0`.
+- The next rerun should keep the same comparison surface but use the new
+  config-driven HGDN candidate path. Pin the hybrid-trainer legs to
+  `WEIGHT_DECAY=0`.
 - Pin the direct baseline leg explicitly to:
   - `DATA_PATH`
   - `TOKENIZER_PATH`

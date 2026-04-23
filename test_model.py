@@ -30,6 +30,8 @@ from model import (
     make_attention_only_baseline,
     make_hybrid_tight,
     make_hybrid_wide,
+    normalize_block_pattern,
+    uses_scalar_optimizer,
     validate_norm_style,
 )
 from profiler_report import (
@@ -485,6 +487,72 @@ def test_muon_routing() -> None:
         found = any(expected in n for n in adam_set)
         assert found, f"Expected {expected} in Adam params, got: {adam_set}"
     print(f"  ✓ Muon routing OK ({len(muon_params)} Muon, {len(adam_params)} Adam)")
+
+
+def test_w_g_matrix_routing() -> None:
+    """Allow `w_g` to ride Muon when the exact-contract path asks for it."""
+    model = HybridGPT(
+        vocab_size=16,
+        num_layers=4,
+        d_model=64,
+        attn_heads=4,
+        attn_kv_heads=2,
+        gdn_n_heads=4,
+        gdn_head_k_dim=8,
+        gdn_expand_v=2.0,
+        gdn_ratio=3,
+        mlp_mult=2,
+    )
+    muon_params, adam_params = [], []
+    for name, p in model.blocks.named_parameters():
+        if p.ndim == 2 and not uses_scalar_optimizer(
+            name, param_ndim=p.ndim, gdn_w_g_optimizer="matrix"
+        ):
+            muon_params.append(name)
+        else:
+            adam_params.append(name)
+    muon_set = set(muon_params)
+    adam_set = set(adam_params)
+    assert any("w_g.weight" in name for name in muon_set), muon_set
+    assert not any("w_g.weight" in name for name in adam_set), adam_set
+    print("  ✓ w_g matrix routing OK")
+
+
+def test_block_pattern_override() -> None:
+    """Allow exact-contract sparse hybrids to override the periodic ratio."""
+    pattern = "attn,attn,gdn,attn,gdn,attn"
+    model = HybridGPT(
+        vocab_size=16,
+        num_layers=6,
+        d_model=64,
+        attn_heads=4,
+        attn_kv_heads=2,
+        gdn_n_heads=4,
+        gdn_head_k_dim=8,
+        gdn_expand_v=2.0,
+        gdn_ratio=0,
+        block_pattern=pattern,
+        mlp_mult=2,
+    )
+    assert model.block_types == ["attn", "attn", "gdn", "attn", "gdn", "attn"]
+    print("  ✓ explicit block pattern OK")
+
+
+def test_block_pattern_validation() -> None:
+    """Reject invalid exact-contract block-pattern strings."""
+    try:
+        normalize_block_pattern("attn,gdn", num_layers=3, gdn_ratio=1)
+    except ValueError as exc:
+        assert "length" in str(exc)
+    else:  # pragma: no cover - assertion fallback
+        raise AssertionError("Expected block-pattern length check to fail")
+    try:
+        normalize_block_pattern("attn,mlp,gdn", num_layers=3, gdn_ratio=1)
+    except ValueError as exc:
+        assert "attn/gdn" in str(exc)
+    else:  # pragma: no cover - assertion fallback
+        raise AssertionError("Expected block-pattern token check to fail")
+    print("  ✓ block pattern validation OK")
 
 
 def test_causal_conv() -> None:
@@ -1353,6 +1421,20 @@ def test_restore_low_dim_params_to_fp32_default_restores_gdn_control() -> None:
     assert layer.w_b.weight.dtype == torch.float32
     assert layer.w_g.weight.dtype == torch.float32
     print("  ✓ default GDN control projection fp32 restore OK")
+
+
+def test_restore_low_dim_params_to_fp32_matrix_w_g() -> None:
+    """Keep `w_g` on the matrix path when exact-contract HGDN asks for it."""
+    layer = GatedDeltaNet(
+        64, n_heads=4, head_k_dim=8, expand_v=2.0, use_fla=False
+    ).bfloat16()
+    restore_low_dim_params_to_fp32(
+        layer, gdn_control_proj_fp32=True, gdn_w_g_optimizer="matrix"
+    )
+    assert layer.w_a.weight.dtype == torch.float32
+    assert layer.w_b.weight.dtype == torch.float32
+    assert layer.w_g.weight.dtype == torch.bfloat16
+    print("  ✓ matrix-routed w_g stays bf16 in fp32 restore helper")
 
 
 def test_hybrid_fwd_bwd() -> None:

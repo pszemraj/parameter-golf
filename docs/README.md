@@ -66,13 +66,14 @@ Branch: `exp/hgdn-k-core`
   - bounded naive-contract sanity batch:
     - exact repo baseline from `train_gpt.py`: `44.00 ms/step`, exact
       roundtrip `1.23710448`, `UNDER_LIMIT`
-    - live HGDN finalist: `98.08 ms/step`, exact roundtrip `1.24735121`,
+    - live14 HGDN replay shell: `98.08 ms/step`, exact roundtrip `1.24735121`,
       `OVER_LIMIT`
     - hybrid-trainer attention-only control: `46.09 ms/step`, exact roundtrip
       `1.24098267`, `OVER_LIMIT`
   - the comparison surface was fair enough to show the real problem:
-    packed HGDN is still behind the exact baseline, but the helper manifests
-    for those two runs did not yet record git provenance.
+    the trainer/runtime shell is close to the exact repo baseline, but the
+    live14 HGDN replay shell is the wrong candidate for the exact
+    `9Lx512 / seq1024` contract.
 
 - Post-`2026-04-21` local patchset before the next rerun:
   - standard attention blocks now use the FA3 fast path when available on
@@ -108,31 +109,26 @@ Branch: `exp/hgdn-k-core`
 
 ## Current local work
 
-- New local baseline-shaped HGDN search helper:
+- New local exact-contract HGDN search helper:
   [`../scripts/run_local_hgdn_naive_contract_search.sh`](../scripts/run_local_hgdn_naive_contract_search.sh)
 - Size-screen config:
   [`../configs/hgdn/naive_contract_search.toml`](../configs/hgdn/naive_contract_search.toml)
-- First-pass artifact-size screen on `2026-04-22` says these candidates are
-  all under the init-time proxy cap:
-  - `l9_d512_r1_m2`
-  - `l9_d512_r1_m1p75`
-  - `l8_d512_r1_m2`
-  - `l9_d480_r1_m2`
-  - `l9_d512_r0_m2`
-- The helper now defaults `PERF_SKIP_FINAL_EVAL=1` for local broad screens so
-  the size screen handles artifact triage and the local loop is not dominated
-  by the quantized roundtrip tail.
-- Local `4070` contract-native screen on `2026-04-23` (`300` steps,
-  `seq=1024`, `65536` tokens/step, `WEIGHT_DECAY=0`) says:
-  - `l8_d512_r1_m2` is the current local HGDN leader:
-    `560.56 ms/step`, `val_bpb=1.8709`
-  - `l9_d512_r1_m1p75` is the next-best HGDN trade:
-    `630.64 ms/step`, `val_bpb=1.8758`
-  - `l9_d480_r1_m2` and `l9_d512_r1_m2` are slower without enough quality gain
-  - same-shell `l8_d512_r0_m2` attention-only control:
-    `407.30 ms/step`, `val_bpb=1.9888`
-  - so the provisional winner-shell HGDN tax is about `1.38x` step time for
-    about `0.118` bpb at step `300`
+- The first baseline-shaped local pass is now diagnostic only. The active
+  search surface is:
+  - sparse `BLOCK_PATTERN` hybrids instead of periodic `GDN_RATIO=1`
+  - `GDN_HEAD_K_DIM=48` instead of `64/60`
+  - `MUON_DISTRIBUTED_MODE=packed_allreduce`
+  - `GDN_W_G_OPTIMIZER=matrix`
+- Current active exact-contract candidates:
+  - `l8_d512_mid2_dk48_m2`
+  - `l8_d512_mid2_dk48_m1p75`
+  - `l9_d512_mid2_dk48_m1p75`
+  - `l9_d512_mid3_dk48_m1p75`
+  - same-shell attention-only controls `l8_d512_r0_m2` and
+    `l9_d512_r0_m1p75`
+- The helper defaults `PERF_SKIP_FINAL_EVAL=1` for local broad screens so the
+  size screen handles artifact triage and the local loop is not dominated by
+  the quantized roundtrip tail.
 - The helper runs the size screen first, then a fixed-contract local batch,
   then bundles configs/logs/commands with `py7zr`.
 
@@ -159,12 +155,15 @@ bash scripts/run_h100_hgdn_naive_contract_round.sh
 ```
 
 The naive-contract helper now pins the direct `train_gpt.py` replay to the
-recorded baseline transport/data contract:
+recorded baseline transport/data contract and runs config-driven HGDN legs
+instead of replaying `single-live14` by default:
 
 - `NCCL_IB_DISABLE=1`
 - `DATA_PATH`
 - `TOKENIZER_PATH`
 - `VOCAB_SIZE`
+- exact-contract HGDN config path
+- same-shell attention-only config path
 
 Details and open items live in [TODO.md](TODO.md).
 

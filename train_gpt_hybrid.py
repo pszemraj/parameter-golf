@@ -49,7 +49,13 @@ from hgdn_runtime_utils import (
     restore_low_dim_params_to_fp32,
     serialize_quantized_state_dict_int8,
 )
-from model import _HAS_FLA, SCALAR_PARAM_PATTERNS, HybridGPT, attention_backend_name
+from model import (
+    _HAS_FLA,
+    HybridGPT,
+    attention_backend_name,
+    uses_scalar_optimizer,
+    validate_gdn_w_g_optimizer,
+)
 from profiler_report import (
     build_profile_report,
     build_profile_rows,
@@ -237,6 +243,8 @@ class Hyperparameters:
     )
     cudnn_benchmark = bool(int(os.environ.get("CUDNN_BENCHMARK", "0")))
     gdn_ratio = int(os.environ.get("GDN_RATIO", 3))  # 3 GDN : 1 Attn
+    block_pattern = os.environ.get("BLOCK_PATTERN", "").strip()
+    gdn_w_g_optimizer = os.environ.get("GDN_W_G_OPTIMIZER", "scalar").lower()
 
     # Optimizer
     embed_lr = float(os.environ.get("EMBED_LR", 0.6))
@@ -255,6 +263,9 @@ class Hyperparameters:
     adam_eps = float(os.environ.get("ADAM_EPS", 1e-8))
     grad_clip_norm = float(os.environ.get("GRAD_CLIP_NORM", 0.0))
     weight_decay = float(os.environ.get("WEIGHT_DECAY", 0.04))
+    muon_distributed_mode = os.environ.get(
+        "MUON_DISTRIBUTED_MODE", "packed_allreduce"
+    ).lower()
 
 
 def build_wandb_config(
@@ -294,6 +305,7 @@ def build_wandb_config(
         "MODEL_DIM": args.model_dim,
         "MLP_MULT": args.mlp_mult,
         "GDN_RATIO": args.gdn_ratio,
+        "BLOCK_PATTERN": args.block_pattern or None,
         "ATTN_BLOCKS": n_attn,
         "CONV_BLOCKS": n_gdn,
         "N_PARAMS": n_params,
@@ -322,6 +334,8 @@ def build_wandb_config(
         "COMPILE": args.compile,
         "COMPILE_STRATEGY": args.compile_strategy,
         "DISTRIBUTED_MODE": args.distributed_mode,
+        "MUON_DISTRIBUTED_MODE": args.muon_distributed_mode,
+        "GDN_W_G_OPTIMIZER": args.gdn_w_g_optimizer,
         "COMPILE_GDN_DISABLED": compile_stats["gdn_disabled"],
         "COMPILE_GDN_FLA_BLOCKS_COMPILED": compile_stats["gdn_fla_blocks_compiled"],
         "COMPILE_GDN_COREKERNEL_LEFT_ENABLED": compile_stats[
@@ -564,6 +578,7 @@ class Muon(torch.optim.Optimizer):
         backend_steps: int,
         nesterov: bool = True,
         weight_decay: float = 0.0,
+        distributed_mode: str = "packed_allreduce",
     ):
         """Initialize Muon.
 
@@ -573,7 +588,15 @@ class Muon(torch.optim.Optimizer):
         :param int backend_steps: Newton-Schulz iteration count.
         :param bool nesterov: Whether to use Nesterov momentum, defaults to True.
         :param float weight_decay: Decoupled weight decay, defaults to 0.0.
+        :param str distributed_mode: Distributed update mode. Either
+            `"packed_allreduce"` or `"sharded_rsag"`, defaults to
+            `"packed_allreduce"`.
         """
+        if distributed_mode not in {"packed_allreduce", "sharded_rsag"}:
+            raise ValueError(
+                "distributed_mode must be 'packed_allreduce' or 'sharded_rsag', "
+                f"got {distributed_mode!r}"
+            )
         super().__init__(
             params,
             dict(
@@ -585,6 +608,7 @@ class Muon(torch.optim.Optimizer):
             ),
         )
         self._built = False
+        self._distributed_mode = distributed_mode
 
     def _build(self) -> None:
         """Allocate distributed Muon state for the current parameter groups."""
@@ -641,7 +665,7 @@ class Muon(torch.optim.Optimizer):
         """Launch async reduce-scatter ops for matrix params after backward."""
         if not self._built:
             self._build()
-        if not self._distributed:
+        if not self._distributed or self._distributed_mode != "sharded_rsag":
             return
         self._rs_futures: list[dist.Work | None] = []
         for meta in self._bank_meta:
@@ -687,7 +711,11 @@ class Muon(torch.optim.Optimizer):
 
             prev_ag_handle: dist.Work | None = None
             prev_meta: dict[str, object] | None = None
-            sharded = self._distributed and hasattr(self, "_rs_futures")
+            sharded = (
+                self._distributed
+                and self._distributed_mode == "sharded_rsag"
+                and hasattr(self, "_rs_futures")
+            )
             packed_distributed = self._distributed and not sharded
 
             if packed_distributed:
@@ -974,6 +1002,12 @@ def main() -> None:
 
     code = Path(__file__).read_text(encoding="utf-8")
     args = Hyperparameters()
+    args.gdn_w_g_optimizer = validate_gdn_w_g_optimizer(args.gdn_w_g_optimizer)
+    if args.muon_distributed_mode not in {"packed_allreduce", "sharded_rsag"}:
+        raise ValueError(
+            "MUON_DISTRIBUTED_MODE must be 'packed_allreduce' or 'sharded_rsag', "
+            f"got {args.muon_distributed_mode!r}"
+        )
     wandb_watch_mode = normalize_wandb_watch_mode(args.wandb_watch)
     _zeropower_via_newtonschulz5_wide = maybe_compile(
         _zeropower_via_newtonschulz5_wide, enabled=args.compile, dynamic=True
@@ -1310,6 +1344,7 @@ def main() -> None:
             mlp_mult=args.mlp_mult,
             leaky_slope=args.leaky_slope,
             gdn_ratio=args.gdn_ratio,
+            block_pattern=args.block_pattern or None,
             rope_base=args.rope_base,
             qk_gain_init=args.qk_gain_init,
             logit_softcap=args.logit_softcap,
@@ -1323,7 +1358,9 @@ def main() -> None:
     )
 
     restore_low_dim_params_to_fp32(
-        base_model, gdn_control_proj_fp32=args.gdn_control_proj_fp32
+        base_model,
+        gdn_control_proj_fp32=args.gdn_control_proj_fp32,
+        gdn_w_g_optimizer=args.gdn_w_g_optimizer,
     )
     if args.gdn_use_cuda_corekernel and owned_runtime_rec_chunk_t is not None:
         for block in base_model.blocks:
@@ -1358,7 +1395,8 @@ def main() -> None:
     n_attn = sum(1 for t in base_model.block_types if t == "attn")
     log0(
         f"model_params:{n_params} blocks:{n_gdn}G+{n_attn}A "
-        f"norm_style:{base_model.norm_style} residual_alpha:{base_model.residual_alpha:g}"
+        f"norm_style:{base_model.norm_style} residual_alpha:{base_model.residual_alpha:g} "
+        f"block_pattern:{args.block_pattern or '<ratio>'}"
     )
     log0(
         "compile_plan:"
@@ -1375,6 +1413,8 @@ def main() -> None:
     log0(
         f"world_size:{world_size} grad_accum_steps:{grad_accum_steps} "
         f"distributed_mode:{args.distributed_mode} uses_ddp:{int(uses_ddp)} "
+        f"muon_distributed_mode:{args.muon_distributed_mode} "
+        f"gdn_w_g_optimizer:{args.gdn_w_g_optimizer} "
         f"sdp_backends:cudnn=False flash=True mem_efficient=False math=False"
     )
     if args.compile and distributed and args.compile_strategy in {"model", "hybrid"}:
@@ -1405,12 +1445,21 @@ def main() -> None:
     matrix_params = [
         p
         for n, p in block_named_params
-        if p.ndim == 2 and not any(pat in n for pat in SCALAR_PARAM_PATTERNS)
+        if p.ndim == 2
+        and not uses_scalar_optimizer(
+            n,
+            param_ndim=p.ndim,
+            gdn_w_g_optimizer=args.gdn_w_g_optimizer,
+        )
     ]
     scalar_params = [
         p
         for n, p in block_named_params
-        if p.ndim < 2 or any(pat in n for pat in SCALAR_PARAM_PATTERNS)
+        if uses_scalar_optimizer(
+            n,
+            param_ndim=p.ndim,
+            gdn_w_g_optimizer=args.gdn_w_g_optimizer,
+        )
     ]
     if base_model.skip_weights.numel() > 0:
         scalar_params.append(base_model.skip_weights)
@@ -1435,6 +1484,7 @@ def main() -> None:
         momentum=args.muon_momentum,
         backend_steps=args.muon_backend_steps,
         weight_decay=args.weight_decay,
+        distributed_mode=args.muon_distributed_mode,
     )
     for g in optimizer_muon.param_groups:
         g["base_lr"] = args.matrix_lr
@@ -1500,7 +1550,8 @@ def main() -> None:
         if use_parallel_muon_distributed:
             assert replicated_grad_sync is not None
             replicated_grad_sync.launch_all_reduces()
-            optimizer_muon.launch_reduce_scatters()
+            if args.muon_distributed_mode == "sharded_rsag":
+                optimizer_muon.launch_reduce_scatters()
             replicated_grad_sync.wait()
             optimizer_tok.step()
             optimizer_scalar.step()

@@ -1,12 +1,12 @@
 [base]
 artifact_limit_bytes = 16000000
 vocab_size = 1024
-num_layers = 9
+num_layers = 8
 d_model = 512
 attn_heads = 8
 attn_kv_heads = 4
 gdn_n_heads = 8
-gdn_head_k_dim = 64
+gdn_head_k_dim = 48
 gdn_expand_v = 1.0
 gdn_allow_neg_eigval = true
 gdn_conv_size = 4
@@ -25,6 +25,7 @@ gdn_output_norm_fp32 = true
 mlp_mult = 2.0
 leaky_slope = 0.5
 gdn_ratio = 1
+block_pattern = ["attn", "attn", "gdn", "attn", "gdn", "attn", "attn", "attn"]
 rope_base = 10000.0
 qk_gain_init = 1.5
 logit_softcap = 30.0
@@ -34,26 +35,38 @@ norm_style = "pre"
 residual_alpha = 1.0
 
 [[candidates]]
-name = "l9_d512_r1_m2"
-notes = "Contract-native HGDN shell against the 9x512 baseline shape."
+name = "l8_d512_mid2_dk48_m2"
+notes = "8L exact-contract sparse hybrid with two mid-block GDN islands."
 
 [[candidates]]
-name = "l9_d512_r1_m1p75"
+name = "l8_d512_mid2_dk48_m1p75"
 mlp_mult = 1.75
-notes = "Same shell with a smaller MLP to buy back artifact headroom."
+notes = "Same sparse 8L shell with a smaller MLP."
 
 [[candidates]]
-name = "l8_d512_r1_m2"
-num_layers = 8
-notes = "Trim one layer while keeping the 512d contract-native width."
+name = "l9_d512_mid2_dk48_m1p75"
+num_layers = 9
+mlp_mult = 1.75
+block_pattern = ["attn", "attn", "gdn", "attn", "attn", "gdn", "attn", "attn", "attn"]
+notes = "9L sparse hybrid with two GDN islands on the baseline depth."
 
 [[candidates]]
-name = "l9_d480_r1_m2"
-d_model = 480
-gdn_head_k_dim = 60
-notes = "Slight width trim while keeping 8 heads and near-baseline shell depth."
+name = "l9_d512_mid3_dk48_m1p75"
+num_layers = 9
+mlp_mult = 1.75
+block_pattern = ["attn", "gdn", "attn", "attn", "gdn", "attn", "attn", "gdn", "attn"]
+notes = "9L sparse hybrid with three distributed GDN islands."
 
 [[candidates]]
-name = "l9_d512_r0_m2"
+name = "l8_d512_r0_m2"
 gdn_ratio = 0
-notes = "Attention-only same-shell anchor to isolate the HGDN tax."
+block_pattern = ["attn", "attn", "attn", "attn", "attn", "attn", "attn", "attn"]
+notes = "Attention-only control matching the 8Lx512d sparse-HGDN shell."
+
+[[candidates]]
+name = "l9_d512_r0_m1p75"
+num_layers = 9
+mlp_mult = 1.75
+gdn_ratio = 0
+block_pattern = ["attn", "attn", "attn", "attn", "attn", "attn", "attn", "attn", "attn"]
+notes = "Attention-only control matching the 9L sparse-HGDN shell."
