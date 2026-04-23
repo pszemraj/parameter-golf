@@ -1378,10 +1378,28 @@ def parse_args() -> argparse.Namespace:
         "--branch-temporal-mode",
         type=str,
         default=None,
-        choices=["current", "lagged", "hybrid"],
+        choices=["current", "lagged", "hybrid", "ema", "ema_hybrid"],
     )
     parser.add_argument("--branch-temporal-lag-scale", type=float, default=None)
+    parser.add_argument(
+        "--residual-token-gate-mode",
+        type=str,
+        default=None,
+        choices=["none", "base", "core_base"],
+    )
+    parser.add_argument(
+        "--branch-router-mode",
+        type=str,
+        default=None,
+        choices=["none", "softmax"],
+    )
     parser.add_argument("--readout-rank", type=int, default=None)
+    parser.add_argument(
+        "--scan-backend",
+        type=str,
+        default=None,
+        choices=["auto", "heinsen", "assoc", "assoc_accel", "sequential"],
+    )
 
     # Non-config args
     parser.add_argument("--seed", type=int, default=1337)
@@ -1516,6 +1534,8 @@ def build_wandb_config(
             "autocast": runtime.get("autocast"),
             "gradient_checkpointing": runtime.get("gradient_checkpointing"),
             "exact_val_bpb": runtime.get("exact_val_bpb"),
+            "scan_backend_requested": runtime.get("scan_backend_requested"),
+            "scan_backend_active": runtime.get("scan_backend_active"),
             "compile": runtime.get("compile", {}),
             "wandb": runtime.get("wandb", {}),
             "float32_matmul_precision": system.get("float32_matmul_precision"),
@@ -1604,12 +1624,16 @@ def build_resolved_config_payload(
     residual_core_init: float,
     branch_temporal_mode: str,
     branch_temporal_lag_scale: float,
+    residual_token_gate_mode: str,
+    branch_router_mode: str,
     trainable_parameters: int,
     fixed_buffer_bytes: int,
     compile_requested: bool,
     compile_after: int,
     compile_mode: Optional[str],
     compile_base_path: bool,
+    scan_backend_requested: str,
+    scan_backend_active: str,
     gradient_checkpointing: bool,
     wandb_enabled: bool,
     wandb_project: str,
@@ -1671,12 +1695,16 @@ def build_resolved_config_payload(
     :param float residual_core_init: Residual core init value.
     :param str branch_temporal_mode: Branch temporal mode.
     :param float branch_temporal_lag_scale: Branch temporal lag scale.
+    :param str residual_token_gate_mode: Tokenwise residual gating mode.
+    :param str branch_router_mode: Per-token branch router mode.
     :param int trainable_parameters: Trainable parameter count.
     :param int fixed_buffer_bytes: Fixed buffer bytes.
     :param bool compile_requested: Whether compile was requested.
     :param int compile_after: Step to start compilation.
     :param Optional[str] compile_mode: torch.compile mode.
     :param bool compile_base_path: Whether to compile the base path.
+    :param str scan_backend_requested: Requested scan backend.
+    :param str scan_backend_active: Active scan backend.
     :param bool gradient_checkpointing: Whether gradient checkpointing is enabled.
     :param bool wandb_enabled: Whether W&B logging is enabled.
     :param str wandb_project: W&B project name.
@@ -1719,6 +1747,8 @@ def build_resolved_config_payload(
             "residual_core_init": float(residual_core_init),
             "branch_temporal_mode": branch_temporal_mode,
             "branch_temporal_lag_scale": float(branch_temporal_lag_scale),
+            "residual_token_gate_mode": residual_token_gate_mode,
+            "branch_router_mode": branch_router_mode,
             "trainable_parameters": int(trainable_parameters),
             "fixed_buffer_bytes": int(fixed_buffer_bytes),
             "smoothing": spec.metadata.get("smoothing"),
@@ -1774,6 +1804,8 @@ def build_resolved_config_payload(
             "autocast": bool(use_autocast),
             "gradient_checkpointing": bool(gradient_checkpointing),
             "exact_val_bpb": byte_count_lut is not None,
+            "scan_backend_requested": scan_backend_requested,
+            "scan_backend_active": scan_backend_active,
             "compile": {
                 "enabled": bool(compile_requested),
                 "compile_after": int(compile_after),
@@ -1975,6 +2007,27 @@ def main() -> None:
             md.get("branch_temporal_lag_scale", 1.0),
         )
     )
+    residual_token_gate_mode = str(
+        _resolve(
+            args.residual_token_gate_mode,
+            m.get("residual_token_gate_mode"),
+            md.get("residual_token_gate_mode", "none"),
+        )
+    )
+    branch_router_mode = str(
+        _resolve(
+            args.branch_router_mode,
+            m.get("branch_router_mode"),
+            md.get("branch_router_mode", "none"),
+        )
+    )
+    scan_backend = str(
+        _resolve(
+            args.scan_backend,
+            t.get("scan_backend"),
+            td.get("scan_backend", "auto"),
+        )
+    )
     run_name = str(cfg.meta.get("run_name", model_dir.name))
     phase = cfg.meta.get("phase")
     wandb_enabled = bool(args.wandb)
@@ -2006,6 +2059,8 @@ def main() -> None:
         f"  controller: type={core_type} layers={core_layers} expansion={core_expansion} "
         f"residual_core={residual_core} branch_temporal_mode={branch_temporal_mode} "
         f"branch_temporal_lag_scale={branch_temporal_lag_scale} "
+        f"residual_token_gate_mode={residual_token_gate_mode} "
+        f"branch_router_mode={branch_router_mode} scan_backend={scan_backend} "
         f"bptt_chunks={bptt_chunks} carry_chunks={carry_chunks} "
         f"grad_ckpt={gradient_checkpointing}"
     )
@@ -2137,6 +2192,9 @@ def main() -> None:
         residual_core_init=residual_core_init,
         branch_temporal_mode=branch_temporal_mode,
         branch_temporal_lag_scale=branch_temporal_lag_scale,
+        residual_token_gate_mode=residual_token_gate_mode,
+        branch_router_mode=branch_router_mode,
+        scan_backend=scan_backend,
         gradient_checkpointing=gradient_checkpointing,
     ).to(device)
     model.prepare_runtime_buffers(device=device, amplifier_dtype=runtime_amp_dtype)
@@ -2201,6 +2259,7 @@ def main() -> None:
         f"Trainable params: {core_model.trainable_parameters:,} | "
         f"Fixed buffers: {core_model.fixed_nbytes / 1e6:.2f} MB"
     )
+    print(f"Active scan backend: {core_model.active_scan_backend_name()}")
 
     # --- Byte count LUT for competition-exact bpb ---
     byte_count_lut: Optional[torch.Tensor] = None
@@ -2261,12 +2320,16 @@ def main() -> None:
         residual_core_init=residual_core_init,
         branch_temporal_mode=branch_temporal_mode,
         branch_temporal_lag_scale=branch_temporal_lag_scale,
+        residual_token_gate_mode=residual_token_gate_mode,
+        branch_router_mode=branch_router_mode,
         trainable_parameters=core_model.trainable_parameters,
         fixed_buffer_bytes=core_model.fixed_nbytes,
         compile_requested=compile_requested,
         compile_after=compile_after,
         compile_mode=compile_mode,
         compile_base_path=compile_base_path,
+        scan_backend_requested=scan_backend,
+        scan_backend_active=core_model.active_scan_backend_name(),
         gradient_checkpointing=gradient_checkpointing,
         wandb_enabled=wandb_enabled,
         wandb_project=wandb_project,
@@ -2387,6 +2450,8 @@ def main() -> None:
         total_tokens = 0
         loss_accum: Optional[torch.Tensor] = None
         last_stats = {"base_loss": float("nan"), "weight_max": 1.0}
+        last_inputs: Optional[torch.Tensor] = None
+        last_targets: Optional[torch.Tensor] = None
 
         for _ in range(grad_accum):
             # Truncated BPTT window. The state is detached once at the start of
@@ -2400,6 +2465,8 @@ def main() -> None:
                 batch, reset_state = train_batcher.next_batch()
                 inputs = batch[:, :-1]
                 targets = batch[:, 1:]
+                last_inputs = inputs
+                last_targets = targets
                 if state is None or reset_state:
                     state = core_model.initial_state(inputs.size(0), device=device)
                 elif j == 0:
@@ -2480,12 +2547,36 @@ def main() -> None:
                 f"lr {current_lr:.2e} | tok/s {tok_per_sec:,.0f}"
             )
             if log_state_every > 0 and train_state is not None and step % log_state_every == 0:
+                watch_metrics = core_model.latest_watch_metrics()
+                token_gate = core_model.latest_residual_token_gate()
+                if token_gate is not None and last_inputs is not None and last_targets is not None:
+                    with torch.no_grad():
+                        base_logits = base_path_model(last_inputs)
+                        base_per_token = cross_entropy_per_token(base_logits, last_targets)
+                        hard_mask = base_per_token > base_per_token.mean()
+                        easy_mask = ~hard_mask
+                        if hard_mask.any() and easy_mask.any():
+                            watch_metrics["residual_gate_hard_minus_easy"] = float(
+                                token_gate[hard_mask].mean().item()
+                                - token_gate[easy_mask].mean().item()
+                            )
                 with torch.no_grad():
                     state_norms = core_model.state_norms(train_state)
                     gate_values = core_model.residual_gate_values()
                 state_s = _format_debug_vector(state_norms)
                 gate_s = _format_debug_vector(gate_values)
-                print(f"           state_norms=[{state_s}] residual_gates=[{gate_s}]")
+                extra = ""
+                if watch_metrics:
+                    metric_s = " ".join(
+                        f"{key}={float(value):.3f}" for key, value in sorted(watch_metrics.items())
+                    )
+                    extra = f" {metric_s}"
+                print(f"           state_norms=[{state_s}] residual_gates=[{gate_s}]{extra}")
+                if wandb_run is not None and watch_metrics:
+                    wandb_run.log(
+                        {f"watch/{key}": value for key, value in watch_metrics.items()},
+                        step=step,
+                    )
 
         if val_every > 0 and step > 0 and step % val_every == 0:
             val_loss, val_bpb = evaluate(

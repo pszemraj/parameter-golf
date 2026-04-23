@@ -26,6 +26,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint as activation_checkpoint
 
+from .scan_backend import apply_affine_scan, normalize_scan_backend, resolve_scan_backend
+
 ArrayLike = np.ndarray | torch.Tensor
 BranchTemporalState: TypeAlias = torch.Tensor | tuple[torch.Tensor, torch.Tensor]
 
@@ -83,10 +85,37 @@ def _normalize_branch_temporal_mode(mode: str) -> str:
     :return str: ``current``, ``lagged``, or ``hybrid``.
     """
     normalized = str(mode).strip().lower()
-    if normalized not in {"current", "lagged", "hybrid"}:
+    if normalized not in {"current", "lagged", "hybrid", "ema", "ema_hybrid"}:
         raise ValueError(
-            f"unknown branch_temporal_mode {mode!r}; expected 'current', 'lagged', or 'hybrid'"
+            "unknown branch_temporal_mode "
+            f"{mode!r}; expected 'current', 'lagged', 'hybrid', 'ema', or 'ema_hybrid'"
         )
+    return normalized
+
+
+def _normalize_residual_token_gate_mode(mode: str) -> str:
+    """Normalize the residual-token gating mode.
+
+    :param str mode: Requested gate mode.
+    :return str: ``none``, ``base``, or ``core_base``.
+    """
+    normalized = str(mode).strip().lower()
+    if normalized not in {"none", "base", "core_base"}:
+        raise ValueError(
+            f"unknown residual_token_gate_mode {mode!r}; expected 'none', 'base', or 'core_base'"
+        )
+    return normalized
+
+
+def _normalize_branch_router_mode(mode: str) -> str:
+    """Normalize the branch-router mode.
+
+    :param str mode: Requested router mode.
+    :return str: ``none`` or ``softmax``.
+    """
+    normalized = str(mode).strip().lower()
+    if normalized not in {"none", "softmax"}:
+        raise ValueError(f"unknown branch_router_mode {mode!r}; expected 'none' or 'softmax'")
     return normalized
 
 
@@ -814,17 +843,25 @@ class MinGRULayer(nn.Module):
     maps back to unconstrained reals if expansion_factor != 1.
     """
 
-    def __init__(self, dim: int, expansion_factor: float = 1.0):
+    def __init__(
+        self,
+        dim: int,
+        expansion_factor: float = 1.0,
+        scan_backend: str = "auto",
+    ):
         """Initialize a single minGRU layer.
 
         :param int dim: Hidden width.
         :param float expansion_factor: Inner-state expansion factor.
+        :param str scan_backend: Parallel scan backend.
         """
         super().__init__()
         self.dim = dim
         dim_inner = int(dim * expansion_factor)
         self.dim_inner = dim_inner
         self.proj_out = dim_inner != dim
+        self.scan_backend_requested = normalize_scan_backend(scan_backend, allow_heinsen=True)
+        self.scan_backend_active: Optional[str] = None
 
         self.to_hidden_and_gate = nn.Linear(dim, dim_inner * 2, bias=False)
         self.out_proj = nn.Linear(dim_inner, dim, bias=False) if self.proj_out else nn.Identity()
@@ -851,25 +888,44 @@ class MinGRULayer(nn.Module):
             else:
                 out = hidden * gate
         else:
-            # Parallel mode — log-space scan. MUST use float32 for log/exp stability.
+            # Parallel mode. We prefer assoc-scan / accelerated-scan when
+            # available, but keep the Heinsen reference path for stability and
+            # environments without the optional dependency.
             orig_dtype = hidden.dtype
             hidden = hidden.float()
             gate = gate.float()
+            backend = resolve_scan_backend(
+                self.scan_backend_requested,
+                device=hidden.device,
+                allow_heinsen=True,
+            )
+            self.scan_backend_active = backend
+            if backend == "heinsen":
+                log_coeffs = -F.softplus(gate)
+                log_z = -F.softplus(-gate)
+                log_tilde_h = _log_g(hidden)
+                log_values = log_z + log_tilde_h
 
-            log_coeffs = -F.softplus(gate)
-            log_z = -F.softplus(-gate)
-            log_tilde_h = _log_g(hidden)
-            log_values = log_z + log_tilde_h
+                if prev_hidden is not None:
+                    prev_hidden_log = (
+                        prev_hidden.float().clamp_min(1e-8).unsqueeze(1).log().clamp(min=-30)
+                    )
+                    log_values = torch.cat((prev_hidden_log, log_values), dim=1)
+                    log_coeffs = F.pad(log_coeffs, (0, 0, 1, 0))
 
-            if prev_hidden is not None:
-                prev_hidden_log = (
-                    prev_hidden.float().clamp_min(1e-8).unsqueeze(1).log().clamp(min=-30)
+                out = _heinsen_scan_log(log_coeffs, log_values)
+                out = out[:, -seq_len:]
+            else:
+                forget = torch.sigmoid(-gate)
+                tokens = torch.sigmoid(gate) * _g(hidden)
+                prev = None if prev_hidden is None else prev_hidden.float()
+                out, active_backend = apply_affine_scan(
+                    forget,
+                    tokens,
+                    prev=prev,
+                    backend=backend,
                 )
-                log_values = torch.cat((prev_hidden_log, log_values), dim=1)
-                log_coeffs = F.pad(log_coeffs, (0, 0, 1, 0))
-
-            out = _heinsen_scan_log(log_coeffs, log_values)
-            out = out[:, -seq_len:]
+                self.scan_backend_active = active_backend
             out = out.to(orig_dtype)
 
         next_hidden = out[:, -1]  # [B, dim_inner], positive
@@ -920,6 +976,7 @@ class ResidualMinGRUBlock(nn.Module):
         expansion_factor: float = 2.0,
         residual_init: float = -2.0,
         norm_eps: float = 1e-5,
+        scan_backend: str = "auto",
     ):
         """Initialize the residual minGRU block.
 
@@ -927,10 +984,15 @@ class ResidualMinGRUBlock(nn.Module):
         :param float expansion_factor: Inner-state expansion factor.
         :param float residual_init: Initial residual gate logit.
         :param float norm_eps: Numerical stability term for RMSNorm.
+        :param str scan_backend: Parallel scan backend.
         """
         super().__init__()
         self.norm = LearnedRMSNorm(dim, eps=norm_eps)
-        self.rnn = MinGRULayer(dim, expansion_factor=expansion_factor)
+        self.rnn = MinGRULayer(
+            dim,
+            expansion_factor=expansion_factor,
+            scan_backend=scan_backend,
+        )
         self.resid_logit = nn.Parameter(torch.tensor(float(residual_init)))
 
     @property
@@ -979,6 +1041,7 @@ class MinGRUCore(nn.Module):
         residual_init: float = -2.0,
         norm_eps: float = 1e-5,
         gradient_checkpointing: bool = False,
+        scan_backend: str = "auto",
         **_kwargs: object,
     ):
         """Initialize the multi-layer minGRU core.
@@ -992,6 +1055,7 @@ class MinGRUCore(nn.Module):
         :param float residual_init: Initial residual gate logit.
         :param float norm_eps: Numerical stability term for RMSNorm.
         :param bool gradient_checkpointing: Whether to checkpoint layers.
+        :param str scan_backend: Parallel scan backend.
         :param object _kwargs: Ignored compatibility keyword arguments.
         """
         super().__init__()
@@ -1006,6 +1070,7 @@ class MinGRUCore(nn.Module):
         self.dim_inner = int(hidden_size * expansion_factor)
         self.residual_blocks = bool(residual_blocks)
         self.gradient_checkpointing = bool(gradient_checkpointing)
+        self.scan_backend_requested = normalize_scan_backend(scan_backend, allow_heinsen=True)
 
         if self.residual_blocks:
             self.blocks = nn.ModuleList(
@@ -1015,6 +1080,7 @@ class MinGRUCore(nn.Module):
                         expansion_factor=expansion_factor,
                         residual_init=residual_init,
                         norm_eps=norm_eps,
+                        scan_backend=self.scan_backend_requested,
                     )
                     for _ in range(self.num_layers)
                 ]
@@ -1023,7 +1089,11 @@ class MinGRUCore(nn.Module):
         else:
             self.layers = nn.ModuleList(
                 [
-                    MinGRULayer(hidden_size, expansion_factor=expansion_factor)
+                    MinGRULayer(
+                        hidden_size,
+                        expansion_factor=expansion_factor,
+                        scan_backend=self.scan_backend_requested,
+                    )
                     for _ in range(self.num_layers)
                 ]
             )
@@ -1070,6 +1140,21 @@ class MinGRUCore(nn.Module):
         if not self.residual_blocks:
             return []
         return [float(torch.sigmoid(block.resid_logit).item()) for block in self.blocks]
+
+    @torch.no_grad()
+    def active_scan_backend(self) -> Optional[str]:
+        """Return the active scan backend used by the minGRU layers.
+
+        :return Optional[str]: Active backend or ``None`` when unavailable.
+        """
+        if self.num_layers <= 0:
+            return None
+        layer = self.layers[0]
+        if self.residual_blocks:
+            layer = self.blocks[0].rnn
+        if hasattr(layer, "scan_backend_active"):
+            return layer.scan_backend_active or self.scan_backend_requested
+        return None
 
 
 # Keep simple ScanCore as a lightweight option
@@ -1174,6 +1259,9 @@ class CoreAmplifierLM(nn.Module):
         residual_core_init: float = -2.0,
         branch_temporal_mode: str = "current",
         branch_temporal_lag_scale: float = 1.0,
+        residual_token_gate_mode: str = "none",
+        branch_router_mode: str = "none",
+        scan_backend: str = "auto",
         gradient_checkpointing: bool = False,
     ) -> None:
         """Initialize the core/amplifier model.
@@ -1189,6 +1277,9 @@ class CoreAmplifierLM(nn.Module):
         :param float residual_core_init: Initial residual gate logit.
         :param str branch_temporal_mode: Branch temporal mixing mode.
         :param float branch_temporal_lag_scale: Lag mixing scale.
+        :param str residual_token_gate_mode: Tokenwise residual gating mode.
+        :param str branch_router_mode: Per-token branch router mode.
+        :param str scan_backend: Requested scan backend for parallel recurrences.
         :param bool gradient_checkpointing: Whether to checkpoint amplifier work.
         """
         super().__init__()
@@ -1197,6 +1288,11 @@ class CoreAmplifierLM(nn.Module):
         self.branch_lags = spec.branch_lags
         self.branch_temporal_mode = _normalize_branch_temporal_mode(branch_temporal_mode)
         self.branch_temporal_lag_scale = float(branch_temporal_lag_scale)
+        self.residual_token_gate_mode = _normalize_residual_token_gate_mode(
+            residual_token_gate_mode
+        )
+        self.branch_router_mode = _normalize_branch_router_mode(branch_router_mode)
+        self.scan_backend_requested = normalize_scan_backend(scan_backend, allow_heinsen=True)
         self.num_branches = len(spec.branch_lags)
         self.max_branch_lag = max(self.branch_lags)
         self.amp_dim = self.core_dim * self.num_branches
@@ -1206,6 +1302,17 @@ class CoreAmplifierLM(nn.Module):
         self.residual_core = bool(residual_core)
         self.residual_core_init = float(residual_core_init)
         self.gradient_checkpointing = bool(gradient_checkpointing)
+        self.scan_backend_active = self.scan_backend_requested
+        self._branch_scan_backend_active: Optional[str] = None
+
+        if (
+            self.branch_temporal_mode in {"ema", "ema_hybrid"}
+            and self.scan_backend_requested == "heinsen"
+        ):
+            raise ValueError(
+                "EMA branch temporal modes require scan_backend auto/assoc/assoc_accel/sequential; "
+                "heinsen only applies to the positive minGRU recurrence"
+            )
 
         self.register_buffer("token_embed", spec.token_embed.clone(), persistent=True)
         self.register_buffer("base_bigram_logits", spec.base_bigram_logits.clone(), persistent=True)
@@ -1232,6 +1339,11 @@ class CoreAmplifierLM(nn.Module):
             dtype=torch.float32,
         )
         self.register_buffer("branch_temporal_lag_mix", lag_mix, persistent=True)
+        ema_decay = torch.tensor(
+            [math.exp(-1.0 / float(lag)) for lag in self.branch_lags],
+            dtype=torch.float32,
+        )
+        self.register_buffer("branch_temporal_ema_decay", ema_decay, persistent=True)
 
         if learn_input_adapter:
             self.input_adapter = nn.Linear(self.core_dim, self.core_dim, bias=False)
@@ -1249,6 +1361,7 @@ class CoreAmplifierLM(nn.Module):
                 batch_first=True,
                 residual_blocks=self.residual_core,
                 residual_init=self.residual_core_init,
+                scan_backend=self.scan_backend_requested,
                 gradient_checkpointing=self.gradient_checkpointing,
             )
         elif core_type == "scan":
@@ -1282,6 +1395,21 @@ class CoreAmplifierLM(nn.Module):
         self.readout_branch_scale = nn.Parameter(torch.ones(self.num_branches))
         self.residual_log_scale = nn.Parameter(torch.tensor(-0.5))
         self.logit_bias = nn.Parameter(torch.zeros(self.vocab_size))
+        if self.residual_token_gate_mode == "none":
+            self.residual_token_gate = None
+        else:
+            gate_dim = 3 if self.residual_token_gate_mode == "base" else (self.core_dim + 3)
+            self.residual_token_gate = nn.Linear(gate_dim, 1)
+            with torch.no_grad():
+                self.residual_token_gate.weight.zero_()
+                self.residual_token_gate.bias.fill_(-1.5)
+        if self.branch_router_mode == "none":
+            self.branch_router = None
+        else:
+            self.branch_router = nn.Linear(self.core_dim + 3, self.num_branches)
+            with torch.no_grad():
+                self.branch_router.weight.zero_()
+                self.branch_router.bias.zero_()
 
         self._runtime_device_str: Optional[str] = None
         self._runtime_amp_dtype: Optional[torch.dtype] = None
@@ -1293,6 +1421,11 @@ class CoreAmplifierLM(nn.Module):
         self._readout_out_proj_runtime: Optional[torch.Tensor] = None
         self._base_bigram_logits_runtime: Optional[torch.Tensor] = None
         self._branch_temporal_lag_mix_runtime: Optional[torch.Tensor] = None
+        self._branch_temporal_ema_decay_runtime: Optional[torch.Tensor] = None
+        self._last_residual_token_gate: Optional[torch.Tensor] = None
+        self._last_residual_gate_mean: Optional[float] = None
+        self._last_residual_gate_std: Optional[float] = None
+        self._last_router_entropy: Optional[float] = None
 
     def _use_gradient_checkpointing(self) -> bool:
         """Return whether gradient checkpointing is active.
@@ -1378,8 +1511,17 @@ class CoreAmplifierLM(nn.Module):
         self._branch_temporal_lag_mix_runtime = self.branch_temporal_lag_mix.to(
             device=device, dtype=dtype
         )
+        self._branch_temporal_ema_decay_runtime = self.branch_temporal_ema_decay.to(
+            device=device, dtype=dtype
+        )
         self._runtime_device_str = str(device)
         self._runtime_amp_dtype = dtype
+        self.scan_backend_active = resolve_scan_backend(
+            self.scan_backend_requested,
+            device=device,
+            allow_heinsen=True,
+        )
+        self._branch_scan_backend_active = None
 
     def _ensure_runtime_buffers(self) -> None:
         """Ensure the cached runtime amplifier buffers are ready."""
@@ -1393,6 +1535,7 @@ class CoreAmplifierLM(nn.Module):
             or self._amp_w2_runtime is None
             or self._base_bigram_logits_runtime is None
             or self._branch_temporal_lag_mix_runtime is None
+            or self._branch_temporal_ema_decay_runtime is None
             or (self.readout_weight is not None and self._readout_weight_runtime is None)
             or (self.readout_in_proj is not None and self._readout_in_proj_runtime is None)
             or (self.readout_out_proj is not None and self._readout_out_proj_runtime is None)
@@ -1420,8 +1563,11 @@ class CoreAmplifierLM(nn.Module):
             core_state = core_state.to(device)
         if self.branch_temporal_mode == "current":
             return core_state
-        history = core_state.new_zeros(batch_size, self.max_branch_lag, self.core_dim)
-        return core_state, history
+        if self.branch_temporal_mode in {"lagged", "hybrid"}:
+            history = core_state.new_zeros(batch_size, self.max_branch_lag, self.core_dim)
+            return core_state, history
+        ema_state = core_state.new_zeros(batch_size, self.num_branches, self.core_dim)
+        return core_state, ema_state
 
     def detach_state(self, state: BranchTemporalState) -> BranchTemporalState:
         """Detach a recurrent state from autograd.
@@ -1468,10 +1614,16 @@ class CoreAmplifierLM(nn.Module):
             core_state, history = state
         else:
             core_state = state
-            history = state.new_zeros(batch_size, self.max_branch_lag, self.core_dim)
+            if self.branch_temporal_mode in {"lagged", "hybrid"}:
+                history = state.new_zeros(batch_size, self.max_branch_lag, self.core_dim)
+            else:
+                history = state.new_zeros(batch_size, self.num_branches, self.core_dim)
         core_state = core_state.to(device=device, dtype=dtype)
         history = history.to(device=device, dtype=dtype)
-        expected_shape = (batch_size, self.max_branch_lag, self.core_dim)
+        if self.branch_temporal_mode in {"lagged", "hybrid"}:
+            expected_shape = (batch_size, self.max_branch_lag, self.core_dim)
+        else:
+            expected_shape = (batch_size, self.num_branches, self.core_dim)
         if tuple(history.shape) != expected_shape:
             raise ValueError(
                 "branch history shape mismatch: "
@@ -1494,6 +1646,109 @@ class CoreAmplifierLM(nn.Module):
             emb = emb.to(dtype=core_param.dtype)
         return self.input_adapter(emb)
 
+    def _base_confidence_features(self, base_logits: torch.Tensor) -> torch.Tensor:
+        """Build frozen-base confidence features for gating and routing.
+
+        :param torch.Tensor base_logits: Frozen base-path logits.
+        :return torch.Tensor: Per-token features ``[entropy, top1_prob, margin]``.
+        """
+        logits = base_logits.detach().float()
+        log_probs = F.log_softmax(logits, dim=-1)
+        probs = log_probs.exp()
+        entropy = -(probs * log_probs).sum(dim=-1, keepdim=True)
+        entropy = entropy / max(math.log(float(self.vocab_size)), 1e-6)
+        top2 = torch.topk(probs, k=2, dim=-1).values
+        top1_prob = top2[..., :1]
+        margin = top2[..., :1] - top2[..., 1:2]
+        return torch.cat([entropy, top1_prob, margin], dim=-1)
+
+    def _controller_condition_features(
+        self,
+        core_out: torch.Tensor,
+        base_features: torch.Tensor,
+        *,
+        include_core: bool,
+        out_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Build tokenwise conditioning features for gating and routing.
+
+        :param torch.Tensor core_out: Controller activations.
+        :param torch.Tensor base_features: Frozen-base confidence features.
+        :param bool include_core: Whether to append normalized core activations.
+        :param torch.dtype out_dtype: Output dtype for downstream linear heads.
+        :return torch.Tensor: Per-token conditioning features.
+        """
+        if include_core:
+            core_features = _rms_norm(core_out.float())
+            features = torch.cat([core_features, base_features], dim=-1)
+        else:
+            features = base_features
+        return features.to(dtype=out_dtype)
+
+    def _route_branches(
+        self,
+        branches: torch.Tensor,
+        core_out: torch.Tensor,
+        base_features: torch.Tensor,
+    ) -> torch.Tensor:
+        """Apply per-token branch routing when enabled.
+
+        :param torch.Tensor branches: Branch activations.
+        :param torch.Tensor core_out: Controller activations.
+        :param torch.Tensor base_features: Frozen-base confidence features.
+        :return torch.Tensor: Routed branch activations.
+        """
+        if self.branch_router is None:
+            self._last_router_entropy = None
+            return branches
+        features = self._controller_condition_features(
+            core_out,
+            base_features,
+            include_core=True,
+            out_dtype=self.branch_router.weight.dtype,
+        )
+        router_logits = self.branch_router(features)
+        router = torch.softmax(router_logits, dim=-1)
+        self._last_router_entropy = float(
+            (-(router.clamp_min(1e-8) * router.clamp_min(1e-8).log()).sum(dim=-1).mean())
+            .detach()
+            .cpu()
+            .item()
+        )
+        return branches * (router * float(self.num_branches)).to(branches.dtype)[..., None]
+
+    def _apply_residual_token_gate(
+        self,
+        residual_logits: torch.Tensor,
+        core_out: torch.Tensor,
+        base_features: torch.Tensor,
+    ) -> torch.Tensor:
+        """Apply tokenwise residual gating when enabled.
+
+        :param torch.Tensor residual_logits: Residual logits before gating.
+        :param torch.Tensor core_out: Controller activations.
+        :param torch.Tensor base_features: Frozen-base confidence features.
+        :return torch.Tensor: Gated residual logits.
+        """
+        if self.residual_token_gate is None:
+            self._last_residual_token_gate = None
+            self._last_residual_gate_mean = None
+            self._last_residual_gate_std = None
+            return residual_logits
+        features = self._controller_condition_features(
+            core_out,
+            base_features,
+            include_core=self.residual_token_gate_mode == "core_base",
+            out_dtype=self.residual_token_gate.weight.dtype,
+        )
+        gate = torch.sigmoid(self.residual_token_gate(features))
+        gate = gate.to(dtype=residual_logits.dtype)
+        gate_flat = gate.squeeze(-1)
+        self._last_residual_token_gate = gate_flat.detach()
+        self._last_residual_gate_mean = float(gate_flat.mean().detach().cpu().item())
+        self._last_residual_gate_std = float(gate_flat.std(unbiased=False).detach().cpu().item())
+        return residual_logits * gate
+
     def _expand_branches(
         self,
         core_out: torch.Tensor,
@@ -1515,24 +1770,52 @@ class CoreAmplifierLM(nn.Module):
 
         assert history is not None
         assert self._branch_temporal_lag_mix_runtime is not None
-        full = torch.cat([history, core_out], dim=1)
-        lagged_inputs = torch.stack(
-            [
-                full[
-                    :, self.max_branch_lag - lag : self.max_branch_lag - lag + core_out.shape[1], :
-                ]
-                for lag in self.branch_lags
-            ],
-            dim=2,
-        )
-        next_history = full[:, -self.max_branch_lag :, :].contiguous()
-        if self.branch_temporal_mode == "lagged":
-            branch_inputs = lagged_inputs
-        else:
-            lag_mix = self._branch_temporal_lag_mix_runtime.view(1, 1, self.num_branches, 1)
-            branch_inputs = (core_out[:, :, None, :] + lag_mix * lagged_inputs) / torch.sqrt(
-                1.0 + lag_mix.square()
+        if self.branch_temporal_mode in {"lagged", "hybrid"}:
+            full = torch.cat([history, core_out], dim=1)
+            lagged_inputs = torch.stack(
+                [
+                    full[
+                        :,
+                        self.max_branch_lag - lag : self.max_branch_lag - lag + core_out.shape[1],
+                        :,
+                    ]
+                    for lag in self.branch_lags
+                ],
+                dim=2,
             )
+            next_history = full[:, -self.max_branch_lag :, :].contiguous()
+            if self.branch_temporal_mode == "lagged":
+                branch_inputs = lagged_inputs
+            else:
+                lag_mix = self._branch_temporal_lag_mix_runtime.view(1, 1, self.num_branches, 1)
+                branch_inputs = (core_out[:, :, None, :] + lag_mix * lagged_inputs) / torch.sqrt(
+                    1.0 + lag_mix.square()
+                )
+        else:
+            assert self._branch_temporal_ema_decay_runtime is not None
+            backend = resolve_scan_backend(
+                self.scan_backend_requested,
+                device=core_out.device,
+                allow_heinsen=False,
+            )
+            decay = self._branch_temporal_ema_decay_runtime.view(1, 1, self.num_branches, 1)
+            ema_gates = decay.expand(1, core_out.shape[1], self.num_branches, self.core_dim)
+            ema_inputs = (1.0 - decay) * core_out[:, :, None, :]
+            ema_state, active_backend = apply_affine_scan(
+                ema_gates,
+                ema_inputs,
+                prev=history,
+                backend=backend,
+            )
+            self._branch_scan_backend_active = active_backend
+            next_history = ema_state[:, -1].contiguous()
+            if self.branch_temporal_mode == "ema":
+                branch_inputs = ema_state
+            else:
+                lag_mix = self._branch_temporal_lag_mix_runtime.view(1, 1, self.num_branches, 1)
+                branch_inputs = (core_out[:, :, None, :] + lag_mix * ema_state) / torch.sqrt(
+                    1.0 + lag_mix.square()
+                )
         branches = torch.einsum("btnc,ncd->btnd", branch_inputs, self._lag_ops_runtime)
         return branches, next_history
 
@@ -1681,10 +1964,33 @@ class CoreAmplifierLM(nn.Module):
             dtype=x.dtype,
         )
         core_out, next_core_state = self.core(x, core_state)
+        if hasattr(self.core, "active_scan_backend"):
+            core_backend = self.core.active_scan_backend()
+            if core_backend:
+                self.scan_backend_active = core_backend
         branches, next_history = self._expand_branches(core_out, history=history)
+        if self._branch_scan_backend_active is not None:
+            self.scan_backend_active = self._branch_scan_backend_active
+        base_logits = self.base_path_logits(input_ids)
+        base_features: Optional[torch.Tensor] = None
+        if self.residual_token_gate_mode != "none" or self.branch_router_mode != "none":
+            base_features = self._base_confidence_features(base_logits)
+            branches = self._route_branches(branches, core_out, base_features)
+        else:
+            self._last_router_entropy = None
         branches = self._amplify(branches)
         residual_logits = self._residual_logits(branches)
-        base_logits = self.base_path_logits(input_ids, dtype=residual_logits.dtype)
+        if base_features is not None:
+            residual_logits = self._apply_residual_token_gate(
+                residual_logits,
+                core_out,
+                base_features,
+            )
+        else:
+            self._last_residual_token_gate = None
+            self._last_residual_gate_mean = None
+            self._last_residual_gate_std = None
+        base_logits = base_logits.to(dtype=residual_logits.dtype)
         logits = (
             base_logits
             + self.logit_bias.to(device=residual_logits.device, dtype=residual_logits.dtype)
@@ -1711,6 +2017,43 @@ class CoreAmplifierLM(nn.Module):
         if hasattr(self.core, "residual_gate_values"):
             return self.core.residual_gate_values()
         return []
+
+    @torch.no_grad()
+    def latest_residual_token_gate(self) -> Optional[torch.Tensor]:
+        """Return the latest tokenwise residual gate tensor.
+
+        :return Optional[torch.Tensor]: Detached gate values or ``None``.
+        """
+        return self._last_residual_token_gate
+
+    @torch.no_grad()
+    def latest_watch_metrics(self) -> dict[str, float]:
+        """Return tokenwise gate and router debug metrics from the latest forward.
+
+        :return dict[str, float]: Latest watch metrics.
+        """
+        metrics: dict[str, float] = {}
+        if self._last_residual_gate_mean is not None:
+            metrics["residual_gate_mean"] = float(self._last_residual_gate_mean)
+        if self._last_residual_gate_std is not None:
+            metrics["residual_gate_std"] = float(self._last_residual_gate_std)
+        if self._last_router_entropy is not None:
+            metrics["router_entropy"] = float(self._last_router_entropy)
+        return metrics
+
+    @torch.no_grad()
+    def active_scan_backend_name(self) -> str:
+        """Return the active scan backend for the current runtime.
+
+        :return str: Active backend name.
+        """
+        if self._branch_scan_backend_active is not None:
+            return self._branch_scan_backend_active
+        if hasattr(self.core, "active_scan_backend"):
+            backend = self.core.active_scan_backend()
+            if backend:
+                return backend
+        return self.scan_backend_active
 
     @torch.no_grad()
     def step(

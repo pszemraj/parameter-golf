@@ -325,6 +325,151 @@ def test_hybrid_temporal_mode_chunk_carry_matches_full_forward():
     assert (full - stitched).abs().max().item() < 1e-4
 
 
+def test_ema_temporal_mode_chunk_carry_matches_full_forward():
+    """EMA temporal taps should preserve forward/chunk consistency."""
+    rng = np.random.default_rng(SEED)
+    tokens = rng.integers(0, VOCAB, size=20_000, dtype=np.int64)
+    spec = build_amplifier_spec(
+        tokens,
+        vocab_size=VOCAB,
+        core_dim=8,
+        branch_lags=(1, 2, 4),
+        num_blocks=1,
+        fixed_dtype=torch.float16,
+    )
+    from core_amplifier_lm import CoreAmplifierLM
+
+    model = CoreAmplifierLM(
+        spec,
+        core_layers=3,
+        core_expansion=2.0,
+        residual_core=True,
+        residual_core_init=-2.0,
+        branch_temporal_mode="ema",
+        scan_backend="assoc",
+        amplifier_dtype=torch.float32,
+    )
+
+    x = torch.randint(0, VOCAB, (2, 17))
+    with torch.no_grad():
+        full = model(x)
+        first, state = model(x[:, :7], return_state=True)
+        second, _ = model(x[:, 7:], state=state, return_state=True)
+        stitched = torch.cat([first, second], dim=1)
+    assert (full - stitched).abs().max().item() < 1e-4
+
+
+def test_mingru_assoc_scan_matches_heinsen_reference():
+    """Assoc-scan should match the Heinsen minGRU reference path on CPU."""
+    rng = np.random.default_rng(SEED)
+    tokens = rng.integers(0, VOCAB, size=20_000, dtype=np.int64)
+    spec = build_amplifier_spec(
+        tokens,
+        vocab_size=VOCAB,
+        core_dim=8,
+        branch_lags=(1, 2, 4),
+        num_blocks=1,
+        fixed_dtype=torch.float16,
+    )
+    from core_amplifier_lm import CoreAmplifierLM
+
+    reference = CoreAmplifierLM(
+        spec,
+        core_layers=3,
+        core_expansion=2.0,
+        residual_core=True,
+        residual_core_init=-2.0,
+        branch_temporal_mode="current",
+        scan_backend="heinsen",
+        amplifier_dtype=torch.float32,
+    )
+    candidate = CoreAmplifierLM(
+        spec,
+        core_layers=3,
+        core_expansion=2.0,
+        residual_core=True,
+        residual_core_init=-2.0,
+        branch_temporal_mode="current",
+        scan_backend="assoc",
+        amplifier_dtype=torch.float32,
+    )
+    candidate.load_state_dict(reference.state_dict())
+
+    x = torch.randint(0, VOCAB, (2, 17))
+    with torch.no_grad():
+        ref_logits, ref_state = reference(x, return_state=True)
+        out_logits, out_state = candidate(x, return_state=True)
+    assert reference.active_scan_backend_name() == "heinsen"
+    assert candidate.active_scan_backend_name() == "assoc"
+    assert torch.allclose(ref_logits, out_logits, atol=1e-4, rtol=1e-4)
+    assert torch.allclose(ref_state, out_state, atol=1e-4, rtol=1e-4)
+
+
+def test_ema_hybrid_temporal_mode_chunk_carry_matches_full_forward():
+    """EMA-hybrid temporal taps should preserve forward/chunk consistency."""
+    rng = np.random.default_rng(SEED)
+    tokens = rng.integers(0, VOCAB, size=20_000, dtype=np.int64)
+    spec = build_amplifier_spec(
+        tokens,
+        vocab_size=VOCAB,
+        core_dim=8,
+        branch_lags=(1, 2, 4),
+        num_blocks=1,
+        fixed_dtype=torch.float16,
+    )
+    from core_amplifier_lm import CoreAmplifierLM
+
+    model = CoreAmplifierLM(
+        spec,
+        core_layers=3,
+        core_expansion=2.0,
+        residual_core=True,
+        residual_core_init=-2.0,
+        branch_temporal_mode="ema_hybrid",
+        branch_temporal_lag_scale=1.0,
+        scan_backend="assoc",
+        amplifier_dtype=torch.float32,
+    )
+
+    x = torch.randint(0, VOCAB, (2, 17))
+    with torch.no_grad():
+        full = model(x)
+        first, state = model(x[:, :7], return_state=True)
+        second, _ = model(x[:, 7:], state=state, return_state=True)
+        stitched = torch.cat([first, second], dim=1)
+    assert (full - stitched).abs().max().item() < 1e-4
+
+
+def test_softmax_branch_router_is_initially_neutral():
+    """Zero-init softmax routing should preserve the baseline forward path."""
+    rng = np.random.default_rng(SEED)
+    tokens = rng.integers(0, VOCAB, size=20_000, dtype=np.int64)
+    spec = build_amplifier_spec(
+        tokens,
+        vocab_size=VOCAB,
+        core_dim=8,
+        branch_lags=(1, 2, 4),
+        num_blocks=1,
+        fixed_dtype=torch.float16,
+    )
+    from core_amplifier_lm import CoreAmplifierLM
+
+    baseline = CoreAmplifierLM(spec, core_layers=2, amplifier_dtype=torch.float32)
+    routed = CoreAmplifierLM(
+        spec,
+        core_layers=2,
+        branch_router_mode="softmax",
+        amplifier_dtype=torch.float32,
+    )
+    routed.load_state_dict(baseline.state_dict(), strict=False)
+
+    x = torch.randint(0, VOCAB, (2, 17))
+    with torch.no_grad():
+        ref = baseline(x[:, :-1])
+        out = routed(x[:, :-1])
+    assert (ref - out).abs().max().item() < 1e-5
+
+
 def test_hold_then_cosine_lr_schedule():
     """The controller LR should warm up, hold, then decay."""
     from train_core_amplifier import get_lr
@@ -347,6 +492,8 @@ def test_record_defaults_match_recommended_run():
     assert model["residual_core"] is True
     assert model["branch_temporal_mode"] == "current"
     assert model["branch_temporal_lag_scale"] == 1.0
+    assert model["residual_token_gate_mode"] == "none"
+    assert model["branch_router_mode"] == "none"
     assert train["batch_size"] == 256
     assert train["carry_chunks"] == 16
     assert train["bptt_chunks"] == 2
@@ -354,6 +501,7 @@ def test_record_defaults_match_recommended_run():
     assert train["warmup_steps"] == 100
     assert train["lr_hold_steps"] == 1500
     assert train["min_lr"] == 3e-4
+    assert train["scan_backend"] == "auto"
 
 
 def test_zero_block_spec_and_model():
@@ -1020,6 +1168,78 @@ def test_training_script_gradient_checkpointing_exports_quantized_payload():
         payload_path = model_dir / "final_trainable.int8.ptz"
         assert payload_path.exists()
         assert payload_path.stat().st_size > 0
+
+
+def test_training_script_architecture_modes_roundtrip():
+    """Training should round-trip new gating, routing, temporal, and scan modes."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir = Path(tmpdir)
+        _, gz_path = _make_gz(tmpdir)
+        model_dir = tmpdir / "model_arch_modes"
+
+        _run_inspect(
+            [
+                "init",
+                str(model_dir),
+                "--data",
+                str(gz_path),
+                "--storage-dtype",
+                "uint8",
+                "--vocab-size",
+                "256",
+                "--core-dim",
+                "8",
+                "--branch-lags",
+                "1,2,4",
+                "--branch-temporal-mode",
+                "ema_hybrid",
+                "--residual-token-gate-mode",
+                "core_base",
+                "--branch-router-mode",
+                "softmax",
+                "--scan-backend",
+                "assoc",
+                "--num-blocks",
+                "1",
+                "--spec-strategy",
+                "stream",
+            ]
+        )
+
+        _run_train(
+            [
+                str(model_dir),
+                "--num-steps",
+                "2",
+                "--seq-len",
+                "32",
+                "--batch-size",
+                "4",
+                "--carry-chunks",
+                "2",
+                "--val-every",
+                "1",
+                "--val-steps",
+                "1",
+                "--log-every",
+                "1",
+                "--learning-rate",
+                "1e-3",
+                "--lr-schedule",
+                "none",
+                "--force-device",
+                "cpu",
+                "--no-mmap",
+            ],
+            expect_in_stdout="Training complete",
+        )
+
+        resolved = json.loads((model_dir / "resolved_config.json").read_text())
+        assert resolved["model"]["branch_temporal_mode"] == "ema_hybrid"
+        assert resolved["model"]["residual_token_gate_mode"] == "core_base"
+        assert resolved["model"]["branch_router_mode"] == "softmax"
+        assert resolved["runtime"]["scan_backend_requested"] == "assoc"
+        assert resolved["runtime"]["scan_backend_active"] == "assoc"
 
 
 def test_training_script_records_step_token_contract():

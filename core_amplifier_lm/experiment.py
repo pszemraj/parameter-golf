@@ -35,6 +35,8 @@ SUMMARY_FIELDS = [
     "residual_core_init",
     "branch_temporal_mode",
     "branch_temporal_lag_scale",
+    "residual_token_gate_mode",
+    "branch_router_mode",
     "carry_chunks",
     "bptt_chunks",
     "branch_lags",
@@ -67,6 +69,7 @@ SUMMARY_FIELDS = [
     "compile_after",
     "compile_mode",
     "compile_duration_sec",
+    "scan_backend",
     "gradient_checkpointing",
     "torch_version",
     "cuda_version",
@@ -654,6 +657,8 @@ def summarize_run_dir(run_dir: str | Path) -> dict[str, str]:
         "residual_core_init": _stringify(model.get("residual_core_init")),
         "branch_temporal_mode": _stringify(model.get("branch_temporal_mode")),
         "branch_temporal_lag_scale": _stringify(model.get("branch_temporal_lag_scale")),
+        "residual_token_gate_mode": _stringify(model.get("residual_token_gate_mode")),
+        "branch_router_mode": _stringify(model.get("branch_router_mode")),
         "carry_chunks": _stringify(training.get("carry_chunks")),
         "bptt_chunks": _stringify(training.get("bptt_chunks")),
         "branch_lags": ",".join(str(x) for x in model.get("branch_lags", [])),
@@ -686,6 +691,7 @@ def summarize_run_dir(run_dir: str | Path) -> dict[str, str]:
         "compile_after": _stringify(compile_cfg.get("compile_after")),
         "compile_mode": _stringify(compile_cfg.get("compile_mode")),
         "compile_duration_sec": _stringify(results.get("compile_duration_sec")),
+        "scan_backend": _stringify(runtime.get("scan_backend_active")),
         "gradient_checkpointing": _stringify(
             runtime.get("gradient_checkpointing", training.get("gradient_checkpointing"))
         ),
@@ -803,6 +809,12 @@ def write_summary_markdown(
                 notes.append(f"layers={row['core_layers']}")
             if row.get("core_expansion"):
                 notes.append(f"exp={row['core_expansion']}")
+            if row.get("residual_token_gate_mode") and row["residual_token_gate_mode"] != "none":
+                notes.append(f"gate={row['residual_token_gate_mode']}")
+            if row.get("branch_router_mode") and row["branch_router_mode"] != "none":
+                notes.append(f"router={row['branch_router_mode']}")
+            if row.get("scan_backend"):
+                notes.append(f"scan={row['scan_backend']}")
             lines.append(
                 "| {run} | {bpb} | {loss} | {tok} | {spec} | {notes} |".format(
                     run=row.get("run_name", ""),

@@ -35,9 +35,21 @@ def main() -> None:
         "--branch-temporal-mode",
         type=str,
         default=None,
-        choices=["current", "lagged", "hybrid"],
+        choices=["current", "lagged", "hybrid", "ema", "ema_hybrid"],
     )
     g.add_argument("--branch-temporal-lag-scale", type=float, default=None)
+    g.add_argument(
+        "--residual-token-gate-mode",
+        type=str,
+        default=None,
+        choices=["none", "base", "core_base"],
+    )
+    g.add_argument(
+        "--branch-router-mode",
+        type=str,
+        default=None,
+        choices=["none", "softmax"],
+    )
     g.add_argument("--num-blocks", type=int, default=None)
     g.add_argument("--smoothing", type=float, default=None)
     g.add_argument("--embedding-init", type=str, default=None, choices=["spectral", "svd"])
@@ -49,6 +61,12 @@ def main() -> None:
     g.add_argument("--residual-core", type=int, default=None, choices=[0, 1])
     g.add_argument("--residual-core-init", type=float, default=None)
     g.add_argument("--readout-rank", type=int, default=None)
+    g.add_argument(
+        "--scan-backend",
+        type=str,
+        default=None,
+        choices=["auto", "heinsen", "assoc", "assoc_accel", "sequential"],
+    )
     g.add_argument("--max-tokens", type=int, default=None)
     g.add_argument("--spec-workers", type=int, default=None)
     g.add_argument(
@@ -78,6 +96,8 @@ def main() -> None:
             "core_dim",
             "branch_temporal_mode",
             "branch_temporal_lag_scale",
+            "residual_token_gate_mode",
+            "branch_router_mode",
             "num_blocks",
             "smoothing",
             "embedding_init",
@@ -91,6 +111,7 @@ def main() -> None:
             "core_expansion",
             "residual_core",
             "residual_core_init",
+            "scan_backend",
             "fixed_dtype",
         ]:
             val = getattr(args, attr.replace("-", "_"), None)

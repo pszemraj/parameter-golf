@@ -154,6 +154,8 @@ def test_summarize_run_dir_reads_structured_artifacts(tmp_path: Path):
                 "core_expansion": 2.0,
                 "residual_core": True,
                 "residual_core_init": -2.0,
+                "residual_token_gate_mode": "base",
+                "branch_router_mode": "softmax",
                 "branch_lags": [1, 2, 4],
                 "num_blocks": 3,
                 "readout_rank": None,
@@ -179,6 +181,7 @@ def test_summarize_run_dir_reads_structured_artifacts(tmp_path: Path):
             "runtime": {
                 "gradient_checkpointing": True,
                 "exact_val_bpb": True,
+                "scan_backend_active": "assoc",
                 "compile": {
                     "enabled": True,
                     "compile_after": 200,
@@ -243,6 +246,9 @@ def test_summarize_run_dir_reads_structured_artifacts(tmp_path: Path):
     assert row["artifact_estimate_bytes"] == "999999"
     assert row["artifact_status"] == "LEFT_ON_TABLE"
     assert row["trainable_int8_zlib_bytes"] == "345"
+    assert row["residual_token_gate_mode"] == "base"
+    assert row["branch_router_mode"] == "softmax"
+    assert row["scan_backend"] == "assoc"
     assert row["gradient_checkpointing"] == "true"
     assert row["repo_code_bytes"] == "654321"
     assert row["local_step_tokens"] == "262144"

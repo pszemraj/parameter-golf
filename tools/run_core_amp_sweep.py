@@ -34,10 +34,22 @@ from core_amplifier_lm.experiment import (
 
 
 def env(name: str, default: str) -> str:
+    """Return an environment variable or a fallback string.
+
+    :param str name: Environment variable name.
+    :param str default: Fallback value when unset.
+    :return str: Resolved string value.
+    """
     return os.environ.get(name, default)
 
 
 def env_bool(name: str, default: bool) -> bool:
+    """Return a boolean environment variable with common truthy parsing.
+
+    :param str name: Environment variable name.
+    :param bool default: Fallback value when unset.
+    :return bool: Parsed boolean value.
+    """
     raw = os.environ.get(name)
     if raw is None:
         return default
@@ -45,11 +57,19 @@ def env_bool(name: str, default: bool) -> bool:
 
 
 def now_stamp() -> str:
+    """Return a timestamp suitable for run-directory names.
+
+    :return str: Timestamp in ``YYYYMMDD_HHMMSS`` format.
+    """
     return datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
 def env_optional_int(*names: str) -> Optional[int]:
-    """Return the first non-empty integer environment variable."""
+    """Return the first non-empty integer environment variable.
+
+    :param str names: Candidate environment variable names.
+    :return Optional[int]: Parsed integer value, or ``None`` when unset.
+    """
     for name in names:
         raw = os.environ.get(name)
         if raw is None or raw == "":
@@ -59,6 +79,11 @@ def env_optional_int(*names: str) -> Optional[int]:
 
 
 def append_command(path: Path, cmd: list[str]) -> None:
+    """Append a shell-escaped command line to a command log.
+
+    :param Path path: Destination text file.
+    :param list[str] cmd: Command vector to record.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
         f.write(shell_join(cmd) + "\n")
@@ -72,7 +97,14 @@ def maybe_add_wandb_args(
     tags_default: list[str],
     enabled_default: bool,
 ) -> None:
-    """Append consistent W&B flags when the current sweep should log online."""
+    """Append consistent W&B flags when the current sweep should log online.
+
+    :param list[str] cmd: Command vector to extend in place.
+    :param str run_name: Concrete W&B run name.
+    :param str group_default: Default W&B group when the environment does not override it.
+    :param list[str] tags_default: Default W&B tags.
+    :param bool enabled_default: Whether W&B is enabled by default for this sweep kind.
+    """
     if not env_bool("WANDB", enabled_default):
         return
     cmd.append("--wandb")
@@ -98,6 +130,13 @@ def maybe_add_wandb_args(
 def stream_command(
     cmd: list[str], *, log_path: Optional[Path] = None, dry_run: bool = False
 ) -> int:
+    """Run a command, optionally teeing combined output to a log file.
+
+    :param list[str] cmd: Command vector to execute.
+    :param Optional[Path] log_path: Optional output log path.
+    :param bool dry_run: Whether to print without executing.
+    :return int: Process exit code.
+    """
     print("+", shell_join(cmd), flush=True)
     if dry_run:
         return 0
@@ -130,6 +169,17 @@ def ensure_data_path(
     python_bin: str,
     dry_run: bool,
 ) -> str:
+    """Resolve the effective training-data path, converting parquet when requested.
+
+    :param Path repo_root: Repository root.
+    :param str data_path: Requested data path.
+    :param str storage_dtype: Output integer dtype for converted token binaries.
+    :param bool auto_convert_parquet: Whether parquet inputs may be converted automatically.
+    :param Path model_root: Root directory for sweep artifacts.
+    :param str python_bin: Python interpreter used for conversion.
+    :param bool dry_run: Whether to print without executing the conversion.
+    :return str: Resolved binary token path.
+    """
     path = Path(data_path)
     if path.suffix.lower() != ".parquet":
         return str(path)
@@ -155,6 +205,12 @@ def ensure_data_path(
 
 
 def run_complete(run_dir: Path, planned_steps: int) -> bool:
+    """Return whether a run directory contains a completed run at the expected step.
+
+    :param Path run_dir: Candidate run directory.
+    :param int planned_steps: Required terminal step count.
+    :return bool: ``True`` when the run finished the planned contract.
+    """
     results = read_json(run_dir / "run_results.json")
     return bool(results.get("completed")) and int(results.get("final_step", -1)) >= int(
         planned_steps
@@ -162,12 +218,22 @@ def run_complete(run_dir: Path, planned_steps: int) -> bool:
 
 
 def rebuild_summaries(model_root: Path, title: str) -> None:
+    """Rebuild summary TSV and Markdown files for a sweep root.
+
+    :param Path model_root: Sweep root directory.
+    :param str title: Markdown title for the summary report.
+    """
     rows = collect_summary_rows(model_root)
     write_summary_tsv(rows, model_root / "summary.tsv")
     write_summary_markdown(rows, model_root / "summary.md", title=title)
 
 
 def copy_shared_model(shared_dir: Path, run_dir: Path) -> None:
+    """Copy a shared spec/config bundle into a concrete run directory.
+
+    :param Path shared_dir: Shared model directory containing the frozen spec and tokenizer.
+    :param Path run_dir: Destination run directory.
+    """
     run_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(shared_dir / "spec.pt", run_dir / "spec.pt")
     shutil.copy2(shared_dir / "config.json", run_dir / "config.json")
@@ -178,6 +244,8 @@ def copy_shared_model(shared_dir: Path, run_dir: Path) -> None:
 
 @dataclass(frozen=True)
 class ControllerRunSpec:
+    """Immutable controller sweep point."""
+
     name: str
     core_layers: int
     core_expansion: float
@@ -196,6 +264,8 @@ class ControllerRunSpec:
 
 @dataclass(frozen=True)
 class StructureRunSpec:
+    """Immutable frozen-structure sweep point."""
+
     name: str
     branch_lags: str
     num_blocks: int
@@ -215,6 +285,13 @@ def resolve_step_token_contract(
     comparisons stay apples-to-apples only if the effective processed tokens per
     optimizer step stay fixed. When ``TARGET_EFFECTIVE_STEP_TOKENS`` is set, we
     derive ``grad_accum`` from the resolved microbatch contract.
+
+    :param int batch_size: Requested local batch size.
+    :param int seq_len: Requested sequence length.
+    :param int bptt_chunks: Number of BPTT chunks per optimizer step.
+    :param int grad_accum: Requested gradient accumulation steps.
+    :return tuple[int, int, int, int, int]: Resolved batch size, sequence length,
+        gradient accumulation, local step tokens, and effective step tokens.
     """
     resolved_batch_size = env_optional_int("LOCAL_BATCH_SIZE_OVERRIDE", "BATCH_SIZE_OVERRIDE")
     resolved_seq_len = env_optional_int("SEQ_LEN_OVERRIDE")
@@ -243,6 +320,11 @@ def resolve_step_token_contract(
 
 
 def controller_default_specs(preset: str) -> list[ControllerRunSpec]:
+    """Return the built-in controller sweep preset.
+
+    :param str preset: Preset name.
+    :return list[ControllerRunSpec]: Default controller run specs.
+    """
     if preset == "controller_default":
         return [
             ControllerRunSpec(
@@ -291,6 +373,9 @@ def controller_spec_max_tokens_default(preset: str) -> str:
 
     Real 5090 controller sweeps should build the frozen spec from the full
     available training shard set unless the caller explicitly requests a cap.
+
+    :param str preset: Controller preset name.
+    :return str: Default spec-token cap, or ``""`` for the full dataset.
     """
     if preset == "controller_default":
         return ""
@@ -300,6 +385,11 @@ def controller_spec_max_tokens_default(preset: str) -> str:
 
 
 def parse_controller_specs(raw: str) -> list[ControllerRunSpec]:
+    """Parse controller run specs from a newline-delimited environment payload.
+
+    :param str raw: Raw spec text.
+    :return list[ControllerRunSpec]: Parsed run specs.
+    """
     specs: list[ControllerRunSpec] = []
     for line in raw.splitlines():
         line = line.strip()
@@ -336,6 +426,11 @@ def parse_controller_specs(raw: str) -> list[ControllerRunSpec]:
 
 
 def structure_default_specs(preset: str) -> list[StructureRunSpec]:
+    """Return the built-in structure sweep preset.
+
+    :param str preset: Preset name.
+    :return list[StructureRunSpec]: Default structure run specs.
+    """
     if preset not in {"structure_default", "cpu_structure"}:
         raise SystemExit(f"unknown structure preset: {preset}")
     return [
@@ -350,7 +445,11 @@ def structure_default_specs(preset: str) -> list[StructureRunSpec]:
 
 
 def structure_preset_defaults(preset: str) -> dict[str, str | bool]:
-    """Return stable structure defaults for real 5090 runs vs CPU smoke."""
+    """Return stable structure defaults for real 5090 runs vs CPU smoke.
+
+    :param str preset: Structure preset name.
+    :return dict[str, str | bool]: Default environment-style values for that preset.
+    """
     if preset == "structure_default":
         return {
             "CORE_DIM": "48",
@@ -425,6 +524,11 @@ def structure_preset_defaults(preset: str) -> dict[str, str | bool]:
 
 
 def parse_structure_specs(raw: str) -> list[StructureRunSpec]:
+    """Parse frozen-structure run specs from a newline-delimited payload.
+
+    :param str raw: Raw spec text.
+    :return list[StructureRunSpec]: Parsed run specs.
+    """
     specs: list[StructureRunSpec] = []
     for line in raw.splitlines():
         line = line.strip()
@@ -460,6 +564,21 @@ def update_controller_config(
     local_step_tokens: int,
     effective_step_tokens: int,
 ) -> None:
+    """Write a per-run controller config snapshot before training starts.
+
+    :param Path run_dir: Concrete run directory.
+    :param str run_name: Run name stored in metadata.
+    :param str phase: Experiment phase label.
+    :param str data_path: Training-data path.
+    :param str storage_dtype: Token storage dtype.
+    :param ControllerRunSpec spec: Controller sweep point.
+    :param dict[str, str] train_defaults: Sweep-level training defaults.
+    :param int batch_size: Resolved local batch size.
+    :param int seq_len: Resolved sequence length.
+    :param int grad_accum: Resolved gradient accumulation steps.
+    :param int local_step_tokens: Tokens processed by one local microbatch step.
+    :param int effective_step_tokens: Tokens processed per optimizer step.
+    """
     cfg = ModelConfig.load(run_dir)
     branch_temporal_mode = env(
         "BRANCH_TEMPORAL_MODE", cfg.model.get("branch_temporal_mode", "current")
@@ -479,6 +598,8 @@ def update_controller_config(
     cfg.model["residual_core_init"] = spec.residual_core_init
     cfg.model["branch_temporal_mode"] = branch_temporal_mode
     cfg.model["branch_temporal_lag_scale"] = float(env("BRANCH_TEMPORAL_LAG_SCALE", "1.0"))
+    cfg.model["residual_token_gate_mode"] = env("RESIDUAL_TOKEN_GATE_MODE", "none")
+    cfg.model["branch_router_mode"] = env("BRANCH_ROUTER_MODE", "none")
     cfg.training["seq_len"] = int(seq_len)
     cfg.training["batch_size"] = int(batch_size)
     cfg.training["grad_accum"] = int(grad_accum)
@@ -496,6 +617,7 @@ def update_controller_config(
     cfg.training["grad_clip"] = float(train_defaults["GRAD_CLIP"])
     cfg.training["hard_loss_gamma"] = float(train_defaults["HARD_LOSS_GAMMA"])
     cfg.training["hard_loss_cap"] = float(train_defaults["HARD_LOSS_CAP"])
+    cfg.training["scan_backend"] = env("SCAN_BACKEND", "auto")
     cfg.training["gradient_checkpointing"] = env_bool(
         "GRADIENT_CHECKPOINTING",
         bool(int(train_defaults["GRADIENT_CHECKPOINTING"])),
@@ -512,6 +634,10 @@ def update_controller_config(
 
 
 def run_controller_sweep(repo_root: Path) -> None:
+    """Run the controller sweep protocol rooted at ``repo_root``.
+
+    :param Path repo_root: Repository root.
+    """
     python_bin = sys.executable
     preset = env("PRESET", "controller_default")
     dry_run = env_bool("DRY_RUN", False)
@@ -600,6 +726,10 @@ def run_controller_sweep(repo_root: Path) -> None:
         env("BRANCH_TEMPORAL_MODE", "current"),
         "--branch-temporal-lag-scale",
         env("BRANCH_TEMPORAL_LAG_SCALE", "1.0"),
+        "--residual-token-gate-mode",
+        env("RESIDUAL_TOKEN_GATE_MODE", "none"),
+        "--branch-router-mode",
+        env("BRANCH_ROUTER_MODE", "none"),
         "--num-blocks",
         env("NUM_BLOCKS", "9"),
         "--fixed-dtype",
@@ -622,6 +752,8 @@ def run_controller_sweep(repo_root: Path) -> None:
         "1",
         "--residual-core-init",
         "-2.0",
+        "--scan-backend",
+        env("SCAN_BACKEND", "auto"),
     ]
     spec_max_tokens = env("SPEC_MAX_TOKENS", controller_spec_max_tokens_default(preset))
     spec_budget_label = spec_max_tokens if spec_max_tokens else "full_available_train_shards"
@@ -741,6 +873,12 @@ def run_controller_sweep(repo_root: Path) -> None:
             env("BRANCH_TEMPORAL_MODE", "current"),
             "--branch-temporal-lag-scale",
             env("BRANCH_TEMPORAL_LAG_SCALE", "1.0"),
+            "--residual-token-gate-mode",
+            env("RESIDUAL_TOKEN_GATE_MODE", "none"),
+            "--branch-router-mode",
+            env("BRANCH_ROUTER_MODE", "none"),
+            "--scan-backend",
+            env("SCAN_BACKEND", "auto"),
             "--val-every",
             train_defaults["VAL_EVERY"],
             "--val-steps",
@@ -794,6 +932,10 @@ def run_controller_sweep(repo_root: Path) -> None:
 
 
 def run_structure_sweep(repo_root: Path) -> None:
+    """Run the frozen-structure sweep protocol rooted at ``repo_root``.
+
+    :param Path repo_root: Repository root.
+    """
     python_bin = sys.executable
     preset = env("PRESET", "structure_default")
     dry_run = env_bool("DRY_RUN", False)
@@ -882,6 +1024,12 @@ def run_structure_sweep(repo_root: Path) -> None:
             env("BRANCH_TEMPORAL_MODE", "current"),
             "--branch-temporal-lag-scale",
             env("BRANCH_TEMPORAL_LAG_SCALE", "1.0"),
+            "--residual-token-gate-mode",
+            env("RESIDUAL_TOKEN_GATE_MODE", "none"),
+            "--branch-router-mode",
+            env("BRANCH_ROUTER_MODE", "none"),
+            "--scan-backend",
+            env("SCAN_BACKEND", "auto"),
             "--num-blocks",
             str(spec.num_blocks),
             "--fixed-dtype",
@@ -986,6 +1134,12 @@ def run_structure_sweep(repo_root: Path) -> None:
             env("BRANCH_TEMPORAL_MODE", "current"),
             "--branch-temporal-lag-scale",
             env("BRANCH_TEMPORAL_LAG_SCALE", "1.0"),
+            "--residual-token-gate-mode",
+            env("RESIDUAL_TOKEN_GATE_MODE", "none"),
+            "--branch-router-mode",
+            env("BRANCH_ROUTER_MODE", "none"),
+            "--scan-backend",
+            env("SCAN_BACKEND", "auto"),
             "--val-every",
             env("VAL_EVERY", str(defaults["VAL_EVERY"])),
             "--val-steps",
@@ -1042,12 +1196,17 @@ def run_structure_sweep(repo_root: Path) -> None:
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse CLI arguments for the sweep runner.
+
+    :return argparse.Namespace: Parsed CLI arguments.
+    """
     ap = argparse.ArgumentParser()
     ap.add_argument("kind", choices=["controller", "structure"])
     return ap.parse_args()
 
 
 def main() -> None:
+    """Dispatch to the requested sweep kind."""
     args = parse_args()
     if args.kind == "controller":
         run_controller_sweep(REPO_ROOT)
