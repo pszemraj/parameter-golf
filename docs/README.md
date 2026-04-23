@@ -119,6 +119,20 @@ Branch: `exp/hgdn-k-core`
   - `l8_d512_r1_m2`
   - `l9_d480_r1_m2`
   - `l9_d512_r0_m2`
+- The helper now defaults `PERF_SKIP_FINAL_EVAL=1` for local broad screens so
+  the size screen handles artifact triage and the local loop is not dominated
+  by the quantized roundtrip tail.
+- Local `4070` contract-native screen on `2026-04-23` (`300` steps,
+  `seq=1024`, `65536` tokens/step, `WEIGHT_DECAY=0`) says:
+  - `l8_d512_r1_m2` is the current local HGDN leader:
+    `560.56 ms/step`, `val_bpb=1.8709`
+  - `l9_d512_r1_m1p75` is the next-best HGDN trade:
+    `630.64 ms/step`, `val_bpb=1.8758`
+  - `l9_d480_r1_m2` and `l9_d512_r1_m2` are slower without enough quality gain
+  - same-shell `l8_d512_r0_m2` attention-only control:
+    `407.30 ms/step`, `val_bpb=1.9888`
+  - so the provisional winner-shell HGDN tax is about `1.38x` step time for
+    about `0.118` bpb at step `300`
 - The helper runs the size screen first, then a fixed-contract local batch,
   then bundles configs/logs/commands with `py7zr`.
 

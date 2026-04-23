@@ -37,13 +37,38 @@ train_batch_tokens="${TRAIN_BATCH_TOKENS:-65536}"
 train_seq_len="${TRAIN_SEQ_LEN:-1024}"
 val_loss_every="${VAL_LOSS_EVERY:-100}"
 train_log_every="${TRAIN_LOG_EVERY:-25}"
-val_batch_size="${VAL_BATCH_SIZE:-8}"
 max_wallclock_seconds="${MAX_WALLCLOCK_SECONDS:-0}"
 compile="${COMPILE:-1}"
 compile_strategy="${COMPILE_STRATEGY:-hybrid}"
 weight_decay="${WEIGHT_DECAY:-0}"
+perf_skip_final_eval="${PERF_SKIP_FINAL_EVAL:-1}"
+grad_accum_steps_override="${GRAD_ACCUM_STEPS:-}"
 
 hgdn_ensure_python_module "${python_bin}" py7zr py7zr
+
+resolve_grad_accum_steps() {
+    if [[ -n "${grad_accum_steps_override}" ]]; then
+        if (( grad_accum_steps_override < 1 )); then
+            echo "GRAD_ACCUM_STEPS must be >= 1, got ${grad_accum_steps_override}" >&2
+            exit 1
+        fi
+        echo "${grad_accum_steps_override}"
+        return
+    fi
+    if (( 8 % ngpu != 0 )); then
+        echo "NGPU must evenly divide 8 when GRAD_ACCUM_STEPS is not set: NGPU=${ngpu}" >&2
+        exit 1
+    fi
+    echo $((8 / ngpu))
+}
+
+grad_accum_steps="$(resolve_grad_accum_steps)"
+min_val_batch_size=$((ngpu * grad_accum_steps * train_seq_len))
+val_batch_size="${VAL_BATCH_SIZE:-${min_val_batch_size}}"
+if (( val_batch_size < min_val_batch_size )); then
+    echo "VAL_BATCH_SIZE must be at least ${min_val_batch_size} for NGPU=${ngpu}, GRAD_ACCUM_STEPS=${grad_accum_steps}, TRAIN_SEQ_LEN=${train_seq_len}" >&2
+    exit 1
+fi
 
 case "${wandb_mode}" in
 online | offline) ;;
@@ -83,6 +108,29 @@ labels=(
     "Attention-only 9Lx512d mlp2.0"
 )
 
+if [[ -n "${CANDIDATE_INDEXES:-}" ]]; then
+    IFS=',' read -r -a selected_indexes <<<"${CANDIDATE_INDEXES}"
+    selected_run_prefixes=()
+    selected_configs=()
+    selected_labels=()
+    for raw_index in "${selected_indexes[@]}"; do
+        if [[ ! "${raw_index}" =~ ^[0-9]+$ ]]; then
+            echo "CANDIDATE_INDEXES entries must be zero-based integers: ${raw_index}" >&2
+            exit 1
+        fi
+        if (( raw_index < 0 || raw_index >= ${#configs[@]} )); then
+            echo "CANDIDATE_INDEXES entry out of range: ${raw_index}" >&2
+            exit 1
+        fi
+        selected_run_prefixes+=("${run_prefixes[$raw_index]}")
+        selected_configs+=("${configs[$raw_index]}")
+        selected_labels+=("${labels[$raw_index]}")
+    done
+    run_prefixes=("${selected_run_prefixes[@]}")
+    configs=("${selected_configs[@]}")
+    labels=("${selected_labels[@]}")
+fi
+
 if [[ "${#run_prefixes[@]}" -ne "${#configs[@]}" ]]; then
     echo "RUN_PREFIXES count (${#run_prefixes[@]}) must match config count (${#configs[@]})." >&2
     exit 1
@@ -111,6 +159,7 @@ print_plan() {
     echo "TORCHINDUCTOR_MAX_AUTOTUNE=${torchinductor_max_autotune}"
     echo "TORCHINDUCTOR_MAX_AUTOTUNE_GEMM=${torchinductor_max_autotune_gemm}"
     echo "ngpu=${ngpu}"
+    echo "grad_accum_steps=${grad_accum_steps}"
     echo "iterations=${iterations}"
     echo "train_batch_tokens=${train_batch_tokens}"
     echo "train_seq_len=${train_seq_len}"
@@ -118,6 +167,7 @@ print_plan() {
     echo "train_log_every=${train_log_every}"
     echo "val_batch_size=${val_batch_size}"
     echo "weight_decay=${weight_decay}"
+    echo "perf_skip_final_eval=${perf_skip_final_eval}"
     echo "compile=${compile}"
     echo "compile_strategy=${compile_strategy}"
     echo "max_wallclock_seconds=${max_wallclock_seconds}"
@@ -188,6 +238,7 @@ run_batch() {
             "COMPILE=${compile}" \
             "COMPILE_STRATEGY=${compile_strategy}" \
             "RUN_ID=${run_id}" \
+            "GRAD_ACCUM_STEPS=${grad_accum_steps}" \
             "ITERATIONS=${iterations}" \
             "MAX_WALLCLOCK_SECONDS=${max_wallclock_seconds}" \
             "TRAIN_BATCH_TOKENS=${train_batch_tokens}" \
@@ -196,6 +247,7 @@ run_batch() {
             "TRAIN_LOG_EVERY=${train_log_every}" \
             "VAL_BATCH_SIZE=${val_batch_size}" \
             "WEIGHT_DECAY=${weight_decay}" \
+            "PERF_SKIP_FINAL_EVAL=${perf_skip_final_eval}" \
             "${config_env[@]}" \
             bash scripts/sweep.sh single
 
@@ -214,6 +266,7 @@ run_batch() {
             "COMPILE=${compile}" \
             "COMPILE_STRATEGY=${compile_strategy}" \
             "RUN_ID=${run_id}" \
+            "GRAD_ACCUM_STEPS=${grad_accum_steps}" \
             "ITERATIONS=${iterations}" \
             "MAX_WALLCLOCK_SECONDS=${max_wallclock_seconds}" \
             "TRAIN_BATCH_TOKENS=${train_batch_tokens}" \
@@ -222,6 +275,7 @@ run_batch() {
             "TRAIN_LOG_EVERY=${train_log_every}" \
             "VAL_BATCH_SIZE=${val_batch_size}" \
             "WEIGHT_DECAY=${weight_decay}" \
+            "PERF_SKIP_FINAL_EVAL=${perf_skip_final_eval}" \
             "${config_env[@]}"
     done
 }
@@ -277,6 +331,7 @@ build_bundle() {
         --val-batch-size "${val_batch_size}"
         --max-wallclock-seconds "${max_wallclock_seconds}"
         --weight-decay "${weight_decay}"
+        --perf-skip-final-eval "${perf_skip_final_eval}"
         --compile-enabled "${compile}"
         --compile-strategy "${compile_strategy}"
     )

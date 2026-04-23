@@ -340,6 +340,7 @@ def cmd_write_local_naive_contract_search_manifest(
             "val_batch_size": args.val_batch_size,
             "max_wallclock_seconds": args.max_wallclock_seconds,
             "weight_decay": args.weight_decay,
+            "perf_skip_final_eval": args.perf_skip_final_eval,
             "compile": args.compile_enabled,
             "compile_strategy": args.compile_strategy,
         },
@@ -770,6 +771,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-wallclock-seconds", type=float, required=True
     )
     local_naive_search.add_argument("--weight-decay", type=float, required=True)
+    local_naive_search.add_argument(
+        "--perf-skip-final-eval", type=parse_bool_flag, required=True
+    )
     local_naive_search.add_argument(
         "--compile-enabled", type=parse_bool_flag, required=True
     )

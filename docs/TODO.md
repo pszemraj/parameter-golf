@@ -30,6 +30,23 @@ Last updated: 2026-04-22 15:00 EDT
   - `l8_d512_r1_m2`
   - `l9_d480_r1_m2`
   - `l9_d512_r0_m2`
+- Local `4070` GPU screen (`2026-04-23`, `300` steps, `seq=1024`,
+  `65536` tokens/step, `WEIGHT_DECAY=0`) now ranks the baseline-shaped shells:
+  - `l8_d512_r1_m2`: `560.56 ms/step`, `val_bpb=1.8709`
+  - `l9_d512_r1_m1p75`: `630.64 ms/step`, `val_bpb=1.8758`
+  - `l9_d480_r1_m2`: `631.19 ms/step`, `val_bpb=1.8803`
+  - `l9_d512_r1_m2`: `646.60 ms/step`, `val_bpb=1.8515`
+  - same-shell anchor `l9_d512_r0_m2`: `452.26 ms/step`,
+    `val_bpb=1.9459`
+- Same-shell winner-shell control on the same local contract:
+  - `l8_d512_r1_m2`: `560.56 ms/step`, `val_bpb=1.8709`
+  - `l8_d512_r0_m2`: `407.30 ms/step`, `val_bpb=1.9888`
+- So the current contract-native HGDN leader is `l8_d512_r1_m2`.
+  It pays about `1.38x` step time versus the same-shell attention-only control
+  while buying back about `0.118` bpb at step `300`.
+- The helper now defaults `PERF_SKIP_FINAL_EVAL=1` for local screening so the
+  size screen handles artifact triage and the local run is not dominated by the
+  quantized roundtrip tail.
 - The attention-only `l9_d512_r0_m2` shell exists only to isolate the HGDN tax
   on the exact baseline-shaped architecture. It is not a replacement baseline.
 
@@ -38,6 +55,12 @@ USE_WANDB=0 WANDB_MODE=offline \
 RUN_PREFIX_BASE=localnaivehgdn1 \
 bash scripts/run_local_hgdn_naive_contract_search.sh
 ```
+
+- Immediate local follow-up from this screen:
+  - trim around `l8_d512_r1_m2`, not around the old live14 replay shell
+  - compare the provisional `l8_d512_r1_m2` HGDN winner against the exact repo
+    baseline only after one more bounded local trim pass or a targeted `1xH100`
+    sanity run
 
 ## 2. Re-run the exact 8x packed HGDN tiebreak on the patched surface
 
