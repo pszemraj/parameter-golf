@@ -212,12 +212,15 @@ def torch_assoc_affine_scan(
     offset = 1
     total_steps = coeff.shape[1]
     while offset < total_steps:
-        coeff_cur = coeff[:, offset:].clone()
-        values_cur = values[:, offset:].clone()
+        coeff_cur = coeff[:, offset:]
+        values_cur = values[:, offset:]
         coeff_prev = coeff[:, :-offset]
         values_prev = values[:, :-offset]
-        values[:, offset:] = values_cur + coeff_cur * values_prev
-        coeff[:, offset:] = coeff_cur * coeff_prev
+        coeff_next = coeff.clone()
+        values_next = values.clone()
+        values_next[:, offset:] = values_cur + coeff_cur * values_prev
+        coeff_next[:, offset:] = coeff_cur * coeff_prev
+        coeff, values = coeff_next, values_next
         offset *= 2
 
     if prev is not None:

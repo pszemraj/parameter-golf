@@ -28,10 +28,15 @@ pip install -r requirements.txt
   - use accelerated scan
   - fail loudly if the accelerated scan stack is missing
 - on CPU and other non-CUDA checks, `scan_backend=auto` resolves to the repo-local `assoc` path
+- the maintained Core/Amplifier path also fails loudly instead of silently degrading on:
+  - spectral basis build failure
+  - missing tokenizer / byte-count LUT for exact `val_bpb`
 - if you intentionally want a slower fallback for debugging, choose it explicitly with:
   - `--scan-backend heinsen`
   - `--scan-backend assoc`   # repo-local Torch associative scan
   - `--scan-backend sequential`
+- if you intentionally want approximate `bpb` for a tiny local smoke run without a tokenizer, opt in explicitly with:
+  - `--allow-approx-bpb`
 
 Recommended root workflow:
 

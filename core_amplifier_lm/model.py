@@ -352,10 +352,12 @@ def _factorize_bigram_residual(
                 "embedding_singular_values": sb.tolist(),
             },
         )
-    except np.linalg.LinAlgError:
-        token_embed, token_out, meta = _svd_factorization()
-        meta["embedding_init"] = "svd_fallback"
-        return token_embed, token_out, meta
+    except np.linalg.LinAlgError as exc:
+        raise RuntimeError(
+            "spectral embedding initialization failed. "
+            "The maintained Core/Amplifier path does not silently fall back to SVD; "
+            "either fix the spectral build or choose embedding_init='svd' explicitly."
+        ) from exc
 
 
 def _build_lag_operator(

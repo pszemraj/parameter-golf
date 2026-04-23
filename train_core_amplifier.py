@@ -828,9 +828,7 @@ def assert_model_config_matches_spec(cfg: Any, spec: AmplifierSpec) -> None:
             continue
         spec_val = spec.metadata.get(key)
         if key == "embedding_init":
-            if str(cfg_val) == "spectral" and str(spec_val) in {"spectral", "svd_fallback"}:
-                continue
-            if str(cfg_val) == "svd" and str(spec_val) == "svd":
+            if str(cfg_val) == str(spec_val):
                 continue
         if key == "spectral_neighbors":
             if str(model_cfg.get("embedding_init", "spectral")) == "svd":
@@ -1361,6 +1359,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log-every", type=int, default=None)
     parser.add_argument("--train-frac", type=float, default=None)
     parser.add_argument("--allow-train-frac-val-split", action="store_true")
+    parser.add_argument("--allow-approx-bpb", action="store_true")
     parser.add_argument(
         "--storage-dtype", type=str, default=None, choices=["uint8", "uint16", "int32", "int64"]
     )
@@ -1588,6 +1587,7 @@ def build_resolved_config_payload(
     storage_dtype: str,
     train_frac: float,
     allow_train_frac_val_split: bool,
+    allow_approx_bpb: bool,
     validation_source: str,
     data_max_tokens: Optional[int],
     seq_len: int,
@@ -1659,6 +1659,7 @@ def build_resolved_config_payload(
     :param float train_frac: Train split fraction.
     :param bool allow_train_frac_val_split: Whether directory data may fall back
         to splitting train tokens for validation.
+    :param bool allow_approx_bpb: Whether approximate bpb is explicitly allowed.
     :param str validation_source: Source of validation tokens.
     :param Optional[int] data_max_tokens: Optional token cap.
     :param int seq_len: Sequence length.
@@ -1789,6 +1790,7 @@ def build_resolved_config_payload(
             "storage_dtype": storage_dtype,
             "train_frac": float(train_frac),
             "allow_train_frac_val_split": bool(allow_train_frac_val_split),
+            "allow_approx_bpb": bool(allow_approx_bpb),
             "validation_source": validation_source,
             "data_max_tokens": None if data_max_tokens is None else int(data_max_tokens),
             "train_tokens": int(train_tokens_count),
@@ -1804,6 +1806,7 @@ def build_resolved_config_payload(
             "autocast": bool(use_autocast),
             "gradient_checkpointing": bool(gradient_checkpointing),
             "exact_val_bpb": byte_count_lut is not None,
+            "allow_approx_bpb": bool(allow_approx_bpb),
             "scan_backend_requested": scan_backend_requested,
             "scan_backend_active": scan_backend_active,
             "compile": {
@@ -1936,6 +1939,7 @@ def main() -> None:
             False,
         )
     )
+    allow_approx_bpb = bool(args.allow_approx_bpb)
     data_max_tokens = _resolve(args.data_max_tokens, cfg.data.get("max_tokens"), None)
 
     seq_len = _resolve(args.seq_len, t.get("seq_len"), td["seq_len"])
@@ -2051,6 +2055,7 @@ def main() -> None:
     if data_max_tokens is not None:
         print(f"  data_max_tokens={int(data_max_tokens):,}")
     print(f"  allow_train_frac_val_split={allow_train_frac_val_split}")
+    print(f"  allow_approx_bpb={allow_approx_bpb}")
     print(
         f"  batch_size={batch_size} seq_len={seq_len} steps={num_steps} lr={learning_rate} "
         f"warmup={warmup_steps} hold={lr_hold_steps} min_lr={min_lr}"
@@ -2270,8 +2275,21 @@ def main() -> None:
             avg_bpt = byte_count_lut.float().mean().item()
             print(f"Byte count LUT loaded from {tok_path.name} (avg {avg_bpt:.2f} bytes/token)")
         except Exception as e:
+            if not allow_approx_bpb:
+                raise SystemExit(
+                    "exact val_bpb setup failed while building the byte-count LUT. "
+                    "The maintained Core/Amplifier path does not silently fall back "
+                    "to approximate bpb; fix the tokenizer path or pass "
+                    "--allow-approx-bpb for a deliberate local smoke run."
+                ) from e
             print(f"WARNING: could not build byte count LUT: {e} — bpb will be approximate")
     else:
+        if not allow_approx_bpb:
+            raise SystemExit(
+                "no tokenizer found in the model directory, so exact val_bpb is unavailable. "
+                "The maintained Core/Amplifier path does not silently fall back to approximate "
+                "bpb; add the tokenizer or pass --allow-approx-bpb for a deliberate local smoke run."
+            )
         print("WARNING: no tokenizer in model dir — bpb will be approximate")
 
     resolved_config = build_resolved_config_payload(
@@ -2284,6 +2302,7 @@ def main() -> None:
         storage_dtype=storage_dtype,
         train_frac=train_frac,
         allow_train_frac_val_split=allow_train_frac_val_split,
+        allow_approx_bpb=allow_approx_bpb,
         validation_source=validation_source,
         data_max_tokens=data_max_tokens,
         seq_len=seq_len,

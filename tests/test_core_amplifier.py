@@ -462,6 +462,28 @@ def test_assoc_accel_direct_scalar_path_matches_sequential_with_prev(monkeypatch
     assert torch.allclose(out, ref, atol=1e-6, rtol=1e-6)
 
 
+def test_spectral_embedding_init_does_not_silently_fall_back(monkeypatch):
+    """Spectral init failures should raise instead of quietly degrading to SVD."""
+    residual = np.eye(8, dtype=np.float32)
+    log_bigram = np.eye(8, dtype=np.float32)
+
+    def fail_spectral(*_args: object, **_kwargs: object) -> object:
+        raise np.linalg.LinAlgError("synthetic spectral failure")
+
+    monkeypatch.setattr("core_amplifier_lm.model._umap_style_spectral_basis", fail_spectral)
+
+    from core_amplifier_lm.model import _factorize_bigram_residual
+
+    with pytest.raises(RuntimeError, match="does not silently fall back to SVD"):
+        _factorize_bigram_residual(
+            residual,
+            log_bigram=log_bigram,
+            core_dim=4,
+            embedding_init="spectral",
+            spectral_neighbors=4,
+        )
+
+
 def test_scan_core_repo_assoc_matches_sequential_reference():
     """ScanCore should use the repo-local assoc path without changing semantics."""
     rng = np.random.default_rng(SEED)
@@ -500,6 +522,67 @@ def test_scan_core_repo_assoc_matches_sequential_reference():
     assert candidate.active_scan_backend_name() == "assoc"
     assert torch.allclose(ref_logits, out_logits, atol=1e-4, rtol=1e-4)
     assert torch.allclose(ref_state, out_state, atol=1e-4, rtol=1e-4)
+
+
+def test_training_requires_exact_bpb_unless_explicitly_allowed():
+    """Training should fail loudly when exact bpb is unavailable by default."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir = Path(tmpdir)
+        _, gz_path = _make_gz(tmpdir)
+        model_dir = tmpdir / "model_no_tokenizer"
+
+        _run_inspect(
+            [
+                "init",
+                str(model_dir),
+                "--data",
+                str(gz_path),
+                "--storage-dtype",
+                "uint8",
+                "--vocab-size",
+                "256",
+                "--core-dim",
+                "8",
+                "--branch-lags",
+                "1,2,4",
+                "--num-blocks",
+                "1",
+                "--spec-strategy",
+                "stream",
+            ]
+        )
+        for tok_file in model_dir.glob("*.model"):
+            tok_file.unlink()
+
+        cmd = [
+            sys.executable,
+            str(PKG_ROOT / "train_core_amplifier.py"),
+            str(model_dir),
+            "--num-steps",
+            "1",
+            "--seq-len",
+            "32",
+            "--batch-size",
+            "4",
+            "--carry-chunks",
+            "2",
+            "--val-every",
+            "1",
+            "--val-steps",
+            "1",
+            "--log-every",
+            "1",
+            "--learning-rate",
+            "1e-3",
+            "--lr-schedule",
+            "none",
+            "--force-device",
+            "cpu",
+            "--no-mmap",
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(PKG_ROOT))
+        assert result.returncode != 0
+        assert "does not silently fall back to approximate bpb" in (result.stdout + result.stderr)
 
 
 def test_ema_hybrid_temporal_mode_chunk_carry_matches_full_forward():
@@ -1438,8 +1521,10 @@ def _run_inspect(args: list[str], expect_in_stdout: str = "") -> str:
     return result.stdout
 
 
-def _run_train(args: list[str], expect_in_stdout: str = "") -> str:
+def _run_train(args: list[str], expect_in_stdout: str = "", allow_approx_bpb: bool = True) -> str:
     cmd = [sys.executable, str(PKG_ROOT / "train_core_amplifier.py")] + args
+    if allow_approx_bpb and "--allow-approx-bpb" not in cmd:
+        cmd.append("--allow-approx-bpb")
     result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(PKG_ROOT))
     if result.returncode != 0:
         raise RuntimeError(
