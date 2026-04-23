@@ -65,6 +65,28 @@ Primary reps:
 - fast structural control:
   - `blocks2_resid12_e8`
 
+## Protocol Invariants
+
+The final-week plan is now explicitly fail-loud on maintained competition-path choices.
+
+Runs only count toward screening or confirmation if all of the following are true:
+
+- `validation_source=explicit_val_shard` for directory-style FineWeb runs
+- exact `val_bpb` is active
+  - no implicit approximate-`bpb` fallback
+- `scan_backend=auto` on CUDA resolves to `assoc_accel`
+  - no silent scan-backend downgrade
+- the shared spec matches the intended structure and embedding-init contract
+  - spectral basis build failure is not treated as “close enough” to `svd`
+
+Explicit low-quality or convenience modes remain allowed only for local smoke or debugging:
+
+- `--allow-train-frac-val-split`
+- `--allow-approx-bpb`
+- `--scan-backend heinsen|assoc|sequential`
+
+If a serious run hits one of those modes unintentionally, the run should be treated as invalid and rerun under the maintained contract.
+
 ## Batch Order
 
 ### 1. Safe lane: compact `max_lr` probe
@@ -89,6 +111,7 @@ Promotion rule:
 - promote at most one LR per rep
 - require `>= 0.003` bpb gain over that rep’s current single-seed incumbent, or a tie within `0.002` with clearly cleaner curve behavior
 - confirm promoted LR on seed `2027`
+- invalidate and rerun any point that does not satisfy the protocol invariants above
 
 ### 2. Aggressive lane: tokenwise residual gating
 
@@ -117,6 +140,7 @@ Promotion rule:
 - promote at most one non-`none` gate mode per rep
 - require `>= 0.003` bpb gain
 - allow at most `7%` throughput loss
+- invalidate and rerun any point that does not satisfy the protocol invariants above
 
 ### 3. Aggressive lane: EMA temporal taps
 
@@ -146,6 +170,7 @@ Promotion rule:
 - promote only the best non-`current` mode
 - require `>= 0.004` bpb gain on the first-pass screen
 - confirm the promoted temporal mode on seed `2027`
+- invalidate and rerun any point that does not satisfy the protocol invariants above
 
 Replay rule:
 
@@ -175,6 +200,7 @@ Promotion rule:
 - require `>= 0.0025` bpb gain
 - allow at most `10%` throughput loss
 - confirm on seed `2027` only if the first pass clears the bar
+- invalidate and rerun any point that does not satisfy the protocol invariants above
 
 ### 5. Finalist `1B` confirmations
 
@@ -198,6 +224,7 @@ Default contract:
 - `8192` steps
 - `1B` planned tokens
 - `lr_hold_steps=7000`
+- all protocol invariants above still apply
 
 Custom finalist format:
 

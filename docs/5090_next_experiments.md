@@ -75,6 +75,23 @@ The deadline-oriented source of truth for ordering, promotion rules, and stop ru
 
 - [docs/5090_final_week_plan.md](/home/pszemraj/workspace/projects/parameter-golf/docs/5090_final_week_plan.md)
 
+## Plan Delta From The No-Fallback Audit
+
+The high-level batch order did not change.
+
+What changed is the acceptance contract for serious runs:
+
+- serious runs now count only if they keep exact `val_bpb`
+- serious CUDA runs now count only if `scan_backend=auto` resolves to `assoc_accel`
+- directory-style FineWeb runs still require the explicit validation shard
+- spectral basis builds no longer silently degrade to `svd`
+
+Practical consequence:
+
+- the next steps are still `max_lr`, gating, EMA, router, and then `1B` finalists
+- but any run that only “works” by slipping onto approximate `bpb`, a slower scan backend, or another degraded path should be treated as invalid and rerun
+- explicit smoke/debug opt-ins still exist, but they are no longer ambiguous with maintained-path experiment results
+
 ## Why The Architecture Lane Changed
 
 The schedule question is no longer the biggest uncertainty. The stronger thesis now is:
