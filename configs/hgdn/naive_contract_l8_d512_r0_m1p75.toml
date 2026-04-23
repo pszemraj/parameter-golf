@@ -1,0 +1,6 @@
+[env]
+NUM_LAYERS = 8
+MODEL_DIM = 512
+MLP_MULT = 1.75
+GDN_RATIO = 0
+MUON_DISTRIBUTED_MODE = "packed_allreduce"

@@ -57,8 +57,30 @@ git_branch="$(git rev-parse --abbrev-ref HEAD)"
 host_name="$(hostname)"
 timestamp_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
+resolve_attn_control_config() {
+    local hgdn_cfg="$1"
+    case "$(basename -- "${hgdn_cfg}")" in
+    naive_contract_l8_d512_*_m2.toml)
+        echo "configs/hgdn/naive_contract_l8_d512_r0_m2.toml"
+        ;;
+    naive_contract_l8_d512_*_m1p75.toml)
+        echo "configs/hgdn/naive_contract_l8_d512_r0_m1p75.toml"
+        ;;
+    naive_contract_l9_d512_*_m2.toml)
+        echo "configs/hgdn/naive_contract_l9_d512_r0_m2.toml"
+        ;;
+    naive_contract_l9_d512_*_m1p75.toml)
+        echo "configs/hgdn/naive_contract_l9_d512_r0_m1p75.toml"
+        ;;
+    *)
+        echo "Could not infer same-shell attention control for ${hgdn_cfg}" >&2
+        return 1
+        ;;
+    esac
+}
+
 hgdn_config="${HGDN_CONFIG:-configs/hgdn/naive_contract_l8_d512_mid2_dk48_m2.toml}"
-attn_config="${ATTN_CONFIG:-configs/hgdn/naive_contract_l8_d512_r0_m2.toml}"
+attn_config="${ATTN_CONFIG:-$(resolve_attn_control_config "${hgdn_config}")}"
 gpt_naive_run_id="${GPT_NAIVE_RUN_ID:-${run_prefix_base}_gpt_naive_baseline_seq${train_seq_len}}"
 hgdn_run_id="${HGDN_RUN_ID:-${run_prefix_base}_hybrid_naive_contract_seq${train_seq_len}}"
 attn_run_id="${ATTN_RUN_ID:-${run_prefix_base}_attn_naive_contract_seq${train_seq_len}}"
