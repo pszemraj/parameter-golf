@@ -142,7 +142,26 @@ This queues:
 Sidecar note:
 
 - `blocks0 gate=base` remains the one aggressive-lane result that actually cleared a promotion bar
-- but because the primary EMA lane failed, it is now a secondary follow-up candidate rather than the main next batch
+- `blocks1 gate=base` missed the bar at `lr=3e-3`, but only narrowly
+- that makes `gate=base x lr=3.5e-3` the one remaining architecture cross-term worth queueing behind the safe finalists
+
+Exact sidecar command:
+
+```bash
+bash scripts/run_5090_gate_lr_sidecar.sh
+```
+
+Optional queueing wrapper:
+
+```bash
+bash scripts/run_5090_final_week_pueue.sh enqueue
+```
+
+That helper:
+
+- boots a dedicated `pueue` daemon under `${HOME}/.cache/parameter-golf/pueue/5090_final_week`
+- queues the safe finalist `1B` batch first
+- queues the `gate=base x lr=3.5e-3` sidecar second with a success dependency
 
 ## Why The Architecture Lane Changed
 
@@ -158,6 +177,12 @@ That means the next architecture order is still:
 2. EMA / EMA-hybrid temporal taps
 3. per-token branch routing
 4. `1B` confirmation on the architecture winners
+
+Current practical interpretation:
+
+- EMA and EMA-hybrid did not survive on the primary `blocks1` lane
+- router stays skipped
+- the only remaining architecture-side follow-up with good expected value is the `gate=base x lr=3.5e-3` cross-term
 
 ## Fast-Scan Note
 

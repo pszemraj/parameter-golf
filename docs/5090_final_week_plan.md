@@ -277,6 +277,15 @@ Queued next batch:
 bash scripts/run_5090_post_temporal_queue.sh
 ```
 
+Optional queue wrapper:
+
+```bash
+bash scripts/run_5090_final_week_pueue.sh enqueue
+```
+
+This keeps the safe finalists as the primary batch and automatically places the remaining
+`gate=base x lr=3.5e-3` sidecar behind them.
+
 ## Stop Rules
 
 Stop adding complexity and move straight to finalist confirmations if any of the following happen:
@@ -288,7 +297,9 @@ Stop adding complexity and move straight to finalist confirmations if any of the
 If the whole aggressive lane stalls, the remaining budget should go to:
 
 - confirming the best safe-lane point
-- optionally one last clean `max_lr` follow-up on the incumbent `blocks1` baseline
+- the one remaining cross-term that still fits the thesis:
+  - `gate=base x lr=3.5e-3` on `blocks1 10x12`
+  - `gate=base x lr=3.5e-3` on `blocks0 12x10`
 
 Do not spend the final week on:
 
