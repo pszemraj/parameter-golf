@@ -71,6 +71,16 @@ bash scripts/run_5090_architecture_router_screen.sh
 bash scripts/run_5090_finalist_confirm1b.sh
 ```
 
+Serious final-week launchers now fail before training if a shell override would
+change the maintained protocol. Defaults are:
+
+- `WANDB_PROJECT=pg-hconv-ablations`
+- `SCAN_BACKEND=auto`
+- `TORCH_BLAS_PREFER_CUBLASLT=1`
+- `COMPILE=0`
+- `GRADIENT_CHECKPOINTING=0`
+- `RUN_VERSION=v2`
+
 The deadline-oriented source of truth for ordering, promotion rules, and stop rules is:
 
 - [docs/5090_final_week_plan.md](/home/pszemraj/workspace/projects/parameter-golf/docs/5090_final_week_plan.md)
@@ -138,6 +148,7 @@ This queues:
 - `blocks1_resid10_e12_lr0035_final`
 - `blocks0_resid12_e10_lr0035_final`
 - seeds `1337 2027 3141`
+- output roots ending in `_v2`
 
 Sidecar note:
 
@@ -151,10 +162,19 @@ Exact sidecar command:
 bash scripts/run_5090_gate_lr_sidecar.sh
 ```
 
+Direct sidecar default seeds are `1337 2027`. The post-temporal queue passes
+those via `SIDECAR_SEEDS` so it no longer inherits the finalist `3141` seed.
+
 To run the safe finalists and then the sidecar in one plain bash flow:
 
 ```bash
 RUN_GATE_LR_SIDECAR_AFTER_FINALISTS=1 bash scripts/run_5090_post_temporal_queue.sh
+```
+
+Equivalent explicit form:
+
+```bash
+RUN_VERSION=v2 RUN_GATE_LR_SIDECAR_AFTER_FINALISTS=1 bash scripts/run_5090_post_temporal_queue.sh
 ```
 
 ## Why The Architecture Lane Changed

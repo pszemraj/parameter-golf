@@ -706,6 +706,7 @@ def run_controller_sweep(repo_root: Path) -> None:
     )
     force_device = env("FORCE_DEVICE", "")
     wandb_enabled_default = preset != "cpu_smoke"
+    core_amp_phase = env("CORE_AMP_PHASE", "5090_controller_screening")
 
     init_cmd = [
         python_bin,
@@ -804,7 +805,7 @@ def run_controller_sweep(repo_root: Path) -> None:
             update_controller_config(
                 run_dir,
                 run_name=spec.name,
-                phase="5090_controller_screening",
+                phase=core_amp_phase,
                 data_path=data_path,
                 storage_dtype=env("STORAGE_DTYPE", "uint16"),
                 spec=resolved_spec,

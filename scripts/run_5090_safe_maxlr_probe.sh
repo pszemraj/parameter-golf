@@ -4,8 +4,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 PYTHON_BIN="${PYTHON:-/home/pszemraj/miniforge3/envs/train/bin/python}"
+source "${SCRIPT_DIR}/5090_common.sh"
 
 SEEDS="${SEEDS:-1337}"
+RUN_VERSION="${RUN_VERSION:-v2}"
 LRS="${LRS:-0.0025 0.0030 0.0035}"
 RUN_BLOCKS1="${RUN_BLOCKS1:-1}"
 RUN_BLOCKS0="${RUN_BLOCKS0:-1}"
@@ -18,6 +20,7 @@ export COMPILE="${COMPILE:-0}"
 export GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-0}"
 export SKIP_DONE="${SKIP_DONE:-1}"
 export REBUILD_SHARED="${REBUILD_SHARED:-0}"
+export CORE_AMP_PHASE="${CORE_AMP_PHASE:-5090_safe_maxlr_probe}"
 export TARGET_EFFECTIVE_STEP_TOKENS="${TARGET_EFFECTIVE_STEP_TOKENS:-131072}"
 export WEIGHT_DECAY="${WEIGHT_DECAY:-0.001}"
 export VAL_EVERY="${VAL_EVERY:-256}"
@@ -31,7 +34,9 @@ export RESIDUAL_TOKEN_GATE_MODE="${RESIDUAL_TOKEN_GATE_MODE:-none}"
 export BRANCH_ROUTER_MODE="${BRANCH_ROUTER_MODE:-none}"
 export SCAN_BACKEND="${SCAN_BACKEND:-auto}"
 export WANDB="${WANDB:-1}"
-export WANDB_PROJECT="${WANDB_PROJECT:-pg-core-amp}"
+export WANDB_PROJECT="${WANDB_PROJECT:-pg-hconv-ablations}"
+
+pg_5090_require_serious_launcher_defaults "$(basename "$0")"
 
 require_dir() {
   local path="$1"
@@ -50,10 +55,7 @@ require_dir() {
 }
 
 lr_tag() {
-  local lr="$1"
-  local tag="${lr//./p}"
-  tag="${tag#0p}"
-  printf 'lr%s' "${tag}"
+  pg_5090_lr_slug "$1"
 }
 
 print_header() {
@@ -61,6 +63,7 @@ print_header() {
   echo "repo_root=${REPO_ROOT}"
   echo "python=${PYTHON_BIN}"
   echo "seeds=${SEEDS}"
+  echo "run_version=${RUN_VERSION}"
   echo "lrs=${LRS}"
   echo "run_blocks1=${RUN_BLOCKS1} run_blocks0=${RUN_BLOCKS0}"
   echo "compile=${COMPILE} gradient_checkpointing=${GRADIENT_CHECKPOINTING} skip_done=${SKIP_DONE}"
@@ -120,13 +123,13 @@ run_family_seed() {
 run_blocks1_seed() {
   local seed="$1"
   local shared_spec_dir="${REPO_ROOT}/experiments/5090_schedule/blocks1_hold_confirm1b_v1/blocks1_resid10_e12_h7000_1b"
-  local model_root="${REPO_ROOT}/experiments/5090_architecture/blocks1_maxlr_probe_seed${seed}_v1"
+  local model_root="${REPO_ROOT}/experiments/5090_architecture/blocks1_maxlr_probe_seed${seed}_${RUN_VERSION}"
   run_family_seed \
     "blocks1" \
     "${seed}" \
     "${shared_spec_dir}" \
     "${model_root}" \
-    "blocks1_maxlr_probe512m_v1" \
+    "blocks1_maxlr_probe512m_${RUN_VERSION}" \
     "core_amp,5090,final_week,safe_lane,maxlr,screening,blocks1" \
     "blocks1_resid10_e12" \
     "10" \
@@ -136,13 +139,13 @@ run_blocks1_seed() {
 run_blocks0_seed() {
   local seed="$1"
   local shared_spec_dir="${REPO_ROOT}/experiments/5090_schedule/blocks0_12x10_hold_confirm1b_v1/blocks0_resid12_e10_h7000_1b"
-  local model_root="${REPO_ROOT}/experiments/5090_architecture/blocks0_maxlr_probe_seed${seed}_v1"
+  local model_root="${REPO_ROOT}/experiments/5090_architecture/blocks0_maxlr_probe_seed${seed}_${RUN_VERSION}"
   run_family_seed \
     "blocks0" \
     "${seed}" \
     "${shared_spec_dir}" \
     "${model_root}" \
-    "blocks0_maxlr_probe512m_v1" \
+    "blocks0_maxlr_probe512m_${RUN_VERSION}" \
     "core_amp,5090,final_week,safe_lane,maxlr,screening,blocks0" \
     "blocks0_resid12_e10" \
     "12" \

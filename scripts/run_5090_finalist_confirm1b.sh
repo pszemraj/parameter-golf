@@ -4,14 +4,16 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 PYTHON_BIN="${PYTHON:-/home/pszemraj/miniforge3/envs/train/bin/python}"
+source "${SCRIPT_DIR}/5090_common.sh"
 
 SEEDS="${SEEDS:-1337 2027 3141}"
-DEFAULT_LEARNING_RATE="${DEFAULT_LEARNING_RATE:-0.003}"
+RUN_VERSION="${RUN_VERSION:-v2}"
+DEFAULT_LEARNING_RATE="${DEFAULT_LEARNING_RATE:-0.0035}"
 DEFAULT_WARMUP_STEPS="${DEFAULT_WARMUP_STEPS:-100}"
 DEFAULT_LR_HOLD_STEPS="${DEFAULT_LR_HOLD_STEPS:-7000}"
 DEFAULT_MIN_LR="${DEFAULT_MIN_LR:-0.0003}"
 DEFAULT_NUM_STEPS="${DEFAULT_NUM_STEPS:-8192}"
-FINALIST_SPECS="${FINALIST_SPECS:-$'blocks1_resid10_e12_final '"${REPO_ROOT}"$'/experiments/5090_schedule/blocks1_hold_confirm1b_v1/blocks1_resid10_e12_h7000_1b 10 12.0 none current none 0.003\nblocks0_resid12_e10_final '"${REPO_ROOT}"$'/experiments/5090_schedule/blocks0_12x10_hold_confirm1b_v1/blocks0_resid12_e10_h7000_1b 12 10.0 none current none 0.003'}"
+FINALIST_SPECS="${FINALIST_SPECS:-$'blocks1_resid10_e12_lr0035_final '"${REPO_ROOT}"$'/experiments/5090_schedule/blocks1_hold_confirm1b_v1/blocks1_resid10_e12_h7000_1b 10 12.0 none current none 0.0035\nblocks0_resid12_e10_lr0035_final '"${REPO_ROOT}"$'/experiments/5090_schedule/blocks0_12x10_hold_confirm1b_v1/blocks0_resid12_e10_h7000_1b 12 10.0 none current none 0.0035'}"
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export TORCH_BLAS_PREFER_CUBLASLT="${TORCH_BLAS_PREFER_CUBLASLT:-1}"
@@ -21,6 +23,7 @@ export COMPILE="${COMPILE:-0}"
 export GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-0}"
 export SKIP_DONE="${SKIP_DONE:-1}"
 export REBUILD_SHARED="${REBUILD_SHARED:-0}"
+export CORE_AMP_PHASE="${CORE_AMP_PHASE:-5090_finalist_confirm1b}"
 export TARGET_EFFECTIVE_STEP_TOKENS="${TARGET_EFFECTIVE_STEP_TOKENS:-131072}"
 export WEIGHT_DECAY="${WEIGHT_DECAY:-0.001}"
 export VAL_EVERY="${VAL_EVERY:-512}"
@@ -31,7 +34,9 @@ export SAVE_EVERY="${SAVE_EVERY:-4096}"
 export TRAIN_FRAC="${TRAIN_FRAC:-0.98}"
 export SCAN_BACKEND="${SCAN_BACKEND:-auto}"
 export WANDB="${WANDB:-1}"
-export WANDB_PROJECT="${WANDB_PROJECT:-pg-core-amp}"
+export WANDB_PROJECT="${WANDB_PROJECT:-pg-hconv-ablations}"
+
+pg_5090_require_serious_launcher_defaults "$(basename "$0")"
 
 require_dir() {
   local path="$1"
@@ -54,6 +59,7 @@ print_header() {
   echo "repo_root=${REPO_ROOT}"
   echo "python=${PYTHON_BIN}"
   echo "seeds=${SEEDS}"
+  echo "run_version=${RUN_VERSION}"
   echo "finalist_specs:"
   printf '%s\n' "${FINALIST_SPECS}"
   echo "default_learning_rate=${DEFAULT_LEARNING_RATE} default_warmup_steps=${DEFAULT_WARMUP_STEPS}"
@@ -76,7 +82,7 @@ run_finalist_seed() {
   local temporal_mode="$7"
   local router_mode="$8"
   local learning_rate="$9"
-  local model_root="${REPO_ROOT}/experiments/5090_architecture/finalist_confirm1b_seed${seed}_v1"
+  local model_root="${REPO_ROOT}/experiments/5090_architecture/finalist_confirm1b_seed${seed}_${RUN_VERSION}"
   local run_name="${name}_h7000_1b_s${seed}"
   local run_specs
 
@@ -94,7 +100,7 @@ EOF
     BRANCH_ROUTER_MODE="${router_mode}" \
     SHARED_SPEC_DIR="${shared_spec_dir}" \
     MODEL_ROOT="${model_root}" \
-    WANDB_GROUP="finalist_confirm1b_v1" \
+    WANDB_GROUP="finalist_confirm1b_${RUN_VERSION}" \
     WANDB_TAGS="core_amp,5090,final_week,confirmation,1b,gate_${gate_mode},temporal_${temporal_mode},router_${router_mode}" \
     RUN_SPECS="${run_specs}" \
     "${PYTHON_BIN}" "${REPO_ROOT}/tools/run_core_amp_sweep.py" controller

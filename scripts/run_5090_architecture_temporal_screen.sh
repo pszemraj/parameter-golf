@@ -4,8 +4,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 PYTHON_BIN="${PYTHON:-/home/pszemraj/miniforge3/envs/train/bin/python}"
+source "${SCRIPT_DIR}/5090_common.sh"
 
 SEEDS="${SEEDS:-1337}"
+RUN_VERSION="${RUN_VERSION:-v2}"
 TEMPORAL_MODES="${TEMPORAL_MODES:-ema ema_hybrid}"
 GATE_MODE="${GATE_MODE:-none}"
 INCLUDE_CURRENT="${INCLUDE_CURRENT:-0}"
@@ -21,6 +23,7 @@ export COMPILE="${COMPILE:-0}"
 export GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-0}"
 export SKIP_DONE="${SKIP_DONE:-1}"
 export REBUILD_SHARED="${REBUILD_SHARED:-0}"
+export CORE_AMP_PHASE="${CORE_AMP_PHASE:-5090_architecture_temporal_screen}"
 export TARGET_EFFECTIVE_STEP_TOKENS="${TARGET_EFFECTIVE_STEP_TOKENS:-131072}"
 export WEIGHT_DECAY="${WEIGHT_DECAY:-0.001}"
 export VAL_EVERY="${VAL_EVERY:-256}"
@@ -33,7 +36,9 @@ export RESIDUAL_TOKEN_GATE_MODE="${RESIDUAL_TOKEN_GATE_MODE:-${GATE_MODE}}"
 export BRANCH_ROUTER_MODE="${BRANCH_ROUTER_MODE:-none}"
 export SCAN_BACKEND="${SCAN_BACKEND:-auto}"
 export WANDB="${WANDB:-1}"
-export WANDB_PROJECT="${WANDB_PROJECT:-pg-core-amp}"
+export WANDB_PROJECT="${WANDB_PROJECT:-pg-hconv-ablations}"
+
+pg_5090_require_serious_launcher_defaults "$(basename "$0")"
 
 require_dir() {
   local path="$1"
@@ -69,6 +74,7 @@ print_header() {
   echo "repo_root=${REPO_ROOT}"
   echo "python=${PYTHON_BIN}"
   echo "seeds=${SEEDS}"
+  echo "run_version=${RUN_VERSION}"
   echo "temporal_modes=$(mode_list)"
   echo "gate_mode=${RESIDUAL_TOKEN_GATE_MODE} include_current=${INCLUDE_CURRENT}"
   echo "run_blocks1=${RUN_BLOCKS1} run_blocks0=${RUN_BLOCKS0} run_blocks2=${RUN_BLOCKS2}"
@@ -119,14 +125,14 @@ run_blocks1_seed_mode() {
   local seed="$1"
   local temporal_mode="$2"
   local shared_spec_dir="${REPO_ROOT}/experiments/5090_schedule/blocks1_hold_confirm1b_v1/blocks1_resid10_e12_h7000_1b"
-  local model_root="${REPO_ROOT}/experiments/5090_architecture/blocks1_temporal_screen_gate_${RESIDUAL_TOKEN_GATE_MODE}_seed${seed}_v1"
+  local model_root="${REPO_ROOT}/experiments/5090_architecture/blocks1_temporal_screen_gate_${RESIDUAL_TOKEN_GATE_MODE}_seed${seed}_${RUN_VERSION}"
   run_family_seed_mode \
     "blocks1" \
     "${seed}" \
     "${temporal_mode}" \
     "${shared_spec_dir}" \
     "${model_root}" \
-    "blocks1_temporal_screen512m_v1" \
+    "blocks1_temporal_screen512m_${RUN_VERSION}" \
     "core_amp,5090,final_week,architecture,temporal,screening,blocks1,gate_${RESIDUAL_TOKEN_GATE_MODE},temporal_$(mode_slug "${temporal_mode}")" \
     "blocks1_resid10_e12_gate_${RESIDUAL_TOKEN_GATE_MODE}_temporal_$(mode_slug "${temporal_mode}")_h3500_512m_s${seed}" \
     "10" \
@@ -137,14 +143,14 @@ run_blocks0_seed_mode() {
   local seed="$1"
   local temporal_mode="$2"
   local shared_spec_dir="${REPO_ROOT}/experiments/5090_schedule/blocks0_12x10_hold_confirm1b_v1/blocks0_resid12_e10_h7000_1b"
-  local model_root="${REPO_ROOT}/experiments/5090_architecture/blocks0_temporal_replay_gate_${RESIDUAL_TOKEN_GATE_MODE}_seed${seed}_v1"
+  local model_root="${REPO_ROOT}/experiments/5090_architecture/blocks0_temporal_replay_gate_${RESIDUAL_TOKEN_GATE_MODE}_seed${seed}_${RUN_VERSION}"
   run_family_seed_mode \
     "blocks0" \
     "${seed}" \
     "${temporal_mode}" \
     "${shared_spec_dir}" \
     "${model_root}" \
-    "blocks0_temporal_replay512m_v1" \
+    "blocks0_temporal_replay512m_${RUN_VERSION}" \
     "core_amp,5090,final_week,architecture,temporal,replay,blocks0,gate_${RESIDUAL_TOKEN_GATE_MODE},temporal_$(mode_slug "${temporal_mode}")" \
     "blocks0_resid12_e10_gate_${RESIDUAL_TOKEN_GATE_MODE}_temporal_$(mode_slug "${temporal_mode}")_h3500_512m_s${seed}" \
     "12" \
@@ -155,14 +161,14 @@ run_blocks2_seed_mode() {
   local seed="$1"
   local temporal_mode="$2"
   local shared_spec_dir="${REPO_ROOT}/experiments/5090_schedule/blocks2_wide_compare1b_seed1337_v1/blocks2_resid12_e8_h7000_1b_s1337"
-  local model_root="${REPO_ROOT}/experiments/5090_architecture/blocks2_temporal_replay_gate_${RESIDUAL_TOKEN_GATE_MODE}_seed${seed}_v1"
+  local model_root="${REPO_ROOT}/experiments/5090_architecture/blocks2_temporal_replay_gate_${RESIDUAL_TOKEN_GATE_MODE}_seed${seed}_${RUN_VERSION}"
   run_family_seed_mode \
     "blocks2" \
     "${seed}" \
     "${temporal_mode}" \
     "${shared_spec_dir}" \
     "${model_root}" \
-    "blocks2_temporal_replay512m_v1" \
+    "blocks2_temporal_replay512m_${RUN_VERSION}" \
     "core_amp,5090,final_week,architecture,temporal,replay,blocks2,gate_${RESIDUAL_TOKEN_GATE_MODE},temporal_$(mode_slug "${temporal_mode}")" \
     "blocks2_resid12_e8_gate_${RESIDUAL_TOKEN_GATE_MODE}_temporal_$(mode_slug "${temporal_mode}")_h3500_512m_s${seed}" \
     "12" \

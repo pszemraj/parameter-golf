@@ -55,6 +55,10 @@ Fixed screening contract:
 - `GRADIENT_CHECKPOINTING=0`
 - `scan_backend=auto`
 - `TORCH_BLAS_PREFER_CUBLASLT=1`
+- W&B project:
+  - `pg-hconv-ablations`
+- output version:
+  - `RUN_VERSION=v2` for the cleaned post-audit rerun
 
 Primary reps:
 
@@ -78,6 +82,12 @@ Runs only count toward screening or confirmation if all of the following are tru
   - no silent scan-backend downgrade
 - the shared spec matches the intended structure and embedding-init contract
   - spectral basis build failure is not treated as “close enough” to `svd`
+- serious 5090 launchers fail before training on protocol drift:
+  - `SCAN_BACKEND` must be `auto`
+  - `TORCH_BLAS_PREFER_CUBLASLT` must be `1`
+  - `COMPILE` and `GRADIENT_CHECKPOINTING` must stay `0`
+  - `SPEC_MAX_TOKENS` and `DATA_MAX_TOKENS` must be unset
+  - W&B must be online in `pg-hconv-ablations`
 
 Explicit low-quality or convenience modes remain allowed only for local smoke or debugging:
 
@@ -257,6 +267,8 @@ Default contract:
 - `lr_hold_steps=7000`
 - all protocol invariants above still apply
 - current queued launcher uses `learning_rate=3.5e-3`
+- default output roots use `_v2` so cleaned reruns do not reuse mixed `v1`
+  artifacts
 
 Custom finalist format:
 
@@ -285,6 +297,8 @@ RUN_GATE_LR_SIDECAR_AFTER_FINALISTS=1 bash scripts/run_5090_post_temporal_queue.
 
 This keeps the safe finalists as the primary batch and then runs the remaining
 `gate=base x lr=3.5e-3` sidecar without introducing a second queue system.
+The queue uses `FINALIST_SEEDS=1337 2027 3141` and
+`SIDECAR_SEEDS=1337 2027` by default.
 
 ## Stop Rules
 
