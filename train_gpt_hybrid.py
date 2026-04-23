@@ -587,6 +587,7 @@ class Muon(torch.optim.Optimizer):
         self._built = False
 
     def _build(self) -> None:
+        """Allocate distributed Muon state for the current parameter groups."""
         self._distributed = dist.is_available() and dist.is_initialized()
         self._world_size = dist.get_world_size() if self._distributed else 1
         self._rank = dist.get_rank() if self._distributed else 0
@@ -797,6 +798,7 @@ class ReplicatedGradSync:
         self._built = False
 
     def _build(self) -> None:
+        """Create per-device flat buckets for replicated-gradient averaging."""
         self._distributed = dist.is_available() and dist.is_initialized()
         self._buckets: list[dict[str, object]] = []
         if not self._distributed or not self._params:

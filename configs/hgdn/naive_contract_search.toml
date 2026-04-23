@@ -1,0 +1,59 @@
+[base]
+artifact_limit_bytes = 16000000
+vocab_size = 1024
+num_layers = 9
+d_model = 512
+attn_heads = 8
+attn_kv_heads = 4
+gdn_n_heads = 8
+gdn_head_k_dim = 64
+gdn_expand_v = 1.0
+gdn_allow_neg_eigval = true
+gdn_conv_size = 4
+gdn_use_q_conv = true
+gdn_use_k_conv = true
+gdn_use_v_conv = true
+gdn_use_packed_qkv_conv = true
+gdn_use_packed_qkv_proj = true
+gdn_conv_output_contiguous = true
+gdn_q_conv_output_contiguous = true
+gdn_k_conv_output_contiguous = true
+gdn_v_conv_output_contiguous = true
+gdn_control_proj_fp32 = false
+gdn_gates_fp32 = true
+gdn_output_norm_fp32 = true
+mlp_mult = 2.0
+leaky_slope = 0.5
+gdn_ratio = 1
+rope_base = 10000.0
+qk_gain_init = 1.5
+logit_softcap = 30.0
+tie_embeddings = true
+tied_embed_init_std = 0.005
+norm_style = "pre"
+residual_alpha = 1.0
+
+[[candidates]]
+name = "l9_d512_r1_m2"
+notes = "Contract-native HGDN shell against the 9x512 baseline shape."
+
+[[candidates]]
+name = "l9_d512_r1_m1p75"
+mlp_mult = 1.75
+notes = "Same shell with a smaller MLP to buy back artifact headroom."
+
+[[candidates]]
+name = "l8_d512_r1_m2"
+num_layers = 8
+notes = "Trim one layer while keeping the 512d contract-native width."
+
+[[candidates]]
+name = "l9_d480_r1_m2"
+d_model = 480
+gdn_head_k_dim = 60
+notes = "Slight width trim while keeping 8 heads and near-baseline shell depth."
+
+[[candidates]]
+name = "l9_d512_r0_m2"
+gdn_ratio = 0
+notes = "Attention-only same-shell anchor to isolate the HGDN tax."

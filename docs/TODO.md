@@ -1,8 +1,45 @@
 # HGDN Next Steps
 
-Last updated: 2026-04-21 03:01 EDT
+Last updated: 2026-04-22 15:00 EDT
 
-## 1. Re-run the exact 8x packed HGDN tiebreak on the patched surface
+## 1. Run the local baseline-shaped HGDN search before more H100 spend
+
+- The fair exact naive-contract batch already answered the branch-goal
+  question for the current live14 replay shell:
+  - exact repo baseline: `44.00 ms/step`, exact roundtrip `1.23710448`,
+    `UNDER_LIMIT`
+  - live HGDN finalist: `98.08 ms/step`, exact roundtrip `1.24735121`,
+    `OVER_LIMIT`
+- That means the next work is **not** another blind H100 rerun of live14.
+  The next work is a contract-native HGDN shell search on the baseline-shaped
+  surface:
+  - `TRAIN_SEQ_LEN=1024`
+  - `TRAIN_BATCH_TOKENS=65536`
+  - `ITERATIONS=500`
+  - `VAL_LOSS_EVERY=100`
+  - `TRAIN_LOG_EVERY=25`
+  - `WEIGHT_DECAY=0`
+- New helper:
+  [`../scripts/run_local_hgdn_naive_contract_search.sh`](../scripts/run_local_hgdn_naive_contract_search.sh)
+- New size-screen config:
+  [`../configs/hgdn/naive_contract_search.toml`](../configs/hgdn/naive_contract_search.toml)
+- Initial artifact-size screen (`2026-04-22`) says all five first-pass
+  baseline-shaped candidates are under the init-time proxy cap:
+  - `l9_d512_r1_m2`
+  - `l9_d512_r1_m1p75`
+  - `l8_d512_r1_m2`
+  - `l9_d480_r1_m2`
+  - `l9_d512_r0_m2`
+- The attention-only `l9_d512_r0_m2` shell exists only to isolate the HGDN tax
+  on the exact baseline-shaped architecture. It is not a replacement baseline.
+
+```bash
+USE_WANDB=0 WANDB_MODE=offline \
+RUN_PREFIX_BASE=localnaivehgdn1 \
+bash scripts/run_local_hgdn_naive_contract_search.sh
+```
+
+## 2. Re-run the exact 8x packed HGDN tiebreak on the patched surface
 
 - The `1xH100` compile matrix closed at `59d0817a` on the live14 replay shell:
   - `hybrid`: `799.05 ms/step`
@@ -42,7 +79,7 @@ RUN_PREFIX_BASE=h100packed_tiebreak \
 bash scripts/run_h100_hgdn_compile_tiebreak_round.sh
 ```
 
-## 2. Re-run the naive-contract sanity batch against the exact repo baseline
+## 3. Re-run the naive-contract sanity batch against the exact repo baseline
 
 - Use [`../scripts/run_h100_hgdn_naive_contract_round.sh`](../scripts/run_h100_hgdn_naive_contract_round.sh).
 - Include exactly three legs:
@@ -76,7 +113,7 @@ RUN_PREFIX_BASE=h100naive1 \
 bash scripts/run_h100_hgdn_naive_contract_round.sh
 ```
 
-## 3. Keep HGDN-only finalist work bounded to closing the exact-baseline gap
+## 4. Keep HGDN-only finalist work bounded to closing the exact-baseline gap
 
 - The branch objective is no longer ambiguous: HGDN only counts if it improves
   against the exact repo baseline in `train_gpt.py`.
@@ -91,7 +128,7 @@ bash scripts/run_h100_hgdn_naive_contract_round.sh
 - Only after the patched reruns land should the next HGDN ablation screen be
   revisited.
 
-## 4. Finish packed-path compile/runtime cleanup only where it still matters
+## 5. Finish packed-path compile/runtime cleanup only where it still matters
 
 - Treat the packed FLA recurrence path as compile-eligible; do not force it
   into eager-only islands again.
@@ -109,7 +146,7 @@ bash scripts/run_h100_hgdn_naive_contract_round.sh
 - Use explicit overrides instead of changing shared defaults again when running
   controlled comparisons.
 
-## 5. Leave archived kernel paths archived
+## 6. Leave archived kernel paths archived
 
 - Full-block megakernel: research-only.
 - Core-kernel pivot: research-only.

@@ -309,6 +309,46 @@ def cmd_write_local_resize_manifest(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_write_local_naive_contract_search_manifest(
+    args: argparse.Namespace,
+) -> int:
+    """Write the local HGDN naive-contract-search manifest.
+
+    :param argparse.Namespace args: Parsed CLI arguments.
+    :return int: Shell-style exit code.
+    """
+    manifest = {
+        "run_prefix_base": args.run_prefix_base,
+        "wandb_project": args.wandb_project,
+        "wandb_mode": args.wandb_mode,
+        "archive_output": str(args.archive_output),
+        "matched_logs": args.matched_logs,
+        "size_screen": {
+            "config": args.size_screen_config,
+            "output_dir": args.size_screen_output,
+        },
+        "contract": {
+            "torch_logs": args.torch_logs or None,
+            "torch_trace": args.torch_trace or None,
+            "torchinductor_max_autotune": args.torchinductor_max_autotune,
+            "torchinductor_max_autotune_gemm": args.torchinductor_max_autotune_gemm,
+            "iterations": args.iterations,
+            "train_batch_tokens": args.train_batch_tokens,
+            "train_seq_len": args.train_seq_len,
+            "val_loss_every": args.val_loss_every,
+            "train_log_every": args.train_log_every,
+            "val_batch_size": args.val_batch_size,
+            "max_wallclock_seconds": args.max_wallclock_seconds,
+            "weight_decay": args.weight_decay,
+            "compile": args.compile_enabled,
+            "compile_strategy": args.compile_strategy,
+        },
+        "run_ids": args.run_id,
+    }
+    write_json(args.output, manifest)
+    return 0
+
+
 def cmd_write_h100_bridge_manifest(args: argparse.Namespace) -> int:
     """Write the exact 8x H100 bridge-round manifest.
 
@@ -697,6 +737,45 @@ def build_parser() -> argparse.ArgumentParser:
     local_resize.add_argument("--compile-strategy", required=True)
     local_resize.add_argument("--run-id", action="append", default=[])
     local_resize.set_defaults(func=cmd_write_local_resize_manifest)
+
+    local_naive_search = subparsers.add_parser(
+        "write-local-naive-contract-search-manifest",
+        help="write the local HGDN naive-contract search manifest",
+    )
+    local_naive_search.add_argument("--output", type=Path, required=True)
+    local_naive_search.add_argument("--run-prefix-base", required=True)
+    local_naive_search.add_argument("--wandb-project", required=True)
+    local_naive_search.add_argument("--wandb-mode", required=True)
+    local_naive_search.add_argument("--archive-output", type=Path, required=True)
+    local_naive_search.add_argument(
+        "--matched-logs", type=parse_bool_flag, required=True
+    )
+    local_naive_search.add_argument("--size-screen-config", required=True)
+    local_naive_search.add_argument("--size-screen-output", required=True)
+    local_naive_search.add_argument("--torch-logs", default="")
+    local_naive_search.add_argument("--torch-trace", default="")
+    local_naive_search.add_argument(
+        "--torchinductor-max-autotune", type=int, required=True
+    )
+    local_naive_search.add_argument(
+        "--torchinductor-max-autotune-gemm", type=int, required=True
+    )
+    local_naive_search.add_argument("--iterations", type=int, required=True)
+    local_naive_search.add_argument("--train-batch-tokens", type=int, required=True)
+    local_naive_search.add_argument("--train-seq-len", type=int, required=True)
+    local_naive_search.add_argument("--val-loss-every", type=int, required=True)
+    local_naive_search.add_argument("--train-log-every", type=int, required=True)
+    local_naive_search.add_argument("--val-batch-size", type=int, required=True)
+    local_naive_search.add_argument(
+        "--max-wallclock-seconds", type=float, required=True
+    )
+    local_naive_search.add_argument("--weight-decay", type=float, required=True)
+    local_naive_search.add_argument(
+        "--compile-enabled", type=parse_bool_flag, required=True
+    )
+    local_naive_search.add_argument("--compile-strategy", required=True)
+    local_naive_search.add_argument("--run-id", action="append", default=[])
+    local_naive_search.set_defaults(func=cmd_write_local_naive_contract_search_manifest)
 
     h100_bridge = subparsers.add_parser(
         "write-h100-bridge-manifest",

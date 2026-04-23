@@ -1,6 +1,6 @@
 # HGDN Branch Status
 
-Last updated: 2026-04-21 03:01 EDT
+Last updated: 2026-04-22 15:00 EDT
 
 Branch: `exp/hgdn-k-core`
 
@@ -36,6 +36,9 @@ Branch: `exp/hgdn-k-core`
 - Keep HGDN as the live record-path family.
 - Keep `train_gpt.py` as the absolute baseline reference; the hybrid-trainer
   attention-only control is diagnostic only.
+- The next HGDN work is contract-native shell search on the exact
+  baseline-shaped surface, not more blind replay of the live14 shell against
+  the naive baseline contract.
 - Do not reopen broad H100 architecture search unless a new exact run
   contradicts the current bridge result.
 - Do not reopen the closed post-conv front-end seam or archived kernel paths
@@ -95,13 +98,29 @@ Branch: `exp/hgdn-k-core`
       `ATTN_USE_FLASH_ATTN3=1` / `DISTRIBUTED_MODE=parallel_muon` surface as the
       tiebreak and naive helpers
     - default exact-8x bridge/tiebreak helpers to `WANDB_WATCH=none`
-  - `2026-04-21` distributed compile follow-up:
+- `2026-04-21` distributed compile follow-up:
     - multi-rank `train_gpt_hybrid.py` now suppresses top-level model compile
       and keeps only the selective submodule compile surface
     - on the exact `8xH100` `parallel_muon` surface, `COMPILE_STRATEGY=hybrid`
       therefore normalizes to the same effective compile plan as `selective`
     - the exact-8x compile helper skips duplicate strategies after that
       normalization instead of launching a broken duplicate arm
+
+## Current local work
+
+- New local baseline-shaped HGDN search helper:
+  [`../scripts/run_local_hgdn_naive_contract_search.sh`](../scripts/run_local_hgdn_naive_contract_search.sh)
+- Size-screen config:
+  [`../configs/hgdn/naive_contract_search.toml`](../configs/hgdn/naive_contract_search.toml)
+- First-pass artifact-size screen on `2026-04-22` says these candidates are
+  all under the init-time proxy cap:
+  - `l9_d512_r1_m2`
+  - `l9_d512_r1_m1p75`
+  - `l8_d512_r1_m2`
+  - `l9_d480_r1_m2`
+  - `l9_d512_r0_m2`
+- The helper runs the size screen first, then a fixed-contract local batch,
+  then bundles configs/logs/commands with `py7zr`.
 
 Exact 8x packed tiebreak:
 
@@ -143,6 +162,7 @@ Structured launcher:
 
 Batch helpers:
 
+- [`../scripts/run_local_hgdn_naive_contract_search.sh`](../scripts/run_local_hgdn_naive_contract_search.sh)
 - [`../scripts/run_local_hgdn_resize_round.sh`](../scripts/run_local_hgdn_resize_round.sh)
 - [`../scripts/run_h100_hgdn_resize_round.sh`](../scripts/run_h100_hgdn_resize_round.sh)
 - [`../scripts/run_h100_hgdn_bridge_round.sh`](../scripts/run_h100_hgdn_bridge_round.sh)
