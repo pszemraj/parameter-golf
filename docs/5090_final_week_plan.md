@@ -113,6 +113,13 @@ Promotion rule:
 - confirm promoted LR on seed `2027`
 - invalidate and rerun any point that does not satisfy the protocol invariants above
 
+Current status:
+
+- completed screening on seed `1337`
+- `lr=3.5e-3` was promoted for:
+  - `blocks1_resid10_e12`
+  - `blocks0_resid12_e10`
+
 ### 2. Aggressive lane: tokenwise residual gating
 
 Script:
@@ -142,6 +149,16 @@ Promotion rule:
 - allow at most `7%` throughput loss
 - invalidate and rerun any point that does not satisfy the protocol invariants above
 
+Current status:
+
+- completed on seeds `1337` and `2027`
+- `blocks1_resid10_e12`:
+  - no gate mode cleared the promotion bar
+  - use `gate=none` for the primary temporal lane
+- `blocks0_resid12_e10`:
+  - `gate=base` cleared the promotion bar
+  - keep it alive as a sidecar aggressive-lane result
+
 ### 3. Aggressive lane: EMA temporal taps
 
 Script:
@@ -161,6 +178,7 @@ Default contract:
   - `ema_hybrid`
 - gate mode:
   - set `GATE_MODE` to the winner from the gate screen
+  - for the current primary lane, that means `GATE_MODE=none`
 - default launcher behavior:
   - reuse the prior `current` baseline instead of rerunning it
 

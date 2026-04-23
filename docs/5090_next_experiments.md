@@ -75,6 +75,30 @@ The deadline-oriented source of truth for ordering, promotion rules, and stop ru
 
 - [docs/5090_final_week_plan.md](/home/pszemraj/workspace/projects/parameter-golf/docs/5090_final_week_plan.md)
 
+## Current Batch Read
+
+Completed so far in the final-week lane:
+
+- safe `max_lr` screen:
+  - `blocks1 10x12`: `lr=3.5e-3` beat `3.0e-3` by about `0.01303` bpb on seed `1337`
+  - `blocks0 12x10`: `lr=3.5e-3` beat `3.0e-3` by about `0.01273` bpb on seed `1337`
+  - decision:
+    - promote `lr=3.5e-3` for both reps to seed `2027`
+
+- gate screen:
+  - `blocks1 10x12`:
+    - `base` improved mean `val_bpb` by about `0.00241`
+    - throughput loss was about `3.7%`
+    - decision:
+      - does **not** clear the `>= 0.003` promotion bar
+      - treat gating as flat on the primary quality rep for now
+  - `blocks0 12x10`:
+    - `base` improved mean `val_bpb` by about `0.00582`
+    - throughput loss was about `3.9%`
+    - decision:
+      - `gate=base` clears the promotion bar on the lean control
+  - `core_base` did not clear the bar on either rep
+
 ## Plan Delta From The No-Fallback Audit
 
 The high-level batch order did not change.
@@ -91,6 +115,25 @@ Practical consequence:
 - the next steps are still `max_lr`, gating, EMA, router, and then `1B` finalists
 - but any run that only “works” by slipping onto approximate `bpb`, a slower scan backend, or another degraded path should be treated as invalid and rerun
 - explicit smoke/debug opt-ins still exist, but they are no longer ambiguous with maintained-path experiment results
+
+## Immediate Next Commands
+
+First close the safe lane:
+
+```bash
+SEEDS="2027" LRS="0.0035" bash scripts/run_5090_safe_maxlr_probe.sh
+```
+
+Then advance the primary architecture lane with the blocks1 gating result interpreted correctly as flat:
+
+```bash
+GATE_MODE=none SEEDS="1337" bash scripts/run_5090_architecture_temporal_screen.sh
+```
+
+Interpretation note:
+
+- `blocks0 gate=base` stays alive as a sidecar aggressive-lane result
+- but it should not displace the primary `blocks1` temporal lane yet, because the plan prioritizes the quality rep for temporal screening
 
 ## Why The Architecture Lane Changed
 

@@ -25,6 +25,10 @@
   - `1B` for confirmation
 - Final-week execution order is now documented in:
   - [docs/5090_final_week_plan.md](/home/pszemraj/workspace/projects/parameter-golf/docs/5090_final_week_plan.md)
+- Final-week lane status:
+  - safe `max_lr` screening promoted `lr=3.5e-3` on both primary reps from seed `1337`
+  - two-seed gating was flat on `blocks1 10x12`
+  - two-seed gating promoted `gate=base` on `blocks0 12x10`
 
 ## Top 3 Current Contenders
 
@@ -207,6 +211,7 @@ Pure hyperparameter / architecture findings:
 
 ## Unresolved Questions
 
+- does `lr=3.5e-3` hold up on seed `2027` for both the `blocks1` and `blocks0` safe-lane reps?
 - does tokenwise residual gating make the controller meaningfully more selective on hard tokens?
 - do EMA or EMA-hybrid taps recover useful temporal structure without drifting toward token mixing?
 - does per-token branch routing help once real temporal taps exist?
