@@ -23,6 +23,8 @@
 - Training-budget policy is now explicit:
   - `512M` for serious screening
   - `1B` for confirmation
+- Final-week execution order is now documented in:
+  - [docs/5090_final_week_plan.md](/home/pszemraj/workspace/projects/parameter-golf/docs/5090_final_week_plan.md)
 
 ## Top 3 Current Contenders
 
@@ -98,6 +100,30 @@ Tokenwise residual-gate screen:
 
 ```bash
 bash scripts/run_5090_architecture_gate_screen.sh
+```
+
+Safe compact `max_lr` probe:
+
+```bash
+bash scripts/run_5090_safe_maxlr_probe.sh
+```
+
+Temporal screen:
+
+```bash
+bash scripts/run_5090_architecture_temporal_screen.sh
+```
+
+Router stretch:
+
+```bash
+bash scripts/run_5090_architecture_router_screen.sh
+```
+
+Finalist `1B` confirmation harness:
+
+```bash
+bash scripts/run_5090_finalist_confirm1b.sh
 ```
 
 ## Best Current Calls

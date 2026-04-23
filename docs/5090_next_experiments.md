@@ -1,10 +1,11 @@
 # 5090 Next Experiments
 
-Last updated: `2026-04-22`
+Last updated: `2026-04-23`
 
 This note is the short working summary. The full architecture source of truth is now:
 
 - [docs/5090_architecture_plan.md](/home/pszemraj/workspace/projects/parameter-golf/docs/5090_architecture_plan.md)
+- [docs/5090_final_week_plan.md](/home/pszemraj/workspace/projects/parameter-golf/docs/5090_final_week_plan.md)
 
 ## Frontier Snapshot
 
@@ -47,41 +48,32 @@ Working defaults now:
 - `1B` is the confirmation budget for finalists.
 - Anything shorter than `512M` is only for smoke tests or harness checks.
 
-## Immediate Next Batch
+## Final-Week Execution Order
 
-The next architecture step is tokenwise residual gating, not more hold work.
+The week is now split into:
 
-Exact launcher:
+- safe lane:
+  - a compact `max_lr` probe on the incumbent reps
+- aggressive lane:
+  - tokenwise gating
+  - EMA / EMA-hybrid temporal taps
+  - branch routing only if the temporal lane wins
+- finalist lane:
+  - `1B` three-seed confirmations on the promoted winners
+
+Launchers:
 
 ```bash
+bash scripts/run_5090_safe_maxlr_probe.sh
 bash scripts/run_5090_architecture_gate_screen.sh
+bash scripts/run_5090_architecture_temporal_screen.sh
+bash scripts/run_5090_architecture_router_screen.sh
+bash scripts/run_5090_finalist_confirm1b.sh
 ```
 
-Default batch:
+The deadline-oriented source of truth for ordering, promotion rules, and stop rules is:
 
-- representatives:
-  - `blocks1_resid10_e12`
-  - `blocks0_resid12_e10`
-- seeds:
-  - `1337`
-  - `2027`
-- gate modes:
-  - `none`
-  - `base`
-  - `core_base`
-- fixed controls:
-  - `branch_temporal_mode=current`
-  - `branch_router_mode=none`
-  - `scan_backend=auto`
-  - `carry_chunks=8`
-  - `bptt_chunks=1`
-  - `4096` steps
-  - `TARGET_EFFECTIVE_STEP_TOKENS=131072`
-  - `lr_hold_steps=3500`
-
-Promotion rule:
-
-- only promote a gate variant if it improves two-seed mean `val_bpb` by at least `0.003` with no more than `5%` throughput loss
+- [docs/5090_final_week_plan.md](/home/pszemraj/workspace/projects/parameter-golf/docs/5090_final_week_plan.md)
 
 ## Why The Architecture Lane Changed
 
@@ -91,7 +83,7 @@ The schedule question is no longer the biggest uncertainty. The stronger thesis 
 - the recurrent controller should intervene selectively on hard tokens
 - temporal structure should come from real causal multi-timescale taps, not just alternate projections of the current state
 
-That means the next order is:
+That means the next architecture order is still:
 
 1. tokenwise residual gating
 2. EMA / EMA-hybrid temporal taps

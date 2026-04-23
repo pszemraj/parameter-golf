@@ -1,8 +1,12 @@
 # 5090 Architecture Plan
 
-Last updated: `2026-04-22`
+Last updated: `2026-04-23`
 
 This is the official plan for the next Core/Amplifier lane on the local RTX 5090.
+
+Deadline-oriented execution order now lives in:
+
+- [docs/5090_final_week_plan.md](/home/pszemraj/workspace/projects/parameter-golf/docs/5090_final_week_plan.md)
 
 ## Thesis
 
@@ -242,6 +246,12 @@ If the best temporal winner is real on `blocks1`, replay that single temporal wi
 - `blocks0_resid12_e10`
 - `blocks2_resid12_e8`
 
+Convenience launcher:
+
+```bash
+bash scripts/run_5090_architecture_temporal_screen.sh
+```
+
 ### Batch C: Branch-Router Screen
 
 Run only after Batch B.
@@ -260,6 +270,12 @@ Promotion rule:
 - require at least `0.0025` mean `val_bpb` gain
 - allow at most `10%` throughput loss
 
+Convenience launcher:
+
+```bash
+bash scripts/run_5090_architecture_router_screen.sh
+```
+
 ### Batch D: `1B` Confirmation
 
 Confirm the top one or two architecture winners at:
@@ -268,6 +284,12 @@ Confirm the top one or two architecture winners at:
 - `1B` planned tokens
 - seeds `1337`, `2027`, `3141`
 - `lr_hold_steps=7000`
+
+Convenience launcher:
+
+```bash
+bash scripts/run_5090_finalist_confirm1b.sh
+```
 
 ## What We Are Not Doing Next
 

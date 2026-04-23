@@ -1,0 +1,246 @@
+# 5090 Final Week Plan
+
+Last updated: `2026-04-23`
+
+This is the deadline-focused execution note for the final week on the local RTX 5090. It complements the architecture note instead of replacing it.
+
+- Full architecture rationale: [docs/5090_architecture_plan.md](/home/pszemraj/workspace/projects/parameter-golf/docs/5090_architecture_plan.md)
+- Short working status: [docs/5090_next_experiments.md](/home/pszemraj/workspace/projects/parameter-golf/docs/5090_next_experiments.md)
+
+## Goal
+
+Use the remaining week to maximize the chance of ending with a stronger repo-root candidate for a credible non-record submission.
+
+This is a dual-track week:
+
+- safe lane:
+  - keep one compact optimization lane alive on the current incumbent family
+- aggressive lane:
+  - test the highest-upside thesis-aligned architecture ideas that are already implemented
+
+Out of scope for this note:
+
+- record-folder packaging
+- PR assembly
+- broader speculative architecture branches
+
+## Locked Context
+
+Current confirmed frontier by three-seed mean:
+
+| Rank | Run | Mean `val_bpb` | Mean steady tok/s |
+|---|---|---:|---:|
+| 1 | `blocks1_resid10_e12_h7000_1b` | `2.1865341393` | `372,888` |
+| 2 | `blocks1_resid12_e10_h7000_1b` | `2.1866023565` | `374,271` |
+| 3 | `blocks0_resid12_e10_h7000_1b` | `2.1899359311` | `386,331` |
+| 4 | `blocks2_resid12_e8_h7000_1b` | `2.2005760974` | `442,062` |
+
+Locked schedule defaults:
+
+- `512M` screens use `lr_hold_steps=3500`
+- `1B` confirmations use `lr_hold_steps=7000`
+
+Fixed screening contract:
+
+- full-dataset frozen shared spec only
+- `4096` steps
+- `seq_len=512`
+- `TARGET_EFFECTIVE_STEP_TOKENS=131072`
+- `carry_chunks=8`
+- `bptt_chunks=1`
+- `warmup_steps=100`
+- `min_lr=3e-4`
+- `weight_decay=1e-3`
+- `COMPILE=0`
+- `GRADIENT_CHECKPOINTING=0`
+- `scan_backend=auto`
+- `TORCH_BLAS_PREFER_CUBLASLT=1`
+
+Primary reps:
+
+- quality baseline:
+  - `blocks1_resid10_e12`
+- lean control:
+  - `blocks0_resid12_e10`
+- fast structural control:
+  - `blocks2_resid12_e8`
+
+## Batch Order
+
+### 1. Safe lane: compact `max_lr` probe
+
+Script:
+
+```bash
+bash scripts/run_5090_safe_maxlr_probe.sh
+```
+
+Default contract:
+
+- reps:
+  - `blocks1_resid10_e12`
+  - `blocks0_resid12_e10`
+- seeds:
+  - `1337`
+- `max_lr in {2.5e-3, 3.0e-3, 3.5e-3}`
+
+Promotion rule:
+
+- promote at most one LR per rep
+- require `>= 0.003` bpb gain over that rep’s current single-seed incumbent, or a tie within `0.002` with clearly cleaner curve behavior
+- confirm promoted LR on seed `2027`
+
+### 2. Aggressive lane: tokenwise residual gating
+
+Script:
+
+```bash
+bash scripts/run_5090_architecture_gate_screen.sh
+```
+
+Default contract:
+
+- reps:
+  - `blocks1_resid10_e12`
+  - `blocks0_resid12_e10`
+- seeds:
+  - `1337`
+  - `2027`
+- `residual_token_gate_mode in {none, base, core_base}`
+- fixed:
+  - `branch_temporal_mode=current`
+  - `branch_router_mode=none`
+
+Promotion rule:
+
+- compare against `gate=none`
+- promote at most one non-`none` gate mode per rep
+- require `>= 0.003` bpb gain
+- allow at most `7%` throughput loss
+
+### 3. Aggressive lane: EMA temporal taps
+
+Script:
+
+```bash
+bash scripts/run_5090_architecture_temporal_screen.sh
+```
+
+Default contract:
+
+- primary rep:
+  - `blocks1_resid10_e12`
+- seeds:
+  - `1337`
+- default launcher modes:
+  - `ema`
+  - `ema_hybrid`
+- gate mode:
+  - set `GATE_MODE` to the winner from the gate screen
+- default launcher behavior:
+  - reuse the prior `current` baseline instead of rerunning it
+
+Promotion rule:
+
+- compare to the matching `current` baseline from the gate batch
+- promote only the best non-`current` mode
+- require `>= 0.004` bpb gain on the first-pass screen
+- confirm the promoted temporal mode on seed `2027`
+
+Replay rule:
+
+- only if the promoted temporal mode survives on `blocks1`
+- then replay that single temporal winner on:
+  - `blocks0_resid12_e10`
+  - `blocks2_resid12_e8`
+- start with seed `1337` only for the control replays
+
+### 4. Stretch lane: branch routing
+
+Script:
+
+```bash
+bash scripts/run_5090_architecture_router_screen.sh
+```
+
+Run this only if the EMA lane yields a real winner.
+
+Default launcher behavior:
+
+- reuse the matching `router=none` temporal baseline
+- launch only `router=softmax` unless `INCLUDE_BASELINE_NONE=1`
+
+Promotion rule:
+
+- require `>= 0.0025` bpb gain
+- allow at most `10%` throughput loss
+- confirm on seed `2027` only if the first pass clears the bar
+
+### 5. Finalist `1B` confirmations
+
+Script:
+
+```bash
+bash scripts/run_5090_finalist_confirm1b.sh
+```
+
+Default finalists:
+
+- `blocks1_resid10_e12_final`
+- `blocks0_resid12_e10_final`
+
+Default contract:
+
+- seeds:
+  - `1337`
+  - `2027`
+  - `3141`
+- `8192` steps
+- `1B` planned tokens
+- `lr_hold_steps=7000`
+
+Custom finalist format:
+
+```text
+name shared_spec_dir core_layers core_expansion gate_mode temporal_mode router_mode
+```
+
+Example:
+
+```bash
+FINALIST_SPECS=$'blocks1_gate_base_ema /abs/path/to/shared 10 12.0 base ema none\nblocks1_gate_base_ema_router /abs/path/to/shared 10 12.0 base ema softmax' \
+bash scripts/run_5090_finalist_confirm1b.sh
+```
+
+## Stop Rules
+
+Stop adding complexity and move straight to finalist confirmations if any of the following happen:
+
+- the gate lane is flat
+- the EMA lane is flat
+- the router lane fails its first-pass bar
+
+If the whole aggressive lane stalls, the remaining budget should go to:
+
+- confirming the best safe-lane point
+- optionally one last clean `max_lr` follow-up on the incumbent `blocks1` baseline
+
+Do not spend the final week on:
+
+- more frozen blocks
+- `core_dim` changes
+- larger controller ladders unless a new mechanism wins decisively
+- attention-like ideas
+- token-token mixing
+- submission packaging
+
+## Final Reserve
+
+Reserve the last `1` to `2` days for target-hardware verification if H100 access is available.
+
+Use that reserve for:
+
+- current incumbent
+- best new local winner, if there is one
+
+Do not start a new model-family branch once the reserve window begins.
