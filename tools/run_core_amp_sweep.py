@@ -600,6 +600,7 @@ def update_controller_config(
     cfg.model["branch_temporal_lag_scale"] = float(env("BRANCH_TEMPORAL_LAG_SCALE", "1.0"))
     cfg.model["residual_token_gate_mode"] = env("RESIDUAL_TOKEN_GATE_MODE", "none")
     cfg.model["branch_router_mode"] = env("BRANCH_ROUTER_MODE", "none")
+    cfg.model["base_bigram_delta"] = env("BASE_BIGRAM_DELTA", "none")
     cfg.model["residual_readout_delta_rank"] = int(env("RESIDUAL_READOUT_DELTA_RANK", "0"))
     cfg.model["residual_readout_delta_init_std"] = float(
         env("RESIDUAL_READOUT_DELTA_INIT_STD", "0.02")
@@ -735,6 +736,8 @@ def run_controller_sweep(repo_root: Path) -> None:
         env("RESIDUAL_TOKEN_GATE_MODE", "none"),
         "--branch-router-mode",
         env("BRANCH_ROUTER_MODE", "none"),
+        "--base-bigram-delta",
+        env("BASE_BIGRAM_DELTA", "none"),
         "--residual-readout-delta-rank",
         env("RESIDUAL_READOUT_DELTA_RANK", "0"),
         "--residual-readout-delta-init-std",
@@ -886,6 +889,8 @@ def run_controller_sweep(repo_root: Path) -> None:
             env("RESIDUAL_TOKEN_GATE_MODE", "none"),
             "--branch-router-mode",
             env("BRANCH_ROUTER_MODE", "none"),
+            "--base-bigram-delta",
+            env("BASE_BIGRAM_DELTA", "none"),
             "--residual-readout-delta-rank",
             env("RESIDUAL_READOUT_DELTA_RANK", "0"),
             "--residual-readout-delta-init-std",
@@ -1041,6 +1046,8 @@ def run_structure_sweep(repo_root: Path) -> None:
             env("RESIDUAL_TOKEN_GATE_MODE", "none"),
             "--branch-router-mode",
             env("BRANCH_ROUTER_MODE", "none"),
+            "--base-bigram-delta",
+            env("BASE_BIGRAM_DELTA", "none"),
             "--residual-readout-delta-rank",
             env("RESIDUAL_READOUT_DELTA_RANK", "0"),
             "--residual-readout-delta-init-std",
@@ -1087,6 +1094,7 @@ def run_structure_sweep(repo_root: Path) -> None:
             cfg = ModelConfig.load(run_dir)
             cfg.meta["run_name"] = spec.name
             cfg.meta["phase"] = env("CORE_AMP_PHASE", "5090_structure_screening")
+            cfg.model["base_bigram_delta"] = env("BASE_BIGRAM_DELTA", "none")
             cfg.model["residual_readout_delta_rank"] = int(env("RESIDUAL_READOUT_DELTA_RANK", "0"))
             cfg.model["residual_readout_delta_init_std"] = float(
                 env("RESIDUAL_READOUT_DELTA_INIT_STD", "0.02")
@@ -1159,6 +1167,8 @@ def run_structure_sweep(repo_root: Path) -> None:
             env("RESIDUAL_TOKEN_GATE_MODE", "none"),
             "--branch-router-mode",
             env("BRANCH_ROUTER_MODE", "none"),
+            "--base-bigram-delta",
+            env("BASE_BIGRAM_DELTA", "none"),
             "--residual-readout-delta-rank",
             env("RESIDUAL_READOUT_DELTA_RANK", "0"),
             "--residual-readout-delta-init-std",

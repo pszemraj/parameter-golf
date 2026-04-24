@@ -304,7 +304,48 @@ The cleaned `v2` run completed for seeds `1337 2027 3141`. The optional
 - `blocks1_resid10_e12_gate_base_lr0035_h3500_512m_s1337`: `2.2575790952`
 - matching no-gate safe-lane screen was better and faster
 
-### 6. Investigation lane: residual readout delta
+### 6. Investigation lane: base-bigram delta
+
+Script:
+
+```bash
+bash scripts/run_5090_base_delta_screen.sh
+```
+
+Default contract:
+
+- reps:
+  - `blocks1_resid10_e12`
+  - `blocks0_resid12_e10`
+- seeds:
+  - `1337`
+- `4096` steps / `512M` planned tokens
+- `learning_rate=3.5e-3`
+- frozen shared specs from the cleaned finalist families
+- `base_bigram_delta=full`
+- `residual_readout_delta_rank=0`
+- all serious-run protocol invariants still apply
+
+Why this is in-scope:
+
+- it trains a zero-initialized correction to the frozen bigram base without
+  changing the frozen statistics build
+- it is a lookup-table correction, so it spends artifact budget with minimal
+  wall-clock cost
+- it is not attention, not a transformer block, and not learned long-context
+  token-token mixing
+- it directly addresses the current artifact-budget gap before trying more
+  expensive residual readout projections
+
+Promotion rule:
+
+- compare to the matching no-delta `512M` safe-lane point
+- require at least `0.003` bpb gain on seed `1337`, or a smaller gain with
+  clearly improved hard-token bucket diagnostics
+- allow at most `5%` throughput loss
+- if it wins on one family, confirm on seed `2027` before considering `1B`
+
+### 7. Investigation lane: residual readout delta
 
 Script:
 
@@ -327,25 +368,10 @@ Default contract:
 - frozen shared specs from the cleaned finalist families
 - all serious-run protocol invariants still apply
 
-Why this is in-scope:
-
-- it adds trainable capacity after the frozen residual readout without changing
-  the frozen statistics build
-- the delta output projection is zero-initialized, so enabling it does not
-  perturb step-0 logits
-- it is not attention, not a transformer block, and not learned token-token
-  mixing
-- it directly addresses the current artifact-budget gap
-
-Promotion rule:
-
-- compare each rank to the matching no-delta `512M` safe-lane point
-- require at least `0.003` bpb gain on seed `1337`, or a smaller gain with
-  clearly improved hard-token bucket diagnostics
-- allow at most `15%` throughput loss for `rank=128`; higher ranks must justify
-  their extra cost with a larger bpb gain
-- if a rank wins on one family, confirm the same rank on seed `2027` before
-  considering `1B`
+Use this after the base-bigram delta screen or when diagnostics specifically
+show the frozen residual readout dictionary is the bottleneck. It is still
+zero-init and non-transformer, but it adds per-token matmuls, so it has a
+higher speed bar than base-delta.
 
 Diagnostic command for completed or partial runs:
 
@@ -360,6 +386,7 @@ Stop adding complexity and keep the cleaned finalists if any of the following ha
 - the gate lane is flat
 - the EMA lane is flat
 - the router lane fails its first-pass bar
+- the base-delta lane is flat after exact-bpb validation
 - the readout-delta lane is flat after diagnostics show no hard-token-bucket
   improvement
 

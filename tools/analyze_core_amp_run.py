@@ -176,6 +176,27 @@ def _find_tokenizer(
 
 
 @contextmanager
+def _zero_base_bigram_delta(model: CoreAmplifierLM) -> Iterator[bool]:
+    """Temporarily disable the optional trainable base-bigram delta.
+
+    :param CoreAmplifierLM model: Model to modify in-place and restore.
+    :return Iterator[bool]: Whether a base-bigram delta table was present.
+    """
+    delta = model.base_bigram_delta
+    if delta is None:
+        yield False
+        return
+    saved = delta.weight.detach().clone()
+    with torch.no_grad():
+        delta.weight.zero_()
+    try:
+        yield True
+    finally:
+        with torch.no_grad():
+            delta.weight.copy_(saved)
+
+
+@contextmanager
 def _zero_readout_delta(model: CoreAmplifierLM) -> Iterator[bool]:
     """Temporarily disable the optional trainable readout delta.
 
@@ -287,6 +308,14 @@ def _write_markdown(path: Path, payload: dict[str, Any]) -> None:
                 f"| readout_delta_gain_bpb | {_format_float(losses.get('readout_delta_gain_bpb'))} |",
             ]
         )
+    if "no_base_bigram_delta_loss" in losses:
+        lines.extend(
+            [
+                f"| no_base_bigram_delta_loss | {_format_float(losses['no_base_bigram_delta_loss'])} |",
+                f"| base_bigram_delta_gain_nats | {_format_float(losses['base_bigram_delta_gain_nats'])} |",
+                f"| base_bigram_delta_gain_bpb | {_format_float(losses.get('base_bigram_delta_gain_bpb'))} |",
+            ]
+        )
     lines.extend(
         [
             "",
@@ -367,6 +396,7 @@ def main() -> None:
         branch_temporal_lag_scale=float(model_cfg.get("branch_temporal_lag_scale", 1.0)),
         residual_token_gate_mode=str(model_cfg.get("residual_token_gate_mode", "none")),
         branch_router_mode=str(model_cfg.get("branch_router_mode", "none")),
+        base_bigram_delta=str(model_cfg.get("base_bigram_delta", "none")),
         residual_readout_delta_rank=int(model_cfg.get("residual_readout_delta_rank", 0)),
         residual_readout_delta_init_std=float(
             model_cfg.get("residual_readout_delta_init_std", 0.02)
@@ -429,9 +459,11 @@ def main() -> None:
     base_loss_parts: list[torch.Tensor] = []
     full_loss_parts: list[torch.Tensor] = []
     no_delta_loss_parts: list[torch.Tensor] = []
+    no_base_delta_loss_parts: list[torch.Tensor] = []
     base_loss_sum = 0.0
     full_loss_sum = 0.0
     no_delta_loss_sum = 0.0
+    no_base_delta_loss_sum = 0.0
     total_tokens = 0
     total_bytes = 0
     state_obj: Optional[Any] = None
@@ -455,6 +487,11 @@ def main() -> None:
                         no_delta_logits, _ = model(inputs, state=state_in, return_state=True)
                     else:
                         no_delta_logits = None
+                with _zero_base_bigram_delta(model) as had_base_delta:
+                    if had_base_delta:
+                        no_base_delta_logits, _ = model(inputs, state=state_in, return_state=True)
+                    else:
+                        no_base_delta_logits = None
             base_loss = cross_entropy_per_token(base_logits, targets)
             full_loss = cross_entropy_per_token(full_logits, targets)
             base_loss_parts.append(base_loss.detach().cpu().flatten())
@@ -465,6 +502,10 @@ def main() -> None:
                 no_delta_loss = cross_entropy_per_token(no_delta_logits, targets)
                 no_delta_loss_parts.append(no_delta_loss.detach().cpu().flatten())
                 no_delta_loss_sum += float(no_delta_loss.sum().item())
+            if no_base_delta_logits is not None:
+                no_base_delta_loss = cross_entropy_per_token(no_base_delta_logits, targets)
+                no_base_delta_loss_parts.append(no_base_delta_loss.detach().cpu().flatten())
+                no_base_delta_loss_sum += float(no_base_delta_loss.sum().item())
             total_tokens += int(targets.numel())
             if byte_count_lut is not None:
                 total_bytes += int(byte_count_lut[targets.long()].sum().item())
@@ -473,6 +514,7 @@ def main() -> None:
     base_losses = torch.cat(base_loss_parts)
     full_losses = torch.cat(full_loss_parts)
     no_delta_losses = torch.cat(no_delta_loss_parts) if no_delta_loss_parts else None
+    no_base_delta_losses = torch.cat(no_base_delta_loss_parts) if no_base_delta_loss_parts else None
     losses: dict[str, Any] = {
         "base_loss": base_loss_sum / max(1, total_tokens),
         "full_loss": full_loss_sum / max(1, total_tokens),
@@ -496,6 +538,16 @@ def main() -> None:
             if total_bytes > 0
             else None
         )
+    if no_base_delta_losses is not None:
+        losses["no_base_bigram_delta_loss"] = no_base_delta_loss_sum / max(1, total_tokens)
+        losses["base_bigram_delta_gain_nats"] = (no_base_delta_loss_sum - full_loss_sum) / max(
+            1, total_tokens
+        )
+        losses["base_bigram_delta_gain_bpb"] = (
+            ((no_base_delta_loss_sum - full_loss_sum) / math.log(2)) / total_bytes
+            if total_bytes > 0
+            else None
+        )
 
     payload = {
         "run_dir": str(run_dir),
@@ -508,6 +560,7 @@ def main() -> None:
             "branch_temporal_mode": str(model_cfg.get("branch_temporal_mode", "current")),
             "residual_token_gate_mode": str(model_cfg.get("residual_token_gate_mode", "none")),
             "branch_router_mode": str(model_cfg.get("branch_router_mode", "none")),
+            "base_bigram_delta": str(model_cfg.get("base_bigram_delta", "none")),
             "residual_readout_delta_rank": int(model_cfg.get("residual_readout_delta_rank", 0)),
             "trainable_parameters": int(model.trainable_parameters),
         },

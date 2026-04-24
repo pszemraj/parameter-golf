@@ -146,22 +146,22 @@ Practical consequence:
 
 ## Immediate Next Commands
 
-The next serious architecture probe is the readout-delta screen. It adds a
-zero-initialized trainable low-rank correction to the frozen residual readout,
-so step-0 logits are unchanged and the path remains Core/Amplifier-style:
-frozen statistics plus recurrent controller, no attention and no learned
-token-token mixing.
+The next serious architecture probe is now the base-bigram delta screen. It
+adds a zero-initialized trainable current-token logit correction on top of the
+frozen bigram base, so step-0 logits are unchanged. This spends about one
+million trainable parameters with lookup-level runtime cost instead of adding
+another large per-token projection.
 
 Dry run first:
 
 ```bash
-DRY_RUN=1 RUN_VERSION=v1 SEEDS=1337 RANKS="128 256" bash scripts/run_5090_readout_delta_screen.sh
+DRY_RUN=1 RUN_VERSION=v1 SEEDS=1337 bash scripts/run_5090_base_delta_screen.sh
 ```
 
 Then run:
 
 ```bash
-RUN_VERSION=v1 SEEDS=1337 RANKS="128 256" bash scripts/run_5090_readout_delta_screen.sh
+RUN_VERSION=v1 SEEDS=1337 bash scripts/run_5090_base_delta_screen.sh
 ```
 
 Use the diagnostic tool on completed or partial runs before extending a losing
@@ -174,10 +174,18 @@ conda run -s --name train python tools/analyze_core_amp_run.py /path/to/run_dir 
 For a quick one-family launch while training is already in progress elsewhere:
 
 ```bash
-RUN_VERSION=v1 SEEDS=1337 RANKS=128 RUN_BLOCKS1=0 bash scripts/run_5090_readout_delta_screen.sh
+RUN_VERSION=v1 SEEDS=1337 RUN_BLOCKS1=0 bash scripts/run_5090_base_delta_screen.sh
 ```
 
 The old `gate x lr` sidecar is no longer recommended.
+
+Readout-delta remains the second adapter lane, but it is more compute-expensive
+than base-delta because it adds matmuls over every token. Use it after
+base-delta unless diagnostics strongly implicate the residual readout itself:
+
+```bash
+RUN_VERSION=v1 SEEDS=1337 RANKS="128 256" bash scripts/run_5090_readout_delta_screen.sh
+```
 
 ## Why The Architecture Lane Changed
 
@@ -190,10 +198,11 @@ The schedule question is no longer the biggest uncertainty. The stronger thesis 
 That means the next architecture order is now:
 
 1. diagnostics on completed finalists and any partial probe
-2. zero-init low-rank residual readout delta
-3. one wider, GPU-friendly frozen-statistics structure probe if the delta screen
+2. zero-init trainable base-bigram delta
+3. zero-init low-rank residual readout delta
+4. one wider, GPU-friendly frozen-statistics structure probe if the delta screen
    does not move
-4. hashed or compact lexical side information only after diagnostics show the
+5. hashed or compact lexical side information only after diagnostics show the
    recurrent path is not helping the hard-token buckets
 
 Current practical interpretation:
@@ -201,8 +210,10 @@ Current practical interpretation:
 - EMA and EMA-hybrid did not survive on the primary `blocks1` lane
 - router stays skipped
 - the existing gate cross-term did not survive at `lr=3.5e-3`
-- readout delta is the next lowest-risk way to spend artifact budget without
+- base-delta is the lowest-compute way to spend artifact budget without
   regressing toward a transformer computational paradigm
+- readout delta is still available, but it should be treated as a costlier
+  second adapter because it adds per-token matmul work
 
 ## Fast-Scan Note
 

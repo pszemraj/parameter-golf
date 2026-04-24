@@ -119,6 +119,24 @@ def _normalize_branch_router_mode(mode: str) -> str:
     return normalized
 
 
+def _normalize_base_bigram_delta_mode(mode: bool | str) -> str:
+    """Normalize the trainable base-bigram delta mode.
+
+    :param bool | str mode: Requested mode.
+    :return str: Normalized mode.
+    """
+    if isinstance(mode, bool):
+        return "full" if mode else "none"
+    normalized = str(mode).strip().lower()
+    if normalized in {"0", "false", "off"}:
+        normalized = "none"
+    if normalized in {"1", "true", "on"}:
+        normalized = "full"
+    if normalized not in {"none", "full"}:
+        raise ValueError(f"base_bigram_delta must be one of {{'none', 'full'}}, got {mode!r}")
+    return normalized
+
+
 def _normalize_nonnegative_int(value: int | str, *, name: str) -> int:
     """Normalize a non-negative integer model knob.
 
@@ -1279,6 +1297,7 @@ class CoreAmplifierLM(nn.Module):
         branch_temporal_lag_scale: float = 1.0,
         residual_token_gate_mode: str = "none",
         branch_router_mode: str = "none",
+        base_bigram_delta: bool | str = "none",
         residual_readout_delta_rank: int = 0,
         residual_readout_delta_init_std: float = 0.02,
         scan_backend: str = "auto",
@@ -1299,6 +1318,9 @@ class CoreAmplifierLM(nn.Module):
         :param float branch_temporal_lag_scale: Lag mixing scale.
         :param str residual_token_gate_mode: Tokenwise residual gating mode.
         :param str branch_router_mode: Per-token branch router mode.
+        :param bool | str base_bigram_delta: Optional trainable current-token
+            base-logit correction mode. ``"full"`` enables a zero-initialized
+            ``vocab x vocab`` lookup delta; ``"none"`` disables it.
         :param int residual_readout_delta_rank: Optional low-rank trainable
             correction added to the frozen residual readout. ``0`` disables it.
         :param float residual_readout_delta_init_std: Standard deviation for
@@ -1317,6 +1339,7 @@ class CoreAmplifierLM(nn.Module):
             residual_token_gate_mode
         )
         self.branch_router_mode = _normalize_branch_router_mode(branch_router_mode)
+        self.base_bigram_delta_mode = _normalize_base_bigram_delta_mode(base_bigram_delta)
         self.residual_readout_delta_rank = _normalize_nonnegative_int(
             residual_readout_delta_rank,
             name="residual_readout_delta_rank",
@@ -1431,6 +1454,14 @@ class CoreAmplifierLM(nn.Module):
         self.readout_branch_scale = nn.Parameter(torch.ones(self.num_branches))
         self.residual_log_scale = nn.Parameter(torch.tensor(-0.5))
         self.logit_bias = nn.Parameter(torch.zeros(self.vocab_size))
+        if self.base_bigram_delta_mode == "full":
+            self.base_bigram_delta = nn.Embedding(self.vocab_size, self.vocab_size)
+            self.base_bigram_delta_log_scale = nn.Parameter(torch.tensor(0.0))
+            with torch.no_grad():
+                self.base_bigram_delta.weight.zero_()
+        else:
+            self.base_bigram_delta = None
+            self.base_bigram_delta_log_scale = None
         if self.residual_readout_delta_rank > 0:
             self.residual_readout_delta_in = nn.Linear(
                 self.amp_dim,
@@ -2064,6 +2095,17 @@ class CoreAmplifierLM(nn.Module):
             self._last_residual_gate_mean = None
             self._last_residual_gate_std = None
         base_logits = base_logits.to(dtype=residual_logits.dtype)
+        if self.base_bigram_delta is not None:
+            base_delta = self.base_bigram_delta(input_ids.long()).to(
+                device=residual_logits.device,
+                dtype=residual_logits.dtype,
+            )
+            assert self.base_bigram_delta_log_scale is not None
+            base_delta_scale = torch.exp(self.base_bigram_delta_log_scale).to(
+                device=residual_logits.device,
+                dtype=residual_logits.dtype,
+            )
+            base_logits = base_logits + base_delta_scale * base_delta
         logits = (
             base_logits
             + self.logit_bias.to(device=residual_logits.device, dtype=residual_logits.dtype)
