@@ -601,6 +601,8 @@ def update_controller_config(
     cfg.model["residual_token_gate_mode"] = env("RESIDUAL_TOKEN_GATE_MODE", "none")
     cfg.model["branch_router_mode"] = env("BRANCH_ROUTER_MODE", "none")
     cfg.model["base_bigram_delta"] = env("BASE_BIGRAM_DELTA", "none")
+    cfg.model["trigram_sidecar"] = env("TRIGRAM_SIDECAR", "none")
+    cfg.model["trigram_log_scale_init"] = float(env("TRIGRAM_LOG_SCALE_INIT", "0.0"))
     cfg.model["residual_readout_delta_rank"] = int(env("RESIDUAL_READOUT_DELTA_RANK", "0"))
     cfg.model["residual_readout_delta_init_std"] = float(
         env("RESIDUAL_READOUT_DELTA_INIT_STD", "0.02")
@@ -738,6 +740,10 @@ def run_controller_sweep(repo_root: Path) -> None:
         env("BRANCH_ROUTER_MODE", "none"),
         "--base-bigram-delta",
         env("BASE_BIGRAM_DELTA", "none"),
+        "--trigram-sidecar",
+        env("TRIGRAM_SIDECAR", "none"),
+        "--trigram-log-scale-init",
+        env("TRIGRAM_LOG_SCALE_INIT", "0.0"),
         "--residual-readout-delta-rank",
         env("RESIDUAL_READOUT_DELTA_RANK", "0"),
         "--residual-readout-delta-init-std",
@@ -891,6 +897,10 @@ def run_controller_sweep(repo_root: Path) -> None:
             env("BRANCH_ROUTER_MODE", "none"),
             "--base-bigram-delta",
             env("BASE_BIGRAM_DELTA", "none"),
+            "--trigram-sidecar",
+            env("TRIGRAM_SIDECAR", "none"),
+            "--trigram-log-scale-init",
+            env("TRIGRAM_LOG_SCALE_INIT", "0.0"),
             "--residual-readout-delta-rank",
             env("RESIDUAL_READOUT_DELTA_RANK", "0"),
             "--residual-readout-delta-init-std",
@@ -912,6 +922,8 @@ def run_controller_sweep(repo_root: Path) -> None:
             "--seed",
             env("SEED", "1337"),
         ]
+        if env_bool("FULL_VAL_FINAL", False):
+            cmd.append("--full-val-final")
         if train_defaults["DATA_MAX_TOKENS"]:
             cmd += ["--data-max-tokens", train_defaults["DATA_MAX_TOKENS"]]
         if no_mmap:
@@ -1048,6 +1060,10 @@ def run_structure_sweep(repo_root: Path) -> None:
             env("BRANCH_ROUTER_MODE", "none"),
             "--base-bigram-delta",
             env("BASE_BIGRAM_DELTA", "none"),
+            "--trigram-sidecar",
+            env("TRIGRAM_SIDECAR", "none"),
+            "--trigram-log-scale-init",
+            env("TRIGRAM_LOG_SCALE_INIT", "0.0"),
             "--residual-readout-delta-rank",
             env("RESIDUAL_READOUT_DELTA_RANK", "0"),
             "--residual-readout-delta-init-std",
@@ -1095,6 +1111,8 @@ def run_structure_sweep(repo_root: Path) -> None:
             cfg.meta["run_name"] = spec.name
             cfg.meta["phase"] = env("CORE_AMP_PHASE", "5090_structure_screening")
             cfg.model["base_bigram_delta"] = env("BASE_BIGRAM_DELTA", "none")
+            cfg.model["trigram_sidecar"] = env("TRIGRAM_SIDECAR", "none")
+            cfg.model["trigram_log_scale_init"] = float(env("TRIGRAM_LOG_SCALE_INIT", "0.0"))
             cfg.model["residual_readout_delta_rank"] = int(env("RESIDUAL_READOUT_DELTA_RANK", "0"))
             cfg.model["residual_readout_delta_init_std"] = float(
                 env("RESIDUAL_READOUT_DELTA_INIT_STD", "0.02")
@@ -1169,6 +1187,10 @@ def run_structure_sweep(repo_root: Path) -> None:
             env("BRANCH_ROUTER_MODE", "none"),
             "--base-bigram-delta",
             env("BASE_BIGRAM_DELTA", "none"),
+            "--trigram-sidecar",
+            env("TRIGRAM_SIDECAR", "none"),
+            "--trigram-log-scale-init",
+            env("TRIGRAM_LOG_SCALE_INIT", "0.0"),
             "--residual-readout-delta-rank",
             env("RESIDUAL_READOUT_DELTA_RANK", "0"),
             "--residual-readout-delta-init-std",
@@ -1190,6 +1212,8 @@ def run_structure_sweep(repo_root: Path) -> None:
             "--seed",
             env("SEED", "1337"),
         ]
+        if env_bool("FULL_VAL_FINAL", False):
+            train_cmd.append("--full-val-final")
         data_max_tokens = env("DATA_MAX_TOKENS", str(defaults["DATA_MAX_TOKENS"]))
         if data_max_tokens:
             train_cmd += ["--data-max-tokens", data_max_tokens]

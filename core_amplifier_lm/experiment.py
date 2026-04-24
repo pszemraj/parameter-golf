@@ -38,6 +38,8 @@ SUMMARY_FIELDS = [
     "residual_token_gate_mode",
     "branch_router_mode",
     "base_bigram_delta",
+    "trigram_sidecar",
+    "trigram_top_k",
     "residual_readout_delta_rank",
     "residual_readout_delta_init_std",
     "carry_chunks",
@@ -64,6 +66,10 @@ SUMMARY_FIELDS = [
     "last_eval_step",
     "last_val_loss",
     "last_val_bpb",
+    "last_eval_tokens",
+    "last_eval_bytes",
+    "last_eval_coverage_frac",
+    "last_eval_full_coverage",
     "elapsed_sec",
     "steady_state_tokens_per_sec",
     "peak_mem_alloc_mib",
@@ -105,7 +111,7 @@ CONTROL_TENSOR_NAME_PATTERNS = tuple(
         (
             "_h0_raw,resid_logit,block_gain,branch_scale,branch_bias,"
             "readout_branch_scale,residual_log_scale,base_bigram_delta_log_scale,"
-            "residual_readout_delta_log_scale,logit_bias,norm.scale"
+            "trigram_log_scale,residual_readout_delta_log_scale,logit_bias,norm.scale"
         ),
     ).split(",")
     if pattern
@@ -664,6 +670,8 @@ def summarize_run_dir(run_dir: str | Path) -> dict[str, str]:
         "residual_token_gate_mode": _stringify(model.get("residual_token_gate_mode")),
         "branch_router_mode": _stringify(model.get("branch_router_mode")),
         "base_bigram_delta": _stringify(model.get("base_bigram_delta")),
+        "trigram_sidecar": _stringify(model.get("trigram_sidecar")),
+        "trigram_top_k": _stringify(model.get("trigram_top_k")),
         "residual_readout_delta_rank": _stringify(model.get("residual_readout_delta_rank")),
         "residual_readout_delta_init_std": _stringify(model.get("residual_readout_delta_init_std")),
         "carry_chunks": _stringify(training.get("carry_chunks")),
@@ -690,6 +698,10 @@ def summarize_run_dir(run_dir: str | Path) -> dict[str, str]:
         "last_eval_step": _stringify(last.get("step") or results.get("last_eval_step")),
         "last_val_loss": _stringify(last.get("val_loss") or results.get("last_val_loss")),
         "last_val_bpb": _stringify(last.get("val_bpb") or results.get("last_val_bpb")),
+        "last_eval_tokens": _stringify(last.get("eval_tokens")),
+        "last_eval_bytes": _stringify(last.get("eval_bytes")),
+        "last_eval_coverage_frac": _stringify(last.get("eval_coverage_frac")),
+        "last_eval_full_coverage": _stringify(last.get("eval_full_coverage")),
         "elapsed_sec": _stringify(results.get("elapsed_sec")),
         "steady_state_tokens_per_sec": _stringify(results.get("steady_state_tokens_per_sec")),
         "peak_mem_alloc_mib": _stringify(results.get("peak_mem_alloc_mib")),

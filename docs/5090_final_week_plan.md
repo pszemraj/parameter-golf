@@ -86,6 +86,8 @@ Runs only count toward screening or confirmation if all of the following are tru
 - `validation_source=explicit_val_shard` for directory-style FineWeb runs
 - exact `val_bpb` is active
   - no implicit approximate-`bpb` fallback
+- eval rows expose `eval_tokens`, `eval_bytes`, and `eval_coverage_frac`
+  - small `VAL_STEPS=8` results are screen metrics, not full validation claims
 - `scan_backend=auto` on CUDA resolves to `assoc_accel`
   - no silent scan-backend downgrade
 - the shared spec matches the intended structure and embedding-init contract
@@ -304,7 +306,50 @@ The cleaned `v2` run completed for seeds `1337 2027 3141`. The optional
 - `blocks1_resid10_e12_gate_base_lr0035_h3500_512m_s1337`: `2.2575790952`
 - matching no-gate safe-lane screen was better and faster
 
-### 6. Investigation lane: base-bigram delta
+### 6. Pivot lane: dense trigram sidecar
+
+Script:
+
+```bash
+bash scripts/run_5090_trigram_sidecar_screen.sh
+```
+
+Default contract:
+
+- reps:
+  - `blocks0_resid12_e10`
+- seeds:
+  - `1337`
+- `4096` steps / `512M` planned tokens
+- `learning_rate=3.5e-3`
+- frozen shared specs from the cleaned finalist families
+- sidecar:
+  - `trigram_sidecar=frozen`
+  - `TRIGRAM_TOP_K=2`
+  - `(x[t-1], x[t]) -> top-K residual logits over the frozen bigram base`
+- `base_bigram_delta=none`
+- `residual_readout_delta_rank=0`
+- all serious-run protocol invariants still apply
+
+Why this is in-scope:
+
+- it spends unused artifact bytes on literal high-order context identity
+- it stays non-transformer: no attention, no learned token-token mixing
+- it directly tests whether the current branch is missing memory rather than
+  controller capacity
+- the previous token is part of recurrent chunk state, so sidecar lookup is
+  causal and consistent between full forward, chunked training, and `step()`
+
+Promotion rule:
+
+- compare to the matching no-sidecar `512M` safe-lane point
+- `>= 0.05` bpb gain on seed `1337`: continue immediately
+- `< 0.02` bpb gain: stop the Core/Amplifier leaderboard-record attempt and
+  package as non-record research unless diagnostics show an obvious bug
+- between those: run diagnostics and a full-val sanity check before replaying
+- replay `blocks1` only after `blocks0` shows a real signal
+
+### 7. Secondary lane: base-bigram delta
 
 Script:
 
@@ -312,40 +357,12 @@ Script:
 bash scripts/run_5090_base_delta_screen.sh
 ```
 
-Default contract:
+This remains implemented, but it is now secondary. It trains a current-token
+bigram correction and does not add literal high-order context identity. Use it
+only if the trigram sidecar shows promise and diagnostics suggest calibration
+rather than memory is the remaining bottleneck.
 
-- reps:
-  - `blocks1_resid10_e12`
-  - `blocks0_resid12_e10`
-- seeds:
-  - `1337`
-- `4096` steps / `512M` planned tokens
-- `learning_rate=3.5e-3`
-- frozen shared specs from the cleaned finalist families
-- `base_bigram_delta=full`
-- `residual_readout_delta_rank=0`
-- all serious-run protocol invariants still apply
-
-Why this is in-scope:
-
-- it trains a zero-initialized correction to the frozen bigram base without
-  changing the frozen statistics build
-- it is a lookup-table correction, so it spends artifact budget with minimal
-  wall-clock cost
-- it is not attention, not a transformer block, and not learned long-context
-  token-token mixing
-- it directly addresses the current artifact-budget gap before trying more
-  expensive residual readout projections
-
-Promotion rule:
-
-- compare to the matching no-delta `512M` safe-lane point
-- require at least `0.003` bpb gain on seed `1337`, or a smaller gain with
-  clearly improved hard-token bucket diagnostics
-- allow at most `5%` throughput loss
-- if it wins on one family, confirm on seed `2027` before considering `1B`
-
-### 7. Investigation lane: residual readout delta
+### 8. Secondary lane: residual readout delta
 
 Script:
 
@@ -368,10 +385,10 @@ Default contract:
 - frozen shared specs from the cleaned finalist families
 - all serious-run protocol invariants still apply
 
-Use this after the base-bigram delta screen or when diagnostics specifically
-show the frozen residual readout dictionary is the bottleneck. It is still
-zero-init and non-transformer, but it adds per-token matmuls, so it has a
-higher speed bar than base-delta.
+Use this only after the trigram sidecar result is understood, or when
+diagnostics specifically show the frozen residual readout dictionary is the
+bottleneck. It is still zero-init and non-transformer, but it adds per-token
+matmuls, so it has a higher speed bar than lookup sidecars.
 
 Diagnostic command for completed or partial runs:
 
@@ -386,7 +403,7 @@ Stop adding complexity and keep the cleaned finalists if any of the following ha
 - the gate lane is flat
 - the EMA lane is flat
 - the router lane fails its first-pass bar
-- the base-delta lane is flat after exact-bpb validation
+- the trigram sidecar gives `< 0.02` bpb on the first serious `blocks0` screen
 - the readout-delta lane is flat after diagnostics show no hard-token-bucket
   improvement
 

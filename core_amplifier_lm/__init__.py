@@ -12,6 +12,7 @@ from .model import (
     estimate_storage_bytes,
 )
 from .spec_builder import (
+    add_trigram_sidecar_to_spec,
     build_spec_optimized,
     count_all,
     load_tokens_int32,
@@ -24,6 +25,7 @@ __all__ = [
     "DEFAULTS",
     "ModelConfig",
     "build_amplifier_spec",
+    "add_trigram_sidecar_to_spec",
     "build_spec_optimized",
     "count_all",
     "default_16mb_recipe",

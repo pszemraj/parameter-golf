@@ -42,6 +42,8 @@ DEFAULTS = {
         "residual_token_gate_mode": "none",
         "branch_router_mode": "none",
         "base_bigram_delta": "none",
+        "trigram_sidecar": "none",
+        "trigram_log_scale_init": 0.0,
         "residual_readout_delta_rank": 0,
         "residual_readout_delta_init_std": 0.02,
         "num_blocks": 9,
@@ -77,6 +79,7 @@ DEFAULTS = {
         "scan_backend": "auto",
         "gradient_checkpointing": False,
         "log_state_every": 200,
+        "full_val_final": False,
     },
     "data": {
         "source": None,
@@ -103,6 +106,8 @@ _ARG_MAP: dict[str, tuple[str, str]] = {
     "residual_token_gate_mode": ("model", "residual_token_gate_mode"),
     "branch_router_mode": ("model", "branch_router_mode"),
     "base_bigram_delta": ("model", "base_bigram_delta"),
+    "trigram_sidecar": ("model", "trigram_sidecar"),
+    "trigram_log_scale_init": ("model", "trigram_log_scale_init"),
     "residual_readout_delta_rank": ("model", "residual_readout_delta_rank"),
     "residual_readout_delta_init_std": ("model", "residual_readout_delta_init_std"),
     "num_blocks": ("model", "num_blocks"),
@@ -143,6 +148,7 @@ _ARG_MAP: dict[str, tuple[str, str]] = {
     "scan_backend": ("training", "scan_backend"),
     "gradient_checkpointing": ("training", "gradient_checkpointing"),
     "log_state_every": ("training", "log_state_every"),
+    "full_val_final": ("training", "full_val_final"),
 }
 
 

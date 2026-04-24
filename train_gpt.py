@@ -49,6 +49,14 @@ def main() -> None:
     model_defaults = DEFAULTS["model"]
     train_defaults = DEFAULTS["training"]
 
+    local_rank_env = os.environ.get("LOCAL_RANK")
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    if world_size > 1 or (local_rank_env is not None and int(local_rank_env) != 0):
+        raise SystemExit(
+            "Core/Amplifier root train_gpt.py is single-process only; DDP/torchrun "
+            "sharding is not implemented for this path yet."
+        )
+
     default_data = repo_root / "data" / "datasets" / "fineweb10B_sp1024"
     model_dir = Path(env("MODEL_DIR", "core_amp_run"))
     data_path = env("DATA_PATH", str(default_data))
@@ -92,6 +100,15 @@ def main() -> None:
         env_bool("RESIDUAL_CORE", bool(model_defaults["residual_core"])),
         "--residual-core-init",
         env("RESIDUAL_CORE_INIT", _to_env_default(model_defaults["residual_core_init"])),
+        "--base-bigram-delta",
+        env("BASE_BIGRAM_DELTA", _to_env_default(model_defaults["base_bigram_delta"])),
+        "--trigram-sidecar",
+        env("TRIGRAM_SIDECAR", _to_env_default(model_defaults["trigram_sidecar"])),
+        "--trigram-log-scale-init",
+        env(
+            "TRIGRAM_LOG_SCALE_INIT",
+            _to_env_default(model_defaults["trigram_log_scale_init"]),
+        ),
     ]
     readout_rank = os.environ.get("READOUT_RANK")
     if readout_rank is not None:
@@ -102,6 +119,10 @@ def main() -> None:
 
     if not (model_dir / "config.json").exists() or not (model_dir / "spec.pt").exists():
         run(init_cmd)
+    elif env_bool("REUSE_MODEL_DIR", False) != "1":
+        raise SystemExit(
+            f"Refusing to reuse existing model dir without REUSE_MODEL_DIR=1: {model_dir}"
+        )
     else:
         print(f"Using existing model dir: {model_dir}", flush=True)
 
@@ -149,6 +170,15 @@ def main() -> None:
         env_bool("RESIDUAL_CORE", bool(model_defaults["residual_core"])),
         "--residual-core-init",
         env("RESIDUAL_CORE_INIT", _to_env_default(model_defaults["residual_core_init"])),
+        "--base-bigram-delta",
+        env("BASE_BIGRAM_DELTA", _to_env_default(model_defaults["base_bigram_delta"])),
+        "--trigram-sidecar",
+        env("TRIGRAM_SIDECAR", _to_env_default(model_defaults["trigram_sidecar"])),
+        "--trigram-log-scale-init",
+        env(
+            "TRIGRAM_LOG_SCALE_INIT",
+            _to_env_default(model_defaults["trigram_log_scale_init"]),
+        ),
         "--val-every",
         env("VAL_EVERY", "200"),
         "--val-steps",
@@ -160,6 +190,8 @@ def main() -> None:
         "--save-every",
         env("SAVE_EVERY", "1000"),
     ]
+    if env_bool("FULL_VAL_FINAL", bool(train_defaults.get("full_val_final", False))) == "1":
+        train_cmd.append("--full-val-final")
     data_max_tokens = os.environ.get("DATA_MAX_TOKENS")
     if data_max_tokens:
         train_cmd += ["--data-max-tokens", data_max_tokens]

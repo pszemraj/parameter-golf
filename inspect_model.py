@@ -51,6 +51,8 @@ def main() -> None:
         choices=["none", "softmax"],
     )
     g.add_argument("--base-bigram-delta", type=str, default=None, choices=["none", "full"])
+    g.add_argument("--trigram-sidecar", type=str, default=None, choices=["none", "frozen"])
+    g.add_argument("--trigram-log-scale-init", type=float, default=None)
     g.add_argument("--residual-readout-delta-rank", type=int, default=None)
     g.add_argument("--residual-readout-delta-init-std", type=float, default=None)
     g.add_argument("--num-blocks", type=int, default=None)
@@ -102,6 +104,8 @@ def main() -> None:
             "residual_token_gate_mode",
             "branch_router_mode",
             "base_bigram_delta",
+            "trigram_sidecar",
+            "trigram_log_scale_init",
             "residual_readout_delta_rank",
             "residual_readout_delta_init_std",
             "num_blocks",
@@ -214,6 +218,8 @@ def main() -> None:
         residual_token_gate_mode=cfg.model.get("residual_token_gate_mode", "none"),
         branch_router_mode=cfg.model.get("branch_router_mode", "none"),
         base_bigram_delta=cfg.model.get("base_bigram_delta", "none"),
+        trigram_sidecar=cfg.model.get("trigram_sidecar", "none"),
+        trigram_log_scale_init=float(cfg.model.get("trigram_log_scale_init", 0.0)),
         residual_readout_delta_rank=int(cfg.model.get("residual_readout_delta_rank", 0)),
         residual_readout_delta_init_std=float(
             cfg.model.get("residual_readout_delta_init_std", 0.02)
@@ -239,6 +245,9 @@ def main() -> None:
         "readout_weight",
         "readout_in_proj",
         "readout_out_proj",
+        "trigram_top_tokens",
+        "trigram_residual_values",
+        "trigram_context_confidence",
     ]:
         buf = getattr(spec, name, None)
         if buf is None:

@@ -146,22 +146,29 @@ Practical consequence:
 
 ## Immediate Next Commands
 
-The next serious architecture probe is now the base-bigram delta screen. It
-adds a zero-initialized trainable current-token logit correction on top of the
-frozen bigram base, so step-0 logits are unchanged. This spends about one
-million trainable parameters with lookup-level runtime cost instead of adding
-another large per-token projection.
+The next serious architecture probe is now the dense SP1024 trigram sidecar.
+This spends artifact budget on literal high-order context memory instead of
+another current-token/base-logit adapter. The sidecar stores top-K residual
+boosts for `(x[t-1], x[t])` contexts and the model carries the previous token
+through chunk state, so training/eval/`step()` all use the same causal context.
 
 Dry run first:
 
 ```bash
-DRY_RUN=1 RUN_VERSION=v1 SEEDS=1337 bash scripts/run_5090_base_delta_screen.sh
+DRY_RUN=1 RUN_VERSION=v1 SEEDS=1337 bash scripts/run_5090_trigram_sidecar_screen.sh
 ```
 
 Then run:
 
 ```bash
-RUN_VERSION=v1 SEEDS=1337 bash scripts/run_5090_base_delta_screen.sh
+RUN_VERSION=v1 SEEDS=1337 bash scripts/run_5090_trigram_sidecar_screen.sh
+```
+
+The default first pass intentionally runs only `blocks0` seed `1337`. Replay
+`blocks1` only if the sampled screen shows a real sidecar signal:
+
+```bash
+RUN_VERSION=v1 SEEDS=1337 RUN_BLOCKS1=1 RUN_BLOCKS0=0 bash scripts/run_5090_trigram_sidecar_screen.sh
 ```
 
 Use the diagnostic tool on completed or partial runs before extending a losing
@@ -171,17 +178,12 @@ lane:
 conda run -s --name train python tools/analyze_core_amp_run.py /path/to/run_dir --steps 16
 ```
 
-For a quick one-family launch while training is already in progress elsewhere:
-
-```bash
-RUN_VERSION=v1 SEEDS=1337 RUN_BLOCKS1=0 bash scripts/run_5090_base_delta_screen.sh
-```
-
 The old `gate x lr` sidecar is no longer recommended.
+The base-bigram delta and readout-delta scripts remain available, but they are
+now secondary to the trigram memory probe.
 
-Readout-delta remains the second adapter lane, but it is more compute-expensive
-than base-delta because it adds matmuls over every token. Use it after
-base-delta unless diagnostics strongly implicate the residual readout itself:
+Readout-delta is still available, but it is a secondary adapter lane. Use it
+only after the trigram sidecar read is understood:
 
 ```bash
 RUN_VERSION=v1 SEEDS=1337 RANKS="128 256" bash scripts/run_5090_readout_delta_screen.sh
@@ -198,22 +200,21 @@ The schedule question is no longer the biggest uncertainty. The stronger thesis 
 That means the next architecture order is now:
 
 1. diagnostics on completed finalists and any partial probe
-2. zero-init trainable base-bigram delta
-3. zero-init low-rank residual readout delta
-4. one wider, GPU-friendly frozen-statistics structure probe if the delta screen
-   does not move
-5. hashed or compact lexical side information only after diagnostics show the
-   recurrent path is not helping the hard-token buckets
+2. dense SP1024 trigram top-K sidecar
+3. replay `blocks1` only if `blocks0` shows a real sidecar signal
+4. base-bigram delta or readout-delta only as secondary calibration/capacity
+   checks
+5. optional score-first adaptive n-gram cache only after the static sidecar is
+   validated and compliance is documented
 
 Current practical interpretation:
 
 - EMA and EMA-hybrid did not survive on the primary `blocks1` lane
 - router stays skipped
 - the existing gate cross-term did not survive at `lr=3.5e-3`
-- base-delta is the lowest-compute way to spend artifact budget without
-  regressing toward a transformer computational paradigm
-- readout delta is still available, but it should be treated as a costlier
-  second adapter because it adds per-token matmul work
+- current lag operators are not evidence against temporal structure because
+  they do not expose literal high-order context identity
+- trigram sidecar is now the strongest non-transformer use of artifact budget
 
 ## Fast-Scan Note
 

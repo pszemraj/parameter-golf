@@ -22,6 +22,7 @@ import random
 import sys
 import time
 from contextlib import nullcontext
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, TypeVar
 
@@ -81,6 +82,21 @@ _SHARD_VERSION = 1
 _HEADER_INTS = 256
 _HEADER_BYTES = _HEADER_INTS * np.dtype("<i4").itemsize
 T = TypeVar("T")
+
+
+@dataclass(frozen=True)
+class EvalResult:
+    """Validation metrics plus coverage metadata."""
+
+    loss: float
+    bpb: float
+    tokens: int
+    bytes: int
+    coverage_frac: float
+    full_coverage: bool
+    steps: int
+    batch_size: int
+    seq_len: int
 
 
 def seed_everything(seed: int) -> None:
@@ -936,6 +952,7 @@ def build_optimizer(
                 "readout_branch_scale",
                 "residual_log_scale",
                 "base_bigram_delta_log_scale",
+                "trigram_log_scale",
                 "residual_readout_delta_log_scale",
                 "logit_bias",
             }
@@ -1058,6 +1075,7 @@ def compute_training_objective(
     *,
     hard_loss_gamma: float,
     hard_loss_cap: float = 0.0,
+    base_nll_model: Optional[CoreAmplifierLM] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, float]]:
     """Compute weighted and raw training losses.
 
@@ -1067,6 +1085,8 @@ def compute_training_objective(
     :param torch.Tensor targets: Target token ids.
     :param float hard_loss_gamma: Hard-loss exponent.
     :param float hard_loss_cap: Optional weight cap.
+    :param Optional[CoreAmplifierLM] base_nll_model: Optional model with a
+        precomputed frozen-base NLL table.
     :return tuple[torch.Tensor, torch.Tensor, dict[str, float]]: Weighted sum, raw sum, and stats.
     """
     per_token = cross_entropy_per_token(logits, targets)
@@ -1075,8 +1095,11 @@ def compute_training_objective(
     if hard_loss_gamma <= 0:
         return raw_sum, raw_sum, stats
     with torch.no_grad():
-        base_logits = base_path_model(inputs)
-        base_per_token = cross_entropy_per_token(base_logits, targets)
+        if base_nll_model is not None:
+            base_per_token = base_nll_model.base_nll_for_targets(inputs, targets)
+        else:
+            base_logits = base_path_model(inputs)
+            base_per_token = cross_entropy_per_token(base_logits, targets)
         weights = base_per_token.clamp_min(1e-3).pow(hard_loss_gamma)
         if hard_loss_cap > 0:
             weights = weights.clamp_max(hard_loss_cap)
@@ -1101,7 +1124,7 @@ def evaluate(
     steps: int,
     use_autocast: bool,
     byte_count_lut: Optional[torch.Tensor] = None,
-) -> tuple[float, float]:
+) -> EvalResult:
     """Evaluate loss and bits-per-byte on validation data.
 
     :param torch.nn.Module model: Model to evaluate.
@@ -1114,10 +1137,20 @@ def evaluate(
     :param int steps: Validation steps to run.
     :param bool use_autocast: Whether to use autocast.
     :param Optional[torch.Tensor] byte_count_lut: Optional exact byte-count lookup.
-    :return tuple[float, float]: Validation loss in nats and bits per byte.
+    :return EvalResult: Validation loss, bpb, and coverage metadata.
     """
     if steps <= 0:
-        return float("nan"), float("nan")
+        return EvalResult(
+            loss=float("nan"),
+            bpb=float("nan"),
+            tokens=0,
+            bytes=0,
+            coverage_frac=0.0,
+            full_coverage=False,
+            steps=int(steps),
+            batch_size=0,
+            seq_len=int(seq_len),
+        )
     core_model = unwrap_model(model)
     model.eval()
     total_loss = 0.0
@@ -1125,7 +1158,8 @@ def evaluate(
     total_bits = 0.0
     total_bytes = 0
 
-    max_streams = max(1, (val_tokens.numel() - 1) // max(1, seq_len + 1))
+    usable_tokens = max(0, int(val_tokens.numel()) - 1)
+    max_streams = max(1, usable_tokens // max(1, seq_len + 1))
     eval_batch_size = min(batch_size, max_streams)
     batcher = SequentialStreamBatcher(
         val_tokens,
@@ -1167,7 +1201,57 @@ def evaluate(
 
     val_loss = total_loss / max(1, total_tokens)
     val_bpb = (total_bits / max(1, total_bytes)) if total_bytes > 0 else float("nan")
-    return val_loss, val_bpb
+    coverage_frac = min(1.0, float(total_tokens) / max(1, usable_tokens))
+    return EvalResult(
+        loss=val_loss,
+        bpb=val_bpb,
+        tokens=int(total_tokens),
+        bytes=int(total_bytes),
+        coverage_frac=coverage_frac,
+        full_coverage=coverage_frac >= 0.999,
+        steps=int(steps),
+        batch_size=int(eval_batch_size),
+        seq_len=int(seq_len),
+    )
+
+
+def full_validation_steps(
+    val_tokens: torch.Tensor,
+    *,
+    seq_len: int,
+    batch_size: int,
+) -> int:
+    """Compute deterministic sequential steps needed to cover validation once.
+
+    :param torch.Tensor val_tokens: Flat validation token tensor.
+    :param int seq_len: Chunk length.
+    :param int batch_size: Requested validation batch size.
+    :return int: Step count covering the validation streams once.
+    """
+    usable_tokens = max(0, int(val_tokens.numel()) - 1)
+    if usable_tokens <= 0:
+        return 0
+    max_streams = max(1, usable_tokens // max(1, seq_len + 1))
+    eval_batch_size = min(batch_size, max_streams)
+    stream_len = usable_tokens // max(1, eval_batch_size)
+    return max(1, math.ceil(stream_len / max(1, seq_len)))
+
+
+def eval_payload_fields(result: EvalResult) -> dict[str, int | float | bool]:
+    """Flatten validation coverage metadata for metrics rows.
+
+    :param EvalResult result: Evaluation result to flatten.
+    :return dict[str, int | float | bool]: Coverage fields.
+    """
+    return {
+        "eval_tokens": int(result.tokens),
+        "eval_bytes": int(result.bytes),
+        "eval_coverage_frac": float(result.coverage_frac),
+        "eval_full_coverage": bool(result.full_coverage),
+        "eval_steps": int(result.steps),
+        "eval_batch_size": int(result.batch_size),
+        "eval_seq_len": int(result.seq_len),
+    }
 
 
 def build_expected_spec_metadata(
@@ -1357,6 +1441,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log-state-every", type=int, default=None)
     parser.add_argument("--val-every", type=int, default=None)
     parser.add_argument("--val-steps", type=int, default=None)
+    parser.add_argument(
+        "--full-val-final",
+        dest="full_val_final",
+        action="store_true",
+        default=None,
+        help="Run the final validation over the full validation stream once.",
+    )
+    parser.add_argument(
+        "--no-full-val-final",
+        dest="full_val_final",
+        action="store_false",
+    )
     parser.add_argument("--save-every", type=int, default=None)
     parser.add_argument("--log-every", type=int, default=None)
     parser.add_argument("--train-frac", type=float, default=None)
@@ -1395,6 +1491,8 @@ def parse_args() -> argparse.Namespace:
         choices=["none", "softmax"],
     )
     parser.add_argument("--base-bigram-delta", type=str, default=None, choices=["none", "full"])
+    parser.add_argument("--trigram-sidecar", type=str, default=None, choices=["none", "frozen"])
+    parser.add_argument("--trigram-log-scale-init", type=float, default=None)
     parser.add_argument("--residual-readout-delta-rank", type=int, default=None)
     parser.add_argument("--residual-readout-delta-init-std", type=float, default=None)
     parser.add_argument("--readout-rank", type=int, default=None)
@@ -1613,6 +1711,7 @@ def build_resolved_config_payload(
     dropout: float,
     val_every: int,
     val_steps: int,
+    full_val_final: bool,
     log_every: int,
     log_state_every: int,
     save_every: int,
@@ -1632,6 +1731,8 @@ def build_resolved_config_payload(
     residual_token_gate_mode: str,
     branch_router_mode: str,
     base_bigram_delta: str,
+    trigram_sidecar: str,
+    trigram_log_scale_init: float,
     residual_readout_delta_rank: int,
     residual_readout_delta_init_std: float,
     trainable_parameters: int,
@@ -1688,6 +1789,7 @@ def build_resolved_config_payload(
     :param float dropout: Dropout rate.
     :param int val_every: Validation cadence.
     :param int val_steps: Validation step count.
+    :param bool full_val_final: Whether final eval covers validation once.
     :param int log_every: Log cadence.
     :param int log_state_every: State log cadence.
     :param int save_every: Save cadence.
@@ -1707,6 +1809,8 @@ def build_resolved_config_payload(
     :param str residual_token_gate_mode: Tokenwise residual gating mode.
     :param str branch_router_mode: Per-token branch router mode.
     :param str base_bigram_delta: Trainable base-bigram delta mode.
+    :param str trigram_sidecar: Frozen trigram sidecar mode.
+    :param float trigram_log_scale_init: Initial trigram boost log scale.
     :param int residual_readout_delta_rank: Low-rank trainable residual
         readout correction rank.
     :param float residual_readout_delta_init_std: Init std for the correction
@@ -1764,6 +1868,10 @@ def build_resolved_config_payload(
             "residual_token_gate_mode": residual_token_gate_mode,
             "branch_router_mode": branch_router_mode,
             "base_bigram_delta": base_bigram_delta,
+            "trigram_sidecar": trigram_sidecar,
+            "trigram_log_scale_init": float(trigram_log_scale_init),
+            "trigram_top_k": spec.metadata.get("trigram_top_k"),
+            "trigram_residual_scale": spec.metadata.get("trigram_residual_scale"),
             "residual_readout_delta_rank": int(residual_readout_delta_rank),
             "residual_readout_delta_init_std": float(residual_readout_delta_init_std),
             "trainable_parameters": int(trainable_parameters),
@@ -1797,6 +1905,7 @@ def build_resolved_config_payload(
             "gradient_checkpointing": bool(gradient_checkpointing),
             "val_every": int(val_every),
             "val_steps": int(val_steps),
+            "full_val_final": bool(full_val_final),
             "log_every": int(log_every),
             "log_state_every": int(log_state_every),
             "save_every": int(save_every),
@@ -1995,6 +2104,9 @@ def main() -> None:
     )
     val_every = _resolve(args.val_every, t.get("val_every"), 200)
     val_steps = _resolve(args.val_steps, t.get("val_steps"), 20)
+    full_val_final = bool(
+        _resolve(args.full_val_final, t.get("full_val_final"), td.get("full_val_final", False))
+    )
     save_every = _resolve(args.save_every, t.get("save_every"), 1000)
     log_every = _resolve(args.log_every, t.get("log_every"), 20)
 
@@ -2046,6 +2158,20 @@ def main() -> None:
             args.base_bigram_delta,
             m.get("base_bigram_delta"),
             md.get("base_bigram_delta", "none"),
+        )
+    )
+    trigram_sidecar = str(
+        _resolve(
+            args.trigram_sidecar,
+            m.get("trigram_sidecar"),
+            md.get("trigram_sidecar", "none"),
+        )
+    )
+    trigram_log_scale_init = float(
+        _resolve(
+            args.trigram_log_scale_init,
+            m.get("trigram_log_scale_init"),
+            md.get("trigram_log_scale_init", 0.0),
         )
     )
     residual_readout_delta_rank = int(
@@ -2104,6 +2230,7 @@ def main() -> None:
         f"residual_token_gate_mode={residual_token_gate_mode} "
         f"branch_router_mode={branch_router_mode} "
         f"base_bigram_delta={base_bigram_delta} "
+        f"trigram_sidecar={trigram_sidecar} "
         f"residual_readout_delta_rank={residual_readout_delta_rank} "
         f"scan_backend={scan_backend} "
         f"bptt_chunks={bptt_chunks} carry_chunks={carry_chunks} "
@@ -2240,6 +2367,8 @@ def main() -> None:
         residual_token_gate_mode=residual_token_gate_mode,
         branch_router_mode=branch_router_mode,
         base_bigram_delta=base_bigram_delta,
+        trigram_sidecar=trigram_sidecar,
+        trigram_log_scale_init=trigram_log_scale_init,
         residual_readout_delta_rank=residual_readout_delta_rank,
         residual_readout_delta_init_std=residual_readout_delta_init_std,
         scan_backend=scan_backend,
@@ -2366,6 +2495,7 @@ def main() -> None:
         dropout=dropout,
         val_every=val_every,
         val_steps=val_steps,
+        full_val_final=full_val_final,
         log_every=log_every,
         log_state_every=log_state_every,
         save_every=save_every,
@@ -2385,6 +2515,8 @@ def main() -> None:
         residual_token_gate_mode=residual_token_gate_mode,
         branch_router_mode=branch_router_mode,
         base_bigram_delta=base_bigram_delta,
+        trigram_sidecar=trigram_sidecar,
+        trigram_log_scale_init=trigram_log_scale_init,
         residual_readout_delta_rank=residual_readout_delta_rank,
         residual_readout_delta_init_std=residual_readout_delta_init_std,
         trainable_parameters=core_model.trainable_parameters,
@@ -2546,6 +2678,7 @@ def main() -> None:
                         targets,
                         hard_loss_gamma=hard_loss_gamma,
                         hard_loss_cap=hard_loss_cap,
+                        base_nll_model=core_model,
                     )
 
                 total_weighted_loss_sum += float(weighted_sum.item())
@@ -2616,8 +2749,7 @@ def main() -> None:
                 token_gate = core_model.latest_residual_token_gate()
                 if token_gate is not None and last_inputs is not None and last_targets is not None:
                     with torch.no_grad():
-                        base_logits = base_path_model(last_inputs)
-                        base_per_token = cross_entropy_per_token(base_logits, last_targets)
+                        base_per_token = core_model.base_nll_for_targets(last_inputs, last_targets)
                         hard_mask = base_per_token > base_per_token.mean()
                         easy_mask = ~hard_mask
                         if hard_mask.any() and easy_mask.any():
@@ -2644,7 +2776,7 @@ def main() -> None:
                     )
 
         if val_every > 0 and step > 0 and step % val_every == 0:
-            val_loss, val_bpb = evaluate(
+            eval_result = evaluate(
                 model,
                 val_tokens,
                 seq_len=seq_len,
@@ -2659,8 +2791,8 @@ def main() -> None:
             payload = {
                 "kind": "eval",
                 "step": step,
-                "val_loss": val_loss,
-                "val_bpb": val_bpb,
+                "val_loss": eval_result.loss,
+                "val_bpb": eval_result.bpb,
                 "train_loss": total_raw_loss_sum / max(1, total_tokens),
                 "elapsed_sec": prior_elapsed_sec + (time.time() - start_time),
                 "lr": optimizer.param_groups[0]["lr"],
@@ -2668,14 +2800,19 @@ def main() -> None:
                 "carry_chunks": carry_chunks,
                 "processed_tokens": seen_train_tokens,
             }
-            print(f"step {step:6d} | val_loss {val_loss:.4f} | val_bpb {val_bpb:.4f}")
+            payload.update(eval_payload_fields(eval_result))
+            print(
+                f"step {step:6d} | val_loss {eval_result.loss:.4f} | "
+                f"val_bpb {eval_result.bpb:.4f} | "
+                f"coverage {eval_result.coverage_frac:.3%}"
+            )
             append_jsonl(metrics_path, payload)
             eval_rows.append(payload)
             if wandb_run is not None and step > 0:
                 wandb_run.log(
                     {
-                        "eval/loss": val_loss,
-                        "eval/bpb": val_bpb,
+                        "eval/loss": eval_result.loss,
+                        "eval/bpb": eval_result.bpb,
                         "train/processed_tokens": seen_train_tokens,
                     },
                     step=step,
@@ -2697,11 +2834,18 @@ def main() -> None:
         step += 1
 
     final_eval_step = max(0, step - 1)
-    need_final_eval = val_steps > 0 and (
-        not eval_rows or int(eval_rows[-1].get("step", -1)) != final_eval_step
+    final_val_steps = (
+        full_validation_steps(val_tokens, seq_len=seq_len, batch_size=batch_size)
+        if full_val_final
+        else val_steps
+    )
+    need_final_eval = final_val_steps > 0 and (
+        not eval_rows
+        or int(eval_rows[-1].get("step", -1)) != final_eval_step
+        or (full_val_final and not bool(eval_rows[-1].get("eval_full_coverage", False)))
     )
     if need_final_eval:
-        val_loss, val_bpb = evaluate(
+        eval_result = evaluate(
             model,
             val_tokens,
             seq_len=seq_len,
@@ -2709,7 +2853,7 @@ def main() -> None:
             device=device,
             device_type=device_type,
             amp_dtype=default_amp_dtype,
-            steps=val_steps,
+            steps=final_val_steps,
             use_autocast=use_autocast,
             byte_count_lut=byte_count_lut,
         )
@@ -2717,24 +2861,26 @@ def main() -> None:
             "kind": "eval",
             "eval_name": "final",
             "step": final_eval_step,
-            "val_loss": val_loss,
-            "val_bpb": val_bpb,
+            "val_loss": eval_result.loss,
+            "val_bpb": eval_result.bpb,
             "elapsed_sec": prior_elapsed_sec + (time.time() - start_time),
             "lr": optimizer.param_groups[0]["lr"],
             "bptt_chunks": bptt_chunks,
             "carry_chunks": carry_chunks,
             "processed_tokens": seen_train_tokens,
         }
+        payload.update(eval_payload_fields(eval_result))
         print(
-            f"final eval @ step {final_eval_step:6d} | val_loss {val_loss:.4f} | val_bpb {val_bpb:.4f}"
+            f"final eval @ step {final_eval_step:6d} | val_loss {eval_result.loss:.4f} | "
+            f"val_bpb {eval_result.bpb:.4f} | coverage {eval_result.coverage_frac:.3%}"
         )
         append_jsonl(metrics_path, payload)
         eval_rows.append(payload)
         if wandb_run is not None and final_eval_step > 0:
             wandb_run.log(
                 {
-                    "eval/loss": val_loss,
-                    "eval/bpb": val_bpb,
+                    "eval/loss": eval_result.loss,
+                    "eval/bpb": eval_result.bpb,
                     "train/processed_tokens": seen_train_tokens,
                 },
                 step=final_eval_step,

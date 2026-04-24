@@ -13,6 +13,7 @@ Drop this next to core_amplifier_lm.py and use build_spec_optimized().
 from __future__ import annotations
 
 import gzip
+import math
 import multiprocessing as mp
 import os
 import resource
@@ -879,8 +880,194 @@ def build_spec_optimized(
     return spec
 
 
+def _mmap_raw_token_file(path: Path, *, storage_dtype: str) -> np.ndarray:
+    """Memory-map a raw or competition-header token file.
+
+    :param Path path: Token shard path.
+    :param str storage_dtype: On-disk dtype for non-header files.
+    :return np.ndarray: Read-only token array view.
+    """
+    if _detect_has_header(path):
+        header = np.fromfile(path, dtype="<i4", count=_HEADER_INTS)
+        num_tokens = int(header[2])
+        return np.memmap(
+            path,
+            dtype="<u2",
+            mode="r",
+            offset=_HEADER_BYTES,
+            shape=(num_tokens,),
+        )
+    return np.memmap(path, dtype=NUMPY_DTYPE_MAP[storage_dtype], mode="r")
+
+
+def _training_token_files(source: str | Path) -> list[Path]:
+    """List training token files without validation shards.
+
+    :param str | Path source: Token source.
+    :return list[Path]: Ordered training files.
+    """
+    p = Path(source)
+    if p.is_dir():
+        train = sorted(p.glob("fineweb_train_*.bin"))
+        if train:
+            return train
+        files = sorted(p.glob("*.bin"))
+        valish = [sp for sp in files if "val" in sp.name]
+        if valish and len(valish) == len(files):
+            raise FileNotFoundError(f"no training shards found in {p}")
+        return [sp for sp in files if "val" not in sp.name]
+    return [p]
+
+
+def add_trigram_sidecar_to_spec(
+    spec: AmplifierSpec,
+    source: str | Path,
+    *,
+    storage_dtype: str = "uint16",
+    top_k: int = 2,
+    smoothing: float = 0.25,
+    residual_clip: float = 8.0,
+    confidence_count_cap: int = 4096,
+    max_tokens: Optional[int] = None,
+    chunk_size: int = 50_000_000,
+    verbose: bool = True,
+) -> AmplifierSpec:
+    """Attach an exact dense trigram top-K sidecar to a spec.
+
+    :param AmplifierSpec spec: Base amplifier spec.
+    :param str | Path source: Training-token source.
+    :param str storage_dtype: On-disk dtype for non-header shards.
+    :param int top_k: Number of next-token residuals to store per context.
+    :param float smoothing: Additive smoothing for trigram log probabilities.
+    :param float residual_clip: Absolute residual-logit clipping bound.
+    :param int confidence_count_cap: Count at which confidence saturates.
+    :param Optional[int] max_tokens: Optional cap for local smoke builds.
+    :param int chunk_size: Counting chunk size in trigram positions.
+    :param bool verbose: Whether to print progress.
+    :return AmplifierSpec: Copy of ``spec`` with trigram sidecar tensors.
+    """
+    vocab_size = int(spec.vocab_size)
+    if vocab_size > np.iinfo(np.int16).max:
+        raise ValueError(f"trigram_top_tokens use int16 storage; got vocab_size={vocab_size}")
+    if top_k <= 0:
+        raise ValueError(f"top_k must be positive, got {top_k}")
+    if top_k >= vocab_size:
+        raise ValueError(f"top_k must be less than vocab_size={vocab_size}, got {top_k}")
+    if residual_clip <= 0:
+        raise ValueError(f"residual_clip must be positive, got {residual_clip}")
+    if confidence_count_cap <= 0:
+        raise ValueError(f"confidence_count_cap must be positive, got {confidence_count_cap}")
+
+    num_contexts = vocab_size * vocab_size
+    counts = np.zeros((num_contexts, vocab_size), dtype=np.uint32)
+    flat_counts = counts.reshape(-1)
+    files = _training_token_files(source)
+    carry = np.empty(0, dtype=np.int32)
+    tokens_seen = 0
+    triples_seen = 0
+    started = time.monotonic()
+
+    if verbose:
+        print(
+            f"Building dense trigram top-{top_k} sidecar from {len(files)} training files "
+            f"({counts.nbytes / 1e9:.2f} GB count table) ...",
+            flush=True,
+        )
+
+    for file_idx, path in enumerate(files):
+        if max_tokens is not None and tokens_seen >= max_tokens:
+            break
+        view = _mmap_raw_token_file(path, storage_dtype=storage_dtype)
+        take = int(view.shape[0])
+        if max_tokens is not None:
+            take = min(take, int(max_tokens) - tokens_seen)
+        if take <= 0:
+            break
+        tokens = np.asarray(view[:take], dtype=np.int32)
+        tokens_seen += int(take)
+        if carry.size:
+            tokens = np.concatenate([carry, tokens])
+        if tokens.size >= 3:
+            for start in range(0, tokens.size - 2, chunk_size):
+                end = min(tokens.size, start + chunk_size + 2)
+                chunk = tokens[start:end]
+                if chunk.size < 3:
+                    continue
+                prev = chunk[:-2].astype(np.int64, copy=False)
+                cur = chunk[1:-1].astype(np.int64, copy=False)
+                nxt = chunk[2:].astype(np.int64, copy=False)
+                flat = ((prev * vocab_size + cur) * vocab_size + nxt).astype(np.int64)
+                unique, counts_in_chunk = np.unique(flat, return_counts=True)
+                flat_counts[unique] += counts_in_chunk.astype(np.uint32, copy=False)
+                triples_seen += int(flat.shape[0])
+        carry = tokens[-2:].astype(np.int32, copy=True)
+        if verbose and ((file_idx + 1) % 10 == 0 or file_idx + 1 == len(files)):
+            elapsed = time.monotonic() - started
+            print(
+                f"  trigram sidecar counted {file_idx + 1}/{len(files)} files | "
+                f"tokens={tokens_seen / 1e9:.2f}B triples={triples_seen / 1e9:.2f}B "
+                f"| {triples_seen / max(elapsed, 1e-6) / 1e6:.1f}M triples/s",
+                flush=True,
+            )
+
+    context_counts = counts.sum(axis=1, dtype=np.uint64)
+    top_idx = np.argpartition(counts, kth=vocab_size - top_k, axis=1)[:, -top_k:]
+    top_counts = np.take_along_axis(counts, top_idx, axis=1)
+    order = np.argsort(-top_counts, axis=1)
+    top_tokens = np.take_along_axis(top_idx, order, axis=1).astype(np.int16)
+    top_counts = np.take_along_axis(top_counts, order, axis=1).astype(np.float64)
+
+    cur_tokens = (np.arange(num_contexts, dtype=np.int64) % vocab_size)[:, None]
+    base_logits = spec.base_bigram_logits.float().cpu().numpy()
+    denom = context_counts[:, None].astype(np.float64) + float(smoothing * vocab_size)
+    log_trigram = np.log((top_counts + float(smoothing)) / np.maximum(denom, 1e-12))
+    residual = log_trigram - base_logits[cur_tokens, top_tokens.astype(np.int64)]
+    residual[context_counts == 0] = 0.0
+    residual = np.clip(residual, -float(residual_clip), float(residual_clip))
+    residual_scale = float(residual_clip) / 127.0
+    residual_q = np.rint(residual / residual_scale).clip(-127, 127).astype(np.int8)
+    confidence = 255.0 * np.minimum(
+        1.0,
+        np.log1p(context_counts.astype(np.float64)) / math.log1p(confidence_count_cap),
+    )
+    confidence_q = np.rint(confidence).clip(0, 255).astype(np.uint8)
+
+    metadata = dict(spec.metadata)
+    metadata.update(
+        {
+            "trigram_sidecar": "dense_topk_residual",
+            "trigram_top_k": int(top_k),
+            "trigram_tokens_seen": int(tokens_seen),
+            "trigram_triples_seen": int(triples_seen),
+            "trigram_smoothing": float(smoothing),
+            "trigram_residual_clip": float(residual_clip),
+            "trigram_residual_scale": residual_scale,
+            "trigram_confidence_count_cap": int(confidence_count_cap),
+        }
+    )
+    return AmplifierSpec(
+        vocab_size=spec.vocab_size,
+        core_dim=spec.core_dim,
+        branch_lags=spec.branch_lags,
+        num_blocks=spec.num_blocks,
+        token_embed=spec.token_embed,
+        base_bigram_logits=spec.base_bigram_logits,
+        lag_ops=spec.lag_ops,
+        amp_w1=spec.amp_w1,
+        amp_w2=spec.amp_w2,
+        readout_weight=spec.readout_weight,
+        readout_in_proj=spec.readout_in_proj,
+        readout_out_proj=spec.readout_out_proj,
+        trigram_top_tokens=torch.from_numpy(top_tokens),
+        trigram_residual_values=torch.from_numpy(residual_q),
+        trigram_context_confidence=torch.from_numpy(confidence_q),
+        metadata=metadata,
+    )
+
+
 __all__ = [
     "SPEC_STRATEGIES",
+    "add_trigram_sidecar_to_spec",
     "build_spec_optimized",
     "count_all",
     "load_tokens_int32",

@@ -34,6 +34,9 @@ def _buffer_bytes(spec: AmplifierSpec) -> dict[str, int]:
         "readout_weight",
         "readout_in_proj",
         "readout_out_proj",
+        "trigram_top_tokens",
+        "trigram_residual_values",
+        "trigram_context_confidence",
     ):
         buf = getattr(spec, name, None)
         if buf is None:

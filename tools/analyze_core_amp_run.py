@@ -217,6 +217,24 @@ def _zero_readout_delta(model: CoreAmplifierLM) -> Iterator[bool]:
             delta_out.weight.copy_(saved)
 
 
+@contextmanager
+def _disable_trigram_sidecar(model: CoreAmplifierLM) -> Iterator[bool]:
+    """Temporarily disable the optional frozen trigram sidecar.
+
+    :param CoreAmplifierLM model: Model to modify in-place and restore.
+    :return Iterator[bool]: Whether a trigram sidecar was active.
+    """
+    old_mode = getattr(model, "trigram_sidecar_mode", "none")
+    if old_mode == "none":
+        yield False
+        return
+    model.trigram_sidecar_mode = "none"
+    try:
+        yield True
+    finally:
+        model.trigram_sidecar_mode = old_mode
+
+
 def _bucket_rows(
     base_losses: torch.Tensor,
     full_losses: torch.Tensor,
@@ -316,6 +334,14 @@ def _write_markdown(path: Path, payload: dict[str, Any]) -> None:
                 f"| base_bigram_delta_gain_bpb | {_format_float(losses.get('base_bigram_delta_gain_bpb'))} |",
             ]
         )
+    if "no_trigram_sidecar_loss" in losses:
+        lines.extend(
+            [
+                f"| no_trigram_sidecar_loss | {_format_float(losses['no_trigram_sidecar_loss'])} |",
+                f"| trigram_sidecar_gain_nats | {_format_float(losses['trigram_sidecar_gain_nats'])} |",
+                f"| trigram_sidecar_gain_bpb | {_format_float(losses.get('trigram_sidecar_gain_bpb'))} |",
+            ]
+        )
     lines.extend(
         [
             "",
@@ -397,6 +423,8 @@ def main() -> None:
         residual_token_gate_mode=str(model_cfg.get("residual_token_gate_mode", "none")),
         branch_router_mode=str(model_cfg.get("branch_router_mode", "none")),
         base_bigram_delta=str(model_cfg.get("base_bigram_delta", "none")),
+        trigram_sidecar=str(model_cfg.get("trigram_sidecar", "none")),
+        trigram_log_scale_init=float(model_cfg.get("trigram_log_scale_init", 0.0)),
         residual_readout_delta_rank=int(model_cfg.get("residual_readout_delta_rank", 0)),
         residual_readout_delta_init_std=float(
             model_cfg.get("residual_readout_delta_init_std", 0.02)
@@ -460,10 +488,12 @@ def main() -> None:
     full_loss_parts: list[torch.Tensor] = []
     no_delta_loss_parts: list[torch.Tensor] = []
     no_base_delta_loss_parts: list[torch.Tensor] = []
+    no_trigram_loss_parts: list[torch.Tensor] = []
     base_loss_sum = 0.0
     full_loss_sum = 0.0
     no_delta_loss_sum = 0.0
     no_base_delta_loss_sum = 0.0
+    no_trigram_loss_sum = 0.0
     total_tokens = 0
     total_bytes = 0
     state_obj: Optional[Any] = None
@@ -492,6 +522,11 @@ def main() -> None:
                         no_base_delta_logits, _ = model(inputs, state=state_in, return_state=True)
                     else:
                         no_base_delta_logits = None
+                with _disable_trigram_sidecar(model) as had_trigram:
+                    if had_trigram:
+                        no_trigram_logits, _ = model(inputs, state=state_in, return_state=True)
+                    else:
+                        no_trigram_logits = None
             base_loss = cross_entropy_per_token(base_logits, targets)
             full_loss = cross_entropy_per_token(full_logits, targets)
             base_loss_parts.append(base_loss.detach().cpu().flatten())
@@ -506,6 +541,10 @@ def main() -> None:
                 no_base_delta_loss = cross_entropy_per_token(no_base_delta_logits, targets)
                 no_base_delta_loss_parts.append(no_base_delta_loss.detach().cpu().flatten())
                 no_base_delta_loss_sum += float(no_base_delta_loss.sum().item())
+            if no_trigram_logits is not None:
+                no_trigram_loss = cross_entropy_per_token(no_trigram_logits, targets)
+                no_trigram_loss_parts.append(no_trigram_loss.detach().cpu().flatten())
+                no_trigram_loss_sum += float(no_trigram_loss.sum().item())
             total_tokens += int(targets.numel())
             if byte_count_lut is not None:
                 total_bytes += int(byte_count_lut[targets.long()].sum().item())
@@ -515,6 +554,7 @@ def main() -> None:
     full_losses = torch.cat(full_loss_parts)
     no_delta_losses = torch.cat(no_delta_loss_parts) if no_delta_loss_parts else None
     no_base_delta_losses = torch.cat(no_base_delta_loss_parts) if no_base_delta_loss_parts else None
+    no_trigram_losses = torch.cat(no_trigram_loss_parts) if no_trigram_loss_parts else None
     losses: dict[str, Any] = {
         "base_loss": base_loss_sum / max(1, total_tokens),
         "full_loss": full_loss_sum / max(1, total_tokens),
@@ -548,6 +588,16 @@ def main() -> None:
             if total_bytes > 0
             else None
         )
+    if no_trigram_losses is not None:
+        losses["no_trigram_sidecar_loss"] = no_trigram_loss_sum / max(1, total_tokens)
+        losses["trigram_sidecar_gain_nats"] = (no_trigram_loss_sum - full_loss_sum) / max(
+            1, total_tokens
+        )
+        losses["trigram_sidecar_gain_bpb"] = (
+            ((no_trigram_loss_sum - full_loss_sum) / math.log(2)) / total_bytes
+            if total_bytes > 0
+            else None
+        )
 
     payload = {
         "run_dir": str(run_dir),
@@ -561,6 +611,7 @@ def main() -> None:
             "residual_token_gate_mode": str(model_cfg.get("residual_token_gate_mode", "none")),
             "branch_router_mode": str(model_cfg.get("branch_router_mode", "none")),
             "base_bigram_delta": str(model_cfg.get("base_bigram_delta", "none")),
+            "trigram_sidecar": str(model_cfg.get("trigram_sidecar", "none")),
             "residual_readout_delta_rank": int(model_cfg.get("residual_readout_delta_rank", 0)),
             "trainable_parameters": int(model.trainable_parameters),
         },
@@ -571,6 +622,7 @@ def main() -> None:
             "steps": int(args.steps),
             "tokens": total_tokens,
             "bytes": total_bytes if total_bytes > 0 else None,
+            "coverage_frac": min(1.0, float(total_tokens) / max(1, int(val_tokens.numel()) - 1)),
             "exact_bpb": byte_count_lut is not None,
         },
         "losses": losses,

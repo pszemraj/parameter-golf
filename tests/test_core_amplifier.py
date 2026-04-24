@@ -16,6 +16,7 @@ import torch
 from core_amplifier_lm import (
     AmplifierSpec,
     DEFAULTS,
+    add_trigram_sidecar_to_spec,
     build_amplifier_spec,
     build_spec_optimized,
     load_tokens_int32,
@@ -350,6 +351,155 @@ def test_base_bigram_delta_is_initially_neutral_and_trainable():
     grad = candidate.base_bigram_delta.weight.grad
     assert grad is not None
     assert grad.abs().sum().item() > 0
+
+
+def test_trigram_sidecar_applies_literal_context_boost_and_carries_state():
+    """Frozen trigram sidecar should use actual prior-token context."""
+    rng = np.random.default_rng(SEED)
+    tokens = rng.integers(0, VOCAB, size=20_000, dtype=np.int64)
+    base_spec = build_amplifier_spec(
+        tokens,
+        vocab_size=VOCAB,
+        core_dim=8,
+        branch_lags=(1, 2, 4),
+        num_blocks=1,
+        fixed_dtype=torch.float16,
+    )
+    top_tokens = torch.zeros((VOCAB * VOCAB, 1), dtype=torch.int16)
+    residual_values = torch.zeros((VOCAB * VOCAB, 1), dtype=torch.int8)
+    confidence = torch.zeros(VOCAB * VOCAB, dtype=torch.uint8)
+    prev_token, cur_token, next_token = 7, 11, 13
+    context = prev_token * VOCAB + cur_token
+    top_tokens[context, 0] = next_token
+    residual_values[context, 0] = 10
+    confidence[context] = 255
+    spec = AmplifierSpec(
+        vocab_size=base_spec.vocab_size,
+        core_dim=base_spec.core_dim,
+        branch_lags=base_spec.branch_lags,
+        num_blocks=base_spec.num_blocks,
+        token_embed=base_spec.token_embed,
+        base_bigram_logits=base_spec.base_bigram_logits,
+        lag_ops=base_spec.lag_ops,
+        amp_w1=base_spec.amp_w1,
+        amp_w2=base_spec.amp_w2,
+        readout_weight=base_spec.readout_weight,
+        readout_in_proj=base_spec.readout_in_proj,
+        readout_out_proj=base_spec.readout_out_proj,
+        trigram_top_tokens=top_tokens,
+        trigram_residual_values=residual_values,
+        trigram_context_confidence=confidence,
+        metadata={**base_spec.metadata, "trigram_residual_scale": 0.1, "trigram_top_k": 1},
+    )
+    from core_amplifier_lm import CoreAmplifierLM
+
+    reference = CoreAmplifierLM(spec, core_layers=1, amplifier_dtype=torch.float32)
+    candidate = CoreAmplifierLM(
+        spec,
+        core_layers=1,
+        trigram_sidecar="frozen",
+        amplifier_dtype=torch.float32,
+    )
+    candidate.load_state_dict(reference.state_dict(), strict=False)
+
+    x = torch.tensor([[prev_token, cur_token, 5, cur_token]], dtype=torch.long)
+    with torch.no_grad():
+        ref_logits = reference(x)
+        cand_logits = candidate(x)
+        state = candidate.initial_state(1)
+        pieces = []
+        for t in range(x.size(1)):
+            logits, state = candidate.step(x[:, t], state)
+            pieces.append(logits[:, None, :])
+        stepwise = torch.cat(pieces, dim=1)
+    boost = cand_logits - ref_logits
+    assert boost[0, 0].abs().max().item() == pytest.approx(0.0, abs=1e-6)
+    assert boost[0, 1, next_token].item() == pytest.approx(1.0, abs=1e-5)
+    assert boost[0, 2].abs().max().item() == pytest.approx(0.0, abs=1e-6)
+    assert torch.allclose(cand_logits, stepwise, atol=1e-4, rtol=1e-4)
+
+
+def test_trigram_sidecar_requires_spec_tensors():
+    """Enabling trigram mode without sidecar tensors should fail loudly."""
+    rng = np.random.default_rng(SEED)
+    tokens = rng.integers(0, VOCAB, size=20_000, dtype=np.int64)
+    spec = build_amplifier_spec(
+        tokens,
+        vocab_size=VOCAB,
+        core_dim=8,
+        branch_lags=(1, 2, 4),
+        num_blocks=1,
+        fixed_dtype=torch.float16,
+    )
+    from core_amplifier_lm import CoreAmplifierLM
+
+    with pytest.raises(ValueError, match="trigram_sidecar"):
+        CoreAmplifierLM(spec, trigram_sidecar="frozen")
+
+
+def test_add_trigram_sidecar_to_spec_counts_top_contexts(tmp_path: Path):
+    """Sidecar builder should recover top next tokens for literal contexts."""
+    vocab = 16
+    train_tokens = np.array([1, 2, 3, 1, 2, 3, 1, 2, 4, 5, 6, 7], dtype=np.int64)
+    spec = build_amplifier_spec(
+        train_tokens,
+        vocab_size=vocab,
+        core_dim=4,
+        branch_lags=(1, 2),
+        num_blocks=1,
+        fixed_dtype=torch.float32,
+    )
+    shard_dir = tmp_path / "shards"
+    shard_dir.mkdir()
+    train_tokens.astype(np.uint16).tofile(shard_dir / "fineweb_train_000000.bin")
+
+    sidecar = add_trigram_sidecar_to_spec(
+        spec,
+        shard_dir,
+        top_k=2,
+        smoothing=0.25,
+        chunk_size=4,
+        verbose=False,
+    )
+    assert sidecar.trigram_top_tokens is not None
+    assert sidecar.trigram_residual_values is not None
+    assert sidecar.trigram_context_confidence is not None
+    context = 1 * vocab + 2
+    assert int(sidecar.trigram_top_tokens[context, 0].item()) == 3
+    assert int(sidecar.trigram_context_confidence[context].item()) > 0
+    assert sidecar.metadata["trigram_top_k"] == 2
+
+
+def test_residual_token_gate_is_initially_neutral():
+    """Tokenwise residual gate should not suppress the residual at init."""
+    rng = np.random.default_rng(SEED)
+    tokens = rng.integers(0, VOCAB, size=20_000, dtype=np.int64)
+    spec = build_amplifier_spec(
+        tokens,
+        vocab_size=VOCAB,
+        core_dim=8,
+        branch_lags=(1, 2, 4),
+        num_blocks=1,
+        fixed_dtype=torch.float16,
+    )
+    from core_amplifier_lm import CoreAmplifierLM
+
+    reference = CoreAmplifierLM(spec, core_layers=2, amplifier_dtype=torch.float32)
+    candidate = CoreAmplifierLM(
+        spec,
+        core_layers=2,
+        residual_token_gate_mode="base",
+        amplifier_dtype=torch.float32,
+    )
+    candidate.load_state_dict(reference.state_dict(), strict=False)
+    x = torch.randint(0, VOCAB, (2, 17))
+    with torch.no_grad():
+        ref_logits = reference(x)
+        cand_logits = candidate(x)
+    assert torch.allclose(ref_logits, cand_logits, atol=1e-5, rtol=1e-5)
+    gate = candidate.latest_residual_token_gate()
+    assert gate is not None
+    assert torch.allclose(gate, torch.ones_like(gate), atol=1e-6, rtol=0.0)
 
 
 def test_residual_readout_delta_rejects_invalid_rank():
@@ -819,9 +969,11 @@ def test_record_defaults_match_recommended_run():
     assert model["branch_temporal_lag_scale"] == 1.0
     assert model["residual_token_gate_mode"] == "none"
     assert model["branch_router_mode"] == "none"
+    assert model["trigram_sidecar"] == "none"
     assert train["batch_size"] == 256
     assert train["carry_chunks"] == 16
     assert train["bptt_chunks"] == 2
+    assert train["full_val_final"] is False
     assert train["learning_rate"] == 3e-3
     assert train["warmup_steps"] == 100
     assert train["lr_hold_steps"] == 1500
@@ -1522,6 +1674,8 @@ def test_training_script_architecture_modes_roundtrip():
                 "core_base",
                 "--branch-router-mode",
                 "softmax",
+                "--trigram-sidecar",
+                "none",
                 "--scan-backend",
                 "assoc",
                 "--num-blocks",
@@ -1563,6 +1717,7 @@ def test_training_script_architecture_modes_roundtrip():
         assert resolved["model"]["branch_temporal_mode"] == "ema_hybrid"
         assert resolved["model"]["residual_token_gate_mode"] == "core_base"
         assert resolved["model"]["branch_router_mode"] == "softmax"
+        assert resolved["model"]["trigram_sidecar"] == "none"
         assert resolved["runtime"]["scan_backend_requested"] == "assoc"
         assert resolved["runtime"]["scan_backend_active"] == "assoc"
 
