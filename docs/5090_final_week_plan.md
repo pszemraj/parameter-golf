@@ -1,6 +1,6 @@
 # 5090 Final Week Plan
 
-Last updated: `2026-04-23`
+Last updated: `2026-04-24`
 
 This is the deadline-focused execution note for the final week on the local RTX 5090. It complements the architecture note instead of replacing it.
 
@@ -26,14 +26,13 @@ Out of scope for this note:
 
 ## Locked Context
 
-Current confirmed frontier by three-seed mean:
+Current confirmed frontier by three-seed mean after the cleaned `v2`
+confirmation batch:
 
 | Rank | Run | Mean `val_bpb` | Mean steady tok/s |
 |---|---|---:|---:|
-| 1 | `blocks1_resid10_e12_h7000_1b` | `2.1865341393` | `372,888` |
-| 2 | `blocks1_resid12_e10_h7000_1b` | `2.1866023565` | `374,271` |
-| 3 | `blocks0_resid12_e10_h7000_1b` | `2.1899359311` | `386,331` |
-| 4 | `blocks2_resid12_e8_h7000_1b` | `2.2005760974` | `442,062` |
+| 1 | `blocks0_resid12_e10_lr0035_final_h7000_1b` | `2.1757877509` | `576,426` |
+| 2 | `blocks1_resid10_e12_lr0035_final_h7000_1b` | `2.1765101841` | `552,843` |
 
 Locked schedule defaults:
 
@@ -68,6 +67,15 @@ Primary reps:
   - `blocks0_resid12_e10`
 - fast structural control:
   - `blocks2_resid12_e8`
+
+Current interpretation:
+
+- the tuned safe-lane finalists are now the incumbent local choices
+- the `gate=base x lr=3.5e-3` sidecar was negative on `blocks1` seed `1337`
+  and should be stopped
+- both finalists leave more than 11 MB of artifact budget unused, so the next
+  architecture work should spend budget on thesis-aligned non-transformer
+  capacity rather than replaying the same gate/temporal formulations
 
 ## Protocol Invariants
 
@@ -283,42 +291,87 @@ FINALIST_SPECS=$'blocks1_gate_base_ema /abs/path/to/shared 10 12.0 base ema none
 bash scripts/run_5090_finalist_confirm1b.sh
 ```
 
-Queued next batch:
+Completed queued batch:
 
 ```bash
 bash scripts/run_5090_post_temporal_queue.sh
 ```
 
-To run the sidecar immediately after the safe finalists in the same bash session:
+The cleaned `v2` run completed for seeds `1337 2027 3141`. The optional
+`gate x lr` sidecar no longer has promotion value after the completed
+`blocks1` seed-`1337` result:
+
+- `blocks1_resid10_e12_gate_base_lr0035_h3500_512m_s1337`: `2.2575790952`
+- matching no-gate safe-lane screen was better and faster
+
+### 6. Investigation lane: residual readout delta
+
+Script:
 
 ```bash
-RUN_GATE_LR_SIDECAR_AFTER_FINALISTS=1 bash scripts/run_5090_post_temporal_queue.sh
+bash scripts/run_5090_readout_delta_screen.sh
 ```
 
-This keeps the safe finalists as the primary batch and then runs the remaining
-`gate=base x lr=3.5e-3` sidecar without introducing a second queue system.
-The queue uses `FINALIST_SEEDS=1337 2027 3141` and
-`SIDECAR_SEEDS=1337 2027` by default.
+Default contract:
+
+- reps:
+  - `blocks1_resid10_e12`
+  - `blocks0_resid12_e10`
+- seeds:
+  - `1337`
+- ranks:
+  - `128`
+  - `256`
+- `4096` steps / `512M` planned tokens
+- `learning_rate=3.5e-3`
+- frozen shared specs from the cleaned finalist families
+- all serious-run protocol invariants still apply
+
+Why this is in-scope:
+
+- it adds trainable capacity after the frozen residual readout without changing
+  the frozen statistics build
+- the delta output projection is zero-initialized, so enabling it does not
+  perturb step-0 logits
+- it is not attention, not a transformer block, and not learned token-token
+  mixing
+- it directly addresses the current artifact-budget gap
+
+Promotion rule:
+
+- compare each rank to the matching no-delta `512M` safe-lane point
+- require at least `0.003` bpb gain on seed `1337`, or a smaller gain with
+  clearly improved hard-token bucket diagnostics
+- allow at most `15%` throughput loss for `rank=128`; higher ranks must justify
+  their extra cost with a larger bpb gain
+- if a rank wins on one family, confirm the same rank on seed `2027` before
+  considering `1B`
+
+Diagnostic command for completed or partial runs:
+
+```bash
+conda run -s --name train python tools/analyze_core_amp_run.py /path/to/run_dir --steps 16
+```
 
 ## Stop Rules
 
-Stop adding complexity and move straight to finalist confirmations if any of the following happen:
+Stop adding complexity and keep the cleaned finalists if any of the following happen:
 
 - the gate lane is flat
 - the EMA lane is flat
 - the router lane fails its first-pass bar
+- the readout-delta lane is flat after diagnostics show no hard-token-bucket
+  improvement
 
 If the whole aggressive lane stalls, the remaining budget should go to:
 
-- confirming the best safe-lane point
-- the one remaining cross-term that still fits the thesis:
-  - `gate=base x lr=3.5e-3` on `blocks1 10x12`
-  - `gate=base x lr=3.5e-3` on `blocks0 12x10`
+- target-hardware verification of the current finalists
+- one carefully bounded frozen-structure probe with GPU-friendly dimensions
 
 Do not spend the final week on:
 
-- more frozen blocks
-- `core_dim` changes
+- more frozen blocks under the already-tested `core_dim=48` setup
+- arbitrary `core_dim` changes that create unfriendly CUDA shapes
 - larger controller ladders unless a new mechanism wins decisively
 - attention-like ideas
 - token-token mixing

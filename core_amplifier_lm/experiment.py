@@ -37,6 +37,8 @@ SUMMARY_FIELDS = [
     "branch_temporal_lag_scale",
     "residual_token_gate_mode",
     "branch_router_mode",
+    "residual_readout_delta_rank",
+    "residual_readout_delta_init_std",
     "carry_chunks",
     "bptt_chunks",
     "branch_lags",
@@ -101,7 +103,8 @@ CONTROL_TENSOR_NAME_PATTERNS = tuple(
         "CORE_AMP_CONTROL_TENSOR_NAME_PATTERNS",
         (
             "_h0_raw,resid_logit,block_gain,branch_scale,branch_bias,"
-            "readout_branch_scale,residual_log_scale,logit_bias,norm.scale"
+            "readout_branch_scale,residual_log_scale,residual_readout_delta_log_scale,"
+            "logit_bias,norm.scale"
         ),
     ).split(",")
     if pattern
@@ -659,6 +662,8 @@ def summarize_run_dir(run_dir: str | Path) -> dict[str, str]:
         "branch_temporal_lag_scale": _stringify(model.get("branch_temporal_lag_scale")),
         "residual_token_gate_mode": _stringify(model.get("residual_token_gate_mode")),
         "branch_router_mode": _stringify(model.get("branch_router_mode")),
+        "residual_readout_delta_rank": _stringify(model.get("residual_readout_delta_rank")),
+        "residual_readout_delta_init_std": _stringify(model.get("residual_readout_delta_init_std")),
         "carry_chunks": _stringify(training.get("carry_chunks")),
         "bptt_chunks": _stringify(training.get("bptt_chunks")),
         "branch_lags": ",".join(str(x) for x in model.get("branch_lags", [])),

@@ -600,6 +600,10 @@ def update_controller_config(
     cfg.model["branch_temporal_lag_scale"] = float(env("BRANCH_TEMPORAL_LAG_SCALE", "1.0"))
     cfg.model["residual_token_gate_mode"] = env("RESIDUAL_TOKEN_GATE_MODE", "none")
     cfg.model["branch_router_mode"] = env("BRANCH_ROUTER_MODE", "none")
+    cfg.model["residual_readout_delta_rank"] = int(env("RESIDUAL_READOUT_DELTA_RANK", "0"))
+    cfg.model["residual_readout_delta_init_std"] = float(
+        env("RESIDUAL_READOUT_DELTA_INIT_STD", "0.02")
+    )
     cfg.training["seq_len"] = int(seq_len)
     cfg.training["batch_size"] = int(batch_size)
     cfg.training["grad_accum"] = int(grad_accum)
@@ -731,6 +735,10 @@ def run_controller_sweep(repo_root: Path) -> None:
         env("RESIDUAL_TOKEN_GATE_MODE", "none"),
         "--branch-router-mode",
         env("BRANCH_ROUTER_MODE", "none"),
+        "--residual-readout-delta-rank",
+        env("RESIDUAL_READOUT_DELTA_RANK", "0"),
+        "--residual-readout-delta-init-std",
+        env("RESIDUAL_READOUT_DELTA_INIT_STD", "0.02"),
         "--num-blocks",
         env("NUM_BLOCKS", "9"),
         "--fixed-dtype",
@@ -878,6 +886,10 @@ def run_controller_sweep(repo_root: Path) -> None:
             env("RESIDUAL_TOKEN_GATE_MODE", "none"),
             "--branch-router-mode",
             env("BRANCH_ROUTER_MODE", "none"),
+            "--residual-readout-delta-rank",
+            env("RESIDUAL_READOUT_DELTA_RANK", "0"),
+            "--residual-readout-delta-init-std",
+            env("RESIDUAL_READOUT_DELTA_INIT_STD", "0.02"),
             "--scan-backend",
             env("SCAN_BACKEND", "auto"),
             "--val-every",
@@ -1029,6 +1041,10 @@ def run_structure_sweep(repo_root: Path) -> None:
             env("RESIDUAL_TOKEN_GATE_MODE", "none"),
             "--branch-router-mode",
             env("BRANCH_ROUTER_MODE", "none"),
+            "--residual-readout-delta-rank",
+            env("RESIDUAL_READOUT_DELTA_RANK", "0"),
+            "--residual-readout-delta-init-std",
+            env("RESIDUAL_READOUT_DELTA_INIT_STD", "0.02"),
             "--scan-backend",
             env("SCAN_BACKEND", "auto"),
             "--num-blocks",
@@ -1070,7 +1086,11 @@ def run_structure_sweep(repo_root: Path) -> None:
         if not dry_run:
             cfg = ModelConfig.load(run_dir)
             cfg.meta["run_name"] = spec.name
-            cfg.meta["phase"] = "5090_structure_screening"
+            cfg.meta["phase"] = env("CORE_AMP_PHASE", "5090_structure_screening")
+            cfg.model["residual_readout_delta_rank"] = int(env("RESIDUAL_READOUT_DELTA_RANK", "0"))
+            cfg.model["residual_readout_delta_init_std"] = float(
+                env("RESIDUAL_READOUT_DELTA_INIT_STD", "0.02")
+            )
             cfg.training["seq_len"] = int(resolved_structure_seq_len)
             cfg.training["batch_size"] = int(resolved_structure_batch_size)
             cfg.training["grad_accum"] = int(resolved_structure_grad_accum)
@@ -1139,6 +1159,10 @@ def run_structure_sweep(repo_root: Path) -> None:
             env("RESIDUAL_TOKEN_GATE_MODE", "none"),
             "--branch-router-mode",
             env("BRANCH_ROUTER_MODE", "none"),
+            "--residual-readout-delta-rank",
+            env("RESIDUAL_READOUT_DELTA_RANK", "0"),
+            "--residual-readout-delta-init-std",
+            env("RESIDUAL_READOUT_DELTA_INIT_STD", "0.02"),
             "--scan-backend",
             env("SCAN_BACKEND", "auto"),
             "--val-every",

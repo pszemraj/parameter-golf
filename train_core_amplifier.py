@@ -935,6 +935,7 @@ def build_optimizer(
                 "branch_bias",
                 "readout_branch_scale",
                 "residual_log_scale",
+                "residual_readout_delta_log_scale",
                 "logit_bias",
             }
         ):
@@ -1392,6 +1393,8 @@ def parse_args() -> argparse.Namespace:
         default=None,
         choices=["none", "softmax"],
     )
+    parser.add_argument("--residual-readout-delta-rank", type=int, default=None)
+    parser.add_argument("--residual-readout-delta-init-std", type=float, default=None)
     parser.add_argument("--readout-rank", type=int, default=None)
     parser.add_argument(
         "--scan-backend",
@@ -1626,6 +1629,8 @@ def build_resolved_config_payload(
     branch_temporal_lag_scale: float,
     residual_token_gate_mode: str,
     branch_router_mode: str,
+    residual_readout_delta_rank: int,
+    residual_readout_delta_init_std: float,
     trainable_parameters: int,
     fixed_buffer_bytes: int,
     compile_requested: bool,
@@ -1698,6 +1703,10 @@ def build_resolved_config_payload(
     :param float branch_temporal_lag_scale: Branch temporal lag scale.
     :param str residual_token_gate_mode: Tokenwise residual gating mode.
     :param str branch_router_mode: Per-token branch router mode.
+    :param int residual_readout_delta_rank: Low-rank trainable residual
+        readout correction rank.
+    :param float residual_readout_delta_init_std: Init std for the correction
+        input projection.
     :param int trainable_parameters: Trainable parameter count.
     :param int fixed_buffer_bytes: Fixed buffer bytes.
     :param bool compile_requested: Whether compile was requested.
@@ -1750,6 +1759,8 @@ def build_resolved_config_payload(
             "branch_temporal_lag_scale": float(branch_temporal_lag_scale),
             "residual_token_gate_mode": residual_token_gate_mode,
             "branch_router_mode": branch_router_mode,
+            "residual_readout_delta_rank": int(residual_readout_delta_rank),
+            "residual_readout_delta_init_std": float(residual_readout_delta_init_std),
             "trainable_parameters": int(trainable_parameters),
             "fixed_buffer_bytes": int(fixed_buffer_bytes),
             "smoothing": spec.metadata.get("smoothing"),
@@ -2025,6 +2036,20 @@ def main() -> None:
             md.get("branch_router_mode", "none"),
         )
     )
+    residual_readout_delta_rank = int(
+        _resolve(
+            args.residual_readout_delta_rank,
+            m.get("residual_readout_delta_rank"),
+            md.get("residual_readout_delta_rank", 0),
+        )
+    )
+    residual_readout_delta_init_std = float(
+        _resolve(
+            args.residual_readout_delta_init_std,
+            m.get("residual_readout_delta_init_std"),
+            md.get("residual_readout_delta_init_std", 0.02),
+        )
+    )
     scan_backend = str(
         _resolve(
             args.scan_backend,
@@ -2065,7 +2090,9 @@ def main() -> None:
         f"residual_core={residual_core} branch_temporal_mode={branch_temporal_mode} "
         f"branch_temporal_lag_scale={branch_temporal_lag_scale} "
         f"residual_token_gate_mode={residual_token_gate_mode} "
-        f"branch_router_mode={branch_router_mode} scan_backend={scan_backend} "
+        f"branch_router_mode={branch_router_mode} "
+        f"residual_readout_delta_rank={residual_readout_delta_rank} "
+        f"scan_backend={scan_backend} "
         f"bptt_chunks={bptt_chunks} carry_chunks={carry_chunks} "
         f"grad_ckpt={gradient_checkpointing}"
     )
@@ -2199,6 +2226,8 @@ def main() -> None:
         branch_temporal_lag_scale=branch_temporal_lag_scale,
         residual_token_gate_mode=residual_token_gate_mode,
         branch_router_mode=branch_router_mode,
+        residual_readout_delta_rank=residual_readout_delta_rank,
+        residual_readout_delta_init_std=residual_readout_delta_init_std,
         scan_backend=scan_backend,
         gradient_checkpointing=gradient_checkpointing,
     ).to(device)
@@ -2341,6 +2370,8 @@ def main() -> None:
         branch_temporal_lag_scale=branch_temporal_lag_scale,
         residual_token_gate_mode=residual_token_gate_mode,
         branch_router_mode=branch_router_mode,
+        residual_readout_delta_rank=residual_readout_delta_rank,
+        residual_readout_delta_init_std=residual_readout_delta_init_std,
         trainable_parameters=core_model.trainable_parameters,
         fixed_buffer_bytes=core_model.fixed_nbytes,
         compile_requested=compile_requested,

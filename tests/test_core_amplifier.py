@@ -228,6 +228,86 @@ def test_residual_mingru_controller_step_consistency():
     assert (full - stepwise).abs().max().item() < 1e-4
 
 
+def test_residual_readout_delta_is_initially_neutral_and_trainable():
+    """The readout delta should add capacity without changing step-0 logits."""
+    rng = np.random.default_rng(SEED)
+    tokens = rng.integers(0, VOCAB, size=20_000, dtype=np.int64)
+    spec = build_amplifier_spec(
+        tokens,
+        vocab_size=VOCAB,
+        core_dim=8,
+        branch_lags=(1, 2, 4),
+        num_blocks=1,
+        fixed_dtype=torch.float16,
+    )
+    from core_amplifier_lm import CoreAmplifierLM
+
+    reference = CoreAmplifierLM(
+        spec,
+        core_layers=3,
+        core_expansion=2.0,
+        residual_core=True,
+        residual_core_init=-2.0,
+        amplifier_dtype=torch.float32,
+    )
+    candidate = CoreAmplifierLM(
+        spec,
+        core_layers=3,
+        core_expansion=2.0,
+        residual_core=True,
+        residual_core_init=-2.0,
+        residual_readout_delta_rank=4,
+        amplifier_dtype=torch.float32,
+    )
+    load_info = candidate.load_state_dict(reference.state_dict(), strict=False)
+    assert not load_info.unexpected_keys
+    assert set(load_info.missing_keys) == {
+        "residual_readout_delta_in.weight",
+        "residual_readout_delta_out.weight",
+        "residual_readout_delta_log_scale",
+    }
+
+    x = torch.randint(0, VOCAB, (2, 19))
+    with torch.no_grad():
+        ref_logits = reference(x[:, :-1])
+        cand_logits = candidate(x[:, :-1])
+        state = candidate.initial_state(2)
+        parts = []
+        for t in range(x.size(1) - 1):
+            logits, state = candidate.step(x[:, t], state)
+            parts.append(logits[:, None, :])
+        stepwise = torch.cat(parts, dim=1)
+    assert torch.allclose(ref_logits, cand_logits, atol=1e-6, rtol=0.0)
+    assert torch.allclose(cand_logits, stepwise, atol=1e-4, rtol=1e-4)
+
+    loss = torch.nn.functional.cross_entropy(
+        candidate(x[:, :-1]).reshape(-1, VOCAB),
+        x[:, 1:].reshape(-1),
+    )
+    loss.backward()
+    grad = candidate.residual_readout_delta_out.weight.grad
+    assert grad is not None
+    assert grad.abs().sum().item() > 0
+
+
+def test_residual_readout_delta_rejects_invalid_rank():
+    """Readout delta rank should fail loudly for invalid values."""
+    rng = np.random.default_rng(SEED)
+    tokens = rng.integers(0, VOCAB, size=20_000, dtype=np.int64)
+    spec = build_amplifier_spec(
+        tokens,
+        vocab_size=VOCAB,
+        core_dim=8,
+        branch_lags=(1, 2, 4),
+        num_blocks=1,
+        fixed_dtype=torch.float16,
+    )
+    from core_amplifier_lm import CoreAmplifierLM
+
+    with pytest.raises(ValueError, match="residual_readout_delta_rank"):
+        CoreAmplifierLM(spec, residual_readout_delta_rank=-1)
+
+
 def test_lagged_temporal_mode_step_consistency():
     """Explicit lagged branch taps should preserve forward/step equivalence."""
     rng = np.random.default_rng(SEED)

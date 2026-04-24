@@ -40,12 +40,13 @@ pg_5090_expect_unset_or_empty() {
 
 pg_5090_require_serious_launcher_defaults() {
   local script_name="$1"
+  local expected_preset="${2:-controller_default}"
   if [[ "${ALLOW_DEGRADED_5090_SERIOUS:-0}" == "1" ]]; then
     echo "${script_name}: ALLOW_DEGRADED_5090_SERIOUS=1, skipping serious-run guard" >&2
     return 0
   fi
 
-  pg_5090_expect_env "${script_name}" "PRESET" "controller_default"
+  pg_5090_expect_env "${script_name}" "PRESET" "${expected_preset}"
   pg_5090_expect_env "${script_name}" "COMPILE" "0"
   pg_5090_expect_env "${script_name}" "GRADIENT_CHECKPOINTING" "0"
   pg_5090_expect_env "${script_name}" "REBUILD_SHARED" "0"

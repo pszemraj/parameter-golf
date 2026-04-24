@@ -119,6 +119,19 @@ def _normalize_branch_router_mode(mode: str) -> str:
     return normalized
 
 
+def _normalize_nonnegative_int(value: int | str, *, name: str) -> int:
+    """Normalize a non-negative integer model knob.
+
+    :param int | str value: Requested value.
+    :param str name: Name used in validation errors.
+    :return int: Normalized integer value.
+    """
+    out = int(value)
+    if out < 0:
+        raise ValueError(f"{name} must be non-negative, got {value}")
+    return out
+
+
 def _count_unigrams(tokens: np.ndarray, vocab_size: int) -> np.ndarray:
     """Count token unigrams.
 
@@ -1266,6 +1279,8 @@ class CoreAmplifierLM(nn.Module):
         branch_temporal_lag_scale: float = 1.0,
         residual_token_gate_mode: str = "none",
         branch_router_mode: str = "none",
+        residual_readout_delta_rank: int = 0,
+        residual_readout_delta_init_std: float = 0.02,
         scan_backend: str = "auto",
         gradient_checkpointing: bool = False,
     ) -> None:
@@ -1284,6 +1299,11 @@ class CoreAmplifierLM(nn.Module):
         :param float branch_temporal_lag_scale: Lag mixing scale.
         :param str residual_token_gate_mode: Tokenwise residual gating mode.
         :param str branch_router_mode: Per-token branch router mode.
+        :param int residual_readout_delta_rank: Optional low-rank trainable
+            correction added to the frozen residual readout. ``0`` disables it.
+        :param float residual_readout_delta_init_std: Standard deviation for
+            the trainable delta input projection. The output projection is
+            always zero-initialized to preserve step-0 parity.
         :param str scan_backend: Requested scan backend for parallel recurrences.
         :param bool gradient_checkpointing: Whether to checkpoint amplifier work.
         """
@@ -1297,6 +1317,16 @@ class CoreAmplifierLM(nn.Module):
             residual_token_gate_mode
         )
         self.branch_router_mode = _normalize_branch_router_mode(branch_router_mode)
+        self.residual_readout_delta_rank = _normalize_nonnegative_int(
+            residual_readout_delta_rank,
+            name="residual_readout_delta_rank",
+        )
+        self.residual_readout_delta_init_std = float(residual_readout_delta_init_std)
+        if self.residual_readout_delta_rank > 0 and self.residual_readout_delta_init_std <= 0:
+            raise ValueError(
+                "residual_readout_delta_init_std must be positive when "
+                "residual_readout_delta_rank > 0"
+            )
         self.scan_backend_requested = normalize_scan_backend(scan_backend, allow_heinsen=True)
         self.num_branches = len(spec.branch_lags)
         self.max_branch_lag = max(self.branch_lags)
@@ -1401,6 +1431,29 @@ class CoreAmplifierLM(nn.Module):
         self.readout_branch_scale = nn.Parameter(torch.ones(self.num_branches))
         self.residual_log_scale = nn.Parameter(torch.tensor(-0.5))
         self.logit_bias = nn.Parameter(torch.zeros(self.vocab_size))
+        if self.residual_readout_delta_rank > 0:
+            self.residual_readout_delta_in = nn.Linear(
+                self.amp_dim,
+                self.residual_readout_delta_rank,
+                bias=False,
+            )
+            self.residual_readout_delta_out = nn.Linear(
+                self.residual_readout_delta_rank,
+                self.vocab_size,
+                bias=False,
+            )
+            self.residual_readout_delta_log_scale = nn.Parameter(torch.tensor(0.0))
+            with torch.no_grad():
+                nn.init.normal_(
+                    self.residual_readout_delta_in.weight,
+                    mean=0.0,
+                    std=self.residual_readout_delta_init_std,
+                )
+                self.residual_readout_delta_out.weight.zero_()
+        else:
+            self.residual_readout_delta_in = None
+            self.residual_readout_delta_out = None
+            self.residual_readout_delta_log_scale = None
         if self.residual_token_gate_mode == "none":
             self.residual_token_gate = None
         else:
@@ -1919,12 +1972,26 @@ class CoreAmplifierLM(nn.Module):
             branches.shape[0], branches.shape[1], n * c
         )
         if self._readout_weight_runtime is not None:
-            return F.linear(x, self._readout_weight_runtime)
-        assert (
-            self._readout_in_proj_runtime is not None and self._readout_out_proj_runtime is not None
+            logits = F.linear(x, self._readout_weight_runtime)
+        else:
+            assert (
+                self._readout_in_proj_runtime is not None
+                and self._readout_out_proj_runtime is not None
+            )
+            hidden = F.linear(x, self._readout_in_proj_runtime)
+            logits = F.linear(hidden, self._readout_out_proj_runtime)
+        if self.residual_readout_delta_in is None or self.residual_readout_delta_out is None:
+            return logits
+        delta_hidden = self.residual_readout_delta_in(
+            x.to(self.residual_readout_delta_in.weight.dtype)
         )
-        hidden = F.linear(x, self._readout_in_proj_runtime)
-        return F.linear(hidden, self._readout_out_proj_runtime)
+        delta_logits = self.residual_readout_delta_out(delta_hidden)
+        assert self.residual_readout_delta_log_scale is not None
+        delta_scale = torch.exp(self.residual_readout_delta_log_scale).to(
+            device=delta_logits.device,
+            dtype=delta_logits.dtype,
+        )
+        return logits + (delta_scale * delta_logits).to(dtype=logits.dtype)
 
     def base_path_logits(
         self, input_ids: torch.Tensor, *, dtype: Optional[torch.dtype] = None

@@ -156,6 +156,8 @@ def test_summarize_run_dir_reads_structured_artifacts(tmp_path: Path):
                 "residual_core_init": -2.0,
                 "residual_token_gate_mode": "base",
                 "branch_router_mode": "softmax",
+                "residual_readout_delta_rank": 128,
+                "residual_readout_delta_init_std": 0.02,
                 "branch_lags": [1, 2, 4],
                 "num_blocks": 3,
                 "readout_rank": None,
@@ -248,6 +250,8 @@ def test_summarize_run_dir_reads_structured_artifacts(tmp_path: Path):
     assert row["trainable_int8_zlib_bytes"] == "345"
     assert row["residual_token_gate_mode"] == "base"
     assert row["branch_router_mode"] == "softmax"
+    assert row["residual_readout_delta_rank"] == "128"
+    assert row["residual_readout_delta_init_std"] == "0.02"
     assert row["scan_backend"] == "assoc"
     assert row["gradient_checkpointing"] == "true"
     assert row["repo_code_bytes"] == "654321"

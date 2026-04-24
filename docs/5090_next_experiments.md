@@ -1,6 +1,6 @@
 # 5090 Next Experiments
 
-Last updated: `2026-04-23`
+Last updated: `2026-04-24`
 
 This note is the short working summary. The full architecture source of truth is now:
 
@@ -9,20 +9,21 @@ This note is the short working summary. The full architecture source of truth is
 
 ## Frontier Snapshot
 
-Current best completed `1B` local points by three-seed mean:
+Current best completed `1B` local points by three-seed mean after the cleaned
+`v2` finalist rerun:
 
 | Rank | Run | Mean `val_bpb` | Std | Mean steady tok/s | Mean artifact bytes |
 |---|---|---:|---:|---:|---:|
-| 1 | `blocks1_resid10_e12_h7000_1b` | `2.1865341393` | `0.0052472581` | `372,888` | `4,790,559` |
-| 2 | `blocks1_resid12_e10_h7000_1b` | `2.1866023565` | `0.0051325073` | `374,271` | `4,791,951` |
-| 3 | `blocks0_resid12_e10_h7000_1b` | `2.1899359311` | `0.0039254056` | `386,331` | `3,945,168` |
-| 4 | `blocks2_resid12_e8_h7000_1b` | `2.2005760974` | `0.0018741094` | `442,062` | `5,326,970` |
+| 1 | `blocks0_resid12_e10_lr0035_final_h7000_1b` | `2.1757877509` | `0.0029076698` | `576,426` | `4,007,243` |
+| 2 | `blocks1_resid10_e12_lr0035_final_h7000_1b` | `2.1765101841` | `0.0061762455` | `552,843` | `4,853,073` |
 
 Interpretation:
 
-- `blocks1` is still the quality frontier, but the top two one-block geometries remain effectively tied.
-- `blocks0 12x10` is the lean control.
-- `blocks2 12x8` is still useful as the fast, stable structural control.
+- `blocks0 12x10` is now the local mean leader by a small margin and is much faster.
+- `blocks1 10x12` is still close enough to keep as the quality counterweight.
+- Both finalists are far under the 16 MB artifact budget, so the next useful
+  architecture ideas should spend some of that budget on non-transformer
+  capacity instead of rechecking small schedule variants.
 
 ## Locked Schedule Defaults
 
@@ -48,18 +49,9 @@ Working defaults now:
 - `1B` is the confirmation budget for finalists.
 - Anything shorter than `512M` is only for smoke tests or harness checks.
 
-## Final-Week Execution Order
+## Final-Week Execution Read
 
-The week is now split into:
-
-- safe lane:
-  - a compact `max_lr` probe on the incumbent reps
-- aggressive lane:
-  - tokenwise gating
-  - EMA / EMA-hybrid temporal taps
-  - branch routing only if the temporal lane wins
-- finalist lane:
-  - `1B` three-seed confirmations on the promoted winners
+The original final-week sequence has run far enough to close its main loop:
 
 Launchers:
 
@@ -118,6 +110,23 @@ Completed so far in the final-week lane:
     - skip router
     - move straight to queued `1B` finalist confirmations
 
+- cleaned `v2` finalist confirmations:
+  - `blocks0_resid12_e10_lr0035_final`: mean `2.1757877509`
+  - `blocks1_resid10_e12_lr0035_final`: mean `2.1765101841`
+  - both completed under exact `val_bpb`, explicit validation shards, and
+    `scan_backend=assoc_accel`
+  - decision:
+    - keep both as current finalists
+    - treat the ranking as close enough that new architecture probes should
+      screen both, not only the current mean leader
+
+- gate/LR sidecar:
+  - completed `blocks1 gate=base lr=3.5e-3` seed `1337`
+  - result: `2.2575790952`, slower than the matching no-gate safe-lane point
+  - decision:
+    - stop this sidecar
+    - do not spend more queue time on the existing tokenwise gate formulation
+
 ## Plan Delta From The No-Fallback Audit
 
 The high-level batch order did not change.
@@ -137,45 +146,38 @@ Practical consequence:
 
 ## Immediate Next Commands
 
-Safe-lane and temporal read now imply the next serious batch is the queued `1B` confirmation set:
+The next serious architecture probe is the readout-delta screen. It adds a
+zero-initialized trainable low-rank correction to the frozen residual readout,
+so step-0 logits are unchanged and the path remains Core/Amplifier-style:
+frozen statistics plus recurrent controller, no attention and no learned
+token-token mixing.
+
+Dry run first:
 
 ```bash
-bash scripts/run_5090_post_temporal_queue.sh
+DRY_RUN=1 RUN_VERSION=v1 SEEDS=1337 RANKS="128 256" bash scripts/run_5090_readout_delta_screen.sh
 ```
 
-This queues:
-
-- `blocks1_resid10_e12_lr0035_final`
-- `blocks0_resid12_e10_lr0035_final`
-- seeds `1337 2027 3141`
-- output roots ending in `_v2`
-
-Sidecar note:
-
-- `blocks0 gate=base` remains the one aggressive-lane result that actually cleared a promotion bar
-- `blocks1 gate=base` missed the bar at `lr=3e-3`, but only narrowly
-- that makes `gate=base x lr=3.5e-3` the one remaining architecture cross-term worth queueing behind the safe finalists
-
-Exact sidecar command:
+Then run:
 
 ```bash
-bash scripts/run_5090_gate_lr_sidecar.sh
+RUN_VERSION=v1 SEEDS=1337 RANKS="128 256" bash scripts/run_5090_readout_delta_screen.sh
 ```
 
-Direct sidecar default seeds are `1337 2027`. The post-temporal queue passes
-those via `SIDECAR_SEEDS` so it no longer inherits the finalist `3141` seed.
-
-To run the safe finalists and then the sidecar in one plain bash flow:
+Use the diagnostic tool on completed or partial runs before extending a losing
+lane:
 
 ```bash
-RUN_GATE_LR_SIDECAR_AFTER_FINALISTS=1 bash scripts/run_5090_post_temporal_queue.sh
+conda run -s --name train python tools/analyze_core_amp_run.py /path/to/run_dir --steps 16
 ```
 
-Equivalent explicit form:
+For a quick one-family launch while training is already in progress elsewhere:
 
 ```bash
-RUN_VERSION=v2 RUN_GATE_LR_SIDECAR_AFTER_FINALISTS=1 bash scripts/run_5090_post_temporal_queue.sh
+RUN_VERSION=v1 SEEDS=1337 RANKS=128 RUN_BLOCKS1=0 bash scripts/run_5090_readout_delta_screen.sh
 ```
+
+The old `gate x lr` sidecar is no longer recommended.
 
 ## Why The Architecture Lane Changed
 
@@ -185,18 +187,22 @@ The schedule question is no longer the biggest uncertainty. The stronger thesis 
 - the recurrent controller should intervene selectively on hard tokens
 - temporal structure should come from real causal multi-timescale taps, not just alternate projections of the current state
 
-That means the next architecture order is still:
+That means the next architecture order is now:
 
-1. tokenwise residual gating
-2. EMA / EMA-hybrid temporal taps
-3. per-token branch routing
-4. `1B` confirmation on the architecture winners
+1. diagnostics on completed finalists and any partial probe
+2. zero-init low-rank residual readout delta
+3. one wider, GPU-friendly frozen-statistics structure probe if the delta screen
+   does not move
+4. hashed or compact lexical side information only after diagnostics show the
+   recurrent path is not helping the hard-token buckets
 
 Current practical interpretation:
 
 - EMA and EMA-hybrid did not survive on the primary `blocks1` lane
 - router stays skipped
-- the only remaining architecture-side follow-up with good expected value is the `gate=base x lr=3.5e-3` cross-term
+- the existing gate cross-term did not survive at `lr=3.5e-3`
+- readout delta is the next lowest-risk way to spend artifact budget without
+  regressing toward a transformer computational paradigm
 
 ## Fast-Scan Note
 
