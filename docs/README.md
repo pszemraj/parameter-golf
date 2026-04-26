@@ -32,7 +32,21 @@ The active branch question is narrow: can a sparse HGDN shell beat the exact
 repo baseline on the exact baseline-shaped contract after accounting for speed
 and artifact size?
 
+## Next Experiment Order
+
+1. Rerun the local sparse exact-contract helper after the GDN dynamics fixes.
+   Start with the shortlist in [Local Sparse Search](#local-sparse-search).
+2. If the local rerun still supports the primary candidate, run the exact H100
+   comparison in [H100 Commands](#h100-commands).
+3. Run the optional quality-ceiling candidate only if the primary result leaves
+   a real quality/speed tradeoff unresolved.
+4. Keep native FLA and recurrence-path timing in the calibration lane described
+   in [FLA Calibration](#fla-calibration). Run timing jobs sequentially with no
+   other active CUDA work.
+
 ## OLMo/FLA Alignment Audit
+
+The external GDN/OLMo design notes are in [REFERENCE.md](REFERENCE.md).
 
 | Item | Status | Branch handling |
 |---|---|---|
@@ -117,7 +131,7 @@ Local sparse search helper:
 ```bash
 USE_WANDB=0 WANDB_MODE=offline \
 DISTRIBUTED_MODE=parallel_muon \
-RUN_PREFIX_BASE=localnaivehgdn_sparse3 \
+RUN_PREFIX_BASE=localnaivehgdn_decayfix \
 bash scripts/run_local_hgdn_naive_contract_search.sh
 ```
 
@@ -184,6 +198,23 @@ conda run -s --name pg python scripts/bench_fla_recurrence_paths.py --iters 20
 Run this benchmark by itself. Timings are invalid if other tests, training jobs,
 or CUDA benchmarks are active in background terminals.
 
+For a training-level recurrence-path ablation, run the same config, seed, step
+count, and compile settings sequentially with:
+
+```bash
+GDN_FLA_RECURRENCE_MODE=compile_visible
+GDN_FLA_RECURRENCE_MODE=direct
+GDN_FLA_RECURRENCE_MODE=direct_fused
+```
+
+Compare `ms/step`, tokens/sec, train loss, sampled BPB, and compile graph breaks.
+Check for active CUDA jobs first:
+
+```bash
+nvidia-smi --query-compute-apps=pid,process_name,used_memory \
+  --format=csv,noheader,nounits
+```
+
 ## Analysis And Sanity Tools
 
 - `scripts/analyze_local_naive_contract_bundle.py`: local sparse bundle ranking.
@@ -211,8 +242,31 @@ conda run -s --name pg python scripts/check_bpb_sanity.py \
 - `scripts/bundle_hgdn_run.py`: bundle helper.
 - `scripts/bootstrap_challenge_data.sh`: data bootstrap helper.
 
+## Validation
+
+Run these checks before handing off a branch or run bundle:
+
+```bash
+bash -n scripts/hgdn_shell_common.sh \
+  scripts/run_local_hgdn_naive_contract_search.sh \
+  scripts/run_h100_hgdn_naive_contract_round.sh \
+  scripts/bootstrap_challenge_data.sh
+
+conda run -s --name pg python -m py_compile \
+  model.py train_gpt.py train_gpt_hybrid.py train_gpt_fla_control.py \
+  hgdn_runtime_utils.py scripts/hgdn_helper_cli.py \
+  scripts/screen_hgdn_arch_sizes.py \
+  scripts/analyze_local_naive_contract_bundle.py \
+  scripts/check_bpb_sanity.py scripts/probe_fla_stack.py \
+  scripts/bench_fla_recurrence_paths.py
+
+conda run -s --name pg ruff check --fix
+conda run -s --name pg ruff format
+conda run -s --name pg ruff check
+git diff --check
+```
+
 Related docs:
 
-- [TODO.md](TODO.md)
 - [REFERENCE.md](REFERENCE.md)
 - [WANDB_SCHEMA.md](WANDB_SCHEMA.md)

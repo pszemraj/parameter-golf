@@ -1,7 +1,5 @@
 # HGDN W&B Schema
 
-Last updated: 2026-04-11
-
 HGDN runs log W&B config, history, and summary fields under the schema below.
 The relevant trainer is [train_gpt_hybrid.py](../train_gpt_hybrid.py).
 
@@ -11,10 +9,8 @@ The relevant trainer is [train_gpt_hybrid.py](../train_gpt_hybrid.py).
 - Default project for real HGDN ablations: `pg-hgdn-ablations`.
 - Do not query or default to older HGDN runs in other W&B projects; migrate them
   into `pg-hgdn-ablations` instead.
-- Treat this schema as experiment protocol.
 - Do not use `args.to_dict()` or any other blanket config dump.
 - Do not log lowercase Python attribute mirrors alongside the canonical keys.
-- If this schema changes, update this file in the same change.
 
 ## Config
 

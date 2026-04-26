@@ -1,6 +1,8 @@
 # OLMo Hybrid 7B Reference
 
 OLMo Hybrid is the main external architectural reference for the HGDN branch.
+Branch implementation status and deviations are tracked in
+[README.md](README.md#olmofla-alignment-audit).
 
 ## 1. What It Is
 
@@ -50,12 +52,11 @@ beta = sigmoid(w_b(x))        scalar gate (0, 1) per head
 g_dt = -exp(A_log) * softplus(w_a(x) + dt_bias)   decay rate
 ```
 
-The branch initializes `A_log` and `dt_bias` with the same timescale prior used
-by public FLA: `A` is sampled in a positive range up to 16, and `dt_bias` is the
-inverse-softplus of a log-uniform `dt` in `[0.001, 0.1]`. These parameters stay
-in fp32 and are optimized in a no-weight-decay Adam group. Zero initialization
-would start around `exp(-softplus(0)) ~= 0.5` retention per token, which is not
-an OLMo/FLA-faithful GDN starting point.
+Public FLA initializes the decay parameters with a timescale prior: `A` is
+sampled in a positive range up to 16, and `dt_bias` is the inverse-softplus of a
+log-uniform `dt` in `[0.001, 0.1]`. Zero initialization would start around
+`exp(-softplus(0)) ~= 0.5` retention per token, which is not an OLMo/FLA-faithful
+GDN starting point.
 
 ### 3.2 Head Dimensions
 
