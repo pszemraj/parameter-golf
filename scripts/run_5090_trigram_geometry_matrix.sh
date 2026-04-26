@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-export RUN_VERSION="${RUN_VERSION:-v1}"
+export RUN_VERSION="${RUN_VERSION:-geom1}"
 export SEEDS="${SEEDS:-1337}"
 
 read -r -d '' DEFAULT_GEOMETRY_SPECS <<'EOF' || true

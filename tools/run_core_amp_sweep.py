@@ -1264,12 +1264,120 @@ def parse_args() -> argparse.Namespace:
     """
     ap = argparse.ArgumentParser()
     ap.add_argument("kind", choices=["controller", "structure"])
+    ap.add_argument("--preset", help="Sweep preset name.")
+    ap.add_argument("--model-root", type=Path, help="Root directory for generated runs.")
+    ap.add_argument("--shared-spec-dir", type=Path, help="Shared or prebuilt spec directory.")
+    ap.add_argument("--commands-txt", type=Path, help="Path that records emitted train commands.")
+    ap.add_argument(
+        "--run-spec",
+        action="append",
+        default=None,
+        help="One explicit run-spec row. May be repeated.",
+    )
+    ap.add_argument("--run-specs-file", type=Path, help="Text file containing run-spec rows.")
+    ap.add_argument("--seed", type=int, help="Training seed for generated train commands.")
+    ap.add_argument("--run-filter", help="Substring filter for generated run names.")
+    ap.add_argument(
+        "--target-effective-step-tokens",
+        type=int,
+        help="Effective train tokens per optimizer step.",
+    )
+    ap.add_argument("--core-amp-phase", help="Phase label written into generated configs.")
+    ap.add_argument("--core-dim", type=int, help="Core statistical basis width.")
+    ap.add_argument("--core-layers", type=int, help="Number of recurrent core layers.")
+    ap.add_argument("--core-expansion", help="Recurrent inner/core expansion factor.")
+    ap.add_argument("--num-blocks", type=int, help="Number of frozen amplifier blocks.")
+    ap.add_argument("--branch-lags", help="Comma-separated branch lag list.")
+    ap.add_argument("--residual-core", type=int, choices=[0, 1], help="Enable residual core.")
+    ap.add_argument("--residual-core-init", help="Residual core gate initialization.")
+    ap.add_argument("--trigram-memory", choices=["none", "frozen"], help="Trigram memory mode.")
+    ap.add_argument("--trigram-log-scale-init", help="Initial trigram memory log scale.")
+    ap.add_argument("--scan-backend", help="Requested scan backend.")
+    ap.add_argument("--wandb-project", help="W&B project for generated train commands.")
+    ap.add_argument("--wandb-group", help="W&B group for generated train commands.")
+    ap.add_argument("--wandb-tags", help="Comma-separated W&B tags for generated train commands.")
+    ap.add_argument(
+        "--dry-run",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Print generated commands without launching them.",
+    )
+    ap.add_argument(
+        "--skip-done",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Skip runs whose terminal artifacts already exist.",
+    )
+    ap.add_argument(
+        "--rebuild-shared",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Rebuild the shared spec before launching controller runs.",
+    )
     return ap.parse_args()
+
+
+def apply_cli_overrides(args: argparse.Namespace) -> None:
+    """Apply typed CLI overrides to the legacy environment-backed internals.
+
+    The sweep implementation is still being migrated away from ambient shell
+    protocol. Keep the compatibility boundary here so new callers can use
+    explicit arguments without adding more exported variables to launcher
+    scripts.
+
+    :param argparse.Namespace args: Parsed CLI arguments.
+    """
+
+    def set_if(name: str, value: object | None) -> None:
+        if value is not None:
+            os.environ[name] = str(value)
+
+    set_if("PRESET", args.preset)
+    set_if("MODEL_ROOT", args.model_root)
+    set_if("SHARED_SPEC_DIR", args.shared_spec_dir)
+    set_if("COMMANDS_TXT", args.commands_txt)
+    set_if("SEED", args.seed)
+    set_if("RUN_FILTER", args.run_filter)
+    set_if("TARGET_EFFECTIVE_STEP_TOKENS", args.target_effective_step_tokens)
+    set_if("CORE_AMP_PHASE", args.core_amp_phase)
+    set_if("CORE_DIM", args.core_dim)
+    set_if("CORE_LAYERS", args.core_layers)
+    set_if("CORE_EXPANSION", args.core_expansion)
+    set_if("NUM_BLOCKS", args.num_blocks)
+    set_if("BRANCH_LAGS", args.branch_lags)
+    set_if("RESIDUAL_CORE", args.residual_core)
+    set_if("RESIDUAL_CORE_INIT", args.residual_core_init)
+    set_if("TRIGRAM_MEMORY", args.trigram_memory)
+    set_if("TRIGRAM_LOG_SCALE_INIT", args.trigram_log_scale_init)
+    set_if("SCAN_BACKEND", args.scan_backend)
+    set_if("WANDB_PROJECT", args.wandb_project)
+    set_if("WANDB_GROUP", args.wandb_group)
+    set_if("WANDB_TAGS", args.wandb_tags)
+    if args.dry_run is not None:
+        os.environ["DRY_RUN"] = "1" if args.dry_run else "0"
+    if args.skip_done is not None:
+        os.environ["SKIP_DONE"] = "1" if args.skip_done else "0"
+    if args.rebuild_shared is not None:
+        os.environ["REBUILD_SHARED"] = "1" if args.rebuild_shared else "0"
+
+    run_spec_lines: list[str] = []
+    if args.run_specs_file is not None:
+        run_spec_lines.extend(args.run_specs_file.read_text(encoding="utf-8").splitlines())
+    if args.run_spec:
+        run_spec_lines.extend(args.run_spec)
+    run_spec_lines = [
+        line.strip()
+        for line in run_spec_lines
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    if run_spec_lines:
+        os.environ["RUN_SPECS"] = "\n".join(run_spec_lines)
 
 
 def main() -> None:
     """Dispatch to the requested sweep kind."""
     args = parse_args()
+    apply_cli_overrides(args)
     if args.kind == "controller":
         run_controller_sweep(REPO_ROOT)
     else:

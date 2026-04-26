@@ -77,6 +77,12 @@ Maintained 5090 runs are expected to keep:
 Do not silently fall back to slower scan backends, approximate BPB, capped spec
 builds, or transformer-like token-token mixing on maintained competition paths.
 
+New launcher work should pass experiment protocol through typed CLI arguments
+to `tools/run_core_amp_sweep.py`. Keep environment variables for process-local
+controls such as `CUDA_VISIBLE_DEVICES`, `TORCH_BLAS_PREFER_CUBLASLT`,
+`WANDB_MODE`, and `PYTHON`; do not add new protocol fields as ambient shell
+state.
+
 ## Checks
 
 ```bash

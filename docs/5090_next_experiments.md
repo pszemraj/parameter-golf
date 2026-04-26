@@ -272,7 +272,7 @@ Replay `blocks1` only as a geometry check after the blocks0 top-K and aligned
 geometry decisions:
 
 ```bash
-RUN_VERSION=v1 SEEDS=1337 RUN_BLOCKS1=1 RUN_BLOCKS0=0 bash scripts/run_5090_trigram_memory_screen.sh
+RUN_VERSION=v2 SEEDS=1337 RUN_BLOCKS1=1 RUN_BLOCKS0=0 bash scripts/run_5090_trigram_memory_screen.sh
 ```
 
 Use diagnostics on completed or partial runs before recovering any secondary

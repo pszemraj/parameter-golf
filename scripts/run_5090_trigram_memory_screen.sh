@@ -7,7 +7,7 @@ PYTHON_BIN="${PYTHON:-/home/pszemraj/miniforge3/envs/train/bin/python}"
 source "${SCRIPT_DIR}/5090_common.sh"
 
 SEEDS="${SEEDS:-1337}"
-RUN_VERSION="${RUN_VERSION:-v1}"
+RUN_VERSION="${RUN_VERSION:-v2}"
 RUN_BLOCKS1="${RUN_BLOCKS1:-0}"
 RUN_BLOCKS0="${RUN_BLOCKS0:-1}"
 LEARNING_RATE="${LEARNING_RATE:-0.0035}"
@@ -184,14 +184,23 @@ EOF
 
   echo
   echo "[${family}] seed=${seed} trigram_top_k=${TRIGRAM_TOP_K} lr=${LEARNING_RATE} model_root=${model_root}"
-  env \
-    SEED="${seed}" \
-    SHARED_SPEC_DIR="${memory_spec_dir}" \
-    MODEL_ROOT="${model_root}" \
-    WANDB_GROUP="${wandb_group}" \
-    WANDB_TAGS="${wandb_tags}" \
-    RUN_SPECS="${run_specs}" \
+  local sweep_cmd=(
     "${PYTHON_BIN}" "${REPO_ROOT}/tools/run_core_amp_sweep.py" controller
+    --seed "${seed}"
+    --shared-spec-dir "${memory_spec_dir}"
+    --model-root "${model_root}"
+    --trigram-memory "${TRIGRAM_MEMORY}"
+    --trigram-log-scale-init "${TRIGRAM_LOG_SCALE_INIT}"
+    --scan-backend "${SCAN_BACKEND}"
+    --wandb-project "${WANDB_PROJECT}"
+    --wandb-group "${wandb_group}"
+    --wandb-tags "${wandb_tags}"
+    --run-spec "${run_specs}"
+  )
+  if [[ "${DRY_RUN:-0}" == "1" ]]; then
+    sweep_cmd+=(--dry-run)
+  fi
+  "${sweep_cmd[@]}"
 }
 
 run_blocks1_seed() {

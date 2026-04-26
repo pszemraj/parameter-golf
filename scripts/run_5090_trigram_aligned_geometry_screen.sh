@@ -20,7 +20,7 @@ export SCAN_BACKEND="${SCAN_BACKEND:-auto}"
 export TORCH_BLAS_PREFER_CUBLASLT="${TORCH_BLAS_PREFER_CUBLASLT:-1}"
 export REBUILD_SHARED="${REBUILD_SHARED:-0}"
 
-export RUN_VERSION="${RUN_VERSION:-v1}"
+export RUN_VERSION="${RUN_VERSION:-geom1}"
 export SEEDS="${SEEDS:-1337}"
 export SKIP_DONE="${SKIP_DONE:-1}"
 export RUN_BLOCKS0="${RUN_BLOCKS0:-1}"
@@ -281,22 +281,31 @@ EOF
 
   echo
   echo "[blocks0_aligned] seed=${seed} trigram_top_k=${TRIGRAM_TOP_K} lr=${LEARNING_RATE} inner_dim=${GEOMETRY_CORE_INNER_DIM_RESOLVED} model_root=${model_root}"
-  env \
-    SEED="${seed}" \
-    SHARED_SPEC_DIR="${memory_spec_dir}" \
-    MODEL_ROOT="${model_root}" \
-    CORE_DIM="${GEOMETRY_CORE_DIM}" \
-    CORE_LAYERS="${GEOMETRY_CORE_LAYERS}" \
-    CORE_EXPANSION="${GEOMETRY_CORE_EXPANSION}" \
-    RESIDUAL_CORE="1" \
-    RESIDUAL_CORE_INIT="-3.0" \
-    NUM_BLOCKS="${GEOMETRY_NUM_BLOCKS}" \
-    BRANCH_LAGS="${GEOMETRY_BRANCH_LAGS}" \
-    WANDB_GROUP="${GEOMETRY_LABEL}_trigram512m_${RUN_VERSION}" \
-    WANDB_TAGS="core_amp,5090,architecture,trigram_memory,aligned_geometry,screening,${LEARNING_RATE_TAG}" \
-    CORE_AMP_PHASE="5090_trigram_aligned_geometry_screen" \
-    RUN_SPECS="${run_specs}" \
+  local sweep_cmd=(
     "${PYTHON_BIN}" "${REPO_ROOT}/tools/run_core_amp_sweep.py" controller
+    --seed "${seed}"
+    --shared-spec-dir "${memory_spec_dir}"
+    --model-root "${model_root}"
+    --core-dim "${GEOMETRY_CORE_DIM}"
+    --core-layers "${GEOMETRY_CORE_LAYERS}"
+    --core-expansion "${GEOMETRY_CORE_EXPANSION}"
+    --residual-core 1
+    --residual-core-init -3.0
+    --num-blocks "${GEOMETRY_NUM_BLOCKS}"
+    --branch-lags "${GEOMETRY_BRANCH_LAGS}"
+    --trigram-memory "${TRIGRAM_MEMORY}"
+    --trigram-log-scale-init "${TRIGRAM_LOG_SCALE_INIT}"
+    --scan-backend "${SCAN_BACKEND}"
+    --wandb-project "${WANDB_PROJECT}"
+    --wandb-group "${GEOMETRY_LABEL}_trigram512m_${RUN_VERSION}"
+    --wandb-tags "core_amp,5090,architecture,trigram_memory,aligned_geometry,screening,${LEARNING_RATE_TAG}"
+    --core-amp-phase "5090_trigram_aligned_geometry_screen"
+    --run-spec "${run_specs}"
+  )
+  if [[ "${DRY_RUN:-0}" == "1" ]]; then
+    sweep_cmd+=(--dry-run)
+  fi
+  "${sweep_cmd[@]}"
 }
 
 main() {
