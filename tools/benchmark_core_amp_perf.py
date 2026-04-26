@@ -25,11 +25,14 @@ from core_amplifier_lm.model import AmplifierSpec, CoreAmplifierLM, MinGRUCore
 
 
 DEFAULT_SHAPES = (
-    "current_blocks0_d48_l12_e10:48:12:10",
-    "current_blocks1_d48_l10_e12:48:10:12",
-    "aligned_d64_l8_e8:64:8:8",
-    "aligned_d128_l4_e4:128:4:4",
-    "aligned_d128_l6_e4:128:6:4",
+    "current_d48_l12_i480:48:12:10",
+    "d64_l10_i512:64:10:8",
+    "d96_l6_i512:96:6:5.333333333333333",
+    "d96_l8_i512:96:8:5.333333333333333",
+    "d128_l4_i512:128:4:4",
+    "d128_l5_i512:128:5:4",
+    "d128_l6_i384:128:6:3",
+    "d160_l4_i512:160:4:3.2",
 )
 
 
@@ -42,6 +45,22 @@ class ShapeSpec:
     layers: int
     expansion: float
 
+    @property
+    def dim_inner(self) -> int:
+        """Return the minGRU inner recurrent width.
+
+        :return int: Integer inner width used by ``MinGRUCell``.
+        """
+        return int(self.dim * self.expansion)
+
+    @property
+    def recurrent_cells(self) -> int:
+        """Return total stacked recurrent cells.
+
+        :return int: ``layers * dim_inner``.
+        """
+        return int(self.layers * self.dim_inner)
+
 
 @dataclass(frozen=True)
 class PerfResult:
@@ -52,6 +71,10 @@ class PerfResult:
     dim: int
     layers: int
     expansion: float
+    dim_inner: int
+    recurrent_cells: int
+    branch_count: int
+    num_blocks: int
     batch_size: int
     seq_len: int
     tokens_per_step: int
@@ -78,6 +101,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--steps", type=int, default=12)
     ap.add_argument("--vocab-size", type=int, default=1024)
     ap.add_argument("--branch-lags", default="1,2,3,4,6,8,12,16,24,32,48,64")
+    ap.add_argument("--num-blocks", type=int, default=0)
     ap.add_argument("--trigram-top-k", type=int, default=2)
     ap.add_argument("--compile", action="store_true", help="Benchmark torch.compile as requested")
     ap.add_argument("--output", type=Path, default=None, help="Optional JSON output path")
@@ -201,6 +225,10 @@ def benchmark_core(
         dim=shape.dim,
         layers=shape.layers,
         expansion=shape.expansion,
+        dim_inner=shape.dim_inner,
+        recurrent_cells=shape.recurrent_cells,
+        branch_count=0,
+        num_blocks=0,
         batch_size=batch_size,
         seq_len=seq_len,
         tokens_per_step=batch_size * seq_len,
@@ -219,13 +247,15 @@ def make_synthetic_spec(
     vocab_size: int,
     core_dim: int,
     branch_lags: tuple[int, ...],
+    num_blocks: int,
     trigram_top_k: int,
 ) -> AmplifierSpec:
-    """Build a synthetic blocks0 spec for runtime benchmarking.
+    """Build a synthetic spec for runtime benchmarking.
 
     :param int vocab_size: Vocabulary size.
     :param int core_dim: Core width.
     :param tuple[int, ...] branch_lags: Branch lags.
+    :param int num_blocks: Synthetic frozen amplifier block count.
     :param int trigram_top_k: Synthetic sidecar top-K, or ``0`` for none.
     :return AmplifierSpec: Synthetic spec.
     """
@@ -258,11 +288,20 @@ def make_synthetic_spec(
             dtype=torch.uint8,
             generator=generator,
         )
+    amp_w1 = torch.empty(0, amp_dim, amp_dim, dtype=torch.bfloat16)
+    amp_w2 = torch.empty(0, amp_dim, amp_dim, dtype=torch.bfloat16)
+    if num_blocks > 0:
+        amp_w1 = (torch.randn(num_blocks, amp_dim, amp_dim, generator=generator) * 0.02).to(
+            torch.bfloat16
+        )
+        amp_w2 = (torch.randn(num_blocks, amp_dim, amp_dim, generator=generator) * 0.02).to(
+            torch.bfloat16
+        )
     return AmplifierSpec(
         vocab_size=vocab_size,
         core_dim=core_dim,
         branch_lags=branch_lags,
-        num_blocks=0,
+        num_blocks=num_blocks,
         token_embed=(torch.randn(vocab_size, core_dim, generator=generator) * 0.02).to(
             torch.bfloat16
         ),
@@ -272,15 +311,19 @@ def make_synthetic_spec(
         lag_ops=(torch.randn(branch_count, core_dim, core_dim, generator=generator) * 0.02).to(
             torch.bfloat16
         ),
-        amp_w1=torch.empty(0, amp_dim, amp_dim, dtype=torch.bfloat16),
-        amp_w2=torch.empty(0, amp_dim, amp_dim, dtype=torch.bfloat16),
+        amp_w1=amp_w1,
+        amp_w2=amp_w2,
         readout_weight=(torch.randn(vocab_size, amp_dim, generator=generator) * 0.02).to(
             torch.bfloat16
         ),
         trigram_top_tokens=trigram_top_tokens,
         trigram_residual_values=trigram_values,
         trigram_context_confidence=trigram_confidence,
-        metadata={"requested_core_dim": core_dim, "trigram_top_k": trigram_top_k},
+        metadata={
+            "requested_core_dim": core_dim,
+            "trigram_top_k": trigram_top_k,
+            "synthetic_num_blocks": num_blocks,
+        },
     )
 
 
@@ -293,10 +336,11 @@ def benchmark_full(
     steps: int,
     vocab_size: int,
     branch_lags: tuple[int, ...],
+    num_blocks: int,
     trigram_top_k: int,
     compile_enabled: bool,
 ) -> PerfResult:
-    """Benchmark a synthetic full Core/Amplifier blocks0 training step.
+    """Benchmark a synthetic full Core/Amplifier training step.
 
     :param ShapeSpec shape: Controller geometry.
     :param int batch_size: Batch size.
@@ -305,6 +349,7 @@ def benchmark_full(
     :param int steps: Timed steps.
     :param int vocab_size: Vocabulary size.
     :param tuple[int, ...] branch_lags: Branch lags.
+    :param int num_blocks: Frozen amplifier block count.
     :param int trigram_top_k: Sidecar top-K, or ``0`` for none.
     :param bool compile_enabled: Whether to use ``torch.compile``.
     :return PerfResult: Benchmark row.
@@ -316,6 +361,7 @@ def benchmark_full(
         vocab_size=vocab_size,
         core_dim=shape.dim,
         branch_lags=branch_lags,
+        num_blocks=num_blocks,
         trigram_top_k=trigram_top_k,
     )
     model = CoreAmplifierLM(
@@ -357,6 +403,10 @@ def benchmark_full(
         dim=shape.dim,
         layers=shape.layers,
         expansion=shape.expansion,
+        dim_inner=shape.dim_inner,
+        recurrent_cells=shape.recurrent_cells,
+        branch_count=len(branch_lags),
+        num_blocks=num_blocks,
         batch_size=batch_size,
         seq_len=seq_len,
         tokens_per_step=batch_size * seq_len,
@@ -377,7 +427,8 @@ def print_result(row: PerfResult) -> None:
     """
     print(
         f"{row.mode}\t{row.name}\tdim={row.dim}\tlayers={row.layers}\t"
-        f"exp={row.expansion:g}\tparams={row.trainable_params}\t"
+        f"exp={row.expansion:g}\tinner={row.dim_inner}\tcells={row.recurrent_cells}\t"
+        f"branches={row.branch_count}\tblocks={row.num_blocks}\tparams={row.trainable_params}\t"
         f"fixed={row.fixed_nbytes}\tbackend={row.backend}\t"
         f"compiled={int(row.compiled)}\tmean_ms={row.mean_ms:.3f}\t"
         f"tok_s={row.tokens_per_sec:,.0f}\tpeak_mib={row.peak_mem_mib:.1f}",
@@ -393,7 +444,8 @@ def main() -> None:
     print(
         f"device={torch.cuda.get_device_name() if torch.cuda.is_available() else 'none'} "
         f"mode={args.mode} batch={args.batch_size} seq={args.seq_len} "
-        f"steps={args.steps} warmup={args.warmup} compile={int(args.compile)}",
+        f"steps={args.steps} warmup={args.warmup} blocks={args.num_blocks} "
+        f"compile={int(args.compile)}",
         flush=True,
     )
     rows: list[PerfResult] = []
@@ -416,6 +468,7 @@ def main() -> None:
                 steps=args.steps,
                 vocab_size=args.vocab_size,
                 branch_lags=branch_lags,
+                num_blocks=args.num_blocks,
                 trigram_top_k=args.trigram_top_k,
                 compile_enabled=args.compile,
             )

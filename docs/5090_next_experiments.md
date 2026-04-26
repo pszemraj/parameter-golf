@@ -210,35 +210,43 @@ Practical consequence:
 ## Immediate Next Commands
 
 The top-2 blocks0 trigram sidecar is confirmed under the `1B` contract. The
-performance read makes one bounded geometry probe higher priority than top-K
-headroom, because the current controller shape is both slow and memory-heavy.
+performance read makes the reviewer-aligned geometry frontier higher priority
+than top-K headroom, because the current controller shape is both slow and
+memory-heavy.
 
-Optional repeatable benchmark:
+Run the staged frontier batch:
 
 ```bash
-TORCH_BLAS_PREFER_CUBLASLT=1 conda run -s --name train python tools/benchmark_core_amp_perf.py --mode full --shape current_blocks0_d48_l12_e10:48:12:10 --shape aligned_d128_l4_e4:128:4:4 --batch-size 256 --seq-len 512 --warmup 4 --steps 10
+DRY_RUN=1 RUN_VERSION=geom1 SEEDS=1337 bash scripts/run_5090_final3day_frontier_batch.sh
+RUN_VERSION=geom1 SEEDS=1337 bash scripts/run_5090_final3day_frontier_batch.sh
 ```
 
-Dry run the aligned top-2 geometry matrix first:
+This runs the synthetic benchmark frontier, then runs the fixed-token K2/blocks0
+screen for:
+
+- `blocks0_d96_l6_i512`
+- `blocks0_d64_l10_i512`
+- `blocks0_d128_l4_i512`
+- `blocks0_d128_l5_i512`
+
+It intentionally stops after Stage 1. Analyze before launching confirmations:
 
 ```bash
-DRY_RUN=1 RUN_VERSION=v1 SEEDS=1337 bash scripts/run_5090_trigram_geometry_matrix.sh
-```
-
-Then run:
-
-```bash
-RUN_VERSION=v1 SEEDS=1337 bash scripts/run_5090_trigram_geometry_matrix.sh
+conda run -s --name train python tools/analyze_5090_geometry_frontier.py \
+  --run-version geom1 \
+  --benchmark logs/5090_final3day/<batch_id>/geometry_frontier_benchmark.json
 ```
 
 Promotion rule:
 
-- compare fixed-token `512M` `val_bpb` against the current top-2 seed-`1337`
-  screen (`2.0751715673`)
-- if an aligned shape is better, or within about `0.01-0.015` bpb while
-  retaining a large throughput gain, promote it to a `1B` confirmation
-- if it is clearly worse at fixed tokens, keep current `48x12x10` for quality
-  and return to top-K headroom
+- better than the current top-2 seed-`1337` screen (`2.0751715673`):
+  promote to `8192`-step / `1B`
+- within `0.020` bpb and at least `1.5x` faster:
+  run `8192` steps before killing
+- within `0.035` bpb and at least `2.0x` faster:
+  run one time-matched confirmation before killing
+- worse by `>0.040` bpb:
+  kill unless the curve slope is clearly unfinished
 
 After the geometry read, the top-K headroom question remains:
 
@@ -299,13 +307,15 @@ The schedule question is no longer the biggest uncertainty. The stronger thesis 
 
 That means the next architecture order is now:
 
-1. test top-K headroom (`K=4`, then only consider `K=8` if artifact estimate
+1. run the reviewer-aligned geometry frontier batch and stop after Stage 1
+2. confirm only geometry rows that clear the fixed-token plus speed promotion
+   rules
+3. test longer BPTT on the best aligned survivor only
+4. test top-K headroom (`K=4`, then only consider `K=8` if artifact estimate
    remains comfortably under cap)
-2. confirm `K=4` only if it clearly beats top-2 on the same screen contract
-3. replay `blocks1` only after the blocks0 top-K decision
-4. base-bigram delta or readout-delta only as secondary calibration/capacity
+5. base-bigram delta or readout-delta only as secondary calibration/capacity
    checks
-5. optional score-first adaptive n-gram cache only after the static sidecar is
+6. optional score-first adaptive n-gram cache only after the static sidecar is
    validated and compliance is documented
 
 Current practical interpretation:
@@ -316,7 +326,8 @@ Current practical interpretation:
 - current lag operators are not evidence against temporal structure because
   they do not expose literal high-order context identity
 - top-2 trigram sidecar is now the strongest non-transformer use of artifact
-  budget and should own the remaining confirmation window
+  budget, but controller geometry is the immediate bottleneck to resolve before
+  spending more runs on K4/K8
 
 ## Fast-Scan Note
 

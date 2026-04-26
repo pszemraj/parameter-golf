@@ -100,13 +100,18 @@ Performance interruption:
   - aligned `core_dim=64`, `layers=8`, `exp=8`: about `802,372` tok/s
   - aligned `core_dim=128`, `layers=4`, `exp=4`: about `1,371,917` tok/s
 - the aligned `128x4x4` controller has similar trainable parameter count to
-  the current leader and still fits the artifact budget with blocks0 + top-2
-  trigram memory
+  the current leader and still fits the artifact budget, but it is a
+  speed-frontier probe rather than the aligned answer
 - `torch.compile` currently fails on the `accelerated-scan` Triton path, so
   compile remains out of the serious local protocol
 - this makes one bounded GPU-friendly geometry probe in-scope before more
   top-K headroom, despite the earlier stop rule against arbitrary `core_dim`
   churn
+- the independent shape review changes the matrix from a shallow/wide probe
+  into a real frontier over recurrent memory cells:
+  - balanced: `96 x 6 x inner512`
+  - memory-preserving: `64 x 10 x inner512`
+  - speed frontier: `128 x 4/5 x inner512`
 - detailed shape rationale and rerun priorities:
   - [docs/5090_shape_reassessment.md](/home/pszemraj/workspace/projects/parameter-golf/docs/5090_shape_reassessment.md)
 
@@ -422,20 +427,24 @@ Seed policy:
 
 Next headroom test after top-2 confirmation:
 
-Before increasing top-K, run the bounded aligned-geometry matrix:
+Before increasing top-K, run the reviewer-aligned geometry frontier batch:
 
 ```bash
-DRY_RUN=1 RUN_VERSION=v1 SEEDS=1337 bash scripts/run_5090_trigram_geometry_matrix.sh
-RUN_VERSION=v1 SEEDS=1337 bash scripts/run_5090_trigram_geometry_matrix.sh
+DRY_RUN=1 RUN_VERSION=geom1 SEEDS=1337 bash scripts/run_5090_final3day_frontier_batch.sh
+RUN_VERSION=geom1 SEEDS=1337 bash scripts/run_5090_final3day_frontier_batch.sh
 ```
 
 Promotion rule:
 
 - compare against the current top-2 seed-`1337` `512M` screen
   (`2.0751715673`)
-- promote an aligned shape if it is better at fixed tokens, or if it is within
-  about `0.01-0.015` bpb while preserving a large throughput gain
-- if it is clearly worse, keep current `48x12x10` as the quality leader and
+- promote an aligned shape if it is better at fixed tokens
+- if within `0.020` bpb and at least `1.5x` faster, run an `8192`-step
+  time-matched confirmation before killing
+- if within `0.035` bpb and at least `2.0x` faster, run one time-matched
+  confirmation before killing
+- if worse by `>0.040` bpb, kill unless the curve slope is clearly unfinished
+- if all aligned shapes die, keep current `48x12x10` as the quality leader and
   return to top-K headroom:
 
 ```bash

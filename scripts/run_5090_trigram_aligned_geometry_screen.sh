@@ -31,10 +31,53 @@ LEARNING_RATE_TAG="$(pg_5090_lr_slug "${LEARNING_RATE}")"
 export COREAMP_SPEC_CACHE_ROOT="${COREAMP_SPEC_CACHE_ROOT:-${HOME}/.cache/experiments/param-golf-coreamp}"
 export GEOMETRY_CORE_DIM="${GEOMETRY_CORE_DIM:-128}"
 export GEOMETRY_CORE_LAYERS="${GEOMETRY_CORE_LAYERS:-4}"
-export GEOMETRY_CORE_EXPANSION="${GEOMETRY_CORE_EXPANSION:-4.0}"
+export GEOMETRY_CORE_INNER_DIM="${GEOMETRY_CORE_INNER_DIM:-512}"
+if [[ -z "${GEOMETRY_CORE_EXPANSION:-}" ]]; then
+  GEOMETRY_CORE_EXPANSION="$(
+    "${PYTHON_BIN}" - "${GEOMETRY_CORE_DIM}" "${GEOMETRY_CORE_INNER_DIM}" <<'PY'
+import sys
+
+core_dim = int(sys.argv[1])
+inner_dim = int(sys.argv[2])
+print(repr(float(inner_dim) / float(core_dim)))
+PY
+  )"
+fi
+export GEOMETRY_CORE_EXPANSION
+GEOMETRY_CORE_INNER_DIM_RESOLVED="$(
+  "${PYTHON_BIN}" - "${GEOMETRY_CORE_DIM}" "${GEOMETRY_CORE_EXPANSION}" <<'PY'
+import sys
+
+core_dim = int(sys.argv[1])
+expansion = float(sys.argv[2])
+print(int(core_dim * expansion))
+PY
+)"
+export GEOMETRY_CORE_INNER_DIM_RESOLVED
+if [[ -n "${GEOMETRY_CORE_INNER_DIM:-}" && "${GEOMETRY_CORE_INNER_DIM_RESOLVED}" != "${GEOMETRY_CORE_INNER_DIM}" ]]; then
+  pg_5090_fail "$(basename "$0")" "GEOMETRY_CORE_DIM=${GEOMETRY_CORE_DIM} and GEOMETRY_CORE_EXPANSION=${GEOMETRY_CORE_EXPANSION} resolve to inner=${GEOMETRY_CORE_INNER_DIM_RESOLVED}, expected ${GEOMETRY_CORE_INNER_DIM}"
+fi
 export GEOMETRY_NUM_BLOCKS="${GEOMETRY_NUM_BLOCKS:-0}"
 export GEOMETRY_BRANCH_LAGS="${GEOMETRY_BRANCH_LAGS:-1,2,3,4,6,8,12,16,24,32,48,64}"
-export GEOMETRY_LABEL="${GEOMETRY_LABEL:-blocks0_core${GEOMETRY_CORE_DIM}_l${GEOMETRY_CORE_LAYERS}_e${GEOMETRY_CORE_EXPANSION}}"
+export GEOMETRY_LABEL="${GEOMETRY_LABEL:-blocks0_core${GEOMETRY_CORE_DIM}_l${GEOMETRY_CORE_LAYERS}_i${GEOMETRY_CORE_INNER_DIM_RESOLVED}}"
+export GEOMETRY_CARRY_CHUNKS="${GEOMETRY_CARRY_CHUNKS:-8}"
+export GEOMETRY_BPTT_CHUNKS="${GEOMETRY_BPTT_CHUNKS:-1}"
+export GEOMETRY_NUM_STEPS="${GEOMETRY_NUM_STEPS:-4096}"
+export GEOMETRY_BATCH_SIZE="${GEOMETRY_BATCH_SIZE:-256}"
+export GEOMETRY_SEQ_LEN="${GEOMETRY_SEQ_LEN:-512}"
+export GEOMETRY_LR_WARMUP_STEPS="${GEOMETRY_LR_WARMUP_STEPS:-100}"
+export GEOMETRY_LR_HOLD_STEPS="${GEOMETRY_LR_HOLD_STEPS:-3500}"
+export GEOMETRY_MIN_LR="${GEOMETRY_MIN_LR:-0.0003}"
+if [[ -z "${GEOMETRY_TRAIN_LABEL:-}" ]]; then
+  if [[ "${GEOMETRY_NUM_STEPS}" == "4096" && "${TARGET_EFFECTIVE_STEP_TOKENS:-131072}" == "131072" ]]; then
+    GEOMETRY_TRAIN_LABEL="512m"
+  elif [[ "${GEOMETRY_NUM_STEPS}" == "8192" && "${TARGET_EFFECTIVE_STEP_TOKENS:-131072}" == "131072" ]]; then
+    GEOMETRY_TRAIN_LABEL="1b"
+  else
+    GEOMETRY_TRAIN_LABEL="${GEOMETRY_NUM_STEPS}steps"
+  fi
+fi
+export GEOMETRY_TRAIN_LABEL
 
 export TRIGRAM_SIDECAR="${TRIGRAM_SIDECAR:-frozen}"
 export TRIGRAM_LOG_SCALE_INIT="${TRIGRAM_LOG_SCALE_INIT:-0.0}"
@@ -198,12 +241,13 @@ repo_root=${REPO_ROOT}
 python=${PYTHON_BIN}
 seeds=${SEEDS}
 run_version=${RUN_VERSION}
-geometry_core_dim=${GEOMETRY_CORE_DIM} layers=${GEOMETRY_CORE_LAYERS} expansion=${GEOMETRY_CORE_EXPANSION} blocks=${GEOMETRY_NUM_BLOCKS}
+geometry_core_dim=${GEOMETRY_CORE_DIM} layers=${GEOMETRY_CORE_LAYERS} inner_dim=${GEOMETRY_CORE_INNER_DIM_RESOLVED} expansion=${GEOMETRY_CORE_EXPANSION} blocks=${GEOMETRY_NUM_BLOCKS}
 geometry_branch_lags=${GEOMETRY_BRANCH_LAGS}
 trigram_sidecar=${TRIGRAM_SIDECAR} top_k=${TRIGRAM_TOP_K} log_scale_init=${TRIGRAM_LOG_SCALE_INIT}
 learning_rate=${LEARNING_RATE}
 compile=${COMPILE} gradient_checkpointing=${GRADIENT_CHECKPOINTING} skip_done=${SKIP_DONE}
-target_effective_step_tokens=${TARGET_EFFECTIVE_STEP_TOKENS}
+num_steps=${GEOMETRY_NUM_STEPS} lr_hold_steps=${GEOMETRY_LR_HOLD_STEPS} carry_chunks=${GEOMETRY_CARRY_CHUNKS} bptt_chunks=${GEOMETRY_BPTT_CHUNKS}
+batch_size=${GEOMETRY_BATCH_SIZE} seq_len=${GEOMETRY_SEQ_LEN} target_effective_step_tokens=${TARGET_EFFECTIVE_STEP_TOKENS}
 coreamp_spec_cache_root=${COREAMP_SPEC_CACHE_ROOT}
 trigram_spec_cache_root=${TRIGRAM_SPEC_CACHE_ROOT}
 trigram_table_cache_root=${TRIGRAM_TABLE_CACHE_ROOT}
@@ -224,14 +268,14 @@ run_blocks0_seed() {
   ensure_trigram_spec "${source_spec_dir}" "${sidecar_spec_dir}"
 
   local model_root="${REPO_ROOT}/experiments/5090_architecture/${GEOMETRY_LABEL}_trigram_seed${seed}_${RUN_VERSION}"
-  local run_name="${GEOMETRY_LABEL}_trigramk${TRIGRAM_TOP_K}_${LEARNING_RATE_TAG}_h3500_512m_s${seed}"
+  local run_name="${GEOMETRY_LABEL}_trigramk${TRIGRAM_TOP_K}_${LEARNING_RATE_TAG}_h${GEOMETRY_LR_HOLD_STEPS}_${GEOMETRY_TRAIN_LABEL}_s${seed}"
   local run_specs
   read -r -d '' run_specs <<EOF || true
-${run_name} ${GEOMETRY_CORE_LAYERS} ${GEOMETRY_CORE_EXPANSION} 8 1 1 -3.0 ${LEARNING_RATE} 100 3500 0.0003 4096 256 512
+${run_name} ${GEOMETRY_CORE_LAYERS} ${GEOMETRY_CORE_EXPANSION} ${GEOMETRY_CARRY_CHUNKS} ${GEOMETRY_BPTT_CHUNKS} 1 -3.0 ${LEARNING_RATE} ${GEOMETRY_LR_WARMUP_STEPS} ${GEOMETRY_LR_HOLD_STEPS} ${GEOMETRY_MIN_LR} ${GEOMETRY_NUM_STEPS} ${GEOMETRY_BATCH_SIZE} ${GEOMETRY_SEQ_LEN}
 EOF
 
   echo
-  echo "[blocks0_aligned] seed=${seed} trigram_top_k=${TRIGRAM_TOP_K} lr=${LEARNING_RATE} model_root=${model_root}"
+  echo "[blocks0_aligned] seed=${seed} trigram_top_k=${TRIGRAM_TOP_K} lr=${LEARNING_RATE} inner_dim=${GEOMETRY_CORE_INNER_DIM_RESOLVED} model_root=${model_root}"
   env \
     SEED="${seed}" \
     SHARED_SPEC_DIR="${sidecar_spec_dir}" \
