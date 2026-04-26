@@ -25,8 +25,6 @@ Current conventions:
     - important W&B links
     - main observations
     - next action
-- `notes/`
-  - point-in-time summary notes and recommendations
 - `experiments/*/report.md`
   - per-family reports backed by completed runs on disk
 

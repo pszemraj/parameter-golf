@@ -2,11 +2,8 @@
 """Root training entrypoint for the Core/Amplifier LM.
 
 This fork-level script intentionally makes the root training path the
-Core/Amplifier language model, so experimentation happens in the repo core
-rather than only inside `/records`.
-
-The original transformer baseline from upstream is preserved as
-`train_gpt_transformer_baseline.py`.
+Core/Amplifier language model, so experimentation happens in the maintained
+repo core rather than in historical transformer-style archives.
 """
 
 from __future__ import annotations
