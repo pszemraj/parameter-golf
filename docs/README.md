@@ -20,7 +20,8 @@ Branch: `exp/hgdn-final`
   `GDN_FLA_RECURRENCE_MODE=direct_fused` or
   `GDN_USE_DIRECT_FLA_LAYER_SEMANTICS=1` additionally tests upstream-style
   in-kernel q/k L2 normalization and decay-gate activation. The default remains
-  `compile_visible`.
+  `compile_visible`. All FLA recurrence modes now use the public FLA default
+  scale, `1 / sqrt(head_k_dim)`.
 - Requested optional `GDN_USE_CUDA_*` paths now fail fast in the trainer when
   `hgdn_cuda_ext` is not loaded instead of silently falling back.
 - Local Python commands on this checkout use `conda run -s --name pg ...`.
@@ -36,8 +37,10 @@ and artifact size?
 | Public FLA recurrence | Resolved | Custom HGDN calls public `fla.ops.gated_delta_rule.chunk_gated_delta_rule`; naive recurrence is refused for active CUDA HGDN training. |
 | Decay init | Resolved | `A_log` / `dt_bias` use timescale-aware FLA-style initialization and log `gdn_decay_init` startup stats. |
 | Decay weight decay | Resolved | `A_log` / `dt_bias` use a separate Adam group with `weight_decay=0.0`. |
+| Recurrence scale | Resolved | Compile-visible and direct custom recurrence paths keep upstream FLA's default `1 / sqrt(head_k_dim)` scale instead of forcing `1.0`. |
 | Negative eigenvalues | Resolved | Custom HGDN defaults `GDN_ALLOW_NEG_EIGVAL=1`; native FLA configs set `FLA_ALLOW_NEG_EIGVAL=true`. |
 | Output norm/gate parameterization | Resolved enough for custom path | Custom HGDN now has learned per-`head_v_dim` `o_norm_weight`; it still uses PyTorch/sidecar norm+SiLU instead of `FusedRMSNormGated` directly. |
+| Output norm epsilon | Documented deviation | Custom HGDN keeps the branch default `eps=1e-6`; native FLA defaults to `1e-5`. Treat `1e-5` as a strict-fidelity ablation, not the active default. |
 | `expand_v=2.0` prior | Added as candidates | Practical sparse search still includes cheaper `1.0`/`1.5` variants, but OLMo-prior `v2` candidates are now first-class configs. |
 | 3:1 GDN:attention prior | Added as candidate | `l8_d512_olmoish_6g2a_v2_m1p25` is the 6G/2A reality check; it is not the default promotion candidate until wallclock evidence supports it. |
 | Native FLA control | Clarified | `train_gpt_fla_control.py` remains pure native GDN calibration, not OLMo Hybrid; an OLMo-ish SP1024 native config exists for dimension/value-width calibration. |
@@ -71,6 +74,10 @@ matched attention-only diagnostic control, and two new OLMo-prior checks:
 
 - `configs/hgdn/naive_contract_l8_d512_mid2_dk48_v2_m1p5.toml`
 - `configs/hgdn/naive_contract_l8_d512_olmoish_6g2a_v2_m1p25.toml`
+
+The local helper includes both OLMo-prior configs plus matched attention-only
+diagnostic controls for `mlp1.5` and `mlp1.25`; the H100 helper can infer those
+controls when `ATTN_CONFIG` is not set.
 
 ## H100 Commands
 
@@ -133,6 +140,11 @@ data/tokenizer defaults. The OLMo-ish config uses `d_model=512`, 8 heads,
 so it can be compared against the exact-contract HGDN surface. Optional knobs
 include `FLA_SHARE_QK`, `FLA_SHARE_KV`, `BIGRAM_HASH_BUCKETS`, and
 `TRIGRAM_HASH_BUCKETS`.
+
+Both native FLA configs default `FLA_STORAGE_DTYPE=fp32` for numerical sanity.
+For speed calibration against bf16 custom HGDN, override
+`FLA_STORAGE_DTYPE=bf16` explicitly. These configs remain pure-GDN calibration;
+the custom HGDN 6G/2A config is the OLMo-style hybrid test.
 
 Tiny smoke:
 

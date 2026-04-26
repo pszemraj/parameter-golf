@@ -39,7 +39,7 @@ def run_chunk_gated_delta_rule_owned(
     g: Tensor,
     beta: Tensor,
     *,
-    scale: float = 1.0,
+    scale: float | None = None,
 ) -> Tensor:
     """Run the HGDN recurrence through the installed public FLA op.
 
@@ -48,7 +48,8 @@ def run_chunk_gated_delta_rule_owned(
     :param Tensor v: Value tensor shaped ``(batch, seq, heads, head_v)``.
     :param Tensor g: Log-space gate tensor shaped ``(batch, seq, heads)``.
     :param Tensor beta: Beta tensor shaped ``(batch, seq, heads)``.
-    :param float scale: Recurrence scale, defaults to `1.0`.
+    :param float | None scale: Optional recurrence scale. `None` keeps the
+        public FLA default of ``1 / sqrt(head_k)``.
     :return Tensor: Recurrence output shaped like ``v``.
     """
     _require_owned_fla()
@@ -133,7 +134,7 @@ def run_chunk_gated_delta_rule_owned_backward(
     g: Tensor,
     beta: Tensor,
     *,
-    scale: float = 1.0,
+    scale: float | None = None,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
     """Recompute the public FLA recurrence and differentiate it.
 
@@ -143,7 +144,8 @@ def run_chunk_gated_delta_rule_owned_backward(
     :param Tensor v: Value tensor.
     :param Tensor g: Log-space gate tensor.
     :param Tensor beta: Beta tensor.
-    :param float scale: Recurrence scale, defaults to `1.0`.
+    :param float | None scale: Optional recurrence scale. `None` keeps the
+        public FLA default of ``1 / sqrt(head_k)``.
     :return tuple[Tensor, Tensor, Tensor, Tensor, Tensor]: Gradients for inputs.
     """
     _require_owned_fla()

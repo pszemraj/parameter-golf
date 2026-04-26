@@ -21,6 +21,10 @@ Shortlist to inspect first:
 - `configs/hgdn/naive_contract_l8_d512_olmoish_6g2a_v2_m1p25.toml`
 - `configs/hgdn/naive_contract_l8_d512_r0_m2.toml`
 
+The local helper includes the OLMo-prior configs and matched attention-only
+controls for `mlp1.5` and `mlp1.25`; no manual config insertion is required
+before rerunning this batch.
+
 ## 2. Run The Primary H100 Sparse Confirmation
 
 Use the exact-baseline helper with:
@@ -84,6 +88,10 @@ H100 calibration, if requested, uses
 `configs/fla/native_olmoish_gdn8_d512_sp1024.toml` and
 `train_gpt_fla_control.py`. Keep it isolated from `HybridGPT`.
 
+Those native FLA configs default to `FLA_STORAGE_DTYPE=fp32` for numerical
+sanity. For speed calibration against the bf16 custom HGDN trainer, override
+`FLA_STORAGE_DTYPE=bf16`.
+
 Measure wrapper/direct/direct-fused/native FLA path cost locally before paying
 for a trainer ablation:
 
@@ -100,6 +108,12 @@ For a training-level direct-op ablation, set:
 GDN_FLA_RECURRENCE_MODE=direct
 ```
 
+Compare it sequentially against the default:
+
+```bash
+GDN_FLA_RECURRENCE_MODE=compile_visible
+```
+
 For upstream-style in-kernel q/k norm and decay-gate activation semantics, set:
 
 ```bash
@@ -107,6 +121,11 @@ GDN_FLA_RECURRENCE_MODE=direct_fused
 # equivalent explicit alias:
 GDN_USE_DIRECT_FLA_LAYER_SEMANTICS=1
 ```
+
+Run these training-level ablations one at a time after checking
+`nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader,nounits`.
+Use the same config, seed, step count, and compile settings, then compare
+`ms/step`, tokens/sec, train loss, sampled BPB, and any compile graph breaks.
 
 ## 5. Keep Hygiene Checks Green
 

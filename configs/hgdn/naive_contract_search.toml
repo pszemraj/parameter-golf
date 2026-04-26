@@ -121,6 +121,20 @@ block_pattern = ["attn", "attn", "attn", "attn", "gdn", "attn", "gdn", "attn", "
 notes = "Late-decoder-biased recurrence after the skip merge."
 
 [[candidates]]
+name = "l8_d512_r0_m1p25"
+mlp_mult = 1.25
+gdn_ratio = 0
+block_pattern = ["attn", "attn", "attn", "attn", "attn", "attn", "attn", "attn"]
+notes = "Attention-only baseline diagnostic control matching the OLMo-ish 8L 6G2A shell at mlp1.25."
+
+[[candidates]]
+name = "l8_d512_r0_m1p5"
+mlp_mult = 1.5
+gdn_ratio = 0
+block_pattern = ["attn", "attn", "attn", "attn", "attn", "attn", "attn", "attn"]
+notes = "Attention-only baseline diagnostic control matching the 8L v2 sparse-HGDN shell at mlp1.5."
+
+[[candidates]]
 name = "l8_d512_r0_m1p75"
 mlp_mult = 1.75
 gdn_ratio = 0

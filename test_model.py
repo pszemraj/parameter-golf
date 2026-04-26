@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from hgdn_cuda import (
     HAS_FLA_GATED_DELTA_RULE,
     fla_chunk_gated_delta_rule_compile_visible,
+    fla_chunk_gated_delta_rule_direct,
     packed_qkv_conv_reference,
     packed_qkv_frontend_reference,
     packed_qkv_split_l2norm_reference,
@@ -347,7 +348,7 @@ def test_recurrence() -> None:
 
 
 def test_owned_fla_recurrence_matches_upstream() -> None:
-    """Check that the owned compile-visible recurrence matches upstream FLA on CUDA."""
+    """Check that the compile-visible recurrence uses upstream default scaling."""
 
     if not torch.cuda.is_available():
         print("  ↷ skipping owned FLA recurrence parity (CUDA unavailable)")
@@ -363,7 +364,7 @@ def test_owned_fla_recurrence_matches_upstream() -> None:
         return
 
     device = torch.device("cuda")
-    B, T, H, Dk, Dv = 2, 128, 4, 8, 16
+    B, T, H, Dk, Dv = 2, 128, 4, 16, 16
     torch.manual_seed(42)
 
     q_base = F.normalize(
@@ -394,7 +395,7 @@ def test_owned_fla_recurrence_matches_upstream() -> None:
         v_ref,
         g_ref,
         beta_ref,
-        scale=1.0,
+        scale=None,
         output_final_state=False,
     )
     out_own = fla_chunk_gated_delta_rule_compile_visible(
@@ -414,7 +415,78 @@ def test_owned_fla_recurrence_matches_upstream() -> None:
     torch.testing.assert_close(v_own.grad, v_ref.grad, atol=2e-2, rtol=2e-2)
     torch.testing.assert_close(g_own.grad, g_ref.grad, atol=2e-2, rtol=2e-2)
     torch.testing.assert_close(beta_own.grad, beta_ref.grad, atol=2e-2, rtol=2e-2)
-    print("  ✓ owned FLA recurrence matches upstream")
+    print("  ✓ owned FLA recurrence matches upstream default scale")
+
+
+def test_direct_fla_recurrence_matches_upstream() -> None:
+    """Check that the direct recurrence uses upstream default scaling."""
+
+    if not torch.cuda.is_available():
+        print("  ↷ skipping direct FLA recurrence parity (CUDA unavailable)")
+        return
+    if not HAS_FLA_GATED_DELTA_RULE:
+        print("  ↷ skipping direct FLA recurrence parity (FLA unavailable)")
+        return
+
+    try:
+        from fla.ops.gated_delta_rule import chunk_gated_delta_rule as upstream_chunk
+    except ImportError:
+        print("  ↷ skipping direct FLA recurrence parity (upstream FLA import failed)")
+        return
+
+    device = torch.device("cuda")
+    B, T, H, Dk, Dv = 2, 128, 4, 16, 16
+    torch.manual_seed(43)
+
+    q_base = F.normalize(
+        torch.randn(B, T, H, Dk, device=device, dtype=torch.bfloat16), p=2, dim=-1
+    )
+    k_base = F.normalize(
+        torch.randn(B, T, H, Dk, device=device, dtype=torch.bfloat16), p=2, dim=-1
+    )
+    v_base = torch.randn(B, T, H, Dv, device=device, dtype=torch.bfloat16)
+    g_base = F.logsigmoid(torch.randn(B, T, H, device=device, dtype=torch.bfloat16))
+    beta_base = torch.sigmoid(torch.randn(B, T, H, device=device, dtype=torch.bfloat16))
+
+    q_ref = q_base.detach().clone().requires_grad_(True)
+    k_ref = k_base.detach().clone().requires_grad_(True)
+    v_ref = v_base.detach().clone().requires_grad_(True)
+    g_ref = g_base.detach().clone().requires_grad_(True)
+    beta_ref = beta_base.detach().clone().requires_grad_(True)
+
+    q_direct = q_base.detach().clone().requires_grad_(True)
+    k_direct = k_base.detach().clone().requires_grad_(True)
+    v_direct = v_base.detach().clone().requires_grad_(True)
+    g_direct = g_base.detach().clone().requires_grad_(True)
+    beta_direct = beta_base.detach().clone().requires_grad_(True)
+
+    out_ref, _ = upstream_chunk(
+        q_ref,
+        k_ref,
+        v_ref,
+        g_ref,
+        beta_ref,
+        scale=None,
+        output_final_state=False,
+    )
+    out_direct = fla_chunk_gated_delta_rule_direct(
+        q_direct,
+        k_direct,
+        v_direct,
+        g_direct,
+        beta_direct,
+    )
+    torch.testing.assert_close(out_direct, out_ref, atol=2e-2, rtol=2e-2)
+
+    grad = torch.randn_like(out_ref)
+    out_ref.backward(grad, retain_graph=True)
+    out_direct.backward(grad)
+    torch.testing.assert_close(q_direct.grad, q_ref.grad, atol=2e-2, rtol=2e-2)
+    torch.testing.assert_close(k_direct.grad, k_ref.grad, atol=2e-2, rtol=2e-2)
+    torch.testing.assert_close(v_direct.grad, v_ref.grad, atol=2e-2, rtol=2e-2)
+    torch.testing.assert_close(g_direct.grad, g_ref.grad, atol=2e-2, rtol=2e-2)
+    torch.testing.assert_close(beta_direct.grad, beta_ref.grad, atol=2e-2, rtol=2e-2)
+    print("  ✓ direct FLA recurrence matches upstream default scale")
 
 
 def test_gdn_split_projections() -> None:
@@ -502,6 +574,10 @@ def test_gdn_direct_fused_fla_mode_smoke() -> None:
     torch.cuda.synchronize()
     assert out.shape == x.shape
     assert x.grad is not None
+    assert layer.A_log.grad is not None
+    assert layer.dt_bias.grad is not None
+    assert torch.isfinite(layer.A_log.grad).all()
+    assert torch.isfinite(layer.dt_bias.grad).all()
     print("  ✓ direct fused FLA mode smoke OK")
 
 
@@ -1775,6 +1851,7 @@ if __name__ == "__main__":
     tests = [
         ("Recurrence", test_recurrence),
         ("Owned FLA recurrence parity", test_owned_fla_recurrence_matches_upstream),
+        ("Direct FLA recurrence parity", test_direct_fla_recurrence_matches_upstream),
         ("Split projections", test_gdn_split_projections),
         ("GDN decay init", test_gdn_decay_init_timescale),
         ("Recurrence input dtypes", test_gdn_recurrence_input_dtypes),

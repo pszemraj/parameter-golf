@@ -201,7 +201,6 @@ def _run_fla_chunk_gated_delta_rule(
         v,
         g,
         beta,
-        scale=1.0,
     )
 
 
@@ -230,7 +229,6 @@ def _run_fla_chunk_gated_delta_rule_backward(
         v,
         g,
         beta,
-        scale=1.0,
     )
 
 
@@ -2051,7 +2049,7 @@ def fla_chunk_gated_delta_rule_direct(
     :param Tensor beta: Beta tensor shaped ``(batch, seq, heads)``.
     :return Tensor: Recurrence output shaped like ``v``.
     """
-    return run_chunk_gated_delta_rule_owned(q, k, v, g, beta, scale=1.0)
+    return run_chunk_gated_delta_rule_owned(q, k, v, g, beta)
 
 
 @_dynamo_disable

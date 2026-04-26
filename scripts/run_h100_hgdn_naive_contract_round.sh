@@ -63,6 +63,12 @@ resolve_attn_control_config() {
     naive_contract_l8_d512_*_m2.toml)
         echo "configs/hgdn/naive_contract_l8_d512_r0_m2.toml"
         ;;
+    naive_contract_l8_d512_*_m1p5.toml)
+        echo "configs/hgdn/naive_contract_l8_d512_r0_m1p5.toml"
+        ;;
+    naive_contract_l8_d512_*_m1p25.toml)
+        echo "configs/hgdn/naive_contract_l8_d512_r0_m1p25.toml"
+        ;;
     naive_contract_l8_d512_*_m1p75.toml)
         echo "configs/hgdn/naive_contract_l8_d512_r0_m1p75.toml"
         ;;
