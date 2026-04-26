@@ -31,6 +31,7 @@ torchinductor_max_autotune_gemm="${TORCHINDUCTOR_MAX_AUTOTUNE_GEMM:-0}"
 torch_logs="${TORCH_LOGS:-}"
 torch_trace="${TORCH_TRACE:-}"
 allow_existing_logs="${ALLOW_EXISTING_LOGS:-0}"
+allow_custom_candidate_configs="${ALLOW_CUSTOM_CANDIDATE_CONFIGS:-0}"
 
 ngpu="${NGPU:-1}"
 iterations="${ITERATIONS:-500}"
@@ -149,6 +150,7 @@ if [[ -n "${CANDIDATE_CONFIGS:-}" ]]; then
     selected_run_prefixes=()
     selected_configs=()
     selected_labels=()
+    custom_index=0
     for raw_config in "${selected_config_filters[@]}"; do
         matched_index=""
         for idx in "${!configs[@]}"; do
@@ -158,8 +160,19 @@ if [[ -n "${CANDIDATE_CONFIGS:-}" ]]; then
             fi
         done
         if [[ -z "${matched_index}" ]]; then
-            echo "CANDIDATE_CONFIGS entry is not in the helper candidate list: ${raw_config}" >&2
-            exit 1
+            if [[ "${allow_custom_candidate_configs}" != "1" ]]; then
+                echo "CANDIDATE_CONFIGS entry is not in the helper candidate list: ${raw_config}" >&2
+                exit 1
+            fi
+            if [[ ! -f "${raw_config}" ]]; then
+                echo "Custom CANDIDATE_CONFIGS entry does not exist: ${raw_config}" >&2
+                exit 1
+            fi
+            selected_run_prefixes+=("${run_prefix_base}_custom${custom_index}")
+            selected_configs+=("${raw_config}")
+            selected_labels+=("Custom $(basename "${raw_config}" .toml)")
+            custom_index=$((custom_index + 1))
+            continue
         fi
         selected_run_prefixes+=("${run_prefixes[$matched_index]}")
         selected_configs+=("${configs[$matched_index]}")

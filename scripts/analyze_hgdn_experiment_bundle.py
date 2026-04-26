@@ -605,16 +605,25 @@ def matched_control_config(config: str) -> str:
     :param str config: HGDN config path.
     :return str: Control config path or empty string.
     """
-    stem = Path(config).stem
-    layer_match = re.match(r"naive_contract_(l\d+)_d512_", stem)
+    config_path = Path(config)
+    stem = config_path.stem
+    layer_dim_match = re.match(r"(naive_contract_l\d+_d\d+)_", stem)
     mult_match = re.search(r"_(m\d+(?:p\d+)?)$", stem)
-    if not layer_match or not mult_match:
+    if not layer_dim_match or not mult_match:
         return ""
+    sibling = (
+        config_path.parent / f"{layer_dim_match.group(1)}_r0_{mult_match.group(1)}.toml"
+    )
+    if sibling.is_file():
+        try:
+            return str(sibling.relative_to(REPO_ROOT))
+        except ValueError:
+            return str(sibling)
     candidate = (
         REPO_ROOT
         / "configs"
         / "hgdn"
-        / f"naive_contract_{layer_match.group(1)}_d512_r0_{mult_match.group(1)}.toml"
+        / f"{layer_dim_match.group(1)}_r0_{mult_match.group(1)}.toml"
     )
     if not candidate.is_file():
         return ""
