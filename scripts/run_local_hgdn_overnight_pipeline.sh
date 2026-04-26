@@ -54,6 +54,8 @@ confirm_iterations="${CONFIRM_ITERATIONS:-500}"
 screen_perf_skip_final_eval="${SCREEN_PERF_SKIP_FINAL_EVAL:-1}"
 confirm_perf_skip_final_eval="${CONFIRM_PERF_SKIP_FINAL_EVAL:-0}"
 confirm_top_hgdn="${CONFIRM_TOP_HGDN:-2}"
+recurrence_selection_metric="${RECURRENCE_SELECTION_METRIC:-final_step_ms}"
+search_selection_metric="${SEARCH_SELECTION_METRIC:-auto}"
 
 default_screen_configs=(
     "configs/hgdn/naive_contract_l8_d512_mid2_dk48_m2.toml"
@@ -170,6 +172,8 @@ write_plan() {
         echo "screen_iterations=${screen_iterations}"
         echo "confirm_iterations=${confirm_iterations}"
         echo "confirm_top_hgdn=${confirm_top_hgdn}"
+        echo "recurrence_selection_metric=${recurrence_selection_metric}"
+        echo "search_selection_metric=${search_selection_metric}"
         echo "screen_candidate_configs=${screen_candidate_configs}"
     } >"${pipeline_dir}/pipeline_plan.env"
 }
@@ -184,6 +188,8 @@ print_plan() {
     echo "run_stage2=${run_stage2} confirm_iterations=${confirm_iterations}"
     echo "screen_candidate_configs=${screen_candidate_configs}"
     echo "confirm_top_hgdn=${confirm_top_hgdn}"
+    echo "recurrence_selection_metric=${recurrence_selection_metric}"
+    echo "search_selection_metric=${search_selection_metric}"
     echo "data_path=${data_path}"
     echo "tokenizer_path=${tokenizer_path}"
     echo "vocab_size=${vocab_size}"
@@ -243,6 +249,7 @@ run_recurrence_stage() {
         "stage0_recurrence" \
         "$(stage_bundle_dir "${stage_prefix}")" \
         "mode" \
+        "${recurrence_selection_metric}" \
         "${pipeline_dir}/stage0_decision.env"
 }
 
@@ -254,7 +261,8 @@ run_search_stage() {
     local selected_mode="$5"
     local candidate_configs="$6"
     local decision_kind="$7"
-    local decision_env="$8"
+    local metric="$8"
+    local decision_env="$9"
     local diagnostic_env=()
     if [[ -n "${torch_logs}" ]]; then
         diagnostic_env+=("TORCH_LOGS=${torch_logs}")
@@ -308,6 +316,7 @@ run_search_stage() {
         "${stage_name}" \
         "$(stage_bundle_dir "${stage_prefix}")" \
         "${decision_kind}" \
+        "${metric}" \
         "${decision_env}"
 }
 
@@ -315,7 +324,8 @@ analyze_stage() {
     local stage_name="$1"
     local bundle_dir="$2"
     local select_kind="$3"
-    local decision_env="$4"
+    local metric="$4"
+    local decision_env="$5"
     local output_dir="${pipeline_dir}/${stage_name}_analysis"
 
     echo
@@ -325,6 +335,7 @@ analyze_stage() {
         --output-dir "${output_dir}" \
         --decision-env "${decision_env}" \
         --select "${select_kind}" \
+        --metric "${metric}" \
         --confirm-top-n "${confirm_top_hgdn}" \
         --top 20
 }
@@ -396,6 +407,7 @@ main() {
             "${selected_mode}" \
             "${screen_candidate_configs}" \
             "config" \
+            "${search_selection_metric}" \
             "${stage1_decision}"
     fi
 
@@ -418,6 +430,7 @@ main() {
             "${selected_mode}" \
             "${stage2_configs}" \
             "config" \
+            "${search_selection_metric}" \
             "${pipeline_dir}/stage2_decision.env"
         write_h100_next_command "${pipeline_dir}/stage2_decision.env"
     fi

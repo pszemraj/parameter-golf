@@ -61,6 +61,7 @@ def parse_args() -> argparse.Namespace:
         "--metric",
         choices=[
             "auto",
+            "final_step_ms",
             "speed_budget_bpb",
             "final_sampled_bpb",
             "final_roundtrip_bpb",
@@ -483,14 +484,43 @@ def compact_row(row: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in row.items() if key != "eval_points"}
 
 
+def summary_sort_key(
+    row: dict[str, Any], metric: str
+) -> tuple[float, float, float, str]:
+    """Return a stable sort key for human summaries.
+
+    :param dict[str, Any] row: Analyzer row.
+    :param str metric: Primary metric.
+    :return tuple[float, float, float, str]: Sort key.
+    """
+    _metric_name, value = metric_value(row, metric)
+    primary = value if value is not None else 999999.0
+    sampled_bpb = (
+        float(row["final_sampled_bpb"])
+        if row.get("final_sampled_bpb") is not None
+        else 999.0
+    )
+    step_ms = (
+        float(row["final_step_ms"])
+        if row.get("final_step_ms") is not None
+        else 999999.0
+    )
+    return (primary, sampled_bpb, step_ms, row["run_id"])
+
+
 def write_outputs(
-    output_dir: Path, rows: list[dict[str, Any]], speed_budget_ms: float | None
+    output_dir: Path,
+    rows: list[dict[str, Any]],
+    speed_budget_ms: float | None,
+    *,
+    metric: str,
 ) -> None:
     """Write rows, CSV, and markdown summary.
 
     :param Path output_dir: Output directory.
     :param list[dict[str, Any]] rows: Analyzer rows.
     :param float | None speed_budget_ms: Resolved speed budget.
+    :param str metric: Primary summary metric.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     compact = [compact_row(row) for row in rows]
@@ -530,18 +560,12 @@ def write_outputs(
         f"Speed budget ms: {speed_budget_ms:.0f}"
         if speed_budget_ms is not None
         else "Speed budget ms: n/a",
+        f"Selection metric: {metric}",
         "",
-        "| Candidate | Mode | Family | Step | ms/step | BPB | Speed BPB | Roundtrip | Size |",
-        "|---|---|---|---:|---:|---:|---:|---:|---|",
+        "| Candidate | Mode | Family | Step | ms/step | toks/s | BPB | Speed BPB | Roundtrip | Size |",
+        "|---|---|---|---:|---:|---:|---:|---:|---:|---|",
     ]
-    for row in sorted(
-        rows,
-        key=lambda item: (
-            item.get("speed_rank_all") or 999,
-            item.get("fixed_step_rank_all") or 999,
-            item["candidate"],
-        ),
-    ):
+    for row in sorted(rows, key=lambda item: summary_sort_key(item, metric)):
         lines.append(
             "| "
             + " | ".join(
@@ -551,6 +575,7 @@ def write_outputs(
                     str(row.get("family") or ""),
                     f"{row.get('final_step', 0)}/{row.get('planned_step', 0)}",
                     format_optional(row.get("final_step_ms"), digits=2),
+                    format_optional(row.get("tokens_per_s"), digits=1),
                     format_optional(row.get("final_sampled_bpb"), digits=4),
                     format_optional(row.get("speed_budget_bpb"), digits=4),
                     format_optional(row.get("final_roundtrip_bpb"), digits=4),
@@ -613,7 +638,9 @@ def write_decision_env(
     if ranked:
         winner = ranked[0]
         metric_name, metric_score = metric_value(winner, metric)
-        top_configs = [str(row["config"]) for row in ranked[:confirm_top_n]]
+        top_configs = unique_preserve_order(
+            [str(row["config"]) for row in ranked[:confirm_top_n]]
+        )
         controls = (
             [matched_control_config(config) for config in top_configs]
             if include_controls
@@ -669,31 +696,33 @@ def write_decision_env(
 
 
 def print_summary(
-    rows: list[dict[str, Any]], *, top: int, speed_budget_ms: float | None
+    rows: list[dict[str, Any]],
+    *,
+    top: int,
+    speed_budget_ms: float | None,
+    metric: str,
 ) -> None:
     """Print a compact analysis table.
 
     :param list[dict[str, Any]] rows: Analyzer rows.
     :param int top: Row limit.
     :param float | None speed_budget_ms: Resolved speed budget.
+    :param str metric: Primary summary metric.
     """
     budget = "n/a" if speed_budget_ms is None else f"{speed_budget_ms:.0f}"
     print(f"speed_budget_ms:{budget}")
-    print("| Candidate | Mode | Family | Step | ms/step | BPB | Speed BPB | Size |")
-    print("|---|---|---|---:|---:|---:|---:|---|")
-    for row in sorted(
-        rows,
-        key=lambda item: (
-            item.get("speed_rank_all") or 999,
-            item.get("fixed_step_rank_all") or 999,
-            item["candidate"],
-        ),
-    )[:top]:
+    print(f"selection_metric:{metric}")
+    print(
+        "| Candidate | Mode | Family | Step | ms/step | toks/s | BPB | Speed BPB | Size |"
+    )
+    print("|---|---|---|---:|---:|---:|---:|---:|---|")
+    for row in sorted(rows, key=lambda item: summary_sort_key(item, metric))[:top]:
         print(
             f"| {row['candidate']} | {row.get('gdn_fla_recurrence_mode') or ''} | "
             f"{row.get('family') or ''} | "
             f"{row.get('final_step', 0)}/{row.get('planned_step', 0)} | "
             f"{format_optional(row.get('final_step_ms'), digits=2)} | "
+            f"{format_optional(row.get('tokens_per_s'), digits=1)} | "
             f"{format_optional(row.get('final_sampled_bpb'), digits=4)} | "
             f"{format_optional(row.get('speed_budget_bpb'), digits=4)} | "
             f"{row.get('artifact_status') or row.get('size_status') or ''} |"
@@ -705,7 +734,7 @@ def main() -> None:
     args = parse_args()
     rows, speed_budget_ms = build_rows(args.bundle_dir, args.speed_budget_ms)
     if args.output_dir is not None:
-        write_outputs(args.output_dir, rows, speed_budget_ms)
+        write_outputs(args.output_dir, rows, speed_budget_ms, metric=args.metric)
     if args.decision_env is not None:
         write_decision_env(
             args.decision_env,
@@ -715,7 +744,9 @@ def main() -> None:
             confirm_top_n=args.confirm_top_n,
             include_controls=args.include_controls,
         )
-    print_summary(rows, top=args.top, speed_budget_ms=speed_budget_ms)
+    print_summary(
+        rows, top=args.top, speed_budget_ms=speed_budget_ms, metric=args.metric
+    )
 
 
 if __name__ == "__main__":
