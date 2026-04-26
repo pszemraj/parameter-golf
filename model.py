@@ -869,7 +869,7 @@ class GatedDeltaNet(nn.Module):
         use_packed_qkv_conv_custom_backward: bool = False,
         use_packed_qkv_single_contig: bool = False,
         use_packed_qkv_split_copy: bool = False,
-        fla_recurrence_mode: str = "compile_visible",
+        fla_recurrence_mode: str = "direct",
     ):
         """Initialize a Gated DeltaNet block.
 
@@ -898,7 +898,7 @@ class GatedDeltaNet(nn.Module):
             `compile_visible` keeps the torch.library wrapper, `direct`
             bypasses it with the custom HGDN recurrence semantics, and
             `direct_fused` uses upstream-style in-kernel q/k norm and decay-gate
-            activation, defaults to `"compile_visible"`.
+            activation, defaults to `"direct"`.
         """
         super().__init__()
         if fla_recurrence_mode not in GDN_FLA_RECURRENCE_MODES:
@@ -1457,7 +1457,7 @@ class GDNBlock(nn.Module):
         use_packed_qkv_conv_custom_backward: bool = False,
         use_packed_qkv_single_contig: bool = False,
         use_packed_qkv_split_copy: bool = False,
-        fla_recurrence_mode: str = "compile_visible",
+        fla_recurrence_mode: str = "direct",
         leaky_slope: float = 0.5,
         norm_style: NormStyle = "pre",
         residual_alpha: float = 1.0,
@@ -1486,7 +1486,7 @@ class GDNBlock(nn.Module):
         :param bool use_packed_qkv_conv_custom_backward: Whether to route the packed depthwise qkv conv through an exact-length custom autograd path, defaults to False.
         :param bool use_packed_qkv_single_contig: Whether to materialize one contiguous packed q/k/v tensor before splitting the packed conv output, defaults to False.
         :param bool use_packed_qkv_split_copy: Whether to materialize q/k/v with `aten.split_with_sizes_copy`, defaults to False.
-        :param str fla_recurrence_mode: Public FLA recurrence path used by the GDN layer, defaults to `"compile_visible"`.
+        :param str fla_recurrence_mode: Public FLA recurrence path used by the GDN layer, defaults to `"direct"`.
         :param float leaky_slope: LeakyReLU slope, defaults to 0.5.
         :param NormStyle norm_style: Residual norm placement, defaults to "pre".
         :param float residual_alpha: Residual scaling factor used by KEEL-style blocks, defaults to 1.0.
@@ -1673,7 +1673,7 @@ class HybridGPT(nn.Module):
         gdn_use_packed_qkv_conv_custom_backward: bool = False,
         gdn_use_packed_qkv_single_contig: bool = False,
         gdn_use_packed_qkv_split_copy: bool = False,
-        gdn_fla_recurrence_mode: str = "compile_visible",
+        gdn_fla_recurrence_mode: str = "direct",
         # Shared
         mlp_mult: float = 3.0,
         leaky_slope: float = 0.5,
@@ -1713,7 +1713,7 @@ class HybridGPT(nn.Module):
         :param bool gdn_use_packed_qkv_conv_custom_backward: Whether to route the packed depthwise qkv conv through an exact-length custom autograd path, defaults to False.
         :param bool gdn_use_packed_qkv_single_contig: Whether to materialize one contiguous packed q/k/v tensor before splitting the packed conv output, defaults to False.
         :param bool gdn_use_packed_qkv_split_copy: Whether to materialize q/k/v with `aten.split_with_sizes_copy`, defaults to False.
-        :param str gdn_fla_recurrence_mode: Public FLA recurrence path used by GDN layers, defaults to `"compile_visible"`.
+        :param str gdn_fla_recurrence_mode: Public FLA recurrence path used by GDN layers, defaults to `"direct"`.
         :param float mlp_mult: MLP expansion factor, defaults to 3.0.
         :param float leaky_slope: LeakyReLU slope, defaults to 0.5.
         :param int gdn_ratio: Number of GDN layers per attention layer, defaults to 3.

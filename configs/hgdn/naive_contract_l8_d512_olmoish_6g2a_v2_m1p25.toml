@@ -3,6 +3,7 @@ NUM_LAYERS = 8
 MODEL_DIM = 512
 MLP_MULT = 1.25
 GDN_RATIO = 3
+GDN_FLA_RECURRENCE_MODE = "direct"
 BLOCK_PATTERN = ["gdn", "gdn", "gdn", "attn", "gdn", "gdn", "gdn", "attn"]
 GDN_HEAD_K_DIM = 48
 GDN_EXPAND_V = 2.0

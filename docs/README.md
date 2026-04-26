@@ -16,12 +16,11 @@ Branch: `exp/hgdn-final`
   `A_log` and `dt_bias` use timescale-aware initialization, those decay params
   run in a no-weight-decay Adam group, negative eigenvalues stay enabled by
   default, and each GDN layer has a learned output RMSNorm weight.
-- `GDN_FLA_RECURRENCE_MODE=direct` is available for wrapper-tax ablations.
-  `GDN_FLA_RECURRENCE_MODE=direct_fused` or
-  `GDN_USE_DIRECT_FLA_LAYER_SEMANTICS=1` additionally tests upstream-style
-  in-kernel q/k L2 normalization and decay-gate activation. The default remains
-  `compile_visible`. All FLA recurrence modes now use the public FLA default
-  scale, `1 / sqrt(head_k_dim)`.
+- Candidate runs default to `GDN_FLA_RECURRENCE_MODE=direct`, and helper
+  scripts also log it explicitly. `compile_visible` and `direct_fused` remain
+  named ablation modes; `direct_fused` tests upstream-style in-kernel q/k L2
+  normalization and decay-gate activation. All FLA recurrence modes now use the
+  public FLA default scale, `1 / sqrt(head_k_dim)`.
 - Local Python commands on this checkout use `conda run -s --name pg ...`.
 
 The active branch question is narrow: can a sparse HGDN shell beat the exact
@@ -30,13 +29,15 @@ and artifact size?
 
 ## Next Experiment Order
 
-1. Rerun the local sparse exact-contract helper after the GDN dynamics fixes.
+1. Run the small sequential recurrence implementation matrix from
+   [FLA Calibration](#fla-calibration) before reopening architecture search.
+2. Rerun the local sparse exact-contract helper after the implementation matrix.
    Start with the shortlist in [Local Sparse Search](#local-sparse-search).
-2. If the local rerun still supports the primary candidate, run the exact H100
+3. If the local rerun still supports the primary candidate, run the exact H100
    comparison in [H100 Commands](#h100-commands).
-3. Run the optional quality-ceiling candidate only if the primary result leaves
+4. Run the optional quality-ceiling candidate only if the primary result leaves
    a real quality/speed tradeoff unresolved.
-4. Keep native FLA and recurrence-path timing in the calibration lane described
+5. Keep native FLA and recurrence-path timing in the calibration lane described
    in [FLA Calibration](#fla-calibration). Run timing jobs sequentially with no
    other active CUDA work.
 
@@ -191,15 +192,18 @@ Run this benchmark by itself. Timings are invalid if other tests, training jobs,
 or CUDA benchmarks are active in background terminals.
 
 For a training-level recurrence-path ablation, run the same config, seed, step
-count, and compile settings sequentially with:
+count, and compile settings sequentially with
+`configs/hgdn/naive_contract_l8_d512_mid2_dk48_v2_m1p5.toml`:
 
 ```bash
-GDN_FLA_RECURRENCE_MODE=compile_visible
 GDN_FLA_RECURRENCE_MODE=direct
 GDN_FLA_RECURRENCE_MODE=direct_fused
+GDN_FLA_RECURRENCE_MODE=compile_visible
 ```
 
-Compare `ms/step`, tokens/sec, train loss, sampled BPB, and compile graph breaks.
+Then run the matched attention-only diagnostic control with
+`configs/hgdn/naive_contract_l8_d512_r0_m1p5.toml`. Compare `ms/step`,
+tokens/sec, train loss, sampled BPB, artifact proxy, and compile graph breaks.
 Check for active CUDA jobs first:
 
 ```bash
@@ -207,9 +211,44 @@ nvidia-smi --query-compute-apps=pid,process_name,used_memory \
   --format=csv,noheader,nounits
 ```
 
+The local helper encodes that exact A/B/C/D matrix and refuses to start when
+other CUDA compute jobs are visible unless `ALLOW_ACTIVE_CUDA_JOBS=1` is set:
+
+```bash
+USE_WANDB=0 WANDB_MODE=offline \
+TORCH_LOGS=recompiles,graph_breaks \
+RUN_PREFIX_BASE=localrecurmatrix1 \
+bash scripts/run_local_hgdn_recurrence_matrix.sh
+```
+
+For an unattended local hierarchy, use the overnight pipeline. It runs:
+
+1. the recurrence implementation matrix,
+2. a bounded architecture/control screen using the selected recurrence mode,
+3. a longer confirmation pass for the top HGDN configs plus their matched
+   attention-only diagnostic controls.
+
+It analyzes each bundle with `scripts/analyze_hgdn_experiment_bundle.py`, writes
+stage decision files under `local-scratch/<prefix>_pipeline`, and writes the
+next H100 command for review instead of launching paid H100 work.
+
+```bash
+USE_WANDB=0 WANDB_MODE=offline \
+TORCH_LOGS=recompiles,graph_breaks \
+RUN_PREFIX_BASE=localhgdn_overnight1 \
+bash scripts/run_local_hgdn_overnight_pipeline.sh
+```
+
+The default screen is deliberately small. Override it with
+`SCREEN_CANDIDATE_CONFIGS=path1.toml,path2.toml,...` when you want a different
+shortlist; the underlying local search helper also accepts `CANDIDATE_CONFIGS`
+for bounded one-off batches.
+
 ## Analysis And Sanity Tools
 
 - `scripts/analyze_local_naive_contract_bundle.py`: local sparse bundle ranking.
+- `scripts/analyze_hgdn_experiment_bundle.py`: generic bundle analyzer and
+  promotion-decision writer for staged pipelines.
 - `scripts/check_bpb_sanity.py`: nats/BPB/implied bytes-per-token checks.
 - `scripts/probe_fla_stack.py`: FLA package/API/kernel import probe.
 - `scripts/bench_fla_recurrence_paths.py`: wrapper versus direct public FLA
@@ -230,6 +269,10 @@ conda run -s --name pg python scripts/check_bpb_sanity.py \
 - `train_gpt_hybrid.py`: packed sparse HGDN and attention-only diagnostic path.
 - `train_gpt_fla_control.py`: isolated native-FLA calibration path.
 - `scripts/run_local_hgdn_naive_contract_search.sh`: local sparse search.
+- `scripts/run_local_hgdn_recurrence_matrix.sh`: local recurrence
+  implementation matrix.
+- `scripts/run_local_hgdn_overnight_pipeline.sh`: staged local implementation,
+  architecture, and confirmation hierarchy.
 - `scripts/run_h100_hgdn_naive_contract_round.sh`: H100 exact-baseline comparison.
 - `scripts/bundle_hgdn_run.py`: bundle helper.
 - `scripts/bootstrap_challenge_data.sh`: data bootstrap helper.
@@ -241,6 +284,8 @@ Run these checks before handing off a branch or run bundle:
 ```bash
 bash -n scripts/hgdn_shell_common.sh \
   scripts/run_local_hgdn_naive_contract_search.sh \
+  scripts/run_local_hgdn_recurrence_matrix.sh \
+  scripts/run_local_hgdn_overnight_pipeline.sh \
   scripts/run_h100_hgdn_naive_contract_round.sh \
   scripts/bootstrap_challenge_data.sh
 

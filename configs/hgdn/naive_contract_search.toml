@@ -23,6 +23,7 @@ gdn_control_proj_fp32 = false
 gdn_w_g_optimizer = "matrix"
 gdn_gates_fp32 = true
 gdn_output_norm_fp32 = true
+gdn_fla_recurrence_mode = "direct"
 mlp_mult = 2.0
 leaky_slope = 0.5
 gdn_ratio = 1

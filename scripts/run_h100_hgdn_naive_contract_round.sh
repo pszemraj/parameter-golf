@@ -44,6 +44,7 @@ compile="${COMPILE:-1}"
 compile_strategy="${COMPILE_STRATEGY:-hybrid}"
 attn_use_flash_attn3="${ATTN_USE_FLASH_ATTN3:-1}"
 distributed_mode="${DISTRIBUTED_MODE:-parallel_muon}"
+gdn_fla_recurrence_mode="${GDN_FLA_RECURRENCE_MODE:-direct}"
 muon_distributed_mode="${MUON_DISTRIBUTED_MODE:-packed_allreduce}"
 gdn_w_g_optimizer="${GDN_W_G_OPTIMIZER:-matrix}"
 weight_decay="${WEIGHT_DECAY:-0}"
@@ -94,6 +95,7 @@ naive_reference_roundtrip_bpb="${NAIVE_REFERENCE_ROUNDTRIP_BPB:-1.22436570}"
 naive_reference_stop_bpb="${NAIVE_REFERENCE_STOP_BPB:-1.2172}"
 
 hgdn_ensure_python_module "${python_bin}" py7zr py7zr
+hgdn_validate_fla_recurrence_mode "${gdn_fla_recurrence_mode}"
 
 case "${wandb_mode}" in
 online | offline) ;;
@@ -104,9 +106,15 @@ online | offline) ;;
 esac
 
 load_config_env() {
-    mapfile -t config_env < <(
+    local raw_config_env=()
+    mapfile -t raw_config_env < <(
         "${python_bin}" scripts/hgdn_helper_cli.py load-env --alias-aware --path "$@"
     )
+    mapfile -t config_env < <(
+        hgdn_filter_recurrence_env "${raw_config_env[@]}"
+    )
+    config_env+=("GDN_USE_DIRECT_FLA_LAYER_SEMANTICS=0")
+    config_env+=("GDN_FLA_RECURRENCE_MODE=${gdn_fla_recurrence_mode}")
 }
 
 print_plan() {
@@ -136,6 +144,7 @@ print_plan() {
     echo "compile_strategy=${compile_strategy}"
     echo "attn_use_flash_attn3=${attn_use_flash_attn3}"
     echo "distributed_mode=${distributed_mode}"
+    echo "gdn_fla_recurrence_mode=${gdn_fla_recurrence_mode}"
     echo "muon_distributed_mode=${muon_distributed_mode}"
     echo "gdn_w_g_optimizer=${gdn_w_g_optimizer}"
     echo "weight_decay=${weight_decay}"
@@ -405,6 +414,7 @@ build_bundle() {
         --max-wallclock-seconds "${max_wallclock_seconds}" \
         --compile-enabled "${compile}" \
         --compile-strategy "${compile_strategy}" \
+        --gdn-fla-recurrence-mode "${gdn_fla_recurrence_mode}" \
         --muon-distributed-mode "${muon_distributed_mode}" \
         --gdn-w-g-optimizer "${gdn_w_g_optimizer}" \
         --weight-decay "${weight_decay}" \

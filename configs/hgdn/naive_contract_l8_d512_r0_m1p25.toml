@@ -3,6 +3,7 @@ NUM_LAYERS = 8
 MODEL_DIM = 512
 MLP_MULT = 1.25
 GDN_RATIO = 0
+GDN_FLA_RECURRENCE_MODE = "direct"
 BLOCK_PATTERN = ["attn", "attn", "attn", "attn", "attn", "attn", "attn", "attn"]
 GDN_W_G_OPTIMIZER = "matrix"
 MUON_DISTRIBUTED_MODE = "packed_allreduce"

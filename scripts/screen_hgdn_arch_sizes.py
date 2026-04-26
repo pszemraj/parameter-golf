@@ -32,6 +32,7 @@ DEFAULT_CONFIG = REPO_ROOT / "configs" / "hgdn" / "naive_contract_search.toml"
 TRAINER_PATH = REPO_ROOT / "train_gpt_hybrid.py"
 PROFILE_ROOT = REPO_ROOT / "profiles" / "arch_size"
 DEFAULT_ARTIFACT_LIMIT_BYTES = 16_000_000
+FLA_RECURRENCE_MODES = ("compile_visible", "direct", "direct_fused")
 
 DEFAULT_MODEL_KWARGS: dict[str, Any] = {
     "vocab_size": 1024,
@@ -55,7 +56,7 @@ DEFAULT_MODEL_KWARGS: dict[str, Any] = {
     "gdn_v_conv_output_contiguous": True,
     "gdn_gates_fp32": True,
     "gdn_output_norm_fp32": True,
-    "gdn_fla_recurrence_mode": "compile_visible",
+    "gdn_fla_recurrence_mode": "direct",
     "mlp_mult": 3.25,
     "leaky_slope": 0.5,
     "gdn_ratio": 1,
@@ -116,6 +117,11 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=20,
         help="Maximum number of candidates to print to stdout, defaults to 20.",
+    )
+    parser.add_argument(
+        "--gdn-fla-recurrence-mode",
+        choices=FLA_RECURRENCE_MODES,
+        help="Override gdn_fla_recurrence_mode for the screen.",
     )
     return parser.parse_args()
 
@@ -258,6 +264,7 @@ def candidate_metrics(
         "d_model": model_kwargs["d_model"],
         "mlp_mult": model_kwargs["mlp_mult"],
         "gdn_ratio": model_kwargs["gdn_ratio"],
+        "gdn_fla_recurrence_mode": model_kwargs["gdn_fla_recurrence_mode"],
         "blocks": f"{ng}G+{na}A",
         "params": params,
         "raw_model_bytes": raw_model_bytes,
@@ -313,6 +320,7 @@ def write_outputs(output_dir: Path, rows: list[dict[str, Any]]) -> None:
         "d_model",
         "mlp_mult",
         "gdn_ratio",
+        "gdn_fla_recurrence_mode",
         "blocks",
         "params",
         "params_delta_pct_vs_ref",
@@ -402,6 +410,9 @@ def main() -> None:
 
     args = parse_args()
     base_cfg, candidates = load_config(args.config)
+    if args.gdn_fla_recurrence_mode is not None:
+        base_cfg = dict(base_cfg)
+        base_cfg["gdn_fla_recurrence_mode"] = args.gdn_fla_recurrence_mode
     code_bytes = len(TRAINER_PATH.read_text(encoding="utf-8").encode("utf-8"))
     rows = [
         candidate_metrics(row["name"], base_cfg, row, code_bytes=code_bytes)

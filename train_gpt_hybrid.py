@@ -214,7 +214,7 @@ class Hyperparameters:
     gdn_fla_recurrence_mode = (
         "direct_fused"
         if bool(int(os.environ.get("GDN_USE_DIRECT_FLA_LAYER_SEMANTICS", "0")))
-        else os.environ.get("GDN_FLA_RECURRENCE_MODE", "compile_visible").lower()
+        else os.environ.get("GDN_FLA_RECURRENCE_MODE", "direct").lower()
     )
     cudnn_benchmark = bool(int(os.environ.get("CUDNN_BENCHMARK", "0")))
     gdn_ratio = int(os.environ.get("GDN_RATIO", 3))  # 3 GDN : 1 Attn

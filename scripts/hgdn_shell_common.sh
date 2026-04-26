@@ -17,6 +17,30 @@ hgdn_require_cmd() {
     fi
 }
 
+hgdn_validate_fla_recurrence_mode() {
+    local mode="${1:?recurrence mode required}"
+    case "${mode}" in
+    compile_visible | direct | direct_fused) ;;
+    *)
+        echo "Unsupported GDN_FLA_RECURRENCE_MODE: ${mode}" >&2
+        echo "Expected one of: compile_visible, direct, direct_fused" >&2
+        exit 1
+        ;;
+    esac
+}
+
+hgdn_filter_recurrence_env() {
+    local kv
+    for kv in "$@"; do
+        case "${kv}" in
+        GDN_FLA_RECURRENCE_MODE=* | GDN_USE_DIRECT_FLA_LAYER_SEMANTICS=*) ;;
+        *)
+            printf '%s\n' "${kv}"
+            ;;
+        esac
+    done
+}
+
 hgdn_run_hybrid_train() {
     local label="$1"
     shift

@@ -6,7 +6,7 @@ hgdn_setup_repo_root "${BASH_SOURCE[0]}"
 
 if [[ "$#" -ne 0 ]]; then
     echo "Run this script with no arguments." >&2
-    echo "It always executes the full local HGDN naive-contract search batch." >&2
+    echo "It executes the bounded local HGDN recurrence implementation matrix." >&2
     exit 1
 fi
 
@@ -15,22 +15,22 @@ hgdn_require_cmd torchrun
 hgdn_require_cmd python
 
 python_bin="${PYTHON_BIN:-python}"
-use_wandb="${USE_WANDB:-1}"
-wandb_mode="${WANDB_MODE:-online}"
+use_wandb="${USE_WANDB:-0}"
+wandb_mode="${WANDB_MODE:-offline}"
 wandb_project="${WANDB_PROJECT:-pg-hgdn-ablations}"
 wandb_watch="${WANDB_WATCH:-none}"
 wandb_watch_log_freq="${WANDB_WATCH_LOG_FREQ:-25}"
-run_prefix_base="${RUN_PREFIX_BASE:-localnaivehgdn1}"
+run_prefix_base="${RUN_PREFIX_BASE:-localrecurmatrix1}"
 bundle_stage_dir="${BUNDLE_STAGE_DIR:-local-scratch/${run_prefix_base}_bundle}"
 archive_output="${ARCHIVE_OUTPUT:-local-scratch/${run_prefix_base}_bundle.7z}"
 command_log="${COMMAND_LOG:-local-scratch/${run_prefix_base}_commands.sh}"
-size_screen_output="${SIZE_SCREEN_OUTPUT:-local-scratch/${run_prefix_base}_size_screen}"
-size_screen_config="${SIZE_SCREEN_CONFIG:-configs/hgdn/naive_contract_search.toml}"
 torchinductor_max_autotune="${TORCHINDUCTOR_MAX_AUTOTUNE:-0}"
 torchinductor_max_autotune_gemm="${TORCHINDUCTOR_MAX_AUTOTUNE_GEMM:-0}"
 torch_logs="${TORCH_LOGS:-}"
 torch_trace="${TORCH_TRACE:-}"
 allow_existing_logs="${ALLOW_EXISTING_LOGS:-0}"
+check_cuda_idle="${CHECK_CUDA_IDLE:-1}"
+allow_active_cuda_jobs="${ALLOW_ACTIVE_CUDA_JOBS:-0}"
 
 ngpu="${NGPU:-1}"
 iterations="${ITERATIONS:-500}"
@@ -42,13 +42,14 @@ max_wallclock_seconds="${MAX_WALLCLOCK_SECONDS:-0}"
 compile="${COMPILE:-1}"
 compile_strategy="${COMPILE_STRATEGY:-hybrid}"
 distributed_mode="${DISTRIBUTED_MODE:-parallel_muon}"
-gdn_fla_recurrence_mode="${GDN_FLA_RECURRENCE_MODE:-direct}"
 weight_decay="${WEIGHT_DECAY:-0}"
-perf_skip_final_eval="${PERF_SKIP_FINAL_EVAL:-1}"
+perf_skip_final_eval="${PERF_SKIP_FINAL_EVAL:-0}"
 grad_accum_steps_override="${GRAD_ACCUM_STEPS:-}"
 bundle_written=0
 
-hgdn_validate_fla_recurrence_mode "${gdn_fla_recurrence_mode}"
+hgdn_config="${HGDN_CONFIG:-configs/hgdn/naive_contract_l8_d512_mid2_dk48_v2_m1p5.toml}"
+attn_config="${ATTN_CONFIG:-configs/hgdn/naive_contract_l8_d512_r0_m1p5.toml}"
+
 hgdn_ensure_python_module "${python_bin}" py7zr py7zr
 
 resolve_grad_accum_steps() {
@@ -84,122 +85,43 @@ online | offline) ;;
 esac
 
 configs=(
-    "configs/hgdn/naive_contract_l8_d512_mid2_dk48_m2.toml"
-    "configs/hgdn/naive_contract_l8_d512_mid2_dk48_m1p75.toml"
-    "configs/hgdn/naive_contract_l8_d512_mid2_dk48_v1p5_m1p75.toml"
-    "configs/hgdn/naive_contract_l8_d512_mid2_dk48_v2_m1p5.toml"
-    "configs/hgdn/naive_contract_l8_d512_boundary2_dk48_m2.toml"
-    "configs/hgdn/naive_contract_l8_d512_mid3_dk48_m1p75.toml"
-    "configs/hgdn/naive_contract_l8_d512_olmoish_6g2a_v2_m1p25.toml"
-    "configs/hgdn/naive_contract_l9_d512_mid2_dk48_m1p75.toml"
-    "configs/hgdn/naive_contract_l9_d512_mid2_dk48_v1p5_m1p75.toml"
-    "configs/hgdn/naive_contract_l9_d512_mid2_dk48_m2.toml"
-    "configs/hgdn/naive_contract_l9_d512_mid3_dk48_m1p75.toml"
-    "configs/hgdn/naive_contract_l9_d512_mid3_dk48_v1p5_m1p75.toml"
-    "configs/hgdn/naive_contract_l9_d512_tail2_dk48_m1p75.toml"
-    "configs/hgdn/naive_contract_l8_d512_r0_m1p25.toml"
-    "configs/hgdn/naive_contract_l8_d512_r0_m1p5.toml"
-    "configs/hgdn/naive_contract_l8_d512_r0_m1p75.toml"
-    "configs/hgdn/naive_contract_l8_d512_r0_m2.toml"
-    "configs/hgdn/naive_contract_l9_d512_r0_m1p75.toml"
-    "configs/hgdn/naive_contract_l9_d512_r0_m2.toml"
+    "${hgdn_config}"
+    "${hgdn_config}"
+    "${hgdn_config}"
+    "${attn_config}"
 )
 
 labels=(
-    "HGDN 8Lx512d mid2 dk48 mlp2.0"
-    "HGDN 8Lx512d mid2 dk48 mlp1.75"
-    "HGDN 8Lx512d mid2 dk48 v1.5 mlp1.75"
-    "HGDN 8Lx512d mid2 dk48 v2.0 mlp1.5"
-    "HGDN 8Lx512d boundary2 dk48 mlp2.0"
-    "HGDN 8Lx512d mid3 dk48 mlp1.75"
-    "HGDN 8Lx512d OLMo-ish 6G2A dk48 v2.0 mlp1.25"
-    "HGDN 9Lx512d mid2 dk48 mlp1.75"
-    "HGDN 9Lx512d mid2 dk48 v1.5 mlp1.75"
-    "HGDN 9Lx512d mid2 dk48 mlp2.0"
-    "HGDN 9Lx512d mid3 dk48 mlp1.75"
-    "HGDN 9Lx512d mid3 dk48 v1.5 mlp1.75"
-    "HGDN 9Lx512d tail2 dk48 mlp1.75"
-    "Attention-only baseline 8Lx512d mlp1.25"
-    "Attention-only baseline 8Lx512d mlp1.5"
-    "Attention-only baseline 8Lx512d mlp1.75"
-    "Attention-only baseline 8Lx512d mlp2.0"
-    "Attention-only baseline 9Lx512d mlp1.75"
-    "Attention-only baseline 9Lx512d mlp2.0"
+    "HGDN recurrence A direct"
+    "HGDN recurrence B direct_fused"
+    "HGDN recurrence C compile_visible"
+    "Attention-only baseline diagnostic control"
 )
 
-default_prefixes=()
-for idx in "${!configs[@]}"; do
-    printf -v suffix '%b' "\\$(printf '%03o' $((97 + idx)))"
-    default_prefixes+=("${run_prefix_base}_${suffix}")
+modes=(
+    "direct"
+    "direct_fused"
+    "compile_visible"
+    "direct"
+)
+
+for mode in "${modes[@]}"; do
+    hgdn_validate_fla_recurrence_mode "${mode}"
 done
 
-if [[ -n "${RUN_PREFIXES:-}" ]]; then
-    IFS=',' read -r -a run_prefixes <<<"${RUN_PREFIXES}"
-else
-    run_prefixes=("${default_prefixes[@]}")
-fi
-
-if [[ -n "${CANDIDATE_INDEXES:-}" && -n "${CANDIDATE_CONFIGS:-}" ]]; then
-    echo "Set only one of CANDIDATE_INDEXES or CANDIDATE_CONFIGS." >&2
-    exit 1
-fi
-
-if [[ -n "${CANDIDATE_CONFIGS:-}" ]]; then
-    IFS=',' read -r -a selected_config_filters <<<"${CANDIDATE_CONFIGS}"
-    selected_run_prefixes=()
-    selected_configs=()
-    selected_labels=()
-    for raw_config in "${selected_config_filters[@]}"; do
-        matched_index=""
-        for idx in "${!configs[@]}"; do
-            if [[ "${configs[$idx]}" == "${raw_config}" ]]; then
-                matched_index="${idx}"
-                break
-            fi
-        done
-        if [[ -z "${matched_index}" ]]; then
-            echo "CANDIDATE_CONFIGS entry is not in the helper candidate list: ${raw_config}" >&2
-            exit 1
-        fi
-        selected_run_prefixes+=("${run_prefixes[$matched_index]}")
-        selected_configs+=("${configs[$matched_index]}")
-        selected_labels+=("${labels[$matched_index]}")
-    done
-    run_prefixes=("${selected_run_prefixes[@]}")
-    configs=("${selected_configs[@]}")
-    labels=("${selected_labels[@]}")
-elif [[ -n "${CANDIDATE_INDEXES:-}" ]]; then
-    IFS=',' read -r -a selected_indexes <<<"${CANDIDATE_INDEXES}"
-    selected_run_prefixes=()
-    selected_configs=()
-    selected_labels=()
-    for raw_index in "${selected_indexes[@]}"; do
-        if [[ ! "${raw_index}" =~ ^[0-9]+$ ]]; then
-            echo "CANDIDATE_INDEXES entries must be zero-based integers: ${raw_index}" >&2
-            exit 1
-        fi
-        if (( raw_index < 0 || raw_index >= ${#configs[@]} )); then
-            echo "CANDIDATE_INDEXES entry out of range: ${raw_index}" >&2
-            exit 1
-        fi
-        selected_run_prefixes+=("${run_prefixes[$raw_index]}")
-        selected_configs+=("${configs[$raw_index]}")
-        selected_labels+=("${labels[$raw_index]}")
-    done
-    run_prefixes=("${selected_run_prefixes[@]}")
-    configs=("${selected_configs[@]}")
-    labels=("${selected_labels[@]}")
-fi
-
-if [[ "${#run_prefixes[@]}" -ne "${#configs[@]}" ]]; then
-    echo "RUN_PREFIXES count (${#run_prefixes[@]}) must match config count (${#configs[@]})." >&2
-    exit 1
-fi
+run_prefixes=(
+    "${run_prefix_base}_a_direct"
+    "${run_prefix_base}_b_direct_fused"
+    "${run_prefix_base}_c_compile_visible"
+    "${run_prefix_base}_d_attention_only"
+)
 
 resolved_run_ids=()
+config_env=()
 
 load_config_env() {
     local config_path="$1"
+    local mode="$2"
     local raw_config_env=()
     mapfile -t raw_config_env < <(
         "${python_bin}" scripts/hgdn_helper_cli.py load-env --path "${config_path}"
@@ -208,7 +130,7 @@ load_config_env() {
         hgdn_filter_recurrence_env "${raw_config_env[@]}"
     )
     config_env+=("GDN_USE_DIRECT_FLA_LAYER_SEMANTICS=0")
-    config_env+=("GDN_FLA_RECURRENCE_MODE=${gdn_fla_recurrence_mode}")
+    config_env+=("GDN_FLA_RECURRENCE_MODE=${mode}")
 }
 
 resolve_run_ids() {
@@ -229,10 +151,31 @@ if [[ -n "${torch_trace}" ]]; then
     diagnostic_env+=("TORCH_TRACE=${torch_trace}")
 fi
 
+check_cuda_jobs() {
+    if [[ "${check_cuda_idle}" != "1" || "${allow_active_cuda_jobs}" == "1" ]]; then
+        return
+    fi
+    if ! command -v nvidia-smi >/dev/null 2>&1; then
+        return
+    fi
+    local active_jobs
+    active_jobs="$(
+        nvidia-smi --query-compute-apps=pid,process_name,used_memory \
+            --format=csv,noheader,nounits 2>/dev/null | sed '/^[[:space:]]*$/d' || true
+    )"
+    if [[ -n "${active_jobs}" ]]; then
+        echo "Refusing to start recurrence matrix while CUDA compute jobs are active:" >&2
+        echo "${active_jobs}" >&2
+        echo "Set ALLOW_ACTIVE_CUDA_JOBS=1 only if this overlap is intentional." >&2
+        exit 1
+    fi
+}
+
 append_train_command() {
     local config_path="$1"
-    local run_id="$2"
-    load_config_env "${config_path}"
+    local mode="$2"
+    local run_id="$3"
+    load_config_env "${config_path}" "${mode}"
     hgdn_append_command \
         "${command_log}" \
         "NGPU=${ngpu}" \
@@ -269,16 +212,9 @@ write_command_log() {
         echo "set -euo pipefail"
     } >"${command_log}"
 
-    hgdn_append_plain_command \
-        "${command_log}" \
-        "${python_bin}" scripts/screen_hgdn_arch_sizes.py \
-        --config "${size_screen_config}" \
-        --gdn-fla-recurrence-mode "${gdn_fla_recurrence_mode}" \
-        --output-dir "${size_screen_output}"
-
     local i
     for ((i = 0; i < ${#configs[@]}; i++)); do
-        append_train_command "${configs[$i]}" "${resolved_run_ids[$i]}"
+        append_train_command "${configs[$i]}" "${modes[$i]}" "${resolved_run_ids[$i]}"
     done
 }
 
@@ -303,7 +239,7 @@ check_planned_logs_are_fresh() {
 
 print_plan() {
     echo
-    echo ">>> Local HGDN naive-contract search (sparse exact-contract candidate screen)"
+    echo ">>> Local HGDN recurrence implementation matrix"
     echo "python_bin=${python_bin}"
     echo "use_wandb=${use_wandb}"
     echo "wandb_mode=${wandb_mode}"
@@ -327,26 +263,18 @@ print_plan() {
     echo "compile=${compile}"
     echo "compile_strategy=${compile_strategy}"
     echo "distributed_mode=${distributed_mode}"
-    echo "gdn_fla_recurrence_mode=${gdn_fla_recurrence_mode}"
+    echo "check_cuda_idle=${check_cuda_idle}"
+    echo "allow_active_cuda_jobs=${allow_active_cuda_jobs}"
     echo "allow_existing_logs=${allow_existing_logs}"
     echo "max_wallclock_seconds=${max_wallclock_seconds}"
-    echo "size_screen_config=${size_screen_config}"
-    echo "size_screen_output=${size_screen_output}"
+    echo "hgdn_config=${hgdn_config}"
+    echo "attn_config=${attn_config}"
     echo "archive_output=${archive_output}"
     echo "batch:"
     local i
     for ((i = 0; i < ${#configs[@]}; i++)); do
-        echo "  - ${run_prefixes[$i]} :: ${labels[$i]} :: ${configs[$i]}"
+        echo "  - ${run_prefixes[$i]} :: mode=${modes[$i]} :: ${labels[$i]} :: ${configs[$i]}"
     done
-}
-
-run_size_screen() {
-    echo
-    echo ">>> artifact-size screen"
-    "${python_bin}" scripts/screen_hgdn_arch_sizes.py \
-        --config "${size_screen_config}" \
-        --gdn-fla-recurrence-mode "${gdn_fla_recurrence_mode}" \
-        --output-dir "${size_screen_output}"
 }
 
 run_batch() {
@@ -354,15 +282,17 @@ run_batch() {
     for ((i = 0; i < ${#configs[@]}; i++)); do
         local config_path="${configs[$i]}"
         local run_id="${resolved_run_ids[$i]}"
+        local mode="${modes[$i]}"
 
-        load_config_env "${config_path}"
+        load_config_env "${config_path}" "${mode}"
 
         echo
-        echo ">>> local naive-contract search: ${labels[$i]}"
+        echo ">>> recurrence matrix: ${labels[$i]}"
         echo "run_id=${run_id}"
+        echo "gdn_fla_recurrence_mode=${mode}"
 
         hgdn_run_hybrid_train \
-            "local naive-contract search: ${labels[$i]}" \
+            "recurrence matrix: ${labels[$i]}" \
             "NGPU=${ngpu}" \
             "USE_WANDB=${use_wandb}" \
             "WANDB_MODE=${wandb_mode}" \
@@ -403,11 +333,10 @@ build_bundle() {
     rm -rf "${bundle_stage_dir}"
     mkdir -p \
         "${bundle_stage_dir}/logs" \
-        "${bundle_stage_dir}/configs" \
-        "${bundle_stage_dir}/size_screen"
+        "${bundle_stage_dir}/configs"
 
     local config_path
-    for config_path in "${configs[@]}" "${size_screen_config}"; do
+    for config_path in "${configs[@]}"; do
         if [[ -f "${config_path}" ]]; then
             cp "${config_path}" "${bundle_stage_dir}/configs/"
         fi
@@ -415,9 +344,6 @@ build_bundle() {
 
     if [[ -f "${command_log}" ]]; then
         cp "${command_log}" "${bundle_stage_dir}/commands.sh"
-    fi
-    if [[ -d "${size_screen_output}" ]]; then
-        cp -R "${size_screen_output}/." "${bundle_stage_dir}/size_screen/"
     fi
 
     local matched_logs=1
@@ -434,13 +360,10 @@ build_bundle() {
             missing_run_ids+=("${run_id}")
         fi
     done
-    if [[ "${#resolved_run_ids[@]}" -eq 0 ]]; then
-        matched_logs=0
-    fi
 
     local -a manifest_cmd
     manifest_cmd=(
-        "${python_bin}" scripts/hgdn_helper_cli.py write-local-naive-contract-search-manifest
+        "${python_bin}" scripts/hgdn_helper_cli.py write-local-recurrence-matrix-manifest
         --output "${bundle_stage_dir}/bundle_manifest.json"
         --run-prefix-base "${run_prefix_base}"
         --wandb-project "${wandb_project}"
@@ -449,12 +372,13 @@ build_bundle() {
         --exit-status "${exit_status}"
         --matched-logs "${matched_logs}"
         --completed-log-count "${completed_log_count}"
-        --size-screen-config "${size_screen_config}"
-        --size-screen-output "${size_screen_output}"
+        --command-log "${command_log}"
         --torch-logs "${torch_logs}"
         --torch-trace "${torch_trace}"
         --torchinductor-max-autotune "${torchinductor_max_autotune}"
         --torchinductor-max-autotune-gemm "${torchinductor_max_autotune_gemm}"
+        --ngpu "${ngpu}"
+        --grad-accum-steps "${grad_accum_steps}"
         --iterations "${iterations}"
         --train-batch-tokens "${train_batch_tokens}"
         --train-seq-len "${train_seq_len}"
@@ -467,18 +391,13 @@ build_bundle() {
         --compile-enabled "${compile}"
         --compile-strategy "${compile_strategy}"
         --distributed-mode "${distributed_mode}"
-        --gdn-fla-recurrence-mode "${gdn_fla_recurrence_mode}"
-        --muon-distributed-mode "per_config"
-        --gdn-w-g-optimizer "per_config"
     )
     local i
     for ((i = 0; i < ${#configs[@]}; i++)); do
         manifest_cmd+=(--config "${configs[$i]}")
         manifest_cmd+=(--label "${labels[$i]}")
-    done
-    local run_id
-    for run_id in "${resolved_run_ids[@]}"; do
-        manifest_cmd+=(--run-id "${run_id}")
+        manifest_cmd+=(--run-id "${resolved_run_ids[$i]}")
+        manifest_cmd+=(--mode "${modes[$i]}")
     done
     for run_id in "${missing_run_ids[@]}"; do
         manifest_cmd+=(--missing-run-id "${run_id}")
@@ -492,7 +411,7 @@ build_bundle() {
 on_exit() {
     local status="$1"
     trap - EXIT
-    if [[ -f "${command_log}" || -d "${size_screen_output}" ]]; then
+    if [[ -f "${command_log}" ]]; then
         build_bundle "${status}" || status=$?
     fi
     exit "${status}"
@@ -504,7 +423,7 @@ main() {
     write_command_log
     check_planned_logs_are_fresh
     trap 'on_exit $?' EXIT
-    run_size_screen
+    check_cuda_jobs
     run_batch
 }
 

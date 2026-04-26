@@ -192,6 +192,7 @@ def cmd_write_local_naive_contract_search_manifest(
             "compile": args.compile_enabled,
             "compile_strategy": args.compile_strategy,
             "distributed_mode": args.distributed_mode,
+            "gdn_fla_recurrence_mode": args.gdn_fla_recurrence_mode,
             "muon_distributed_mode": args.muon_distributed_mode,
             "gdn_w_g_optimizer": args.gdn_w_g_optimizer,
         },
@@ -224,6 +225,7 @@ def cmd_write_h100_naive_contract_manifest(args: argparse.Namespace) -> int:
             "max_wallclock_seconds": args.max_wallclock_seconds,
             "compile": args.compile_enabled,
             "compile_strategy": args.compile_strategy,
+            "gdn_fla_recurrence_mode": args.gdn_fla_recurrence_mode,
             "weight_decay": args.weight_decay,
             "torch_logs": args.torch_logs or None,
             "torch_trace": args.torch_trace or None,
@@ -249,7 +251,7 @@ def cmd_write_h100_naive_contract_manifest(args: argparse.Namespace) -> int:
             {
                 "label": "exact repo naive baseline on naive-baseline contract",
                 "trainer": "train_gpt.py",
-                "mode": "direct",
+                "mode": "n/a",
                 "run_id": args.gpt_naive_run_id,
                 "data_path": args.baseline_data_path,
                 "tokenizer_path": args.baseline_tokenizer_path,
@@ -266,6 +268,7 @@ def cmd_write_h100_naive_contract_manifest(args: argparse.Namespace) -> int:
                 "mode": "single",
                 "run_id": args.hgdn_run_id,
                 "config": args.hgdn_config,
+                "gdn_fla_recurrence_mode": args.gdn_fla_recurrence_mode,
             },
             {
                 "label": "attention-only baseline diagnostic control on naive-baseline contract",
@@ -273,7 +276,62 @@ def cmd_write_h100_naive_contract_manifest(args: argparse.Namespace) -> int:
                 "mode": "single",
                 "run_id": args.attn_run_id,
                 "config": args.attn_config,
+                "gdn_fla_recurrence_mode": args.gdn_fla_recurrence_mode,
             },
+        ],
+    }
+    write_json(args.output, manifest)
+    return 0
+
+
+def cmd_write_local_recurrence_matrix_manifest(args: argparse.Namespace) -> int:
+    """Write the local recurrence implementation matrix manifest.
+
+    :param argparse.Namespace args: Parsed CLI arguments.
+    :return int: Shell-style exit code.
+    """
+    if not (len(args.config) == len(args.label) == len(args.run_id) == len(args.mode)):
+        raise SystemExit("config/label/run-id/mode counts must match")
+    manifest = {
+        "run_prefix_base": args.run_prefix_base,
+        "wandb_project": args.wandb_project,
+        "wandb_mode": args.wandb_mode,
+        "archive_output": str(args.archive_output),
+        "exit_status": args.exit_status,
+        "matched_logs": args.matched_logs,
+        "completed_log_count": args.completed_log_count,
+        "missing_run_ids": args.missing_run_id,
+        "command_log": args.command_log,
+        "contract": {
+            "ngpu": args.ngpu,
+            "grad_accum_steps": args.grad_accum_steps,
+            "iterations": args.iterations,
+            "train_batch_tokens": args.train_batch_tokens,
+            "train_seq_len": args.train_seq_len,
+            "val_loss_every": args.val_loss_every,
+            "train_log_every": args.train_log_every,
+            "val_batch_size": args.val_batch_size,
+            "max_wallclock_seconds": args.max_wallclock_seconds,
+            "compile": args.compile_enabled,
+            "compile_strategy": args.compile_strategy,
+            "distributed_mode": args.distributed_mode,
+            "weight_decay": args.weight_decay,
+            "perf_skip_final_eval": args.perf_skip_final_eval,
+            "torch_logs": args.torch_logs or None,
+            "torch_trace": args.torch_trace or None,
+            "torchinductor_max_autotune": args.torchinductor_max_autotune,
+            "torchinductor_max_autotune_gemm": args.torchinductor_max_autotune_gemm,
+        },
+        "runs": [
+            {
+                "label": label,
+                "config": config,
+                "run_id": run_id,
+                "gdn_fla_recurrence_mode": mode,
+            }
+            for config, label, run_id, mode in zip(
+                args.config, args.label, args.run_id, args.mode, strict=True
+            )
         ],
     }
     write_json(args.output, manifest)
@@ -348,6 +406,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     local_naive_search.add_argument("--compile-strategy", required=True)
     local_naive_search.add_argument("--distributed-mode", required=True)
+    local_naive_search.add_argument("--gdn-fla-recurrence-mode", required=True)
     local_naive_search.add_argument("--muon-distributed-mode", required=True)
     local_naive_search.add_argument("--gdn-w-g-optimizer", required=True)
     local_naive_search.add_argument("--config", action="append", default=[])
@@ -388,6 +447,7 @@ def build_parser() -> argparse.ArgumentParser:
     h100_naive.add_argument("--max-wallclock-seconds", type=float, required=True)
     h100_naive.add_argument("--compile-enabled", type=parse_bool_flag, required=True)
     h100_naive.add_argument("--compile-strategy", required=True)
+    h100_naive.add_argument("--gdn-fla-recurrence-mode", required=True)
     h100_naive.add_argument("--muon-distributed-mode", required=True)
     h100_naive.add_argument("--gdn-w-g-optimizer", required=True)
     h100_naive.add_argument("--weight-decay", type=float, required=True)
@@ -409,6 +469,52 @@ def build_parser() -> argparse.ArgumentParser:
     h100_naive.add_argument("--host-name", default="")
     h100_naive.add_argument("--timestamp-utc", default="")
     h100_naive.set_defaults(func=cmd_write_h100_naive_contract_manifest)
+
+    local_recurrence = subparsers.add_parser(
+        "write-local-recurrence-matrix-manifest",
+        help="write the local HGDN recurrence implementation matrix manifest",
+    )
+    local_recurrence.add_argument("--output", type=Path, required=True)
+    local_recurrence.add_argument("--run-prefix-base", required=True)
+    local_recurrence.add_argument("--wandb-project", required=True)
+    local_recurrence.add_argument("--wandb-mode", required=True)
+    local_recurrence.add_argument("--archive-output", type=Path, required=True)
+    local_recurrence.add_argument("--exit-status", type=int, required=True)
+    local_recurrence.add_argument("--matched-logs", type=parse_bool_flag, required=True)
+    local_recurrence.add_argument("--completed-log-count", type=int, required=True)
+    local_recurrence.add_argument("--command-log", required=True)
+    local_recurrence.add_argument("--torch-logs", default="")
+    local_recurrence.add_argument("--torch-trace", default="")
+    local_recurrence.add_argument(
+        "--torchinductor-max-autotune", type=int, required=True
+    )
+    local_recurrence.add_argument(
+        "--torchinductor-max-autotune-gemm", type=int, required=True
+    )
+    local_recurrence.add_argument("--ngpu", type=int, required=True)
+    local_recurrence.add_argument("--grad-accum-steps", type=int, required=True)
+    local_recurrence.add_argument("--iterations", type=int, required=True)
+    local_recurrence.add_argument("--train-batch-tokens", type=int, required=True)
+    local_recurrence.add_argument("--train-seq-len", type=int, required=True)
+    local_recurrence.add_argument("--val-loss-every", type=int, required=True)
+    local_recurrence.add_argument("--train-log-every", type=int, required=True)
+    local_recurrence.add_argument("--val-batch-size", type=int, required=True)
+    local_recurrence.add_argument("--max-wallclock-seconds", type=float, required=True)
+    local_recurrence.add_argument(
+        "--compile-enabled", type=parse_bool_flag, required=True
+    )
+    local_recurrence.add_argument("--compile-strategy", required=True)
+    local_recurrence.add_argument("--distributed-mode", required=True)
+    local_recurrence.add_argument("--weight-decay", type=float, required=True)
+    local_recurrence.add_argument(
+        "--perf-skip-final-eval", type=parse_bool_flag, required=True
+    )
+    local_recurrence.add_argument("--config", action="append", default=[])
+    local_recurrence.add_argument("--label", action="append", default=[])
+    local_recurrence.add_argument("--run-id", action="append", default=[])
+    local_recurrence.add_argument("--mode", action="append", default=[])
+    local_recurrence.add_argument("--missing-run-id", action="append", default=[])
+    local_recurrence.set_defaults(func=cmd_write_local_recurrence_matrix_manifest)
 
     return parser
 
