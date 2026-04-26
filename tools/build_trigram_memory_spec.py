@@ -70,17 +70,21 @@ def parse_args() -> argparse.Namespace:
     return ap.parse_args()
 
 
-def _copy_model_dir_metadata(source: Path, dest: Path) -> None:
+def _copy_model_dir_metadata(source: Path, dest: Path, *, clean_dest: bool = False) -> None:
     """Copy lightweight model-dir metadata needed by launchers.
 
     :param Path source: Source spec directory.
     :param Path dest: Destination spec directory.
+    :param bool clean_dest: Whether to remove stale copied metadata first.
     """
     dest.mkdir(parents=True, exist_ok=True)
-    for name in ("config.json", "tokenizer.model", "fineweb_1024_bpe.model"):
-        src = source / name
-        if src.exists():
-            shutil.copy2(src, dest / name)
+    if clean_dest:
+        for path in [dest / "config.json", *dest.glob("*.model"), *dest.glob("*.vocab")]:
+            if path.is_file() or path.is_symlink():
+                path.unlink()
+    for src in sorted([source / "config.json", *source.glob("*.model"), *source.glob("*.vocab")]):
+        if src.is_file():
+            shutil.copy2(src, dest / src.name)
 
 
 def _tensor_sha256(tensor: torch.Tensor) -> str:
@@ -151,13 +155,70 @@ def _table_cache_path(
     return Path(cache_root).expanduser().resolve() / name
 
 
-def _spec_with_trigram_table(spec: AmplifierSpec, table: dict[str, Any]) -> AmplifierSpec:
+def _validate_trigram_table(
+    table: dict[str, Any],
+    *,
+    base_spec: AmplifierSpec,
+    top_k: int,
+) -> None:
+    """Validate a cached trigram tensor table before attaching it.
+
+    :param dict[str, Any] table: Cached trigram table payload.
+    :param AmplifierSpec base_spec: Base spec that will receive the table.
+    :param int top_k: Expected number of top tokens per context.
+    :raises ValueError: If required keys, tensor shapes, or dtypes are invalid.
+    """
+    if not isinstance(table, dict):
+        raise ValueError("trigram table cache payload must be a dict")
+    required = {
+        "metadata",
+        "trigram_top_tokens",
+        "trigram_residual_values",
+        "trigram_context_confidence",
+    }
+    missing = sorted(required.difference(table))
+    if missing:
+        raise ValueError(f"trigram table cache is missing required keys: {missing}")
+    if not isinstance(table["metadata"], dict):
+        raise ValueError("trigram table cache metadata must be a dict")
+
+    vocab_size = int(base_spec.vocab_size)
+    expected_top_shape = (vocab_size * vocab_size, int(top_k))
+    expected_confidence_shape = (vocab_size * vocab_size,)
+    checks = (
+        ("trigram_top_tokens", expected_top_shape, torch.int16),
+        ("trigram_residual_values", expected_top_shape, torch.int8),
+        ("trigram_context_confidence", expected_confidence_shape, torch.uint8),
+    )
+    for key, expected_shape, expected_dtype in checks:
+        value = table[key]
+        if not isinstance(value, torch.Tensor):
+            raise ValueError(f"trigram table cache {key} must be a torch.Tensor")
+        if tuple(value.shape) != expected_shape:
+            raise ValueError(
+                f"trigram table cache {key} has shape {tuple(value.shape)}; "
+                f"expected {expected_shape}"
+            )
+        if value.dtype != expected_dtype:
+            raise ValueError(
+                f"trigram table cache {key} has dtype {value.dtype}; expected {expected_dtype}"
+            )
+
+
+def _spec_with_trigram_table(
+    spec: AmplifierSpec,
+    table: dict[str, Any],
+    *,
+    top_k: int,
+) -> AmplifierSpec:
     """Attach cached trigram tensors to a spec.
 
     :param AmplifierSpec spec: Base spec.
     :param dict[str, Any] table: Cached trigram table payload.
+    :param int top_k: Expected number of top tokens per context.
     :return AmplifierSpec: Spec with memory tensors attached.
     """
+    _validate_trigram_table(table, base_spec=spec, top_k=top_k)
     metadata = dict(spec.metadata)
     metadata.update(dict(table["metadata"]))
     return AmplifierSpec(
@@ -195,12 +256,14 @@ def _table_from_spec(spec: AmplifierSpec) -> dict[str, Any]:
     metadata = {
         key: value for key, value in spec.metadata.items() if str(key).startswith("trigram_")
     }
-    return {
+    table = {
         "metadata": metadata,
         "trigram_top_tokens": spec.trigram_top_tokens.cpu(),
         "trigram_residual_values": spec.trigram_residual_values.cpu(),
         "trigram_context_confidence": spec.trigram_context_confidence.cpu(),
     }
+    _validate_trigram_table(table, base_spec=spec, top_k=int(spec.trigram_top_tokens.shape[1]))
+    return table
 
 
 def _record_data_fingerprint(spec: AmplifierSpec, data_fingerprint: dict[str, object]) -> None:
@@ -313,6 +376,7 @@ def main() -> None:
     if args.table_cache_root:
         if table_cache_path.exists() and not args.rebuild_table_cache:
             table_payload = torch.load(table_cache_path, map_location="cpu", weights_only=False)
+            _validate_trigram_table(table_payload, base_spec=base_spec, top_k=int(args.top_k))
             print(f"Loaded cached trigram memory table: {table_cache_path}")
         elif args.rebuild_table_cache:
             print(f"Rebuilding trigram memory table cache: {table_cache_path}")
@@ -341,10 +405,10 @@ def main() -> None:
             torch.save(table_payload, table_cache_path)
             print(f"Cached trigram memory table: {table_cache_path}")
     else:
-        memory_spec = _spec_with_trigram_table(base_spec, table_payload)
+        memory_spec = _spec_with_trigram_table(base_spec, table_payload, top_k=int(args.top_k))
         _record_data_fingerprint(memory_spec, data_fingerprint)
 
-    _copy_model_dir_metadata(source_dir, out_dir)
+    _copy_model_dir_metadata(source_dir, out_dir, clean_dest=bool(args.force))
     memory_spec.save(out_spec)
     print(f"Wrote trigram memory spec: {out_spec}")
     print(memory_spec.summary())
