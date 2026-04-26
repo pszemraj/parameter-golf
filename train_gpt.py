@@ -59,9 +59,11 @@ class Hyperparameters:
     run_id = os.environ.get("RUN_ID", str(uuid.uuid4()))
     seed = int(os.environ.get("SEED", 1337))
 
-    # Validation cadence and batch size. Validation always uses the full fineweb_val split.
+    # Validation cadence and batch size. VAL_MAX_SEQS=0 uses the full fineweb_val split.
     val_batch_size = int(os.environ.get("VAL_BATCH_SIZE", 524_288))
     val_loss_every = int(os.environ.get("VAL_LOSS_EVERY", 1000))
+    min_val_seqs = int(os.environ.get("MIN_VAL_SEQS", 1))
+    val_max_seqs = int(os.environ.get("VAL_MAX_SEQS", 0))
     log_step0_eval = bool(int(os.environ.get("LOG_STEP0_EVAL", "0")))
     train_log_every = int(os.environ.get("TRAIN_LOG_EVERY", 200))
 
@@ -1173,6 +1175,8 @@ def main() -> None:
         args.train_seq_len,
         load_data_shard=load_data_shard,
         missing_message=f"No files found for pattern: {args.val_files}",
+        min_seqs=args.min_val_seqs,
+        max_seqs=args.val_max_seqs,
     )
     base_bytes_lut, has_leading_space_lut, is_boundary_token_lut = (
         build_sentencepiece_luts(sp, args.vocab_size, device)
@@ -1181,7 +1185,11 @@ def main() -> None:
         f"val_bpb:enabled tokenizer_kind=sentencepiece tokenizer_path={args.tokenizer_path}"
     )
     log0(f"train_loader:dataset:{dataset_dir.name} train_shards:{actual_train_files}")
-    log0(f"val_loader:shards pattern={args.val_files} tokens:{val_tokens.numel() - 1}")
+    log0(
+        f"val_loader:shards pattern={args.val_files} tokens:{val_tokens.numel() - 1} "
+        f"seqs:{(val_tokens.numel() - 1) // args.train_seq_len} "
+        f"min_seqs:{args.min_val_seqs} max_seqs:{args.val_max_seqs}"
+    )
 
     # -----------------------------
     # MODEL + OPTIMIZER SETUP

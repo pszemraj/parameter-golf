@@ -70,6 +70,8 @@ def load_validation_tokens_from_files(
     *,
     load_data_shard: Callable[[Path], Tensor],
     missing_message: str,
+    min_seqs: int = 1,
+    max_seqs: int = 0,
 ) -> Tensor:
     """Load and trim validation tokens to one whole-number sequence span.
 
@@ -77,16 +79,35 @@ def load_validation_tokens_from_files(
     :param int seq_len: Sequence length used to truncate the validation stream.
     :param Callable[[Path], Tensor] load_data_shard: Shard loader function.
     :param str missing_message: Error to raise when no files are provided.
+    :param int min_seqs: Minimum required full validation sequences, defaults to 1.
+    :param int max_seqs: Optional deterministic prefix cap in full sequences;
+        `0` means use the whole validation split, defaults to 0.
     :raises FileNotFoundError: If `files` is empty.
-    :raises ValueError: If the validation split is shorter than one sequence.
+    :raises ValueError: If the validation split is shorter than the requested
+        minimum or if the sample cap is smaller than the requested minimum.
     :return Tensor: Validation tokens with one extra token for next-token targets.
     """
     if not files:
         raise FileNotFoundError(missing_message)
+    if min_seqs < 1:
+        raise ValueError(f"MIN_VAL_SEQS must be >= 1, got {min_seqs}")
+    if max_seqs < 0:
+        raise ValueError(f"VAL_MAX_SEQS must be >= 0, got {max_seqs}")
+    if 0 < max_seqs < min_seqs:
+        raise ValueError(
+            f"VAL_MAX_SEQS={max_seqs} is smaller than MIN_VAL_SEQS={min_seqs}"
+        )
     tokens = torch.cat([load_data_shard(file) for file in files]).contiguous()
-    usable = ((tokens.numel() - 1) // seq_len) * seq_len
-    if usable <= 0:
-        raise ValueError(f"Validation split is too short for TRAIN_SEQ_LEN={seq_len}")
+    available_seqs = (tokens.numel() - 1) // seq_len
+    if available_seqs < min_seqs:
+        raise ValueError(
+            f"Validation split has {available_seqs} full sequences for "
+            f"TRAIN_SEQ_LEN={seq_len}; require at least MIN_VAL_SEQS={min_seqs}. "
+            "Use the dedicated fineweb_val shard for experiment decisions, or set "
+            "MIN_VAL_SEQS lower only for explicit smoke tests."
+        )
+    selected_seqs = min(available_seqs, max_seqs) if max_seqs else available_seqs
+    usable = selected_seqs * seq_len
     return tokens[: usable + 1]
 
 

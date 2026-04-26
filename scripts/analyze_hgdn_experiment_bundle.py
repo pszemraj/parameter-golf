@@ -65,12 +65,13 @@ def parse_args() -> argparse.Namespace:
         choices=[
             "auto",
             "final_step_ms",
+            "equal_wallclock_bpb",
             "speed_budget_bpb",
             "final_sampled_bpb",
             "final_roundtrip_bpb",
         ],
         default="auto",
-        help="Ranking metric. auto prefers speed_budget_bpb, then final_sampled_bpb.",
+        help="Ranking metric. auto prefers equal_wallclock_bpb, then fixed-step BPB.",
     )
     parser.add_argument("--speed-budget-ms", type=float, default=None)
     parser.add_argument("--confirm-top-n", type=int, default=2)
@@ -360,11 +361,12 @@ def build_rows(
     )
     for row in rows:
         row["speed_budget_ms"] = resolved_budget
-        row["speed_budget_bpb"] = (
+        row["equal_wallclock_bpb"] = (
             interpolate_bpb(row.get("eval_points", []), resolved_budget)
             if resolved_budget is not None
             else None
         )
+        row["speed_budget_bpb"] = row["equal_wallclock_bpb"]
     assign_ranks(rows)
     return rows, resolved_budget
 
@@ -376,7 +378,7 @@ def assign_ranks(rows: list[dict[str, Any]]) -> None:
     """
     for metric, rank_key in (
         ("final_sampled_bpb", "fixed_step_rank_all"),
-        ("speed_budget_bpb", "speed_rank_all"),
+        ("equal_wallclock_bpb", "speed_rank_all"),
     ):
         ranked = sorted(
             [row for row in rows if row.get(metric) is not None],
@@ -397,10 +399,12 @@ def metric_value(row: dict[str, Any], metric: str) -> tuple[str, float | None]:
     :return tuple[str, float | None]: Resolved metric name and value.
     """
     if metric == "auto":
-        for key in ("speed_budget_bpb", "final_sampled_bpb", "final_roundtrip_bpb"):
+        for key in ("equal_wallclock_bpb", "final_sampled_bpb", "final_roundtrip_bpb"):
             if row.get(key) is not None:
                 return key, float(row[key])
         return "auto", None
+    if metric == "speed_budget_bpb":
+        metric = "equal_wallclock_bpb"
     value = row.get(metric)
     return metric, float(value) if value is not None else None
 
@@ -563,6 +567,7 @@ def write_outputs(
         "tokens_per_s",
         "final_train_loss",
         "final_sampled_bpb",
+        "equal_wallclock_bpb",
         "speed_budget_bpb",
         "final_roundtrip_bpb",
         "size_proxy_bytes",
@@ -589,12 +594,12 @@ def write_outputs(
     lines = [
         "# HGDN Experiment Bundle Analysis",
         "",
-        f"Speed budget ms: {speed_budget_ms:.0f}"
+        f"Equal-wallclock budget ms: {speed_budget_ms:.0f}"
         if speed_budget_ms is not None
-        else "Speed budget ms: n/a",
+        else "Equal-wallclock budget ms: n/a",
         f"Selection metric: {metric}",
         "",
-        "| Candidate | Mode | Family | Step | ms/step | toks/s | Train loss | BPB | Speed BPB | Roundtrip | Size proxy | Size |",
+        "| Candidate | Mode | Family | Step | ms/step | toks/s | Train loss | BPB | Equal-WC BPB | Roundtrip | Size proxy | Size |",
         "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for row in sorted(rows, key=lambda item: summary_sort_key(item, metric)):
@@ -610,7 +615,7 @@ def write_outputs(
                     format_optional(row.get("tokens_per_s"), digits=1),
                     format_optional(row.get("final_train_loss"), digits=4),
                     format_optional(row.get("final_sampled_bpb"), digits=4),
-                    format_optional(row.get("speed_budget_bpb"), digits=4),
+                    format_optional(row.get("equal_wallclock_bpb"), digits=4),
                     format_optional(row.get("final_roundtrip_bpb"), digits=4),
                     format_int_optional(row.get("size_proxy_bytes")),
                     str(row.get("artifact_status") or row.get("size_status") or ""),
@@ -789,10 +794,10 @@ def print_summary(
     :param str metric: Primary summary metric.
     """
     budget = "n/a" if speed_budget_ms is None else f"{speed_budget_ms:.0f}"
-    print(f"speed_budget_ms:{budget}")
+    print(f"equal_wallclock_budget_ms:{budget}")
     print(f"selection_metric:{metric}")
     print(
-        "| Candidate | Mode | Family | Step | ms/step | toks/s | Train loss | BPB | Speed BPB | Size proxy | Size |"
+        "| Candidate | Mode | Family | Step | ms/step | toks/s | Train loss | BPB | Equal-WC BPB | Size proxy | Size |"
     )
     print("|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|")
     for row in sorted(rows, key=lambda item: summary_sort_key(item, metric))[:top]:
@@ -804,7 +809,7 @@ def print_summary(
             f"{format_optional(row.get('tokens_per_s'), digits=1)} | "
             f"{format_optional(row.get('final_train_loss'), digits=4)} | "
             f"{format_optional(row.get('final_sampled_bpb'), digits=4)} | "
-            f"{format_optional(row.get('speed_budget_bpb'), digits=4)} | "
+            f"{format_optional(row.get('equal_wallclock_bpb'), digits=4)} | "
             f"{format_int_optional(row.get('size_proxy_bytes'))} | "
             f"{row.get('artifact_status') or row.get('size_status') or ''} |"
         )

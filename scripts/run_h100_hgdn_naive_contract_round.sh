@@ -39,6 +39,8 @@ train_seq_len="${TRAIN_SEQ_LEN:-1024}"
 val_loss_every="${VAL_LOSS_EVERY:-200}"
 train_log_every="${TRAIN_LOG_EVERY:-50}"
 val_batch_size="${VAL_BATCH_SIZE:-524288}"
+min_val_seqs="${MIN_VAL_SEQS:-512}"
+val_max_seqs="${VAL_MAX_SEQS:-0}"
 max_wallclock_seconds="${MAX_WALLCLOCK_SECONDS:-600}"
 compile="${COMPILE:-1}"
 compile_strategy="${COMPILE_STRATEGY:-hybrid}"
@@ -140,6 +142,8 @@ print_plan() {
     echo "val_loss_every=${val_loss_every}"
     echo "train_log_every=${train_log_every}"
     echo "val_batch_size=${val_batch_size}"
+    echo "min_val_seqs=${min_val_seqs}"
+    echo "val_max_seqs=${val_max_seqs}"
     echo "compile=${compile}"
     echo "compile_strategy=${compile_strategy}"
     echo "attn_use_flash_attn3=${attn_use_flash_attn3}"
@@ -198,6 +202,8 @@ run_round() {
         "VAL_LOSS_EVERY=${val_loss_every}" \
         "TRAIN_LOG_EVERY=${train_log_every}" \
         "VAL_BATCH_SIZE=${val_batch_size}" \
+        "MIN_VAL_SEQS=${min_val_seqs}" \
+        "VAL_MAX_SEQS=${val_max_seqs}" \
         "DATA_PATH=${data_path}" \
         "TOKENIZER_PATH=${tokenizer_path}" \
         "VOCAB_SIZE=${vocab_size}" \
@@ -223,6 +229,8 @@ run_round() {
         "VAL_LOSS_EVERY=${val_loss_every}" \
         "TRAIN_LOG_EVERY=${train_log_every}" \
         "VAL_BATCH_SIZE=${val_batch_size}" \
+        "MIN_VAL_SEQS=${min_val_seqs}" \
+        "VAL_MAX_SEQS=${val_max_seqs}" \
         "DATA_PATH=${data_path}" \
         "TOKENIZER_PATH=${tokenizer_path}" \
         "VOCAB_SIZE=${vocab_size}" \
@@ -265,6 +273,11 @@ run_round() {
         "VAL_LOSS_EVERY=${val_loss_every}" \
         "TRAIN_LOG_EVERY=${train_log_every}" \
         "VAL_BATCH_SIZE=${val_batch_size}" \
+        "MIN_VAL_SEQS=${min_val_seqs}" \
+        "VAL_MAX_SEQS=${val_max_seqs}" \
+        "DATA_PATH=${data_path}" \
+        "TOKENIZER_PATH=${tokenizer_path}" \
+        "VOCAB_SIZE=${vocab_size}" \
         "${config_env[@]}" \
         torchrun --standalone --nproc_per_node="${ngpu}" train_gpt_hybrid.py
 
@@ -297,6 +310,11 @@ run_round() {
         "VAL_LOSS_EVERY=${val_loss_every}" \
         "TRAIN_LOG_EVERY=${train_log_every}" \
         "VAL_BATCH_SIZE=${val_batch_size}" \
+        "MIN_VAL_SEQS=${min_val_seqs}" \
+        "VAL_MAX_SEQS=${val_max_seqs}" \
+        "DATA_PATH=${data_path}" \
+        "TOKENIZER_PATH=${tokenizer_path}" \
+        "VOCAB_SIZE=${vocab_size}" \
         "${config_env[@]}"
 
     echo
@@ -331,6 +349,11 @@ run_round() {
         "VAL_LOSS_EVERY=${val_loss_every}" \
         "TRAIN_LOG_EVERY=${train_log_every}" \
         "VAL_BATCH_SIZE=${val_batch_size}" \
+        "MIN_VAL_SEQS=${min_val_seqs}" \
+        "VAL_MAX_SEQS=${val_max_seqs}" \
+        "DATA_PATH=${data_path}" \
+        "TOKENIZER_PATH=${tokenizer_path}" \
+        "VOCAB_SIZE=${vocab_size}" \
         "${config_env[@]}" \
         torchrun --standalone --nproc_per_node="${ngpu}" train_gpt_hybrid.py
 
@@ -363,6 +386,11 @@ run_round() {
         "VAL_LOSS_EVERY=${val_loss_every}" \
         "TRAIN_LOG_EVERY=${train_log_every}" \
         "VAL_BATCH_SIZE=${val_batch_size}" \
+        "MIN_VAL_SEQS=${min_val_seqs}" \
+        "VAL_MAX_SEQS=${val_max_seqs}" \
+        "DATA_PATH=${data_path}" \
+        "TOKENIZER_PATH=${tokenizer_path}" \
+        "VOCAB_SIZE=${vocab_size}" \
         "${config_env[@]}"
 }
 
@@ -411,6 +439,8 @@ build_bundle() {
         --val-loss-every "${val_loss_every}" \
         --train-log-every "${train_log_every}" \
         --val-batch-size "${val_batch_size}" \
+        --min-val-seqs "${min_val_seqs}" \
+        --val-max-seqs "${val_max_seqs}" \
         --max-wallclock-seconds "${max_wallclock_seconds}" \
         --compile-enabled "${compile}" \
         --compile-strategy "${compile_strategy}" \

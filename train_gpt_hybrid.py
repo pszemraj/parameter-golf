@@ -99,6 +99,8 @@ class Hyperparameters:
     # Validation
     val_batch_size = int(os.environ.get("VAL_BATCH_SIZE", 524_288))
     val_loss_every = int(os.environ.get("VAL_LOSS_EVERY", 1000))
+    min_val_seqs = int(os.environ.get("MIN_VAL_SEQS", 1))
+    val_max_seqs = int(os.environ.get("VAL_MAX_SEQS", 0))
     train_log_every = int(os.environ.get("TRAIN_LOG_EVERY", 200))
     log_step0_eval = bool(int(os.environ.get("LOG_STEP0_EVAL", "0")))
     wandb_watch = os.environ.get("WANDB_WATCH", "none").lower()
@@ -1190,6 +1192,8 @@ def main() -> None:
         args.train_seq_len,
         load_data_shard=load_data_shard,
         missing_message="No validation shards provided",
+        min_seqs=args.min_val_seqs,
+        max_seqs=args.val_max_seqs,
     )
     base_bytes_lut, has_ls_lut, is_bnd_lut = build_sentencepiece_luts(
         sp, args.vocab_size, device
@@ -1197,6 +1201,11 @@ def main() -> None:
     log0(
         f"train_loader:dataset:{dataset_dir.name} train_shards:{len(train_files)} "
         f"val_shards:{len(val_files)}"
+    )
+    log0(
+        f"val_loader:pattern:{args.val_files} tokens:{val_tokens.numel() - 1} "
+        f"seqs:{(val_tokens.numel() - 1) // args.train_seq_len} "
+        f"min_seqs:{args.min_val_seqs} max_seqs:{args.val_max_seqs}"
     )
     log0(
         f"launch_contract:planned_train_tokens:{planned_train_tokens} "

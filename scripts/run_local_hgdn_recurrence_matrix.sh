@@ -38,6 +38,8 @@ train_batch_tokens="${TRAIN_BATCH_TOKENS:-65536}"
 train_seq_len="${TRAIN_SEQ_LEN:-1024}"
 val_loss_every="${VAL_LOSS_EVERY:-100}"
 train_log_every="${TRAIN_LOG_EVERY:-25}"
+min_val_seqs="${MIN_VAL_SEQS:-512}"
+val_max_seqs="${VAL_MAX_SEQS:-512}"
 max_wallclock_seconds="${MAX_WALLCLOCK_SECONDS:-0}"
 compile="${COMPILE:-1}"
 compile_strategy="${COMPILE_STRATEGY:-hybrid}"
@@ -204,6 +206,8 @@ append_train_command() {
         "TRAIN_SEQ_LEN=${train_seq_len}" \
         "VAL_LOSS_EVERY=${val_loss_every}" \
         "TRAIN_LOG_EVERY=${train_log_every}" \
+        "MIN_VAL_SEQS=${min_val_seqs}" \
+        "VAL_MAX_SEQS=${val_max_seqs}" \
         "VAL_BATCH_SIZE=${val_batch_size}" \
         "WEIGHT_DECAY=${weight_decay}" \
         "PERF_SKIP_FINAL_EVAL=${perf_skip_final_eval}" \
@@ -263,6 +267,8 @@ print_plan() {
     echo "train_seq_len=${train_seq_len}"
     echo "val_loss_every=${val_loss_every}"
     echo "train_log_every=${train_log_every}"
+    echo "min_val_seqs=${min_val_seqs}"
+    echo "val_max_seqs=${val_max_seqs}"
     echo "val_batch_size=${val_batch_size}"
     echo "weight_decay=${weight_decay}"
     echo "perf_skip_final_eval=${perf_skip_final_eval}"
@@ -325,6 +331,8 @@ run_batch() {
             "TRAIN_SEQ_LEN=${train_seq_len}" \
             "VAL_LOSS_EVERY=${val_loss_every}" \
             "TRAIN_LOG_EVERY=${train_log_every}" \
+            "MIN_VAL_SEQS=${min_val_seqs}" \
+            "VAL_MAX_SEQS=${val_max_seqs}" \
             "VAL_BATCH_SIZE=${val_batch_size}" \
             "WEIGHT_DECAY=${weight_decay}" \
             "PERF_SKIP_FINAL_EVAL=${perf_skip_final_eval}" \
@@ -396,6 +404,8 @@ build_bundle() {
         --train-seq-len "${train_seq_len}"
         --val-loss-every "${val_loss_every}"
         --train-log-every "${train_log_every}"
+        --min-val-seqs "${min_val_seqs}"
+        --val-max-seqs "${val_max_seqs}"
         --val-batch-size "${val_batch_size}"
         --max-wallclock-seconds "${max_wallclock_seconds}"
         --weight-decay "${weight_decay}"

@@ -209,7 +209,9 @@ GDN_FLA_RECURRENCE_MODE=compile_visible
 
 Then run the matched attention-only diagnostic control with
 `configs/hgdn/naive_contract_l8_d512_r0_m1p5.toml`. Compare `ms/step`,
-tokens/sec, train loss, sampled BPB, artifact proxy, and compile graph breaks.
+tokens/sec, train loss, sampled BPB, equal-wallclock BPB, artifact proxy, and
+compile graph breaks. Promotion decisions should use BPB, not validation loss;
+raw speed is only a direct decision metric for explicit systems-only checks.
 Check for active CUDA jobs first:
 
 ```bash
@@ -239,7 +241,10 @@ For an unattended local hierarchy, use the overnight pipeline. It runs:
 It analyzes each bundle with `scripts/analyze_hgdn_experiment_bundle.py`, writes
 stage decision files under `local-scratch/<prefix>_pipeline`, and writes the
 next H100 command for review instead of launching paid H100 work. The secondary
-stage writes `next_h100_secondary_command.sh` when it runs.
+stage writes `next_h100_secondary_command.sh` when it runs. The default
+promotion metric is `equal_wallclock_bpb`; set
+`RECURRENCE_SELECTION_METRIC=final_step_ms` only for a speed-only recurrence
+implementation check.
 
 ```bash
 USE_WANDB=0 WANDB_MODE=offline \
@@ -255,6 +260,14 @@ for bounded one-off batches. Override the gated secondary check with
 `SECONDARY_CANDIDATE_CONFIGS=path1.toml,path2.toml,...`, or set
 `SECONDARY_FORCE=1` when you intentionally want the OLMo-ish sanity check even
 if the primary candidate does not beat its matched control.
+
+Validation uses the dedicated `fineweb_val_*.bin` shard. Local and H100 helpers
+default to `MIN_VAL_SEQS=512` so staged decisions cannot accidentally promote
+from a toy validation split. Local helpers default to `VAL_MAX_SEQS=512`, a
+deterministic prefix of the dedicated validation shard; H100 helpers and raw
+trainers default to `VAL_MAX_SEQS=0`, meaning the full validation shard. For
+plumbing-only smoke tests on tiny synthetic validation data, set
+`MIN_VAL_SEQS=1` explicitly.
 
 ## Analysis And Sanity Tools
 

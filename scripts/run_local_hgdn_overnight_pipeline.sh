@@ -34,6 +34,8 @@ train_batch_tokens="${TRAIN_BATCH_TOKENS:-65536}"
 train_seq_len="${TRAIN_SEQ_LEN:-1024}"
 val_loss_every="${VAL_LOSS_EVERY:-100}"
 train_log_every="${TRAIN_LOG_EVERY:-25}"
+min_val_seqs="${MIN_VAL_SEQS:-512}"
+val_max_seqs="${VAL_MAX_SEQS:-512}"
 max_wallclock_seconds="${MAX_WALLCLOCK_SECONDS:-0}"
 compile="${COMPILE:-1}"
 compile_strategy="${COMPILE_STRATEGY:-hybrid}"
@@ -57,7 +59,7 @@ screen_perf_skip_final_eval="${SCREEN_PERF_SKIP_FINAL_EVAL:-1}"
 confirm_perf_skip_final_eval="${CONFIRM_PERF_SKIP_FINAL_EVAL:-0}"
 secondary_perf_skip_final_eval="${SECONDARY_PERF_SKIP_FINAL_EVAL:-${confirm_perf_skip_final_eval}}"
 confirm_top_hgdn="${CONFIRM_TOP_HGDN:-2}"
-recurrence_selection_metric="${RECURRENCE_SELECTION_METRIC:-final_step_ms}"
+recurrence_selection_metric="${RECURRENCE_SELECTION_METRIC:-equal_wallclock_bpb}"
 search_selection_metric="${SEARCH_SELECTION_METRIC:-auto}"
 secondary_force="${SECONDARY_FORCE:-0}"
 
@@ -169,6 +171,8 @@ write_plan() {
         echo "train_seq_len=${train_seq_len}"
         echo "val_loss_every=${val_loss_every}"
         echo "train_log_every=${train_log_every}"
+        echo "min_val_seqs=${min_val_seqs}"
+        echo "val_max_seqs=${val_max_seqs}"
         echo "compile=${compile}"
         echo "compile_strategy=${compile_strategy}"
         echo "distributed_mode=${distributed_mode}"
@@ -206,6 +210,8 @@ print_plan() {
     echo "data_path=${data_path}"
     echo "tokenizer_path=${tokenizer_path}"
     echo "vocab_size=${vocab_size}"
+    echo "min_val_seqs=${min_val_seqs}"
+    echo "val_max_seqs=${val_max_seqs}"
     echo "gates:"
     echo "  stage0: recurrence mode matrix on v2_m1p5"
     echo "  stage1: bounded candidate/control screen using the selected recurrence mode"
@@ -251,6 +257,8 @@ run_recurrence_stage() {
         TRAIN_SEQ_LEN="${train_seq_len}" \
         VAL_LOSS_EVERY="${val_loss_every}" \
         TRAIN_LOG_EVERY="${train_log_every}" \
+        MIN_VAL_SEQS="${min_val_seqs}" \
+        VAL_MAX_SEQS="${val_max_seqs}" \
         MAX_WALLCLOCK_SECONDS="${max_wallclock_seconds}" \
         COMPILE="${compile}" \
         COMPILE_STRATEGY="${compile_strategy}" \
@@ -318,6 +326,8 @@ run_search_stage() {
         TRAIN_SEQ_LEN="${train_seq_len}" \
         VAL_LOSS_EVERY="${val_loss_every}" \
         TRAIN_LOG_EVERY="${train_log_every}" \
+        MIN_VAL_SEQS="${min_val_seqs}" \
+        VAL_MAX_SEQS="${val_max_seqs}" \
         MAX_WALLCLOCK_SECONDS="${max_wallclock_seconds}" \
         COMPILE="${compile}" \
         COMPILE_STRATEGY="${compile_strategy}" \

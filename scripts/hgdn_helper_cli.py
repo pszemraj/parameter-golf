@@ -185,6 +185,8 @@ def cmd_write_local_naive_contract_search_manifest(
             "train_seq_len": args.train_seq_len,
             "val_loss_every": args.val_loss_every,
             "train_log_every": args.train_log_every,
+            "min_val_seqs": args.min_val_seqs,
+            "val_max_seqs": args.val_max_seqs,
             "val_batch_size": args.val_batch_size,
             "max_wallclock_seconds": args.max_wallclock_seconds,
             "weight_decay": args.weight_decay,
@@ -221,6 +223,8 @@ def cmd_write_h100_naive_contract_manifest(args: argparse.Namespace) -> int:
             "train_seq_len": args.train_seq_len,
             "val_loss_every": args.val_loss_every,
             "train_log_every": args.train_log_every,
+            "min_val_seqs": args.min_val_seqs,
+            "val_max_seqs": args.val_max_seqs,
             "val_batch_size": args.val_batch_size,
             "max_wallclock_seconds": args.max_wallclock_seconds,
             "compile": args.compile_enabled,
@@ -310,6 +314,8 @@ def cmd_write_local_recurrence_matrix_manifest(args: argparse.Namespace) -> int:
             "train_seq_len": args.train_seq_len,
             "val_loss_every": args.val_loss_every,
             "train_log_every": args.train_log_every,
+            "min_val_seqs": args.min_val_seqs,
+            "val_max_seqs": args.val_max_seqs,
             "val_batch_size": args.val_batch_size,
             "max_wallclock_seconds": args.max_wallclock_seconds,
             "compile": args.compile_enabled,
@@ -393,6 +399,8 @@ def build_parser() -> argparse.ArgumentParser:
     local_naive_search.add_argument("--train-seq-len", type=int, required=True)
     local_naive_search.add_argument("--val-loss-every", type=int, required=True)
     local_naive_search.add_argument("--train-log-every", type=int, required=True)
+    local_naive_search.add_argument("--min-val-seqs", type=int, required=True)
+    local_naive_search.add_argument("--val-max-seqs", type=int, required=True)
     local_naive_search.add_argument("--val-batch-size", type=int, required=True)
     local_naive_search.add_argument(
         "--max-wallclock-seconds", type=float, required=True
@@ -443,6 +451,8 @@ def build_parser() -> argparse.ArgumentParser:
     h100_naive.add_argument("--train-seq-len", type=int, required=True)
     h100_naive.add_argument("--val-loss-every", type=int, required=True)
     h100_naive.add_argument("--train-log-every", type=int, required=True)
+    h100_naive.add_argument("--min-val-seqs", type=int, required=True)
+    h100_naive.add_argument("--val-max-seqs", type=int, required=True)
     h100_naive.add_argument("--val-batch-size", type=int, required=True)
     h100_naive.add_argument("--max-wallclock-seconds", type=float, required=True)
     h100_naive.add_argument("--compile-enabled", type=parse_bool_flag, required=True)
@@ -498,6 +508,8 @@ def build_parser() -> argparse.ArgumentParser:
     local_recurrence.add_argument("--train-seq-len", type=int, required=True)
     local_recurrence.add_argument("--val-loss-every", type=int, required=True)
     local_recurrence.add_argument("--train-log-every", type=int, required=True)
+    local_recurrence.add_argument("--min-val-seqs", type=int, required=True)
+    local_recurrence.add_argument("--val-max-seqs", type=int, required=True)
     local_recurrence.add_argument("--val-batch-size", type=int, required=True)
     local_recurrence.add_argument("--max-wallclock-seconds", type=float, required=True)
     local_recurrence.add_argument(
