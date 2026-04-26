@@ -1267,50 +1267,6 @@ def test_gdn_cuda_fused_cpu_fallback_matches_packed_path() -> None:
     )
 
 
-def test_gdn_cuda_megakernel_flag_validation() -> None:
-    """Reject megakernel settings that violate the packed HGDN contract."""
-    _assert_gdn_init_rejections(
-        [
-            (
-                "Expected megakernel to require packed qkv proj+conv",
-                dict(use_cuda_megakernel=True),
-            ),
-            (
-                "Expected megakernel to require fp32 gate math",
-                dict(
-                    use_packed_qkv_conv=True,
-                    use_packed_qkv_proj=True,
-                    conv_output_contiguous=True,
-                    use_cuda_megakernel=True,
-                    gates_fp32=False,
-                ),
-            ),
-            (
-                "Expected megakernel to reject legacy fused frontend flags",
-                dict(
-                    use_packed_qkv_conv=True,
-                    use_packed_qkv_proj=True,
-                    conv_output_contiguous=True,
-                    use_cuda_megakernel=True,
-                    use_cuda_fused_frontend=True,
-                ),
-            ),
-        ]
-    )
-    print("  ✓ HGDN megakernel flag validation OK")
-
-
-def test_gdn_cuda_megakernel_cpu_fallback_matches_packed_path() -> None:
-    """CPU fallback for the megakernel path should preserve packed-path results."""
-    _assert_gdn_cpu_fallback_matches_reference(
-        base_kwargs=_make_standard_packed_kwargs(output_norm_fp32=True),
-        candidate_overrides=dict(use_cuda_megakernel=True),
-        grad_atol=3e-4,
-        grad_rtol=5e-3,
-        success_message="  ✓ HGDN megakernel CPU fallback matches packed path",
-    )
-
-
 def test_gdn_cuda_fused_frontend_lib_validation() -> None:
     """Compile-visible fused frontend should validate the intended family contract."""
     _assert_gdn_init_rejections(

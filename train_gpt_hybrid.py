@@ -9,8 +9,8 @@ Usage (single GPU):
 Usage (8xH100):
   RUN_ID=hybrid_8gpu torchrun --standalone --nproc_per_node=8 train_gpt_hybrid.py
 
-Sweep (see sweep.sh):
-  WANDB_SWEEP=1 GDN_EXPAND_V=1.5 GDN_RATIO=3 ... torchrun ...
+Config-driven runs:
+  RUN_ID=hybrid_test NUM_LAYERS=8 MODEL_DIM=512 ... torchrun ...
 """
 
 from __future__ import annotations
@@ -18,7 +18,6 @@ from __future__ import annotations
 import copy
 import gc
 import io
-import json
 import os
 import random
 import sys
@@ -37,10 +36,6 @@ import torch.distributed as dist
 from torch import Tensor, nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from hgdn_megakernel import (
-    extension_status as hgdn_megakernel_extension_status,
-    resolve_runtime_rec_chunk_t as hgdn_resolve_runtime_rec_chunk_t,
-)
 from hgdn_runtime_utils import (
     dequantize_state_dict_int8,
     maybe_compile,
@@ -226,8 +221,6 @@ class Hyperparameters:
     gdn_use_cuda_fused_output = bool(
         int(os.environ.get("GDN_USE_CUDA_FUSED_OUTPUT", "0"))
     )
-    gdn_use_cuda_corekernel = bool(int(os.environ.get("GDN_USE_CUDA_COREKERNEL", "0")))
-    gdn_use_cuda_megakernel = bool(int(os.environ.get("GDN_USE_CUDA_MEGAKERNEL", "0")))
     gdn_use_cuda_split_norm = bool(int(os.environ.get("GDN_USE_CUDA_SPLIT_NORM", "0")))
     gdn_use_cuda_split_norm_lib = bool(
         int(os.environ.get("GDN_USE_CUDA_SPLIT_NORM_LIB", "0"))
@@ -338,12 +331,6 @@ def build_wandb_config(
         "GDN_W_G_OPTIMIZER": args.gdn_w_g_optimizer,
         "COMPILE_GDN_DISABLED": compile_stats["gdn_disabled"],
         "COMPILE_GDN_FLA_BLOCKS_COMPILED": compile_stats["gdn_fla_blocks_compiled"],
-        "COMPILE_GDN_COREKERNEL_LEFT_ENABLED": compile_stats[
-            "gdn_corekernel_left_enabled"
-        ],
-        "COMPILE_GDN_MEGAKERNEL_LEFT_ENABLED": compile_stats[
-            "gdn_megakernel_left_enabled"
-        ],
         "COMPILE_GDN_MLPS_COMPILED": compile_stats["gdn_mlps_compiled"],
         "COMPILE_ATTN_BLOCKS_COMPILED": compile_stats["attn_blocks_compiled"],
         "COMPILE_MODEL_COMPILED": compile_stats["model_compiled"],
@@ -385,8 +372,6 @@ def build_wandb_config(
         "GDN_USE_CUDA_FUSED_FRONTEND": args.gdn_use_cuda_fused_frontend,
         "GDN_USE_CUDA_FUSED_FRONTEND_LIB": args.gdn_use_cuda_fused_frontend_lib,
         "GDN_USE_CUDA_FUSED_OUTPUT": args.gdn_use_cuda_fused_output,
-        "GDN_USE_CUDA_COREKERNEL": args.gdn_use_cuda_corekernel,
-        "GDN_USE_CUDA_MEGAKERNEL": args.gdn_use_cuda_megakernel,
         "GDN_USE_CUDA_SPLIT_NORM": args.gdn_use_cuda_split_norm,
         "GDN_USE_CUDA_SPLIT_NORM_LIB": args.gdn_use_cuda_split_norm_lib,
         "GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD": args.gdn_use_packed_qkv_conv_custom_backward,
@@ -1142,60 +1127,7 @@ def main() -> None:
     log0(code, console=False)
     log0(f"Python {sys.version}", console=False)
     log0(f"PyTorch {torch.__version__}", console=False)
-    if args.gdn_use_cuda_corekernel and args.gdn_use_cuda_megakernel:
-        raise RuntimeError(
-            "GDN_USE_CUDA_COREKERNEL=1 is incompatible with GDN_USE_CUDA_MEGAKERNEL=1."
-        )
-    owned_runtime_rec_chunk_t: int | None = None
-    if args.gdn_use_cuda_corekernel or args.gdn_use_cuda_megakernel:
-        megakernel_status = hgdn_megakernel_extension_status()
-        mode_name = "corekernel" if args.gdn_use_cuda_corekernel else "megakernel"
-        rec_chunk_t_env_name = (
-            "GDN_COREKERNEL_REC_CHUNK_T"
-            if args.gdn_use_cuda_corekernel
-            else "GDN_MEGAKERNEL_REC_CHUNK_T"
-        )
-        rec_chunk_t_fallback = (
-            " (fallback GDN_MEGAKERNEL_REC_CHUNK_T)"
-            if args.gdn_use_cuda_corekernel
-            else ""
-        )
-        try:
-            owned_runtime_rec_chunk_t = hgdn_resolve_runtime_rec_chunk_t(
-                prefer_corekernel=args.gdn_use_cuda_corekernel
-            )
-        except ValueError as exc:
-            raise RuntimeError(str(exc)) from exc
-        log0(
-            f"hgdn_{mode_name}_preflight:{json.dumps(megakernel_status, sort_keys=True)}"
-        )
-        log0(f"hgdn_{mode_name}_rec_chunk_t:{owned_runtime_rec_chunk_t}")
-        if args.gdn_control_proj_fp32:
-            raise RuntimeError(
-                f"GDN_USE_CUDA_{mode_name.upper()}=1 requires GDN_CONTROL_PROJ_FP32=0 "
-                "because the owned CUDA path expects bf16 w_a/w_b/w_g weights."
-            )
-        if not megakernel_status["loaded"]:
-            raise RuntimeError(
-                "An owned HGDN CUDA kernel path is enabled but the HGDN kernel extension is "
-                "unavailable. Build it before training with "
-                "`python setup_hgdn_megakernel.py build_ext --inplace` or explicitly enable "
-                "`GDN_MEGAKERNEL_ALLOW_JIT_BUILD=1`."
-            )
-        if owned_runtime_rec_chunk_t > int(megakernel_status["rec_chunk_t_max"]):
-            raise RuntimeError(
-                f"{rec_chunk_t_env_name} exceeds the compiled HGDN kernel maximum. "
-                "Rebuild with a larger HGDN_REC_CHUNK_T or lower "
-                f"{rec_chunk_t_env_name}{rec_chunk_t_fallback}. "
-                f"got={owned_runtime_rec_chunk_t} "
-                f"max={int(megakernel_status['rec_chunk_t_max'])}"
-            )
-    if (
-        args.gdn_ratio > 0
-        and not args.gdn_use_cuda_corekernel
-        and not args.gdn_use_cuda_megakernel
-        and not _HAS_FLA
-    ):
+    if args.gdn_ratio > 0 and not _HAS_FLA:
         raise RuntimeError(
             "Packed HGDN training requires the FLA gated-delta fast path. "
             "Refusing to silently fall back to the naive recurrence. "
@@ -1232,8 +1164,6 @@ def main() -> None:
         f"cuda_fused_frontend={int(args.gdn_use_cuda_fused_frontend)} "
         f"cuda_fused_frontend_lib={int(args.gdn_use_cuda_fused_frontend_lib)} "
         f"cuda_fused_output={int(args.gdn_use_cuda_fused_output)} "
-        f"cuda_corekernel={int(args.gdn_use_cuda_corekernel)} "
-        f"cuda_megakernel={int(args.gdn_use_cuda_megakernel)} "
         f"cuda_split_norm={int(args.gdn_use_cuda_split_norm)} "
         f"cuda_split_norm_lib={int(args.gdn_use_cuda_split_norm_lib)}",
         console=False,
@@ -1334,8 +1264,6 @@ def main() -> None:
             gdn_use_cuda_fused_frontend=args.gdn_use_cuda_fused_frontend,
             gdn_use_cuda_fused_frontend_lib=args.gdn_use_cuda_fused_frontend_lib,
             gdn_use_cuda_fused_output=args.gdn_use_cuda_fused_output,
-            gdn_use_cuda_corekernel=args.gdn_use_cuda_corekernel,
-            gdn_use_cuda_megakernel=args.gdn_use_cuda_megakernel,
             gdn_use_cuda_split_norm=args.gdn_use_cuda_split_norm,
             gdn_use_cuda_split_norm_lib=args.gdn_use_cuda_split_norm_lib,
             gdn_use_packed_qkv_conv_custom_backward=args.gdn_use_packed_qkv_conv_custom_backward,
@@ -1362,11 +1290,6 @@ def main() -> None:
         gdn_control_proj_fp32=args.gdn_control_proj_fp32,
         gdn_w_g_optimizer=args.gdn_w_g_optimizer,
     )
-    if args.gdn_use_cuda_corekernel and owned_runtime_rec_chunk_t is not None:
-        for block in base_model.blocks:
-            gdn = getattr(block, "gdn", None)
-            if gdn is not None and bool(getattr(gdn, "use_cuda_corekernel", False)):
-                gdn.corekernel_rec_chunk_t = int(owned_runtime_rec_chunk_t)
     rotary_prewarm_count = 0
     if args.compile:
         rotary_prewarm_count = prewarm_rotary_caches(
@@ -1404,8 +1327,6 @@ def main() -> None:
         f"gdn_disabled:{compile_stats['gdn_disabled']} "
         f"gdn_blocks_compiled:{compile_stats['gdn_blocks_compiled']} "
         f"gdn_fla_blocks_compiled:{compile_stats['gdn_fla_blocks_compiled']} "
-        f"gdn_corekernel_left_enabled:{compile_stats['gdn_corekernel_left_enabled']} "
-        f"gdn_megakernel_left_enabled:{compile_stats['gdn_megakernel_left_enabled']} "
         f"gdn_mlps_compiled:{compile_stats['gdn_mlps_compiled']} "
         f"attn_blocks_compiled:{compile_stats['attn_blocks_compiled']} "
         f"model_compiled:{compile_stats['model_compiled']}"
