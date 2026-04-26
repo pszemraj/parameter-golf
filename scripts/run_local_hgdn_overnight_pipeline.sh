@@ -47,6 +47,23 @@ data_path="${DATA_PATH:-$HGDN_REPO_ROOT/data/datasets/fineweb10B_sp1024}"
 tokenizer_path="${TOKENIZER_PATH:-$HGDN_REPO_ROOT/data/tokenizers/fineweb_1024_bpe.model}"
 vocab_size="${VOCAB_SIZE:-1024}"
 
+h100_ngpu="${H100_NGPU:-8}"
+h100_iterations="${H100_ITERATIONS:-20000}"
+h100_train_batch_tokens="${H100_TRAIN_BATCH_TOKENS:-524288}"
+h100_train_seq_len="${H100_TRAIN_SEQ_LEN:-1024}"
+h100_val_loss_every="${H100_VAL_LOSS_EVERY:-200}"
+h100_train_log_every="${H100_TRAIN_LOG_EVERY:-50}"
+h100_val_batch_size="${H100_VAL_BATCH_SIZE:-524288}"
+h100_min_val_seqs="${H100_MIN_VAL_SEQS:-512}"
+h100_val_max_seqs="${H100_VAL_MAX_SEQS:-0}"
+h100_max_wallclock_seconds="${H100_MAX_WALLCLOCK_SECONDS:-600}"
+h100_compile="${H100_COMPILE:-1}"
+h100_compile_strategy="${H100_COMPILE_STRATEGY:-hybrid}"
+h100_grad_accum_steps="${H100_GRAD_ACCUM_STEPS:-0}"
+h100_data_path="${H100_DATA_PATH:-$HGDN_REPO_ROOT/data/datasets/fineweb10B_sp1024}"
+h100_tokenizer_path="${H100_TOKENIZER_PATH:-$HGDN_REPO_ROOT/data/tokenizers/fineweb_1024_bpe.model}"
+h100_vocab_size="${H100_VOCAB_SIZE:-1024}"
+
 run_stage0="${RUN_STAGE0:-1}"
 run_stage1="${RUN_STAGE1:-1}"
 run_stage2="${RUN_STAGE2:-1}"
@@ -60,7 +77,9 @@ confirm_perf_skip_final_eval="${CONFIRM_PERF_SKIP_FINAL_EVAL:-0}"
 secondary_perf_skip_final_eval="${SECONDARY_PERF_SKIP_FINAL_EVAL:-${confirm_perf_skip_final_eval}}"
 confirm_top_hgdn="${CONFIRM_TOP_HGDN:-2}"
 recurrence_selection_metric="${RECURRENCE_SELECTION_METRIC:-equal_wallclock_bpb}"
-search_selection_metric="${SEARCH_SELECTION_METRIC:-auto}"
+screen_selection_metric="${SCREEN_SELECTION_METRIC:-${SEARCH_SELECTION_METRIC:-auto}}"
+confirm_selection_metric="${CONFIRM_SELECTION_METRIC:-final_roundtrip_bpb}"
+secondary_selection_metric="${SECONDARY_SELECTION_METRIC:-${confirm_selection_metric}}"
 secondary_force="${SECONDARY_FORCE:-0}"
 
 default_screen_configs=(
@@ -179,13 +198,31 @@ write_plan() {
         echo "data_path=${data_path}"
         echo "tokenizer_path=${tokenizer_path}"
         echo "vocab_size=${vocab_size}"
+        echo "h100_ngpu=${h100_ngpu}"
+        echo "h100_iterations=${h100_iterations}"
+        echo "h100_train_batch_tokens=${h100_train_batch_tokens}"
+        echo "h100_train_seq_len=${h100_train_seq_len}"
+        echo "h100_val_loss_every=${h100_val_loss_every}"
+        echo "h100_train_log_every=${h100_train_log_every}"
+        echo "h100_val_batch_size=${h100_val_batch_size}"
+        echo "h100_min_val_seqs=${h100_min_val_seqs}"
+        echo "h100_val_max_seqs=${h100_val_max_seqs}"
+        echo "h100_max_wallclock_seconds=${h100_max_wallclock_seconds}"
+        echo "h100_compile=${h100_compile}"
+        echo "h100_compile_strategy=${h100_compile_strategy}"
+        echo "h100_grad_accum_steps=${h100_grad_accum_steps}"
+        echo "h100_data_path=${h100_data_path}"
+        echo "h100_tokenizer_path=${h100_tokenizer_path}"
+        echo "h100_vocab_size=${h100_vocab_size}"
         echo "recurrence_iterations=${recurrence_iterations}"
         echo "screen_iterations=${screen_iterations}"
         echo "confirm_iterations=${confirm_iterations}"
         echo "secondary_iterations=${secondary_iterations}"
         echo "confirm_top_hgdn=${confirm_top_hgdn}"
         echo "recurrence_selection_metric=${recurrence_selection_metric}"
-        echo "search_selection_metric=${search_selection_metric}"
+        echo "screen_selection_metric=${screen_selection_metric}"
+        echo "confirm_selection_metric=${confirm_selection_metric}"
+        echo "secondary_selection_metric=${secondary_selection_metric}"
         echo "screen_candidate_configs=${screen_candidate_configs}"
         echo "secondary_candidate_configs=${secondary_candidate_configs}"
         echo "secondary_force=${secondary_force}"
@@ -205,11 +242,19 @@ print_plan() {
     echo "secondary_candidate_configs=${secondary_candidate_configs}"
     echo "confirm_top_hgdn=${confirm_top_hgdn}"
     echo "recurrence_selection_metric=${recurrence_selection_metric}"
-    echo "search_selection_metric=${search_selection_metric}"
+    echo "screen_selection_metric=${screen_selection_metric}"
+    echo "confirm_selection_metric=${confirm_selection_metric}"
+    echo "secondary_selection_metric=${secondary_selection_metric}"
     echo "secondary_force=${secondary_force}"
     echo "data_path=${data_path}"
     echo "tokenizer_path=${tokenizer_path}"
     echo "vocab_size=${vocab_size}"
+    echo "h100_contract:"
+    echo "  ngpu=${h100_ngpu} iterations=${h100_iterations} train_batch_tokens=${h100_train_batch_tokens}"
+    echo "  train_seq_len=${h100_train_seq_len} max_wallclock_seconds=${h100_max_wallclock_seconds}"
+    echo "  min_val_seqs=${h100_min_val_seqs} val_max_seqs=${h100_val_max_seqs} val_batch_size=${h100_val_batch_size}"
+    echo "  data_path=${h100_data_path}"
+    echo "  tokenizer_path=${h100_tokenizer_path}"
     echo "min_val_seqs=${min_val_seqs}"
     echo "val_max_seqs=${val_max_seqs}"
     echo "gates:"
@@ -367,6 +412,7 @@ analyze_stage() {
 write_h100_next_command() {
     local decision_env="$1"
     local output_name="${2:-next_h100_command.sh}"
+    local run_suffix="${3:-primary_finalist}"
     # shellcheck disable=SC1090
     source "${decision_env}"
     local h100_command="${pipeline_dir}/${output_name}"
@@ -376,6 +422,23 @@ write_h100_next_command() {
         printf '%q ' \
             "USE_WANDB=0" \
             "WANDB_MODE=offline" \
+            "ALLOW_EXISTING_LOGS=0" \
+            "NGPU=${h100_ngpu}" \
+            "GRAD_ACCUM_STEPS=${h100_grad_accum_steps}" \
+            "ITERATIONS=${h100_iterations}" \
+            "MAX_WALLCLOCK_SECONDS=${h100_max_wallclock_seconds}" \
+            "TRAIN_BATCH_TOKENS=${h100_train_batch_tokens}" \
+            "TRAIN_SEQ_LEN=${h100_train_seq_len}" \
+            "VAL_LOSS_EVERY=${h100_val_loss_every}" \
+            "TRAIN_LOG_EVERY=${h100_train_log_every}" \
+            "VAL_BATCH_SIZE=${h100_val_batch_size}" \
+            "MIN_VAL_SEQS=${h100_min_val_seqs}" \
+            "VAL_MAX_SEQS=${h100_val_max_seqs}" \
+            "DATA_PATH=${h100_data_path}" \
+            "TOKENIZER_PATH=${h100_tokenizer_path}" \
+            "VOCAB_SIZE=${h100_vocab_size}" \
+            "COMPILE=${h100_compile}" \
+            "COMPILE_STRATEGY=${h100_compile_strategy}" \
             "ATTN_USE_FLASH_ATTN3=1" \
             "DISTRIBUTED_MODE=parallel_muon" \
             "MUON_DISTRIBUTED_MODE=packed_allreduce" \
@@ -384,7 +447,7 @@ write_h100_next_command() {
             "HGDN_CONFIG=${SELECTED_CONFIG}" \
             "ATTN_CONFIG=${SELECTED_CONTROL_CONFIG:-}" \
             "WANDB_WATCH=none" \
-            "RUN_PREFIX_BASE=h100naive_${run_prefix_base}_finalist" \
+            "RUN_PREFIX_BASE=h100naive_${run_prefix_base}_${run_suffix}" \
             bash scripts/run_h100_hgdn_naive_contract_round.sh
         printf '\n'
     } >"${h100_command}"
@@ -444,7 +507,7 @@ main() {
             "${selected_mode}" \
             "${screen_candidate_configs}" \
             "config" \
-            "${search_selection_metric}" \
+            "${screen_selection_metric}" \
             "${stage1_decision}"
     fi
 
@@ -467,9 +530,12 @@ main() {
             "${selected_mode}" \
             "${stage2_configs}" \
             "config" \
-            "${search_selection_metric}" \
+            "${confirm_selection_metric}" \
             "${pipeline_dir}/stage2_decision.env"
-        write_h100_next_command "${pipeline_dir}/stage2_decision.env"
+        write_h100_next_command \
+            "${pipeline_dir}/stage2_decision.env" \
+            "next_h100_command.sh" \
+            "primary_finalist"
     fi
 
     if [[ "${run_stage3}" == "1" ]]; then
@@ -490,11 +556,12 @@ main() {
                     "${selected_mode}" \
                     "${secondary_candidate_configs}" \
                     "config" \
-                    "${search_selection_metric}" \
+                    "${secondary_selection_metric}" \
                     "${pipeline_dir}/stage3_decision.env"
                 write_h100_next_command \
                     "${pipeline_dir}/stage3_decision.env" \
-                    "next_h100_secondary_command.sh"
+                    "next_h100_secondary_command.sh" \
+                    "secondary_sanity"
             fi
         fi
     fi

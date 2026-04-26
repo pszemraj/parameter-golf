@@ -26,6 +26,7 @@ archive_output="${ARCHIVE_OUTPUT:-local-scratch/${run_prefix_base}_bundle.7z}"
 command_log="${COMMAND_LOG:-local-scratch/${run_prefix_base}_commands.sh}"
 torch_logs="${TORCH_LOGS:-}"
 torch_trace="${TORCH_TRACE:-}"
+allow_existing_logs="${ALLOW_EXISTING_LOGS:-0}"
 omp_num_threads="${OMP_NUM_THREADS:-1}"
 mkl_num_threads="${MKL_NUM_THREADS:-1}"
 openblas_num_threads="${OPENBLAS_NUM_THREADS:-1}"
@@ -91,10 +92,12 @@ attn_config="${ATTN_CONFIG:-$(resolve_attn_control_config "${hgdn_config}")}"
 gpt_naive_run_id="${GPT_NAIVE_RUN_ID:-${run_prefix_base}_gpt_naive_baseline_seq${train_seq_len}}"
 hgdn_run_id="${HGDN_RUN_ID:-${run_prefix_base}_hybrid_naive_contract_seq${train_seq_len}}"
 attn_run_id="${ATTN_RUN_ID:-${run_prefix_base}_attn_naive_contract_seq${train_seq_len}}"
+expected_run_ids=("${gpt_naive_run_id}" "${hgdn_run_id}" "${attn_run_id}")
 
 naive_reference_name="${NAIVE_REFERENCE_NAME:-2026-03-17_NaiveBaseline}"
 naive_reference_roundtrip_bpb="${NAIVE_REFERENCE_ROUNDTRIP_BPB:-1.22436570}"
 naive_reference_stop_bpb="${NAIVE_REFERENCE_STOP_BPB:-1.2172}"
+bundle_written=0
 
 hgdn_ensure_python_module "${python_bin}" py7zr py7zr
 hgdn_validate_fla_recurrence_mode "${gdn_fla_recurrence_mode}"
@@ -130,6 +133,7 @@ print_plan() {
     echo "wandb_watch_log_freq=${wandb_watch_log_freq}"
     echo "TORCH_LOGS=${torch_logs:-<unset>}"
     echo "TORCH_TRACE=${torch_trace:-<unset>}"
+    echo "allow_existing_logs=${allow_existing_logs}"
     echo "OMP_NUM_THREADS=${omp_num_threads}"
     echo "MKL_NUM_THREADS=${mkl_num_threads}"
     echo "OPENBLAS_NUM_THREADS=${openblas_num_threads}"
@@ -173,6 +177,25 @@ prepare_command_log() {
         echo "#!/bin/bash"
         echo "set -euo pipefail"
     } >"${command_log}"
+}
+
+check_planned_logs_are_fresh() {
+    if [[ "${allow_existing_logs}" == "1" ]]; then
+        return
+    fi
+    local conflict=0
+    local run_id
+    for run_id in "${expected_run_ids[@]}"; do
+        local log_path="logs/${run_id}.txt"
+        if [[ -e "${log_path}" ]]; then
+            echo "Refusing to append to existing run log: ${log_path}" >&2
+            conflict=1
+        fi
+    done
+    if (( conflict )); then
+        echo "Use a fresh RUN_PREFIX_BASE, or set ALLOW_EXISTING_LOGS=1 only for an intentional append." >&2
+        exit 1
+    fi
 }
 
 run_round() {
@@ -395,33 +418,55 @@ run_round() {
 }
 
 build_bundle() {
+    local exit_status="${1:-0}"
+    if [[ "${bundle_written}" == "1" ]]; then
+        return
+    fi
+    bundle_written=1
+
     echo
     echo ">>> bundle outputs"
 
     rm -rf "${bundle_stage_dir}"
     mkdir -p "${bundle_stage_dir}/logs" "${bundle_stage_dir}/configs"
 
-    cp "${hgdn_config}" "${bundle_stage_dir}/configs/"
-    cp "${attn_config}" "${bundle_stage_dir}/configs/"
-    cp "${command_log}" "${bundle_stage_dir}/commands.sh"
-
-    local matched_logs=0
-    local run_id
-    for run_id in "${gpt_naive_run_id}" "${hgdn_run_id}" "${attn_run_id}"; do
-        local log_path="logs/${run_id}.txt"
-        if [[ -f "${log_path}" ]]; then
-            cp "${log_path}" "${bundle_stage_dir}/logs/"
-            matched_logs=1
+    local config_path
+    for config_path in "${hgdn_config}" "${attn_config}"; do
+        if [[ -f "${config_path}" ]]; then
+            cp "${config_path}" "${bundle_stage_dir}/configs/"
         fi
     done
 
-    "${python_bin}" scripts/hgdn_helper_cli.py write-h100-naive-contract-manifest \
+    if [[ -f "${command_log}" ]]; then
+        cp "${command_log}" "${bundle_stage_dir}/commands.sh"
+    fi
+
+    local matched_logs=1
+    local completed_log_count=0
+    local missing_run_ids=()
+    local run_id
+    for run_id in "${expected_run_ids[@]}"; do
+        local log_path="logs/${run_id}.txt"
+        if [[ -f "${log_path}" ]]; then
+            cp "${log_path}" "${bundle_stage_dir}/logs/"
+            completed_log_count=$((completed_log_count + 1))
+        else
+            matched_logs=0
+            missing_run_ids+=("${run_id}")
+        fi
+    done
+
+    local -a manifest_cmd
+    manifest_cmd=(
+        "${python_bin}" scripts/hgdn_helper_cli.py write-h100-naive-contract-manifest
         --output "${bundle_stage_dir}/bundle_manifest.json" \
         --run-prefix-base "${run_prefix_base}" \
         --wandb-project "${wandb_project}" \
         --wandb-mode "${wandb_mode}" \
         --archive-output "${archive_output}" \
+        --exit-status "${exit_status}" \
         --matched-logs "${matched_logs}" \
+        --completed-log-count "${completed_log_count}" \
         --command-log "${command_log}" \
         --torch-logs "${torch_logs}" \
         --torch-trace "${torch_trace}" \
@@ -463,12 +508,31 @@ build_bundle() {
         --git-branch "${git_branch}" \
         --host-name "${host_name}" \
         --timestamp-utc "${timestamp_utc}"
+    )
+    for run_id in "${missing_run_ids[@]}"; do
+        manifest_cmd+=(--missing-run-id "${run_id}")
+    done
+    "${manifest_cmd[@]}"
 
     hgdn_create_7z_archive "${python_bin}" "${archive_output}" "${bundle_stage_dir}"
     echo "bundle_archive=${archive_output}"
 }
 
-print_plan
-prepare_command_log
-run_round
-build_bundle
+on_exit() {
+    local status="$1"
+    trap - EXIT
+    if [[ -f "${command_log}" ]]; then
+        build_bundle "${status}" || status=$?
+    fi
+    exit "${status}"
+}
+
+main() {
+    print_plan
+    prepare_command_log
+    check_planned_logs_are_fresh
+    trap 'on_exit $?' EXIT
+    run_round
+}
+
+main

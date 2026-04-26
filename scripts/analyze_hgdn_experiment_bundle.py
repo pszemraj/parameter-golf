@@ -26,6 +26,10 @@ EVAL_RE = re.compile(
     rf"val_loss:(?P<loss>{NUMBER}) val_bpb:(?P<bpb>{NUMBER}) "
     rf"train_time:(?P<time_ms>{NUMBER})ms"
 )
+WALLCLOCK_STOP_RE = re.compile(
+    rf"stopping_early:\s+wallclock_cap\s+train_time:(?P<time_ms>{NUMBER})ms\s+"
+    rf"step:(?P<step>\d+)(?:/(?P<planned>\d+))?"
+)
 MODEL_RE = re.compile(r"model_params:(?P<params>\d+) blocks:(?P<blocks>\d+G\+\d+A)")
 MODE_RE = re.compile(r"gdn_fla_recurrence_mode:(?P<mode>[a-z_]+)")
 PERF_RE = re.compile(
@@ -154,6 +158,7 @@ def parse_log(path: Path) -> dict[str, Any]:
     """
     train_points: list[dict[str, float]] = []
     eval_points: list[dict[str, float]] = []
+    wallclock_stop_points: list[dict[str, float]] = []
     params: int | None = None
     blocks = ""
     mode = ""
@@ -189,6 +194,14 @@ def parse_log(path: Path) -> dict[str, Any]:
                     "val_bpb": float(match.group("bpb")),
                 }
             )
+        if match := WALLCLOCK_STOP_RE.search(line):
+            point = {
+                "step": float(match.group("step")),
+                "train_time_ms": float(match.group("time_ms")),
+            }
+            if match.group("planned") is not None:
+                point["planned"] = float(match.group("planned"))
+            wallclock_stop_points.append(point)
         if match := MODEL_RE.search(line):
             params = int(match.group("params"))
             blocks = match.group("blocks")
@@ -209,10 +222,34 @@ def parse_log(path: Path) -> dict[str, Any]:
             artifact_code_bytes = int(match.group("code"))
             artifact_total_bytes = int(match.group("total"))
 
-    final_train = train_points[-1] if train_points else {}
-    final_eval = eval_points[-1] if eval_points else {}
-    planned_step = int(final_train.get("planned", final_eval.get("planned", 0)))
-    final_step = int(final_train.get("step", final_eval.get("step", 0)))
+    final_train = (
+        max(train_points, key=lambda row: (row["step"], row["train_time_ms"]))
+        if train_points
+        else {}
+    )
+    final_eval = (
+        max(eval_points, key=lambda row: (row["step"], row["train_time_ms"]))
+        if eval_points
+        else {}
+    )
+    terminal_points = train_points + eval_points + wallclock_stop_points
+    planned_values = [row["planned"] for row in terminal_points if "planned" in row]
+    step_values = [row["step"] for row in terminal_points if "step" in row]
+    train_time_values = [
+        row["train_time_ms"] for row in terminal_points if "train_time_ms" in row
+    ]
+    planned_step = int(max(planned_values)) if planned_values else 0
+    final_step = int(max(step_values)) if step_values else 0
+    final_train_time_ms = max(train_time_values) if train_time_values else None
+    reached_planned_step = bool(planned_step and final_step >= planned_step)
+    wallclock_clean_stop = bool(wallclock_stop_points)
+    completion_reason = (
+        "planned_step"
+        if reached_planned_step
+        else "wallclock_cap"
+        if wallclock_clean_stop
+        else "incomplete"
+    )
     final_step_ms = (
         perf_step_ms
         if perf_step_ms is not None
@@ -225,10 +262,12 @@ def parse_log(path: Path) -> dict[str, Any]:
         "run_id": path.stem,
         "params": params,
         "blocks": blocks,
-        "completed": bool(planned_step and final_step >= planned_step),
+        "completed": reached_planned_step or wallclock_clean_stop,
+        "completion_reason": completion_reason,
+        "wallclock_clean_stop": wallclock_clean_stop,
         "final_step": final_step,
         "planned_step": planned_step,
-        "final_train_time_ms": final_train.get("train_time_ms"),
+        "final_train_time_ms": final_train_time_ms,
         "final_step_ms": final_step_ms,
         "final_train_loss": final_train.get("train_loss"),
         "final_sampled_bpb": final_eval.get("val_bpb"),
@@ -256,21 +295,46 @@ def interpolate_bpb(
     :param float budget_ms: Common training time in milliseconds.
     :return float | None: Interpolated BPB.
     """
+    value, _status = interpolate_bpb_with_status(eval_points, budget_ms)
+    return value
+
+
+def interpolate_bpb_with_status(
+    eval_points: list[dict[str, float]], budget_ms: float
+) -> tuple[float | None, str]:
+    """Estimate BPB at a common train-time budget and explain the source.
+
+    :param list[dict[str, float]] eval_points: Validation points.
+    :param float budget_ms: Common training time in milliseconds.
+    :return tuple[float | None, str]: BPB and status label.
+    """
     if not eval_points:
-        return None
+        return None, "no_eval"
     points = sorted(eval_points, key=lambda row: row["train_time_ms"])
-    if budget_ms <= points[0]["train_time_ms"]:
-        return points[0]["val_bpb"]
+    if budget_ms < points[0]["train_time_ms"]:
+        return None, "before_first_eval"
     if budget_ms >= points[-1]["train_time_ms"]:
-        return points[-1]["val_bpb"]
+        status = (
+            "exact_eval"
+            if budget_ms == points[-1]["train_time_ms"]
+            else "clamped_after"
+        )
+        return points[-1]["val_bpb"], status
     for left, right in zip(points, points[1:], strict=False):
         if left["train_time_ms"] <= budget_ms <= right["train_time_ms"]:
+            if budget_ms == left["train_time_ms"]:
+                return left["val_bpb"], "exact_eval"
+            if budget_ms == right["train_time_ms"]:
+                return right["val_bpb"], "exact_eval"
             span = right["train_time_ms"] - left["train_time_ms"]
             if span <= 0:
-                return right["val_bpb"]
+                return right["val_bpb"], "duplicate_time"
             alpha = (budget_ms - left["train_time_ms"]) / span
-            return left["val_bpb"] + alpha * (right["val_bpb"] - left["val_bpb"])
-    return points[-1]["val_bpb"]
+            return (
+                left["val_bpb"] + alpha * (right["val_bpb"] - left["val_bpb"]),
+                "interpolated",
+            )
+    return points[-1]["val_bpb"], "clamped_after"
 
 
 def manifest_entries(manifest: dict[str, Any]) -> list[dict[str, Any]]:
@@ -349,24 +413,34 @@ def build_rows(
             row["tokens_per_s"] = None
         rows.append(row)
 
-    complete_times = [
-        float(row["final_train_time_ms"])
+    complete_rows = [
+        row
         for row in rows
         if row.get("completed")
         and row.get("final_train_time_ms") is not None
         and row.get("eval_points")
     ]
+    hgdn_complete_times = [
+        float(row["final_train_time_ms"])
+        for row in complete_rows
+        if row.get("family") == "HGDN"
+    ]
+    complete_times = [float(row["final_train_time_ms"]) for row in complete_rows]
+    budget_times = hgdn_complete_times or complete_times
     resolved_budget = (
-        float(speed_budget_ms or min(complete_times)) if complete_times else None
+        float(speed_budget_ms or min(budget_times)) if budget_times else None
     )
     for row in rows:
         row["speed_budget_ms"] = resolved_budget
-        row["equal_wallclock_bpb"] = (
-            interpolate_bpb(row.get("eval_points", []), resolved_budget)
+        equal_wallclock_bpb, equal_wallclock_bpb_status = (
+            interpolate_bpb_with_status(row.get("eval_points", []), resolved_budget)
             if resolved_budget is not None
-            else None
+            else (None, "no_budget")
         )
+        row["equal_wallclock_bpb"] = equal_wallclock_bpb
+        row["equal_wallclock_bpb_status"] = equal_wallclock_bpb_status
         row["speed_budget_bpb"] = row["equal_wallclock_bpb"]
+        row["speed_budget_bpb_status"] = equal_wallclock_bpb_status
     assign_ranks(rows)
     return rows, resolved_budget
 
@@ -561,14 +635,20 @@ def write_outputs(
         "family",
         "gdn_fla_recurrence_mode",
         "completed",
+        "completion_reason",
+        "wallclock_clean_stop",
         "final_step",
         "planned_step",
+        "final_train_time_ms",
         "final_step_ms",
         "tokens_per_s",
         "final_train_loss",
         "final_sampled_bpb",
+        "speed_budget_ms",
         "equal_wallclock_bpb",
+        "equal_wallclock_bpb_status",
         "speed_budget_bpb",
+        "speed_budget_bpb_status",
         "final_roundtrip_bpb",
         "size_proxy_bytes",
         "size_total_init_bytes",

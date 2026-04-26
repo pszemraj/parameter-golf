@@ -215,7 +215,10 @@ def cmd_write_h100_naive_contract_manifest(args: argparse.Namespace) -> int:
         "wandb_mode": args.wandb_mode,
         "archive_output": str(args.archive_output),
         "command_log": args.command_log,
+        "exit_status": args.exit_status,
         "matched_logs": args.matched_logs,
+        "completed_log_count": args.completed_log_count,
+        "missing_run_ids": args.missing_run_id,
         "contract": {
             "ngpu": args.ngpu,
             "iterations": args.iterations,
@@ -432,7 +435,9 @@ def build_parser() -> argparse.ArgumentParser:
     h100_naive.add_argument("--wandb-project", required=True)
     h100_naive.add_argument("--wandb-mode", required=True)
     h100_naive.add_argument("--archive-output", type=Path, required=True)
+    h100_naive.add_argument("--exit-status", type=int, required=True)
     h100_naive.add_argument("--matched-logs", type=parse_bool_flag, required=True)
+    h100_naive.add_argument("--completed-log-count", type=int, required=True)
     h100_naive.add_argument("--command-log", required=True)
     h100_naive.add_argument("--torch-logs", default="")
     h100_naive.add_argument("--torch-trace", default="")
@@ -469,6 +474,7 @@ def build_parser() -> argparse.ArgumentParser:
     h100_naive.add_argument("--attn-config", required=True)
     h100_naive.add_argument("--hgdn-run-id", required=True)
     h100_naive.add_argument("--attn-run-id", required=True)
+    h100_naive.add_argument("--missing-run-id", action="append", default=[])
     h100_naive.add_argument("--naive-reference-name", required=True)
     h100_naive.add_argument(
         "--naive-reference-roundtrip-bpb", type=float, required=True
