@@ -277,7 +277,14 @@ Promotion rule:
 After the geometry read, the top-K headroom question remains:
 
 ```bash
-bash scripts/run_5090_trigram_memory_screen.sh --dry-run --run-version v2 --trigram-top-k 4 --seeds 1337
+bash scripts/run_5090_adaptive_closeout.sh \
+  --dry-run \
+  --frontier-batch-id geom1 \
+  --run-version geom1 \
+  --seed 1337 \
+  --no-run-benchmark \
+  --count-workers 2 \
+  --stop-after k4
 ```
 
 Current trigram memory is a sparse additive boost into base logits with one
@@ -287,7 +294,13 @@ hit/confidence/margin features and does not arbitrate when to trust the memory.
 Then run:
 
 ```bash
-bash scripts/run_5090_trigram_memory_screen.sh --run-version v2 --trigram-top-k 4 --seeds 1337
+bash scripts/run_5090_adaptive_closeout.sh \
+  --frontier-batch-id geom1 \
+  --run-version geom1 \
+  --seed 1337 \
+  --no-run-benchmark \
+  --count-workers 2 \
+  --stop-after k4
 ```
 
 Promotion rule:
@@ -300,14 +313,31 @@ Promotion rule:
   blocks1 check
 
 ```bash
-bash scripts/run_5090_trigram_confirm1b.sh --run-version v2 --trigram-top-k 4 --seeds 1337
+bash scripts/run_5090_trigram_aligned_geometry_screen.sh \
+  --run-version geom1_k4_confirm \
+  --seeds 1337 \
+  --geometry-label blocks0_d128_l5_i512 \
+  --geometry-core-dim 128 \
+  --geometry-core-layers 5 \
+  --geometry-core-inner-dim 512 \
+  --trigram-top-k 4 \
+  --num-steps 8192 \
+  --lr-hold-steps 7000 \
+  --full-val-final
 ```
 
 Replay `blocks1` only as a geometry check after the blocks0 top-K and aligned
 geometry decisions:
 
 ```bash
-bash scripts/run_5090_trigram_memory_screen.sh --run-version v2 --seeds 1337 --run-blocks1 --no-run-blocks0
+bash scripts/run_5090_trigram_aligned_geometry_screen.sh \
+  --run-version blocks1_check \
+  --seeds 1337 \
+  --geometry-label blocks1_d64_l10_i512 \
+  --geometry-core-dim 64 \
+  --geometry-core-layers 10 \
+  --geometry-core-inner-dim 512 \
+  --geometry-num-blocks 1
 ```
 
 Use diagnostics on completed or partial runs before recovering any secondary

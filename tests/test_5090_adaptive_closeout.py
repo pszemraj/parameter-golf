@@ -119,6 +119,7 @@ def test_confirmation_planner_limits_promoted_rows(tmp_path: Path) -> None:
     assert len(commands) == 1
     assert commands[0].label == "blocks0_d96_l6_i512"
     assert "--full-val-final" in commands[0].command
+    assert "--count-workers" not in commands[0].command
     assert str(CONFIRM_STEPS) in commands[0].command
 
 
@@ -218,6 +219,27 @@ def test_geometry_command_uses_flag_protocol() -> None:
     assert command[:2] == ["bash", "scripts/run_5090_trigram_aligned_geometry_screen.sh"]
     assert "--run-version" in command
     assert "RUN_VERSION=" not in " ".join(command)
+
+
+def test_geometry_command_propagates_count_workers() -> None:
+    """Generated variant commands should preserve trigram count-worker settings."""
+    command = geometry_command(
+        "blocks0_d96_l6_i512",
+        run_version="geom1_k4",
+        seed="1337",
+        num_steps=4096,
+        hold_steps=3500,
+        trigram_top_k=4,
+        full_val_final=False,
+        val_every=256,
+        log_every=64,
+        log_state_every=256,
+        save_every=2048,
+        count_workers=4,
+    )
+
+    assert "--count-workers" in command
+    assert "4" in command
 
 
 def test_smoke_contract_uses_tiny_steps_and_disables_wandb(tmp_path: Path) -> None:

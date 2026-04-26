@@ -53,6 +53,15 @@ def main() -> None:
     g.add_argument("--base-bigram-delta", type=str, default=None, choices=["none", "full"])
     g.add_argument("--trigram-memory", type=str, default=None, choices=["none", "frozen"])
     g.add_argument("--trigram-log-scale-init", type=float, default=None)
+    g.add_argument("--trigram-top-k", type=int, default=None)
+    g.add_argument("--trigram-smoothing", type=float, default=None)
+    g.add_argument("--trigram-residual-clip", type=float, default=None)
+    g.add_argument("--trigram-confidence-count-cap", type=int, default=None)
+    g.add_argument("--trigram-max-tokens", type=int, default=None)
+    g.add_argument("--trigram-chunk-size", type=int, default=50_000_000)
+    g.add_argument("--trigram-count-workers", type=int, default=1)
+    g.add_argument("--trigram-table-cache-root", type=str, default=None)
+    g.add_argument("--rebuild-trigram-table-cache", action="store_true")
     g.add_argument("--residual-readout-delta-rank", type=int, default=None)
     g.add_argument("--residual-readout-delta-init-std", type=float, default=None)
     g.add_argument("--num-blocks", type=int, default=None)
@@ -112,6 +121,11 @@ def main() -> None:
             "base_bigram_delta",
             "trigram_memory",
             "trigram_log_scale_init",
+            "trigram_top_k",
+            "trigram_smoothing",
+            "trigram_residual_clip",
+            "trigram_confidence_count_cap",
+            "trigram_max_tokens",
             "residual_readout_delta_rank",
             "residual_readout_delta_init_std",
             "num_blocks",
@@ -164,6 +178,16 @@ def main() -> None:
             max_tokens=cfg.spec.get("max_tokens"),
             num_workers=cfg.spec.get("workers", -1),
             strategy=cfg.spec.get("strategy", "auto"),
+            trigram_memory=trigram_memory_config_value(cfg.model, "none"),
+            trigram_top_k=int(cfg.model.get("trigram_top_k", 2)),
+            trigram_smoothing=float(cfg.model.get("trigram_smoothing", 0.25)),
+            trigram_residual_clip=float(cfg.model.get("trigram_residual_clip", 8.0)),
+            trigram_confidence_count_cap=int(cfg.model.get("trigram_confidence_count_cap", 4096)),
+            trigram_max_tokens=cfg.model.get("trigram_max_tokens"),
+            trigram_chunk_size=int(args.trigram_chunk_size),
+            trigram_count_workers=int(args.trigram_count_workers),
+            trigram_table_cache_root=args.trigram_table_cache_root,
+            rebuild_trigram_table_cache=bool(args.rebuild_trigram_table_cache),
             verbose=True,
         )
         spec.save(cfg.spec_path)

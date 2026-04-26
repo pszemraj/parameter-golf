@@ -180,12 +180,18 @@ TARGET_EFFECTIVE_STEP_TOKENS=131072
 Only after geometry and BPTT are read should top-K headroom run:
 
 ```bash
-bash scripts/run_5090_trigram_memory_screen.sh --run-version v2 --trigram-top-k 4 --seeds 1337
+bash scripts/run_5090_adaptive_closeout.sh \
+  --frontier-batch-id geom1 \
+  --run-version geom1 \
+  --seed 1337 \
+  --no-run-benchmark \
+  --count-workers 2 \
+  --stop-after k4
 ```
 
-If the winning geometry is not the old `48x12x10`, run K4 through
-`scripts/run_5090_trigram_aligned_geometry_screen.sh` with that geometry
-instead of the legacy memory launcher.
+K4 should run through `scripts/run_5090_trigram_aligned_geometry_screen.sh`
+with the selected geometry. The legacy separate trigram-memory launchers have
+been removed from the maintained surface.
 
 ## Cache Policy
 

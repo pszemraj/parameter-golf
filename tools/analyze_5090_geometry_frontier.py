@@ -122,16 +122,16 @@ def load_benchmark(path: Optional[Path]) -> dict[str, dict[str, Any]]:
     return {str(row.get("name", "")): row for row in rows if row.get("name")}
 
 
-def load_summary_row(
+def load_summary_rows(
     repo_root: Path, geometry: Geometry, *, run_version: str, seed: str
-) -> dict[str, str]:
-    """Load the first summary row for a geometry run.
+) -> list[dict[str, str]]:
+    """Load matching summary rows for a geometry run.
 
     :param Path repo_root: Repository root.
     :param Geometry geometry: Geometry to inspect.
     :param str run_version: Run version suffix.
     :param str seed: Seed string.
-    :return dict[str, str]: Summary row, or an empty dict when missing.
+    :return list[dict[str, str]]: Matching summary rows.
     """
     summary_path = (
         repo_root
@@ -141,12 +141,44 @@ def load_summary_row(
         / "summary.tsv"
     )
     if not summary_path.exists():
-        return {}
+        return []
     with summary_path.open("r", encoding="utf-8", newline="") as f:
         rows = list(csv.DictReader(f, delimiter="\t"))
-    row = rows[0] if rows else {}
-    hydrate_summary_geometry(row)
-    return row
+    out: list[dict[str, str]] = []
+    for row in rows:
+        hydrate_summary_geometry(row)
+        row_seed = str(row.get("seed", "")).strip()
+        run_name = str(row.get("run_name", "")).strip()
+        if row_seed == str(seed) or run_name.endswith(f"_s{seed}") or not row_seed:
+            out.append(row)
+    return out
+
+
+def load_summary_row(
+    repo_root: Path, geometry: Geometry, *, run_version: str, seed: str
+) -> dict[str, str]:
+    """Load the unique seed-matching summary row for a geometry run.
+
+    :param Path repo_root: Repository root.
+    :param Geometry geometry: Geometry to inspect.
+    :param str run_version: Run version suffix.
+    :param str seed: Seed string.
+    :return dict[str, str]: Summary row, or an empty dict when missing.
+    :raises SystemExit: If multiple matching rows make the run ambiguous.
+    """
+    rows = load_summary_rows(repo_root, geometry, run_version=run_version, seed=seed)
+    if not rows:
+        return {}
+    if len(rows) == 1:
+        return rows[0]
+    completed = [row for row in rows if row.get("status") == "completed"]
+    if len(completed) == 1:
+        return completed[0]
+    names = ", ".join(row.get("run_name", "<unnamed>") for row in rows)
+    raise SystemExit(
+        f"ambiguous summary rows for {geometry.label} seed={seed} run_version={run_version}: "
+        f"{names}"
+    )
 
 
 def hydrate_summary_geometry(row: dict[str, str]) -> None:
@@ -466,10 +498,12 @@ def main() -> None:
     else:
         print("No geometry row currently clears the automatic promotion thresholds.")
         print()
-        print("If all rows are completed and killed, return to K4 headroom on the current leader:")
         print(
-            "bash scripts/run_5090_trigram_memory_screen.sh "
-            "--run-version v2 --trigram-top-k 4 --seeds 1337"
+            "If all rows are completed and killed, rerun the adaptive planner for the selected stage:"
+        )
+        print(
+            "python tools/plan_5090_adaptive_closeout.py "
+            "--stage k4 --run-version geom1 --seed 1337 --emit markdown"
         )
 
 

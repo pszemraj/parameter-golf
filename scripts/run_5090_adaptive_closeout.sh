@@ -184,6 +184,7 @@ write_plan() {
       --seed "${SEED}" \
       --benchmark "${BENCHMARK_JSON}" \
       --max-confirmations "${MAX_CONFIRMATIONS}" \
+      --count-workers "${TRIGRAM_COUNT_WORKERS}" \
       --write-script "${out_script}" \
       --emit markdown
   )

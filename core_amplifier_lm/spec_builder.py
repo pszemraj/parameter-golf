@@ -29,6 +29,14 @@ import numpy as np
 import torch
 
 from .model import AmplifierSpec, _build_spec_from_counts, _normalize_branch_lags
+from .trigram_memory import (
+    record_trigram_memory_data_fingerprint,
+    spec_with_trigram_memory_table,
+    trigram_memory_expected_metadata,
+    trigram_memory_table_cache_path,
+    trigram_memory_table_from_spec,
+    validate_trigram_memory_table,
+)
 
 NUMPY_DTYPE_MAP = {
     "uint8": np.uint8,
@@ -785,6 +793,16 @@ def build_spec_optimized(
     spectral_neighbors: int = 64,
     lag_identity_base: float = 0.15,
     readout_rank: Optional[int] = None,
+    trigram_memory: str = "none",
+    trigram_top_k: int = 2,
+    trigram_smoothing: float = 0.25,
+    trigram_residual_clip: float = 8.0,
+    trigram_confidence_count_cap: int = 4096,
+    trigram_max_tokens: Optional[int] = None,
+    trigram_chunk_size: int = 50_000_000,
+    trigram_count_workers: int = 1,
+    trigram_table_cache_root: str | Path | None = None,
+    rebuild_trigram_table_cache: bool = False,
     verbose: bool = True,
 ) -> AmplifierSpec:
     """Build an ``AmplifierSpec`` from a file or shard directory.
@@ -804,11 +822,29 @@ def build_spec_optimized(
     :param int spectral_neighbors: Neighbor count for spectral basis build.
     :param float lag_identity_base: Base identity blend for lag operators.
     :param Optional[int] readout_rank: Optional low-rank readout factorization.
+    :param str trigram_memory: ``none`` or ``frozen`` dense trigram memory.
+    :param int trigram_top_k: Number of top next-token residuals per context.
+    :param float trigram_smoothing: Additive smoothing for trigram logits.
+    :param float trigram_residual_clip: Residual logit clipping bound.
+    :param int trigram_confidence_count_cap: Count where confidence saturates.
+    :param Optional[int] trigram_max_tokens: Optional trigram count cap for
+        smoke/debug specs.
+    :param int trigram_chunk_size: Counting chunk size in trigram positions.
+    :param int trigram_count_workers: Exact worker-local count processes.
+    :param str | Path | None trigram_table_cache_root: Optional tensor-table
+        cache root. This cache is an implementation detail; the returned spec is
+        always self-contained.
+    :param bool rebuild_trigram_table_cache: Whether to overwrite a cached table.
     :param bool verbose: Whether to print progress.
     :return AmplifierSpec: Built spec.
     """
     if strategy not in SPEC_STRATEGIES:
         raise ValueError(f"unknown strategy {strategy!r}, must be one of {SPEC_STRATEGIES}")
+    trigram_memory = str(trigram_memory).strip().lower()
+    if trigram_memory not in {"none", "frozen"}:
+        raise ValueError(
+            f"trigram_memory must be one of {{'none', 'frozen'}}, got {trigram_memory!r}"
+        )
 
     branch_lags = _normalize_branch_lags(branch_lags)
     all_lags = sorted(set(branch_lags) | {1})
@@ -934,6 +970,79 @@ def build_spec_optimized(
             "bigram_tokens": int(total_tokens - 1),
         },
     )
+
+    if trigram_memory == "frozen":
+        data_fingerprint = training_token_file_fingerprint(source)
+        expected_metadata = trigram_memory_expected_metadata(
+            top_k=int(trigram_top_k),
+            smoothing=float(trigram_smoothing),
+            residual_clip=float(trigram_residual_clip),
+            confidence_count_cap=int(trigram_confidence_count_cap),
+            max_tokens=trigram_max_tokens,
+            data_fingerprint=data_fingerprint,
+        )
+        table_payload = None
+        table_cache_path = None
+        if trigram_table_cache_root is not None:
+            table_cache_path = trigram_memory_table_cache_path(
+                cache_root=trigram_table_cache_root,
+                base_spec=spec,
+                data=source,
+                data_fingerprint=data_fingerprint,
+                storage_dtype=storage_dtype,
+                top_k=int(trigram_top_k),
+                smoothing=float(trigram_smoothing),
+                residual_clip=float(trigram_residual_clip),
+                confidence_count_cap=int(trigram_confidence_count_cap),
+                max_tokens=trigram_max_tokens,
+            )
+            if table_cache_path.exists() and not rebuild_trigram_table_cache:
+                table_payload = torch.load(table_cache_path, map_location="cpu", weights_only=False)
+                validate_trigram_memory_table(
+                    table_payload,
+                    base_spec=spec,
+                    top_k=int(trigram_top_k),
+                    expected_metadata=expected_metadata,
+                )
+                if verbose:
+                    print(f"Loaded cached trigram memory table: {table_cache_path}", flush=True)
+            elif rebuild_trigram_table_cache and verbose:
+                print(f"Rebuilding trigram memory table cache: {table_cache_path}", flush=True)
+            elif verbose:
+                print(f"Trigram memory table cache miss: {table_cache_path}", flush=True)
+                print(
+                    "The counted table will be cached there after the full pass completes.",
+                    flush=True,
+                )
+
+        if table_payload is None:
+            spec = add_trigram_memory_to_spec(
+                spec,
+                source,
+                storage_dtype=storage_dtype,
+                top_k=int(trigram_top_k),
+                smoothing=float(trigram_smoothing),
+                residual_clip=float(trigram_residual_clip),
+                confidence_count_cap=int(trigram_confidence_count_cap),
+                max_tokens=trigram_max_tokens,
+                chunk_size=int(trigram_chunk_size),
+                count_workers=int(trigram_count_workers),
+                verbose=verbose,
+            )
+            record_trigram_memory_data_fingerprint(spec, data_fingerprint)
+            table_payload = trigram_memory_table_from_spec(spec)
+            if table_cache_path is not None:
+                table_cache_path.parent.mkdir(parents=True, exist_ok=True)
+                torch.save(table_payload, table_cache_path)
+                if verbose:
+                    print(f"Cached trigram memory table: {table_cache_path}", flush=True)
+        else:
+            spec = spec_with_trigram_memory_table(
+                spec,
+                table_payload,
+                top_k=int(trigram_top_k),
+            )
+            record_trigram_memory_data_fingerprint(spec, data_fingerprint)
 
     if verbose:
         print(spec.summary())

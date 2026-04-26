@@ -159,7 +159,14 @@ script surface so new runs do not accidentally replay obsolete lanes.
 Script:
 
 ```bash
-bash scripts/run_5090_trigram_memory_screen.sh
+bash scripts/run_5090_trigram_aligned_geometry_screen.sh \
+  --run-version geom1 \
+  --seeds 1337 \
+  --geometry-label blocks0_d128_l5_i512 \
+  --geometry-core-dim 128 \
+  --geometry-core-layers 5 \
+  --geometry-core-inner-dim 512 \
+  --trigram-top-k 2
 ```
 
 Default contract:
@@ -211,10 +218,20 @@ Current read:
   - disabling only the trigram memory costs about `0.2648` bpb
 - artifact estimate: `7,333,039` bytes, leaving `8,666,961` bytes headroom
 
-The continuation bar is cleared. Use the dedicated confirmation launcher:
+The continuation bar is cleared. Use the aligned geometry launcher for
+confirmation:
 
 ```bash
-bash scripts/run_5090_trigram_confirm1b.sh
+bash scripts/run_5090_trigram_aligned_geometry_screen.sh \
+  --run-version geom1_confirm \
+  --seeds 1337 \
+  --geometry-label blocks0_d128_l5_i512 \
+  --geometry-core-dim 128 \
+  --geometry-core-layers 5 \
+  --geometry-core-inner-dim 512 \
+  --num-steps 8192 \
+  --lr-hold-steps 7000 \
+  --full-val-final
 ```
 
 Default confirmation contract:
@@ -283,10 +300,16 @@ Promotion rule:
   confirmation before killing
 - if worse by `>0.040` bpb, kill unless the curve slope is clearly unfinished
 - if all aligned shapes die, keep current `48x12x10` as the quality leader and
-  return to top-K headroom:
+  run top-K headroom through the aligned launcher or adaptive closeout:
 
 ```bash
-bash scripts/run_5090_trigram_memory_screen.sh --run-version v2 --trigram-top-k 4 --seeds 1337
+bash scripts/run_5090_adaptive_closeout.sh \
+  --frontier-batch-id geom1 \
+  --run-version geom1 \
+  --seed 1337 \
+  --no-run-benchmark \
+  --count-workers 2 \
+  --stop-after k4
 ```
 
 Only consider `K=8` if `K=4` improves and the measured artifact estimate still
@@ -309,7 +332,13 @@ is lower priority than top-K headroom.
 Top-K headroom run after the aligned-geometry read:
 
 ```bash
-bash scripts/run_5090_trigram_memory_screen.sh --run-version v2 --trigram-top-k 4 --seeds 1337
+bash scripts/run_5090_adaptive_closeout.sh \
+  --frontier-batch-id geom1 \
+  --run-version geom1 \
+  --seed 1337 \
+  --no-run-benchmark \
+  --count-workers 2 \
+  --stop-after k4
 ```
 
 Promotion rule:

@@ -577,6 +577,8 @@ class SequentialStreamBatcher:
         seq_len: int,
         batch_size: int,
         output_device: torch.device,
+        allow_tail: bool = False,
+        cover_remainder: bool = False,
     ) -> None:
         """Initialize a sequential batcher over one token tensor.
 
@@ -584,11 +586,17 @@ class SequentialStreamBatcher:
         :param int seq_len: Chunk length.
         :param int batch_size: Batch size.
         :param torch.device output_device: Target device for emitted batches.
+        :param bool allow_tail: Whether to emit a shorter final chunk instead of
+            wrapping to the stream prefix.
+        :param bool cover_remainder: Whether to emit leftover validation targets
+            after the equal-length streams.
         """
         self.tokens = tokens  # keep original dtype, do NOT .long()
         self.seq_len = int(seq_len)
         self.batch_size = int(batch_size)
         self.output_device = output_device
+        self.allow_tail = bool(allow_tail)
+        self.cover_remainder = bool(cover_remainder)
         self.index_device = self.tokens.device
         self.numpy_tokens = (
             self.tokens.detach().cpu().numpy()
@@ -613,10 +621,46 @@ class SequentialStreamBatcher:
                 "validation set too short for the requested batch_size / seq_len combination"
             )
         self.stream_len = usable // self.batch_size
+        self.remainder = usable - self.stream_len * self.batch_size
+        self.remainder_start = self.stream_len * self.batch_size
+        self.remainder_emitted = False
         if self.stream_len <= self.seq_len:
             raise ValueError("validation streams are shorter than one chunk")
         self.base_starts = torch.arange(self.batch_size, device=self.index_device) * self.stream_len
         self.position = 0
+
+    def _gather(self, starts: torch.Tensor, length: int) -> torch.Tensor:
+        """Gather one validation batch.
+
+        :param torch.Tensor starts: Start offsets for each row.
+        :param int length: Target-token count to gather.
+        :return torch.Tensor: Batch with ``length + 1`` tokens per row.
+        """
+        offsets = (
+            self.offsets
+            if int(length) == self.seq_len
+            else torch.arange(int(length) + 1, device=self.index_device)
+        )
+        idx = starts[:, None] + offsets[None, :]
+        if self.numpy_tokens is not None:
+            gathered = np.asarray(self.numpy_tokens[idx.cpu().numpy()], dtype=np.int64)
+            gathered_t = torch.from_numpy(gathered)
+            if (
+                self._pinned_batch_cpu is not None
+                and gathered_t.shape == self._pinned_batch_cpu.shape
+            ):
+                self._pinned_batch_cpu.copy_(gathered_t)
+                batch = self._pinned_batch_cpu
+            else:
+                batch = gathered_t
+        else:
+            batch = self.tokens[idx].long()  # .long() only on the small gathered batch
+        if batch.device != self.output_device:
+            batch = batch.to(
+                self.output_device,
+                non_blocking=(self.output_device.type == "cuda" and self._pinned_batch_cpu is None),
+            )
+        return batch
 
     def next_batch(self) -> tuple[torch.Tensor, bool]:
         """Return the next validation batch and reset flag.
@@ -624,27 +668,24 @@ class SequentialStreamBatcher:
         :return tuple[torch.Tensor, bool]: Batch tensor and whether the stream reset.
         """
         reset_state = False
-        if self.position + self.seq_len + 1 > self.stream_len:
+        if self.allow_tail and self.position >= self.stream_len:
+            if self.cover_remainder and self.remainder > 0 and not self.remainder_emitted:
+                self.remainder_emitted = True
+                starts = torch.tensor([self.remainder_start], device=self.index_device)
+                return self._gather(starts, self.remainder), True
+            self.position = 0
+            self.remainder_emitted = False
+            reset_state = True
+
+        if not self.allow_tail and self.position + self.seq_len + 1 > self.stream_len:
             self.position = 0
             reset_state = True
+        length = self.seq_len
+        if self.allow_tail:
+            length = min(self.seq_len, self.stream_len - self.position)
         starts = self.base_starts + self.position
-        idx = starts[:, None] + self.offsets[None, :]
-        if self.numpy_tokens is not None:
-            gathered = np.asarray(self.numpy_tokens[idx.cpu().numpy()], dtype=np.int64)
-            gathered_t = torch.from_numpy(gathered)
-            if self._pinned_batch_cpu is not None:
-                self._pinned_batch_cpu.copy_(gathered_t)
-                batch = self._pinned_batch_cpu
-            else:
-                batch = gathered_t
-        else:
-            batch = self.tokens[idx].long()  # .long() only on the small gathered batch
-        self.position += self.seq_len
-        if batch.device != self.output_device:
-            batch = batch.to(
-                self.output_device,
-                non_blocking=(self.output_device.type == "cuda" and self._pinned_batch_cpu is None),
-            )
+        batch = self._gather(starts, length)
+        self.position += length
         return batch, reset_state
 
 
@@ -1175,6 +1216,7 @@ def evaluate(
     steps: int,
     use_autocast: bool,
     byte_count_lut: Optional[torch.Tensor] = None,
+    cover_once: bool = False,
 ) -> EvalResult:
     """Evaluate loss and bits-per-byte on validation data.
 
@@ -1188,6 +1230,8 @@ def evaluate(
     :param int steps: Validation steps to run.
     :param bool use_autocast: Whether to use autocast.
     :param Optional[torch.Tensor] byte_count_lut: Optional exact byte-count lookup.
+    :param bool cover_once: Whether to emit tail/remainder chunks exactly once
+        instead of wrapping to the validation prefix.
     :return EvalResult: Validation loss, bpb, and coverage metadata.
     """
     usable_tokens = max(0, int(val_tokens.numel()) - 1)
@@ -1218,6 +1262,8 @@ def evaluate(
         seq_len=seq_len,
         batch_size=eval_batch_size,
         output_device=device,
+        allow_tail=cover_once,
+        cover_remainder=cover_once,
     )
 
     def autocast_context() -> Any:
@@ -1290,7 +1336,8 @@ def full_validation_steps(
     max_streams = max(1, usable_tokens // max(1, seq_len + 1))
     eval_batch_size = min(batch_size, max_streams)
     stream_len = usable_tokens // max(1, eval_batch_size)
-    return max(1, math.ceil(stream_len / max(1, seq_len)))
+    remainder = usable_tokens - stream_len * eval_batch_size
+    return max(1, math.ceil(stream_len / max(1, seq_len)) + (1 if remainder > 0 else 0))
 
 
 def eval_payload_fields(result: EvalResult) -> dict[str, int | float | bool]:
@@ -2895,6 +2942,7 @@ def main() -> None:
                 steps=val_steps,
                 use_autocast=use_autocast,
                 byte_count_lut=byte_count_lut,
+                cover_once=False,
             )
             payload = {
                 "kind": "eval",
@@ -2964,6 +3012,7 @@ def main() -> None:
             steps=final_val_steps,
             use_autocast=use_autocast,
             byte_count_lut=byte_count_lut,
+            cover_once=full_val_final,
         )
         payload = {
             "kind": "eval",

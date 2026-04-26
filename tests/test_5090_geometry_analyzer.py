@@ -17,6 +17,7 @@ from tools.analyze_5090_geometry_frontier import (
     decision,
     eligibility_errors,
     estimated_time_matched_steps,
+    load_summary_row,
     parse_geometry,
     speed_ratio,
 )
@@ -104,6 +105,35 @@ def test_geometry_consistency_is_required_for_decisions():
     assert "core_inner_dim!=512" in errors
     assert "recurrent_cells!=3072" in errors
     assert decision(-0.1, 2.5, valid_screen_row=not errors) == "pending"
+
+
+def test_summary_loader_rejects_ambiguous_seed_rows(tmp_path: Path):
+    label = "blocks0_d96_l6_i512"
+    geometry = parse_geometry(label)
+    summary_dir = tmp_path / "experiments" / "5090_architecture" / f"{label}_trigram_seed1337_geom1"
+    summary_dir.mkdir(parents=True)
+    with (summary_dir / "summary.tsv").open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=SUMMARY_FIELDS, delimiter="\t")
+        writer.writeheader()
+        writer.writerow(
+            {
+                field: _summary_row(label, run_name=f"{label}_old", seed="1337").get(field, "")
+                for field in SUMMARY_FIELDS
+            }
+        )
+        writer.writerow(
+            {
+                field: _summary_row(label, run_name=f"{label}_new", seed="1337").get(field, "")
+                for field in SUMMARY_FIELDS
+            }
+        )
+
+    try:
+        load_summary_row(tmp_path, geometry, run_version="geom1", seed="1337")
+    except SystemExit as exc:
+        assert "ambiguous summary rows" in str(exc)
+    else:
+        raise AssertionError("expected ambiguous summary rows to fail loudly")
 
 
 def test_benchmark_ratio_prefers_current_d48_l12_i480_and_rounds_steps():

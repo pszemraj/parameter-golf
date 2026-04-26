@@ -6,6 +6,7 @@ import torch
 
 from train_core_amplifier import (
     EvalResult,
+    SequentialStreamBatcher,
     eval_payload_fields,
     format_eval_coverage,
     full_validation_steps,
@@ -31,6 +32,28 @@ def test_full_validation_steps_covers_stream_once():
     assert steps > 0
     covered = steps * 8 * 100
     assert covered >= tokens.numel() - 1
+
+
+def test_full_validation_batcher_covers_each_target_once():
+    tokens = torch.arange(10_001)
+    seq_len = 100
+    batch_size = 8
+    batcher = SequentialStreamBatcher(
+        tokens,
+        seq_len=seq_len,
+        batch_size=batch_size,
+        output_device=torch.device("cpu"),
+        allow_tail=True,
+        cover_remainder=True,
+    )
+    steps = full_validation_steps(tokens, seq_len=seq_len, batch_size=batch_size)
+
+    seen = []
+    for _ in range(steps):
+        batch, _reset = batcher.next_batch()
+        seen.extend(batch[:, 1:].flatten().tolist())
+
+    assert sorted(seen) == list(range(1, tokens.numel()))
 
 
 def test_eval_payload_fields_are_explicit():

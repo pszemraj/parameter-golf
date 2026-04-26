@@ -19,6 +19,11 @@ from .spec_builder import (
     load_train_val_int32,
     training_token_file_fingerprint,
 )
+from .trigram_memory import (
+    spec_with_trigram_memory_table,
+    trigram_memory_table_from_spec,
+    validate_trigram_memory_table,
+)
 
 __all__ = [
     "AmplifierSpec",
@@ -34,5 +39,8 @@ __all__ = [
     "load_tokens_int32",
     "load_train_val_int32",
     "trigram_memory_config_value",
+    "spec_with_trigram_memory_table",
+    "trigram_memory_table_from_spec",
     "training_token_file_fingerprint",
+    "validate_trigram_memory_table",
 ]

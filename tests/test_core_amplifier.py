@@ -486,6 +486,40 @@ def test_add_trigram_memory_to_spec_counts_top_contexts(tmp_path: Path):
     assert torch.equal(memory.trigram_context_confidence, parallel.trigram_context_confidence)
 
 
+def test_build_spec_optimized_can_return_unified_trigram_memory_spec(tmp_path: Path):
+    """Optimized spec build should produce final frozen-memory specs directly."""
+    vocab = 16
+    train_tokens = np.array([1, 2, 3, 1, 2, 3, 1, 2, 4, 5, 6, 7], dtype=np.int64)
+    shard_dir = tmp_path / "shards"
+    table_cache = tmp_path / "tables"
+    shard_dir.mkdir()
+    train_tokens.astype(np.uint16).tofile(shard_dir / "fineweb_train_000000.bin")
+
+    spec = build_spec_optimized(
+        shard_dir,
+        vocab_size=vocab,
+        core_dim=4,
+        branch_lags=(1, 2),
+        num_blocks=0,
+        fixed_dtype=torch.float32,
+        storage_dtype="uint16",
+        strategy="stream",
+        trigram_memory="frozen",
+        trigram_top_k=2,
+        trigram_max_tokens=12,
+        trigram_chunk_size=4,
+        trigram_table_cache_root=table_cache,
+        verbose=False,
+    )
+
+    assert spec.trigram_top_tokens is not None
+    assert spec.trigram_residual_values is not None
+    assert spec.trigram_context_confidence is not None
+    assert spec.metadata["trigram_top_k"] == 2
+    assert spec.metadata["trigram_train_file_count"] == 1
+    assert list(table_cache.glob("trigram_memory_table_k2_max12_*.pt"))
+
+
 def test_training_token_file_fingerprint_tracks_train_shard_set(tmp_path: Path):
     """Dataset fingerprints should ignore validation shards and change with train shards."""
     shard_dir = tmp_path / "shards"

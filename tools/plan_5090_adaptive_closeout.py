@@ -101,6 +101,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     ap.add_argument("--bptt-chunks", type=int, default=DEFAULT_BPTT_CHUNKS)
     ap.add_argument("--seq-len", type=int, default=None)
     ap.add_argument("--val-steps", type=int, default=None)
+    ap.add_argument("--count-workers", type=int, default=None)
     ap.add_argument("--trigram-max-tokens", type=int, default=None)
     ap.add_argument("--data-max-tokens", type=int, default=None)
     ap.add_argument("--no-wandb", action="store_true")
@@ -315,6 +316,7 @@ def geometry_command(
     seq_len: Optional[int] = None,
     target_effective_step_tokens: Optional[int] = None,
     val_steps: Optional[int] = None,
+    count_workers: Optional[int] = None,
     trigram_max_tokens: Optional[int] = None,
     data_max_tokens: Optional[int] = None,
     no_wandb: bool = False,
@@ -339,6 +341,7 @@ def geometry_command(
     :param Optional[int] seq_len: Optional sequence-length override.
     :param Optional[int] target_effective_step_tokens: Optional effective token contract.
     :param Optional[int] val_steps: Optional sampled validation steps.
+    :param Optional[int] count_workers: Optional trigram count worker override.
     :param Optional[int] trigram_max_tokens: Optional trigram count cap.
     :param Optional[int] data_max_tokens: Optional train-data token cap.
     :param bool no_wandb: Whether to disable W&B.
@@ -392,6 +395,8 @@ def geometry_command(
         cmd.extend(["--target-effective-step-tokens", str(target_effective_step_tokens)])
     if val_steps is not None:
         cmd.extend(["--val-steps", str(val_steps)])
+    if count_workers is not None:
+        cmd.extend(["--count-workers", str(count_workers)])
     if trigram_max_tokens is not None:
         cmd.extend(["--trigram-max-tokens", str(trigram_max_tokens)])
     if data_max_tokens is not None:
@@ -413,6 +418,7 @@ def shared_command_kwargs(args: argparse.Namespace) -> dict[str, object]:
         "seq_len": args.seq_len,
         "target_effective_step_tokens": int(args.effective_step_tokens),
         "val_steps": args.val_steps,
+        "count_workers": args.count_workers,
         "trigram_max_tokens": args.trigram_max_tokens,
         "data_max_tokens": args.data_max_tokens,
         "no_wandb": bool(args.no_wandb),

@@ -54,7 +54,6 @@ TRIGRAM_RESIDUAL_CLIP="${TRIGRAM_RESIDUAL_CLIP:-8.0}"
 TRIGRAM_CONFIDENCE_COUNT_CAP="${TRIGRAM_CONFIDENCE_COUNT_CAP:-4096}"
 TRIGRAM_CHUNK_SIZE="${TRIGRAM_CHUNK_SIZE:-50000000}"
 TRIGRAM_COUNT_WORKERS="${TRIGRAM_COUNT_WORKERS:-1}"
-TRIGRAM_MEMORY_SPEC_CACHE_ROOT="${TRIGRAM_MEMORY_SPEC_CACHE_ROOT:-${COREAMP_SPEC_CACHE_ROOT}}"
 TRIGRAM_MEMORY_TABLE_CACHE_ROOT="${TRIGRAM_MEMORY_TABLE_CACHE_ROOT:-${COREAMP_SPEC_CACHE_ROOT}/trigram_memory_tables}"
 REBUILD_TRIGRAM_MEMORY_TABLE_CACHE="${REBUILD_TRIGRAM_MEMORY_TABLE_CACHE:-0}"
 TRIGRAM_MAX_TOKENS="${TRIGRAM_MAX_TOKENS:-}"
@@ -262,8 +261,13 @@ slugify() {
 
 shared_spec_dir() {
   local label
-  label="$(slugify "${GEOMETRY_LABEL}_branches_${GEOMETRY_BRANCH_LAGS}_blocks${GEOMETRY_NUM_BLOCKS}")"
-  printf '%s/shared_specs/%s_full' "${COREAMP_SPEC_CACHE_ROOT}" "${label}"
+  local token_scope
+  token_scope="full"
+  if [[ -n "${TRIGRAM_MAX_TOKENS:-}" ]]; then
+    token_scope="max${TRIGRAM_MAX_TOKENS}"
+  fi
+  label="$(slugify "${GEOMETRY_LABEL}_branches_${GEOMETRY_BRANCH_LAGS}_blocks${GEOMETRY_NUM_BLOCKS}_${TRIGRAM_MEMORY}_trigramk${TRIGRAM_TOP_K}_clip${TRIGRAM_RESIDUAL_CLIP}_cap${TRIGRAM_CONFIDENCE_COUNT_CAP}_${token_scope}")"
+  printf '%s/shared_specs/%s' "${COREAMP_SPEC_CACHE_ROOT}" "${label}"
 }
 
 ensure_shared_spec() {
@@ -296,76 +300,22 @@ ensure_shared_spec() {
     --residual-token-gate-mode none
     --branch-router-mode none
     --base-bigram-delta none
-    --trigram-memory none
+    --trigram-memory "${TRIGRAM_MEMORY}"
+    --trigram-log-scale-init "${TRIGRAM_LOG_SCALE_INIT}"
+    --trigram-top-k "${TRIGRAM_TOP_K}"
+    --trigram-smoothing 0.25
+    --trigram-residual-clip "${TRIGRAM_RESIDUAL_CLIP}"
+    --trigram-confidence-count-cap "${TRIGRAM_CONFIDENCE_COUNT_CAP}"
+    --trigram-chunk-size "${TRIGRAM_CHUNK_SIZE}"
+    --trigram-count-workers "${TRIGRAM_COUNT_WORKERS}"
+    --trigram-table-cache-root "${TRIGRAM_MEMORY_TABLE_CACHE_ROOT}"
     --scan-backend auto
   )
-  if [[ "${DRY_RUN:-0}" == "1" ]]; then
-    printf '+'
-    printf ' %q' "${cmd[@]}"
-    printf '\n'
-    return 0
-  fi
-  "${cmd[@]}"
-}
-
-resolve_trigram_memory_spec_dir() {
-  local source_spec_dir="$1"
-  local family="$2"
-  if [[ "${DRY_RUN:-0}" == "1" ]]; then
-    printf '%s/trigram_memory_specs/%s_k%s_dryrun' \
-      "${TRIGRAM_MEMORY_SPEC_CACHE_ROOT}" \
-      "$(slugify "${family}")" \
-      "${TRIGRAM_TOP_K}"
-    return 0
-  fi
-  local cmd=(
-    "${PYTHON_BIN}" "${REPO_ROOT}/tools/trigram_memory_spec_path.py"
-    "${source_spec_dir}"
-    --data "${DATA_PATH}"
-    --family "${family}"
-    --cache-root "${TRIGRAM_MEMORY_SPEC_CACHE_ROOT}"
-    --storage-dtype "${STORAGE_DTYPE}"
-    --top-k "${TRIGRAM_TOP_K}"
-    --smoothing 0.25
-    --residual-clip "${TRIGRAM_RESIDUAL_CLIP}"
-    --confidence-count-cap "${TRIGRAM_CONFIDENCE_COUNT_CAP}"
-  )
-  if [[ "${DRY_RUN:-0}" != "1" ]]; then
-    cmd+=(--mkdir)
-  fi
-  if [[ -n "${TRIGRAM_MAX_TOKENS:-}" ]]; then
-    cmd+=(--max-tokens "${TRIGRAM_MAX_TOKENS}")
-  fi
-  "${cmd[@]}"
-}
-
-ensure_trigram_memory_spec() {
-  local source_spec_dir="$1"
-  local out_spec_dir="$2"
-
-  echo "Ensuring dense trigram top-${TRIGRAM_TOP_K} memory spec from full training shards ..."
-  local cmd=(
-    "${PYTHON_BIN}" "${REPO_ROOT}/tools/build_trigram_memory_spec.py"
-    "${source_spec_dir}"
-    "${out_spec_dir}"
-    --data "${DATA_PATH}"
-    --storage-dtype "${STORAGE_DTYPE}"
-    --top-k "${TRIGRAM_TOP_K}"
-    --smoothing 0.25
-    --residual-clip "${TRIGRAM_RESIDUAL_CLIP}"
-    --confidence-count-cap "${TRIGRAM_CONFIDENCE_COUNT_CAP}"
-    --chunk-size "${TRIGRAM_CHUNK_SIZE}"
-    --count-workers "${TRIGRAM_COUNT_WORKERS}"
-    --table-cache-root "${TRIGRAM_MEMORY_TABLE_CACHE_ROOT}"
-  )
-  if [[ "${REBUILD_TRIGRAM_MEMORY:-0}" == "1" ]]; then
-    cmd+=(--force)
-  fi
   if [[ "${REBUILD_TRIGRAM_MEMORY_TABLE_CACHE}" == "1" ]]; then
-    cmd+=(--rebuild-table-cache)
+    cmd+=(--rebuild-trigram-table-cache)
   fi
   if [[ -n "${TRIGRAM_MAX_TOKENS:-}" ]]; then
-    cmd+=(--max-tokens "${TRIGRAM_MAX_TOKENS}")
+    cmd+=(--trigram-max-tokens "${TRIGRAM_MAX_TOKENS}")
   fi
   if [[ "${DRY_RUN:-0}" == "1" ]]; then
     printf '+'
@@ -395,7 +345,6 @@ num_steps=${GEOMETRY_NUM_STEPS} lr_hold_steps=${GEOMETRY_LR_HOLD_STEPS} carry_ch
 batch_size=${GEOMETRY_BATCH_SIZE} seq_len=${GEOMETRY_SEQ_LEN} target_effective_step_tokens=${TARGET_EFFECTIVE_STEP_TOKENS}
 data_max_tokens=${DATA_MAX_TOKENS:-}
 coreamp_spec_cache_root=${COREAMP_SPEC_CACHE_ROOT}
-trigram_memory_spec_cache_root=${TRIGRAM_MEMORY_SPEC_CACHE_ROOT}
 trigram_memory_table_cache_root=${TRIGRAM_MEMORY_TABLE_CACHE_ROOT}
 scan_backend=${SCAN_BACKEND} wandb_project=${WANDB_PROJECT} cublaslt=${TORCH_BLAS_PREFER_CUBLASLT} py_unbuffered=${PYTHONUNBUFFERED}
 smoke_test=${SMOKE_TEST}
@@ -410,9 +359,6 @@ run_blocks0_seed() {
   local source_spec_dir
   source_spec_dir="$(shared_spec_dir)"
   ensure_shared_spec "${source_spec_dir}"
-  local memory_spec_dir
-  memory_spec_dir="$(resolve_trigram_memory_spec_dir "${source_spec_dir}" "${GEOMETRY_LABEL}")"
-  ensure_trigram_memory_spec "${source_spec_dir}" "${memory_spec_dir}"
 
   local model_root="${REPO_ROOT}/experiments/5090_architecture/${GEOMETRY_LABEL}_trigram_seed${seed}_${RUN_VERSION}"
   local run_name="${GEOMETRY_LABEL}_trigramk${TRIGRAM_TOP_K}_${LEARNING_RATE_TAG}_h${GEOMETRY_LR_HOLD_STEPS}_${GEOMETRY_TRAIN_LABEL}_s${seed}"
@@ -430,7 +376,7 @@ EOF
     --data-path "${DATA_PATH}"
     --storage-dtype "${STORAGE_DTYPE}"
     --target-effective-step-tokens "${TARGET_EFFECTIVE_STEP_TOKENS}"
-    --shared-spec-dir "${memory_spec_dir}"
+    --shared-spec-dir "${source_spec_dir}"
     --model-root "${model_root}"
     --lr-schedule "${LR_SCHEDULE}"
     --weight-decay "${WEIGHT_DECAY}"
