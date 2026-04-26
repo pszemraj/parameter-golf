@@ -127,6 +127,27 @@ def _args(tmp_path: Path, stage: str):
     )
 
 
+def _gated_args(tmp_path: Path):
+    args = _args(tmp_path, "gated-followup")
+    args.run_version = "geom1_seq2048"
+    args.label = ["blocks0_d128_l5_i512"]
+    args.gate_evidence_run_version = "geom1_k4_bptt2_confirm"
+    args.gate_evidence_trigram_top_k = 4
+    args.gate_evidence_seq_len = 512
+    args.gate_evidence_bptt_chunks = 2
+    args.gate_evidence_batch_size = 128
+    args.gate_evidence_steps = 8192
+    args.gate_evidence_hold_steps = 7000
+    args.gate_evidence_train_label = "1b_bptt2_k4"
+    args.gate_followup_run_version = "geom1_seq2048_bptt2"
+    args.gate_followup_trigram_top_k = 4
+    args.gate_followup_seq_len = 2048
+    args.gate_followup_bptt_chunks = 2
+    args.gate_followup_steps = 4096
+    args.gate_followup_hold_steps = 3500
+    return args
+
+
 def test_confirmation_planner_limits_promoted_rows(tmp_path: Path) -> None:
     """Only valid promoted geometry screens should become confirmations."""
     _write_summary(tmp_path, "blocks0_d96_l6_i512", "geom1", bpb=2.0)
@@ -200,6 +221,165 @@ def test_bptt_planner_preserves_k4_long_context_contract(tmp_path: Path) -> None
     assert "2048" in command
     assert "--geometry-train-label" in command
     assert "512m_seq2048_bptt2_k4" in command
+    assert "--geometry-batch-size" in command
+    assert "32" in command
+
+
+def test_gated_followup_first_completes_evidence_contract(tmp_path: Path) -> None:
+    """The generic gate should plan evidence before the dependent follow-up."""
+    label = "blocks0_d128_l5_i512"
+    _write_summary(
+        tmp_path,
+        label,
+        "geom1_seq2048_confirm",
+        steps=8192,
+        bpb=1.973,
+        top_k=4,
+        batch_size=64,
+        seq_len=2048,
+        full_coverage=True,
+    )
+    args = _gated_args(tmp_path)
+
+    stage = plan_stage(args)
+
+    assert stage.status == "commands"
+    assert len(stage.commands) == 1
+    command = stage.commands[0].command
+    assert "geom1_k4_bptt2_confirm" in command
+    assert "--trigram-top-k" in command
+    assert "4" in command
+    assert "--geometry-seq-len" in command
+    assert "512" in command
+    assert "--geometry-bptt-chunks" in command
+    assert "2" in command
+    assert "--geometry-train-label" in command
+    assert "1b_bptt2_k4" in command
+
+
+def test_gated_followup_blocks_when_evidence_is_too_weak(tmp_path: Path) -> None:
+    """A completed but weak evidence row should stop the gated follow-up."""
+    label = "blocks0_d128_l5_i512"
+    _write_summary(
+        tmp_path,
+        label,
+        "geom1_seq2048_confirm",
+        steps=8192,
+        bpb=1.973,
+        top_k=4,
+        batch_size=64,
+        seq_len=2048,
+        full_coverage=True,
+    )
+    _write_summary(
+        tmp_path,
+        label,
+        "geom1_k4_bptt2_confirm",
+        steps=8192,
+        bpb=2.02,
+        top_k=4,
+        batch_size=128,
+        seq_len=512,
+        bptt_chunks=2,
+        full_coverage=True,
+    )
+    args = _gated_args(tmp_path)
+    args.gate_max_worse_bpb = 0.015
+
+    stage = plan_stage(args)
+
+    assert stage.status == "not_selected"
+    assert stage.commands == []
+
+
+def test_gated_followup_runs_long_context_bptt2_when_evidence_clears(tmp_path: Path) -> None:
+    """The selected follow-up should be a contract instance, not hard-coded planner logic."""
+    label = "blocks0_d128_l5_i512"
+    _write_summary(
+        tmp_path,
+        label,
+        "geom1_seq2048_confirm",
+        steps=8192,
+        bpb=1.973,
+        top_k=4,
+        batch_size=64,
+        seq_len=2048,
+        full_coverage=True,
+    )
+    _write_summary(
+        tmp_path,
+        label,
+        "geom1_k4_bptt2_confirm",
+        steps=8192,
+        bpb=1.980,
+        top_k=4,
+        batch_size=128,
+        seq_len=512,
+        bptt_chunks=2,
+        full_coverage=True,
+    )
+    args = _gated_args(tmp_path)
+
+    stage = plan_stage(args)
+
+    assert stage.status == "commands"
+    command = stage.commands[0].command
+    assert "geom1_seq2048_bptt2" in command
+    assert "--trigram-top-k" in command
+    assert "4" in command
+    assert "--geometry-seq-len" in command
+    assert "2048" in command
+    assert "--geometry-bptt-chunks" in command
+    assert "2" in command
+    assert "--geometry-batch-size" in command
+    assert "32" in command
+    assert "--geometry-train-label" in command
+    assert "512m_seq2048_bptt2_k4" in command
+
+
+def test_gated_followup_reports_already_complete(tmp_path: Path) -> None:
+    """A completed gated follow-up should be a no-op with a distinct status."""
+    label = "blocks0_d128_l5_i512"
+    _write_summary(
+        tmp_path,
+        label,
+        "geom1_seq2048_confirm",
+        steps=8192,
+        bpb=1.973,
+        top_k=4,
+        batch_size=64,
+        seq_len=2048,
+        full_coverage=True,
+    )
+    _write_summary(
+        tmp_path,
+        label,
+        "geom1_k4_bptt2_confirm",
+        steps=8192,
+        bpb=1.980,
+        top_k=4,
+        batch_size=128,
+        seq_len=512,
+        bptt_chunks=2,
+        full_coverage=True,
+    )
+    _write_summary(
+        tmp_path,
+        label,
+        "geom1_seq2048_bptt2",
+        steps=4096,
+        bpb=1.99,
+        top_k=4,
+        batch_size=32,
+        seq_len=2048,
+        bptt_chunks=2,
+    )
+    args = _gated_args(tmp_path)
+
+    stage = plan_stage(args)
+
+    assert stage.status == "already_complete"
+    assert stage.commands == []
 
 
 def test_k4_planner_combines_bptt_only_when_it_wins(tmp_path: Path) -> None:
