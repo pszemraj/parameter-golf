@@ -1,18 +1,48 @@
-data/tokenizers
+# Local-only agent/project instructions
+AGENTS.md
+
+# Python/tool caches
 __pycache__/
+*.py[cod]
+.cache/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.venv/
+
+# OS/editor noise
 .DS_Store
+
+# Local checkouts/build outputs
 modded-nanogpt/
 modded-nanogpt
 build/
+dist/
+*.egg-info/
 hgdn_cuda_ext*.so
-data/datasets
+hgdn_megakernel_ext*.so
+
+# Challenge data and tokenizer artifacts
+data/datasets/
+data/tokenizers/
 data/manifest.json
 data/docs_selected.jsonl
-.mypy_cache/
-.venv
+
+# Experiment outputs and generated bundles
+local-scratch/
 logs/
-wandb_exports/
 profiles/
 artifacts/
+wandb/
+wandb_exports/
+*.7z
+*_commands.sh
+
+# Model/checkpoint artifacts
 final_model.pt
 final_model.int8.ptz
+*.pt
+*.ptz
+*.pth
+*.ckpt
+*.safetensors
