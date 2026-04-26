@@ -95,6 +95,9 @@ The chunked kernel processes sequences in blocks for hardware efficiency. The ou
 The custom HGDN path keeps the norm/gate in PyTorch or the optional sidecar
 output op, but includes the learned per-`head_v_dim` norm weight so the
 parameterization matches the important part of `FusedRMSNormGated`.
+For systems ablation, `GDN_FLA_RECURRENCE_MODE=direct_fused` routes raw
+post-conv q/k and raw decay gates into public FLA with
+`use_qk_l2norm_in_kernel=True` and `use_gate_in_kernel=True`.
 
 ### 3.6 GDN Parameter Count (per layer)
 
@@ -210,7 +213,9 @@ model_config.block_pattern = ["gdn", "gdn", "gdn", "attn"]  # x 8 = 32 layers
 
 ## 8. Dependencies
 
-- **`flash-linear-attention` (`fla`)**: Required for `dispatch_chunk_gated_delta_rule` kernel. GDN instantiation raises at runtime if `has_fla()` returns False.
+- **`flash-linear-attention` (`fla`)**: Required for public
+  `chunk_gated_delta_rule` and native `fla.layers.GatedDeltaNet` calibration.
+  The HGDN trainer refuses active CUDA HGDN training if FLA is unavailable.
 - **`FusedRMSNormGated`**: From `fla.modules`, used as the output norm within GDN.
 - Parallelism: HSDP (pretraining) FSDP (long-context); Ulysses context parallelism (long-context only).
 

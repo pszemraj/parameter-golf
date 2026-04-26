@@ -35,6 +35,7 @@ from hgdn_cuda import (
     HAS_FLA_GATED_DELTA_RULE,
     fla_chunk_gated_delta_rule_compile_visible,
     fla_chunk_gated_delta_rule_direct,
+    fla_chunk_gated_delta_rule_direct_fused_gate_norm,
     fused_packed_qkv_conv,
     fused_packed_qkv_conv_aten_backward,
     fused_packed_qkv_conv_aten_weight_backward,
@@ -65,7 +66,7 @@ _W_G_SCALAR_PARAM_PATTERN = "w_g."
 _VALID_GDN_W_G_OPTIMIZERS = {"scalar", "matrix"}
 SCALAR_PARAM_PATTERNS = _BASE_SCALAR_PARAM_PATTERNS + (_W_G_SCALAR_PARAM_PATTERN,)
 GDN_DECAY_PARAM_PATTERNS = ("A_log", "dt_bias")
-GDN_FLA_RECURRENCE_MODES = {"compile_visible", "direct"}
+GDN_FLA_RECURRENCE_MODES = {"compile_visible", "direct", "direct_fused"}
 
 NormStyle = Literal["pre", "post", "keel"]
 _PROFILE_RANGES = bool(int(os.environ.get("PROFILE_RANGES", "0")))
@@ -920,7 +921,11 @@ class GatedDeltaNet(nn.Module):
         :param bool use_packed_qkv_conv_custom_backward: Whether to route the packed depthwise qkv conv through an exact-length custom autograd path, defaults to False.
         :param bool use_packed_qkv_single_contig: Whether to materialize one contiguous packed q/k/v tensor before splitting the packed conv output, defaults to False.
         :param bool use_packed_qkv_split_copy: Whether to materialize q/k/v with `aten.split_with_sizes_copy`, defaults to False.
-        :param str fla_recurrence_mode: Public FLA recurrence path: `compile_visible` keeps the torch.library wrapper, `direct` bypasses it, defaults to `"compile_visible"`.
+        :param str fla_recurrence_mode: Public FLA recurrence path:
+            `compile_visible` keeps the torch.library wrapper, `direct`
+            bypasses it with the custom HGDN recurrence semantics, and
+            `direct_fused` uses upstream-style in-kernel q/k norm and decay-gate
+            activation, defaults to `"compile_visible"`.
         """
         super().__init__()
         if fla_recurrence_mode not in GDN_FLA_RECURRENCE_MODES:
@@ -1298,6 +1303,18 @@ class GatedDeltaNet(nn.Module):
             )
         if self.use_cuda_fused_output and not self.output_norm_fp32:
             raise ValueError("use_cuda_fused_output requires output_norm_fp32=True")
+        if self.fla_recurrence_mode == "direct_fused" and (
+            self.use_cuda_frontend_nct
+            or self.use_cuda_fused_frontend
+            or self.use_cuda_fused_frontend_lib
+            or self.use_cuda_split_norm
+            or self.use_cuda_split_norm_lib
+        ):
+            raise ValueError(
+                "fla_recurrence_mode='direct_fused' requires raw post-conv q/k; "
+                "it is incompatible with CUDA frontend or split-norm paths that "
+                "already normalize q/k."
+            )
 
         # Feature-map projections → Muon
         if self.use_packed_qkv_proj:
@@ -1370,12 +1387,16 @@ class GatedDeltaNet(nn.Module):
         x: Tensor,
         *,
         audit_call_index: int | None = None,
+        fused_fla_semantics: bool = False,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
         """Project activations into recurrence inputs with aligned dtypes.
 
         :param Tensor x: Input activations shaped `(batch, seq, d_model)`.
         :param int | None audit_call_index: Optional structured audit call index.
-        :return tuple[Tensor, Tensor, Tensor, Tensor, Tensor]: Normalized q/k, values, decay logits, and write gates.
+        :param bool fused_fla_semantics: Whether to leave q/k and the decay gate
+            raw for FLA's in-kernel normalization/gate path, defaults to False.
+        :return tuple[Tensor, Tensor, Tensor, Tensor, Tensor]: q/k, values,
+            decay gate input, and write gates.
         """
         B, T, _ = x.shape
         H, Dk, Dv = self.n_heads, self.head_k_dim, self.head_v_dim
@@ -1589,10 +1610,16 @@ class GatedDeltaNet(nn.Module):
                 with profile_range("gdn.norm_qkv"):
                     # Keep the recurrence inputs on one activation dtype across PyTorch /
                     # platform variants. Some stacks promote F.normalize to fp32 here.
-                    with profile_range("gdn.q_norm"):
-                        q = match_reference_tensor(l2_norm(q.view(B, T, H, Dk)), x)
-                    with profile_range("gdn.k_norm"):
-                        k = match_reference_tensor(l2_norm(k.view(B, T, H, Dk)), x)
+                    if fused_fla_semantics:
+                        with profile_range("gdn.q_reshape_raw"):
+                            q = match_reference_tensor(q.view(B, T, H, Dk), x)
+                        with profile_range("gdn.k_reshape_raw"):
+                            k = match_reference_tensor(k.view(B, T, H, Dk), x)
+                    else:
+                        with profile_range("gdn.q_norm"):
+                            q = match_reference_tensor(l2_norm(q.view(B, T, H, Dk)), x)
+                        with profile_range("gdn.k_norm"):
+                            k = match_reference_tensor(l2_norm(k.view(B, T, H, Dk)), x)
                     with profile_range("gdn.v_reshape"):
                         v = v.view(B, T, H, Dv)
                         if self.use_packed_qkv_single_contig and not v.is_contiguous():
@@ -1620,10 +1647,16 @@ class GatedDeltaNet(nn.Module):
                 v=v,
             )
             with profile_range("gdn.norm_qkv"):
-                with profile_range("gdn.q_norm"):
-                    q = match_reference_tensor(l2_norm(q.view(B, T, H, Dk)), x)
-                with profile_range("gdn.k_norm"):
-                    k = match_reference_tensor(l2_norm(k.view(B, T, H, Dk)), x)
+                if fused_fla_semantics:
+                    with profile_range("gdn.q_reshape_raw"):
+                        q = match_reference_tensor(q.view(B, T, H, Dk), x)
+                    with profile_range("gdn.k_reshape_raw"):
+                        k = match_reference_tensor(k.view(B, T, H, Dk), x)
+                else:
+                    with profile_range("gdn.q_norm"):
+                        q = match_reference_tensor(l2_norm(q.view(B, T, H, Dk)), x)
+                    with profile_range("gdn.k_norm"):
+                        k = match_reference_tensor(l2_norm(k.view(B, T, H, Dk)), x)
                 with profile_range("gdn.v_reshape"):
                     v = match_reference_tensor(v.view(B, T, H, Dv), x)
             audit_gdn_boundary(
@@ -1652,7 +1685,10 @@ class GatedDeltaNet(nn.Module):
         assert q is not None and k is not None and v is not None
 
         with profile_range("gdn.gates"):
-            if self.gates_fp32:
+            if fused_fla_semantics:
+                with profile_range("gdn.g_proj_raw"):
+                    g = self.w_a(x)
+            elif self.gates_fp32:
                 with profile_range("gdn.g_proj"):
                     g_pre = self.w_a(x).float()
                 with profile_range("gdn.g_pointwise"):
@@ -1714,14 +1750,32 @@ class GatedDeltaNet(nn.Module):
         H, Dv = self.n_heads, self.head_v_dim
         with profile_range("gdn.forward"):
             audit_call_index = begin_gdn_boundary_audit()
+            fused_fla_semantics = self.fla_recurrence_mode == "direct_fused"
             q, k, v, g, beta = self._project_recurrence_inputs(
-                x, audit_call_index=audit_call_index
+                x,
+                audit_call_index=audit_call_index,
+                fused_fla_semantics=fused_fla_semantics,
             )
             log_gdn_layouts_once(q=q, k=k, v=v, g=g, beta=beta)
 
             with profile_range("gdn.recurrence"):
+                if fused_fla_semantics and not (self.use_fla and x.is_cuda):
+                    raise RuntimeError(
+                        "fla_recurrence_mode='direct_fused' requires CUDA and "
+                        "the public FLA recurrence stack."
+                    )
                 if self.use_fla and x.is_cuda:
-                    if self.fla_recurrence_mode == "direct":
+                    if self.fla_recurrence_mode == "direct_fused":
+                        o = fla_chunk_gated_delta_rule_direct_fused_gate_norm(
+                            q,
+                            k,
+                            v,
+                            g,
+                            beta,
+                            self.A_log,
+                            self.dt_bias,
+                        )
+                    elif self.fla_recurrence_mode == "direct":
                         o = fla_chunk_gated_delta_rule_direct(q, k, v, g, beta)
                     else:
                         o = fla_chunk_gated_delta_rule_compile_visible(q, k, v, g, beta)

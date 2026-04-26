@@ -237,9 +237,11 @@ class Hyperparameters:
     gdn_use_packed_qkv_split_copy = bool(
         int(os.environ.get("GDN_PACKED_QKV_SPLIT_COPY", "0"))
     )
-    gdn_fla_recurrence_mode = os.environ.get(
-        "GDN_FLA_RECURRENCE_MODE", "compile_visible"
-    ).lower()
+    gdn_fla_recurrence_mode = (
+        "direct_fused"
+        if bool(int(os.environ.get("GDN_USE_DIRECT_FLA_LAYER_SEMANTICS", "0")))
+        else os.environ.get("GDN_FLA_RECURRENCE_MODE", "compile_visible").lower()
+    )
     cudnn_benchmark = bool(int(os.environ.get("CUDNN_BENCHMARK", "0")))
     gdn_ratio = int(os.environ.get("GDN_RATIO", 3))  # 3 GDN : 1 Attn
     block_pattern = os.environ.get("BLOCK_PATTERN", "").strip()

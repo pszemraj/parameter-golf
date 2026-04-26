@@ -18,6 +18,7 @@ from .fla_owned import (
     HAS_OWNED_FLA_GATED_DELTA_RULE,
     run_chunk_gated_delta_rule_owned,
     run_chunk_gated_delta_rule_owned_backward,
+    run_chunk_gated_delta_rule_owned_fused_gate_norm,
 )
 from .reference import (
     packed_qkv_frontend_backward_reference,
@@ -2051,6 +2052,43 @@ def fla_chunk_gated_delta_rule_direct(
     :return Tensor: Recurrence output shaped like ``v``.
     """
     return run_chunk_gated_delta_rule_owned(q, k, v, g, beta, scale=1.0)
+
+
+@_dynamo_disable
+def fla_chunk_gated_delta_rule_direct_fused_gate_norm(
+    q: Tensor,
+    k: Tensor,
+    v: Tensor,
+    g: Tensor,
+    beta: Tensor,
+    A_log: Tensor,
+    dt_bias: Tensor,
+) -> Tensor:
+    """Run public FLA with upstream-style in-kernel q/k norm and gate activation.
+
+    This is an ablation path, not the default custom-HGDN contract. It preserves
+    the native FLA autograd context and uses the public FLA default recurrence
+    scale.
+
+    :param Tensor q: Raw query tensor shaped ``(batch, seq, heads, head_k)``.
+    :param Tensor k: Raw key tensor shaped ``(batch, seq, heads, head_k)``.
+    :param Tensor v: Value tensor shaped ``(batch, seq, heads, head_v)``.
+    :param Tensor g: Raw gate tensor shaped ``(batch, seq, heads)``.
+    :param Tensor beta: Beta tensor shaped ``(batch, seq, heads)``.
+    :param Tensor A_log: Decay scale parameter shaped ``(heads,)``.
+    :param Tensor dt_bias: Decay dt-bias parameter shaped ``(heads,)``.
+    :return Tensor: Recurrence output shaped like ``v``.
+    """
+    return run_chunk_gated_delta_rule_owned_fused_gate_norm(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        A_log,
+        dt_bias,
+        scale=None,
+    )
 
 
 def frontend_preact_silu_split_l2norm_nct(

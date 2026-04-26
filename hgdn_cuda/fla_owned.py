@@ -78,6 +78,53 @@ def run_chunk_gated_delta_rule_owned(
     return out.to(dtype=v.dtype).contiguous()
 
 
+def run_chunk_gated_delta_rule_owned_fused_gate_norm(
+    q: Tensor,
+    k: Tensor,
+    v: Tensor,
+    g: Tensor,
+    beta: Tensor,
+    A_log: Tensor,
+    dt_bias: Tensor,
+    *,
+    scale: float | None = None,
+) -> Tensor:
+    """Run public FLA with in-kernel q/k L2 norm and decay-gate activation.
+
+    :param Tensor q: Raw query tensor shaped ``(batch, seq, heads, head_k)``.
+    :param Tensor k: Raw key tensor shaped ``(batch, seq, heads, head_k)``.
+    :param Tensor v: Value tensor shaped ``(batch, seq, heads, head_v)``.
+    :param Tensor g: Raw gate tensor shaped ``(batch, seq, heads)``.
+    :param Tensor beta: Beta tensor shaped ``(batch, seq, heads)``.
+    :param Tensor A_log: Decay scale parameter shaped ``(heads,)``.
+    :param Tensor dt_bias: Decay dt-bias parameter shaped ``(heads,)``.
+    :param float | None scale: Optional recurrence scale. `None` keeps the
+        public FLA default of ``1 / sqrt(head_k)``.
+    :raises RuntimeError: If CUDA is unavailable for this upstream-semantics path.
+    :return Tensor: Recurrence output shaped like ``v``.
+    """
+    _require_owned_fla()
+    if q.device.type != "cuda":
+        raise RuntimeError(
+            "The fused-gate/norm FLA path requires CUDA; the CPU naive reference "
+            "does not expose use_qk_l2norm_in_kernel/use_gate_in_kernel."
+        )
+    out, _ = chunk_gated_delta_rule(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        beta=beta,
+        scale=scale,
+        output_final_state=False,
+        use_qk_l2norm_in_kernel=True,
+        use_gate_in_kernel=True,
+        A_log=A_log,
+        dt_bias=dt_bias,
+    )
+    return out.contiguous()
+
+
 def run_chunk_gated_delta_rule_owned_backward(
     grad_output: Tensor,
     q: Tensor,

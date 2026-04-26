@@ -477,6 +477,34 @@ def test_gdn_recurrence_input_dtypes() -> None:
     print(f"  ✓ recurrence input dtypes OK ({q.dtype})")
 
 
+def test_gdn_direct_fused_fla_mode_smoke() -> None:
+    """Smoke-test the upstream-style direct FLA fused norm/gate recurrence mode."""
+    if not torch.cuda.is_available() or not HAS_FLA_GATED_DELTA_RULE:
+        print("  ✓ direct fused FLA mode skipped (CUDA/FLA unavailable)")
+        return
+    layer = (
+        GatedDeltaNet(
+            64,
+            n_heads=2,
+            head_k_dim=16,
+            expand_v=1.0,
+            use_fla=True,
+            fla_recurrence_mode="direct_fused",
+        )
+        .cuda()
+        .bfloat16()
+    )
+    restore_low_dim_params_to_fp32(layer, gdn_control_proj_fp32=False)
+    x = torch.randn(2, 32, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    out = layer(x)
+    loss = out.float().square().mean()
+    loss.backward()
+    torch.cuda.synchronize()
+    assert out.shape == x.shape
+    assert x.grad is not None
+    print("  ✓ direct fused FLA mode smoke OK")
+
+
 def test_muon_routing() -> None:
     """Verify SCALAR_PARAM_PATTERNS correctly tags w_a/w_b/w_g for Adam."""
     model = HybridGPT(
@@ -1750,6 +1778,7 @@ if __name__ == "__main__":
         ("Split projections", test_gdn_split_projections),
         ("GDN decay init", test_gdn_decay_init_timescale),
         ("Recurrence input dtypes", test_gdn_recurrence_input_dtypes),
+        ("Direct fused FLA mode smoke", test_gdn_direct_fused_fla_mode_smoke),
         ("Muon routing", test_muon_routing),
         ("Causal conv", test_causal_conv),
         ("Causal conv disable", test_causal_conv_disable),

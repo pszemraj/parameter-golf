@@ -16,8 +16,11 @@ Branch: `exp/hgdn-final`
   `A_log` and `dt_bias` use timescale-aware initialization, those decay params
   run in a no-weight-decay Adam group, negative eigenvalues stay enabled by
   default, and each GDN layer has a learned output RMSNorm weight.
-- `GDN_FLA_RECURRENCE_MODE=direct` is available for wrapper-tax ablations; the
-  default remains `compile_visible`.
+- `GDN_FLA_RECURRENCE_MODE=direct` is available for wrapper-tax ablations.
+  `GDN_FLA_RECURRENCE_MODE=direct_fused` or
+  `GDN_USE_DIRECT_FLA_LAYER_SEMANTICS=1` additionally tests upstream-style
+  in-kernel q/k L2 normalization and decay-gate activation. The default remains
+  `compile_visible`.
 - Requested optional `GDN_USE_CUDA_*` paths now fail fast in the trainer when
   `hgdn_cuda_ext` is not loaded instead of silently falling back.
 - Local Python commands on this checkout use `conda run -s --name pg ...`.
@@ -25,6 +28,21 @@ Branch: `exp/hgdn-final`
 The active branch question is narrow: can a sparse HGDN shell beat the exact
 repo baseline on the exact baseline-shaped contract after accounting for speed
 and artifact size?
+
+## OLMo/FLA Alignment Audit
+
+| Item | Status | Branch handling |
+|---|---|---|
+| Public FLA recurrence | Resolved | Custom HGDN calls public `fla.ops.gated_delta_rule.chunk_gated_delta_rule`; naive recurrence is refused for active CUDA HGDN training. |
+| Decay init | Resolved | `A_log` / `dt_bias` use timescale-aware FLA-style initialization and log `gdn_decay_init` startup stats. |
+| Decay weight decay | Resolved | `A_log` / `dt_bias` use a separate Adam group with `weight_decay=0.0`. |
+| Negative eigenvalues | Resolved | Custom HGDN defaults `GDN_ALLOW_NEG_EIGVAL=1`; native FLA configs set `FLA_ALLOW_NEG_EIGVAL=true`. |
+| Output norm/gate parameterization | Resolved enough for custom path | Custom HGDN now has learned per-`head_v_dim` `o_norm_weight`; it still uses PyTorch/sidecar norm+SiLU instead of `FusedRMSNormGated` directly. |
+| `expand_v=2.0` prior | Added as candidates | Practical sparse search still includes cheaper `1.0`/`1.5` variants, but OLMo-prior `v2` candidates are now first-class configs. |
+| 3:1 GDN:attention prior | Added as candidate | `l8_d512_olmoish_6g2a_v2_m1p25` is the 6G/2A reality check; it is not the default promotion candidate until wallclock evidence supports it. |
+| Native FLA control | Clarified | `train_gpt_fla_control.py` remains pure native GDN calibration, not OLMo Hybrid; an OLMo-ish SP1024 native config exists for dimension/value-width calibration. |
+| Wrapper overhead | Measurable | `scripts/bench_fla_recurrence_paths.py` times wrapper, direct custom recurrence, direct fused FLA semantics, and native `fla.layers.GatedDeltaNet`. |
+| Optional local CUDA extension fallback | Resolved in trainer | Requested `GDN_USE_CUDA_*` paths fail fast if `hgdn_cuda_ext` is absent. |
 
 ## Local Sparse Search
 
@@ -145,13 +163,17 @@ Wrapper/direct/native timing ablation:
 conda run -s --name pg python scripts/bench_fla_recurrence_paths.py --iters 20
 ```
 
+Run this benchmark by itself. Timings are invalid if other tests, training jobs,
+or CUDA benchmarks are active in background terminals.
+
 ## Analysis And Sanity Tools
 
 - `scripts/analyze_local_naive_contract_bundle.py`: local sparse bundle ranking.
 - `scripts/check_bpb_sanity.py`: nats/BPB/implied bytes-per-token checks.
 - `scripts/probe_fla_stack.py`: FLA package/API/kernel import probe.
 - `scripts/bench_fla_recurrence_paths.py`: wrapper versus direct public FLA
-  recurrence timing, plus native `fla.layers.GatedDeltaNet` timing.
+  recurrence timing, upstream-style direct fused FLA semantics timing, plus
+  native `fla.layers.GatedDeltaNet` timing.
 - `scripts/screen_hgdn_arch_sizes.py`: artifact-size screen for active configs.
 
 Example BPB sanity check:

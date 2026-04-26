@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Time HGDN recurrence wrapper, direct public FLA, and native FLA layer paths."""
+"""Time HGDN recurrence wrapper, direct public FLA, and native FLA layer paths.
+
+Run this as the only active GPU workload. The reported timings are not valid if
+other benchmarks, tests, training jobs, or background CUDA work are running.
+"""
 
 from __future__ import annotations
 
@@ -19,6 +23,7 @@ REPO_ROOT = ensure_repo_root_on_sys_path()
 from hgdn_cuda import (  # noqa: E402
     fla_chunk_gated_delta_rule_compile_visible,
     fla_chunk_gated_delta_rule_direct,
+    fla_chunk_gated_delta_rule_direct_fused_gate_norm,
 )
 
 
@@ -109,6 +114,28 @@ def make_recurrence_inputs(args: argparse.Namespace) -> tuple[torch.Tensor, ...]
     return tuple(x.detach().requires_grad_(True) for x in (q, k, v, g, beta))
 
 
+def make_fused_semantics_inputs(args: argparse.Namespace) -> tuple[torch.Tensor, ...]:
+    """Create raw recurrence-boundary tensors for FLA fused norm/gate timing.
+
+    :param argparse.Namespace args: Parsed arguments.
+    :return tuple[torch.Tensor, ...]: `q, k, v, g_raw, beta, A_log, dt_bias`.
+    """
+    dtype = dtype_from_name(args.dtype)
+    device = torch.device("cuda")
+    b, t, h, dk = args.batch_size, args.seq_len, args.heads, args.head_k_dim
+    dv = int(round(dk * args.expand_v))
+    q = torch.randn(b, t, h, dk, device=device, dtype=dtype)
+    k = torch.randn(b, t, h, dk, device=device, dtype=dtype)
+    v = torch.randn(b, t, h, dv, device=device, dtype=dtype)
+    g = torch.randn(b, t, h, device=device, dtype=dtype)
+    beta = torch.rand(b, t, h, device=device, dtype=dtype)
+    A_log = torch.randn(h, device=device, dtype=torch.float32)
+    dt_bias = torch.randn(h, device=device, dtype=torch.float32) - 4.0
+    return tuple(
+        x.detach().requires_grad_(True) for x in (q, k, v, g, beta, A_log, dt_bias)
+    )
+
+
 def zero_leaf_grads(tensors: tuple[torch.Tensor, ...]) -> None:
     """Clear gradients on leaf tensors.
 
@@ -136,6 +163,24 @@ def make_recurrence_step(
         zero_leaf_grads(tensors)
         q, k, v, g, beta = tensors
         out = op(q, k, v, g, beta)
+        out.float().square().mean().backward()
+
+    return step
+
+
+def make_fused_semantics_step(tensors: tuple[torch.Tensor, ...]) -> Callable[[], None]:
+    """Build one upstream-style fused public-FLA recurrence benchmark step.
+
+    :param tuple[torch.Tensor, ...] tensors: Raw recurrence inputs plus decay params.
+    :return Callable[[], None]: Benchmark closure.
+    """
+
+    def step() -> None:
+        zero_leaf_grads(tensors)
+        q, k, v, g, beta, A_log, dt_bias = tensors
+        out = fla_chunk_gated_delta_rule_direct_fused_gate_norm(
+            q, k, v, g, beta, A_log, dt_bias
+        )
         out.float().square().mean().backward()
 
     return step
@@ -218,6 +263,7 @@ def main() -> None:
     device_index = torch.cuda.current_device()
     props = torch.cuda.get_device_properties(device_index)
     tensors = make_recurrence_inputs(args)
+    fused_tensors = make_fused_semantics_inputs(args)
     payload: dict[str, object] = {
         "device": props.name,
         "compute_capability": f"{props.major}.{props.minor}",
@@ -242,6 +288,11 @@ def main() -> None:
     )
     results["direct_recurrence"] = bench_cuda(
         make_recurrence_step(fla_chunk_gated_delta_rule_direct, tensors),
+        warmup=args.warmup,
+        iters=args.iters,
+    )
+    results["direct_fused_gate_norm_recurrence"] = bench_cuda(
+        make_fused_semantics_step(fused_tensors),
         warmup=args.warmup,
         iters=args.iters,
     )

@@ -35,6 +35,7 @@ Core architecture and size:
 - `GDN_EXPAND_V`
 - `GDN_HEAD_K_DIM`
 - `GDN_CONV_SIZE`
+- `GDN_FLA_RECURRENCE_MODE`
 - `NORM_STYLE`
 - `RESIDUAL_ALPHA`
 - `TIE_EMBEDDINGS`

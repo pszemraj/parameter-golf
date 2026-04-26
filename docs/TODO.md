@@ -84,17 +84,28 @@ H100 calibration, if requested, uses
 `configs/fla/native_olmoish_gdn8_d512_sp1024.toml` and
 `train_gpt_fla_control.py`. Keep it isolated from `HybridGPT`.
 
-Measure wrapper/direct/native FLA path cost locally before paying for a trainer
-ablation:
+Measure wrapper/direct/direct-fused/native FLA path cost locally before paying
+for a trainer ablation:
 
 ```bash
 conda run -s --name pg python scripts/bench_fla_recurrence_paths.py --iters 20
 ```
 
+Run this benchmark by itself. Do not compare timings from a session with other
+GPU work active in background terminals.
+
 For a training-level direct-op ablation, set:
 
 ```bash
 GDN_FLA_RECURRENCE_MODE=direct
+```
+
+For upstream-style in-kernel q/k norm and decay-gate activation semantics, set:
+
+```bash
+GDN_FLA_RECURRENCE_MODE=direct_fused
+# equivalent explicit alias:
+GDN_USE_DIRECT_FLA_LAYER_SEMANTICS=1
 ```
 
 ## 5. Keep Hygiene Checks Green

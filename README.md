@@ -214,6 +214,10 @@ conda run -s --name pg python scripts/probe_fla_stack.py
 conda run -s --name pg python scripts/bench_fla_recurrence_paths.py --iters 20
 ```
 
+The benchmark covers the compile-visible wrapper, direct public FLA recurrence,
+direct upstream-style fused q/k-norm+gate FLA semantics, and native
+`fla.layers.GatedDeltaNet`.
+
 Native FLA control configs are split into
 `configs/fla/native_prlike_gdn10_d544_sp8192.toml` and
 `configs/fla/native_olmoish_gdn8_d512_sp1024.toml`.
