@@ -54,23 +54,6 @@ data_path="${DATA_PATH:-$HGDN_REPO_ROOT/data/datasets/fineweb10B_sp1024}"
 tokenizer_path="${TOKENIZER_PATH:-$HGDN_REPO_ROOT/data/tokenizers/fineweb_1024_bpe.model}"
 vocab_size="${VOCAB_SIZE:-1024}"
 
-h100_ngpu="${H100_NGPU:-8}"
-h100_iterations="${H100_ITERATIONS:-20000}"
-h100_train_batch_tokens="${H100_TRAIN_BATCH_TOKENS:-524288}"
-h100_train_seq_len="${H100_TRAIN_SEQ_LEN:-1024}"
-h100_val_loss_every="${H100_VAL_LOSS_EVERY:-200}"
-h100_train_log_every="${H100_TRAIN_LOG_EVERY:-50}"
-h100_val_batch_size="${H100_VAL_BATCH_SIZE:-524288}"
-h100_min_val_seqs="${H100_MIN_VAL_SEQS:-512}"
-h100_val_max_seqs="${H100_VAL_MAX_SEQS:-0}"
-h100_max_wallclock_seconds="${H100_MAX_WALLCLOCK_SECONDS:-600}"
-h100_compile="${H100_COMPILE:-1}"
-h100_compile_strategy="${H100_COMPILE_STRATEGY:-hybrid}"
-h100_grad_accum_steps="${H100_GRAD_ACCUM_STEPS:-0}"
-h100_data_path="${H100_DATA_PATH:-$HGDN_REPO_ROOT/data/datasets/fineweb10B_sp1024}"
-h100_tokenizer_path="${H100_TOKENIZER_PATH:-$HGDN_REPO_ROOT/data/tokenizers/fineweb_1024_bpe.model}"
-h100_vocab_size="${H100_VOCAB_SIZE:-1024}"
-
 primary_hgdn_config="${PRIMARY_HGDN_CONFIG:-configs/hgdn/naive_contract_l8_d512_mid2_dk48_m2.toml}"
 primary_control_config="${PRIMARY_CONTROL_CONFIG:-configs/hgdn/naive_contract_l8_d512_r0_m2.toml}"
 secondary_hgdn_config="${SECONDARY_HGDN_CONFIG:-configs/hgdn/naive_contract_l8_d512_olmoish_6g2a_v2_m1p25.toml}"
@@ -338,10 +321,6 @@ print_plan() {
     echo "secondary_hgdn_config=${secondary_hgdn_config}"
     echo "secondary_control_config=${secondary_control_config}"
     echo "decision_margins: primary_control=${primary_control_margin} secondary_primary=${secondary_primary_margin}"
-    echo "h100_contract:"
-    echo "  ngpu=${h100_ngpu} iterations=${h100_iterations} train_batch_tokens=${h100_train_batch_tokens}"
-    echo "  train_seq_len=${h100_train_seq_len} max_wallclock_seconds=${h100_max_wallclock_seconds}"
-    echo "  min_val_seqs=${h100_min_val_seqs} val_max_seqs=${h100_val_max_seqs} val_batch_size=${h100_val_batch_size}"
 }
 
 run_size_screen() {
@@ -543,51 +522,6 @@ build_bundle() {
     echo "bundle_dir=${bundle_stage_dir}"
 }
 
-write_h100_command() {
-    local output_name="$1"
-    local run_suffix="$2"
-    local hgdn_config="$3"
-    local attn_config="$4"
-    local h100_command="${bundle_stage_dir}/${output_name}"
-    {
-        echo "#!/bin/bash"
-        echo "set -euo pipefail"
-        printf '%q ' \
-            "USE_WANDB=0" \
-            "WANDB_MODE=offline" \
-            "ALLOW_EXISTING_LOGS=0" \
-            "NGPU=${h100_ngpu}" \
-            "GRAD_ACCUM_STEPS=${h100_grad_accum_steps}" \
-            "ITERATIONS=${h100_iterations}" \
-            "MAX_WALLCLOCK_SECONDS=${h100_max_wallclock_seconds}" \
-            "TRAIN_BATCH_TOKENS=${h100_train_batch_tokens}" \
-            "TRAIN_SEQ_LEN=${h100_train_seq_len}" \
-            "VAL_LOSS_EVERY=${h100_val_loss_every}" \
-            "TRAIN_LOG_EVERY=${h100_train_log_every}" \
-            "VAL_BATCH_SIZE=${h100_val_batch_size}" \
-            "MIN_VAL_SEQS=${h100_min_val_seqs}" \
-            "VAL_MAX_SEQS=${h100_val_max_seqs}" \
-            "DATA_PATH=${h100_data_path}" \
-            "TOKENIZER_PATH=${h100_tokenizer_path}" \
-            "VOCAB_SIZE=${h100_vocab_size}" \
-            "COMPILE=${h100_compile}" \
-            "COMPILE_STRATEGY=${h100_compile_strategy}" \
-            "ATTN_USE_FLASH_ATTN3=1" \
-            "DISTRIBUTED_MODE=parallel_muon" \
-            "MUON_DISTRIBUTED_MODE=packed_allreduce" \
-            "GDN_W_G_OPTIMIZER=matrix" \
-            "GDN_FLA_RECURRENCE_MODE=${gdn_fla_recurrence_mode}" \
-            "HGDN_CONFIG=${hgdn_config}" \
-            "ATTN_CONFIG=${attn_config}" \
-            "WANDB_WATCH=none" \
-            "RUN_PREFIX_BASE=h100naive_${run_prefix_base}_${run_suffix}" \
-            bash scripts/run_h100_hgdn_naive_contract_round.sh
-        printf '\n'
-    } >"${h100_command}"
-    chmod +x "${h100_command}"
-    echo "wrote ${h100_command}"
-}
-
 analyze_bundle() {
     if [[ "${analysis_written}" == "1" ]]; then
         return
@@ -598,14 +532,13 @@ analyze_bundle() {
     "${python_bin}" scripts/analyze_hgdn_experiment_bundle.py \
         --bundle-dir "${bundle_stage_dir}" \
         --output-dir "${bundle_stage_dir}/analysis" \
-        --decision-env "${bundle_stage_dir}/selected_hgdn.env" \
+        --decision-json "${bundle_stage_dir}/selected_hgdn.json" \
         --select config \
         --metric final_roundtrip_bpb \
         --confirm-top-n 2 \
         --top 20
     "${python_bin}" scripts/resolve_hgdn_wallclock_decision.py \
         --rows-json "${bundle_stage_dir}/analysis/rows.json" \
-        --output-env "${bundle_stage_dir}/wallclock_decision.env" \
         --output-json "${bundle_stage_dir}/wallclock_decision.json" \
         --primary-config "${primary_hgdn_config}" \
         --primary-control-config "${primary_control_config}" \
@@ -613,16 +546,6 @@ analyze_bundle() {
         --secondary-control-config "${secondary_control_config}" \
         --primary-control-margin "${primary_control_margin}" \
         --secondary-primary-margin "${secondary_primary_margin}"
-    write_h100_command \
-        "next_h100_primary_command.sh" \
-        "primary_wallclock_resolved" \
-        "${primary_hgdn_config}" \
-        "${primary_control_config}"
-    write_h100_command \
-        "next_h100_secondary_command.sh" \
-        "secondary_wallclock_resolved" \
-        "${secondary_hgdn_config}" \
-        "${secondary_control_config}"
 }
 
 archive_bundle() {

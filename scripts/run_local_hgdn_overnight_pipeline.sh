@@ -47,23 +47,6 @@ data_path="${DATA_PATH:-$HGDN_REPO_ROOT/data/datasets/fineweb10B_sp1024}"
 tokenizer_path="${TOKENIZER_PATH:-$HGDN_REPO_ROOT/data/tokenizers/fineweb_1024_bpe.model}"
 vocab_size="${VOCAB_SIZE:-1024}"
 
-h100_ngpu="${H100_NGPU:-8}"
-h100_iterations="${H100_ITERATIONS:-20000}"
-h100_train_batch_tokens="${H100_TRAIN_BATCH_TOKENS:-524288}"
-h100_train_seq_len="${H100_TRAIN_SEQ_LEN:-1024}"
-h100_val_loss_every="${H100_VAL_LOSS_EVERY:-200}"
-h100_train_log_every="${H100_TRAIN_LOG_EVERY:-50}"
-h100_val_batch_size="${H100_VAL_BATCH_SIZE:-524288}"
-h100_min_val_seqs="${H100_MIN_VAL_SEQS:-512}"
-h100_val_max_seqs="${H100_VAL_MAX_SEQS:-0}"
-h100_max_wallclock_seconds="${H100_MAX_WALLCLOCK_SECONDS:-600}"
-h100_compile="${H100_COMPILE:-1}"
-h100_compile_strategy="${H100_COMPILE_STRATEGY:-hybrid}"
-h100_grad_accum_steps="${H100_GRAD_ACCUM_STEPS:-0}"
-h100_data_path="${H100_DATA_PATH:-$HGDN_REPO_ROOT/data/datasets/fineweb10B_sp1024}"
-h100_tokenizer_path="${H100_TOKENIZER_PATH:-$HGDN_REPO_ROOT/data/tokenizers/fineweb_1024_bpe.model}"
-h100_vocab_size="${H100_VOCAB_SIZE:-1024}"
-
 run_stage0="${RUN_STAGE0:-1}"
 run_stage1="${RUN_STAGE1:-1}"
 run_stage2="${RUN_STAGE2:-1}"
@@ -163,6 +146,26 @@ check_cuda_jobs() {
     fi
 }
 
+json_get_scalar() {
+    local json_path="$1"
+    local key="$2"
+    "${python_bin}" - "${json_path}" "${key}" <<'PY'
+import json
+import sys
+
+path, key = sys.argv[1:3]
+value = json.loads(open(path, encoding="utf-8").read()).get(key)
+if isinstance(value, bool):
+    print("1" if value else "0")
+elif value is None:
+    print("")
+elif isinstance(value, list):
+    print(",".join(str(item) for item in value))
+else:
+    print(value)
+PY
+}
+
 stage_bundle_dir() {
     local stage_prefix="$1"
     echo "local-scratch/${stage_prefix}_bundle"
@@ -180,53 +183,81 @@ stage_command_log() {
 
 write_plan() {
     mkdir -p "${pipeline_dir}"
-    {
-        echo "run_prefix_base=${run_prefix_base}"
-        echo "use_wandb=${use_wandb}"
-        echo "wandb_mode=${wandb_mode}"
-        echo "wandb_project=${wandb_project}"
-        echo "ngpu=${ngpu}"
-        echo "train_batch_tokens=${train_batch_tokens}"
-        echo "train_seq_len=${train_seq_len}"
-        echo "val_loss_every=${val_loss_every}"
-        echo "train_log_every=${train_log_every}"
-        echo "min_val_seqs=${min_val_seqs}"
-        echo "val_max_seqs=${val_max_seqs}"
-        echo "compile=${compile}"
-        echo "compile_strategy=${compile_strategy}"
-        echo "distributed_mode=${distributed_mode}"
-        echo "data_path=${data_path}"
-        echo "tokenizer_path=${tokenizer_path}"
-        echo "vocab_size=${vocab_size}"
-        echo "h100_ngpu=${h100_ngpu}"
-        echo "h100_iterations=${h100_iterations}"
-        echo "h100_train_batch_tokens=${h100_train_batch_tokens}"
-        echo "h100_train_seq_len=${h100_train_seq_len}"
-        echo "h100_val_loss_every=${h100_val_loss_every}"
-        echo "h100_train_log_every=${h100_train_log_every}"
-        echo "h100_val_batch_size=${h100_val_batch_size}"
-        echo "h100_min_val_seqs=${h100_min_val_seqs}"
-        echo "h100_val_max_seqs=${h100_val_max_seqs}"
-        echo "h100_max_wallclock_seconds=${h100_max_wallclock_seconds}"
-        echo "h100_compile=${h100_compile}"
-        echo "h100_compile_strategy=${h100_compile_strategy}"
-        echo "h100_grad_accum_steps=${h100_grad_accum_steps}"
-        echo "h100_data_path=${h100_data_path}"
-        echo "h100_tokenizer_path=${h100_tokenizer_path}"
-        echo "h100_vocab_size=${h100_vocab_size}"
-        echo "recurrence_iterations=${recurrence_iterations}"
-        echo "screen_iterations=${screen_iterations}"
-        echo "confirm_iterations=${confirm_iterations}"
-        echo "secondary_iterations=${secondary_iterations}"
-        echo "confirm_top_hgdn=${confirm_top_hgdn}"
-        echo "recurrence_selection_metric=${recurrence_selection_metric}"
-        echo "screen_selection_metric=${screen_selection_metric}"
-        echo "confirm_selection_metric=${confirm_selection_metric}"
-        echo "secondary_selection_metric=${secondary_selection_metric}"
-        echo "screen_candidate_configs=${screen_candidate_configs}"
-        echo "secondary_candidate_configs=${secondary_candidate_configs}"
-        echo "secondary_force=${secondary_force}"
-    } >"${pipeline_dir}/pipeline_plan.env"
+    env \
+        RUN_PREFIX_BASE_JSON="${run_prefix_base}" \
+        USE_WANDB_JSON="${use_wandb}" \
+        WANDB_MODE_JSON="${wandb_mode}" \
+        WANDB_PROJECT_JSON="${wandb_project}" \
+        NGPU_JSON="${ngpu}" \
+        TRAIN_BATCH_TOKENS_JSON="${train_batch_tokens}" \
+        TRAIN_SEQ_LEN_JSON="${train_seq_len}" \
+        VAL_LOSS_EVERY_JSON="${val_loss_every}" \
+        TRAIN_LOG_EVERY_JSON="${train_log_every}" \
+        MIN_VAL_SEQS_JSON="${min_val_seqs}" \
+        VAL_MAX_SEQS_JSON="${val_max_seqs}" \
+        COMPILE_JSON="${compile}" \
+        COMPILE_STRATEGY_JSON="${compile_strategy}" \
+        DISTRIBUTED_MODE_JSON="${distributed_mode}" \
+        DATA_PATH_JSON="${data_path}" \
+        TOKENIZER_PATH_JSON="${tokenizer_path}" \
+        VOCAB_SIZE_JSON="${vocab_size}" \
+        RECURRENCE_ITERATIONS_JSON="${recurrence_iterations}" \
+        SCREEN_ITERATIONS_JSON="${screen_iterations}" \
+        CONFIRM_ITERATIONS_JSON="${confirm_iterations}" \
+        SECONDARY_ITERATIONS_JSON="${secondary_iterations}" \
+        CONFIRM_TOP_HGDN_JSON="${confirm_top_hgdn}" \
+        RECURRENCE_SELECTION_METRIC_JSON="${recurrence_selection_metric}" \
+        SCREEN_SELECTION_METRIC_JSON="${screen_selection_metric}" \
+        CONFIRM_SELECTION_METRIC_JSON="${confirm_selection_metric}" \
+        SECONDARY_SELECTION_METRIC_JSON="${secondary_selection_metric}" \
+        SCREEN_CANDIDATE_CONFIGS_JSON="${screen_candidate_configs}" \
+        SECONDARY_CANDIDATE_CONFIGS_JSON="${secondary_candidate_configs}" \
+        SECONDARY_FORCE_JSON="${secondary_force}" \
+        "${python_bin}" - "${pipeline_dir}/pipeline_plan.json" <<'PY'
+import json
+import os
+import sys
+
+
+def split_csv(value: str) -> list[str]:
+    return [item for item in value.split(",") if item]
+
+
+plan = {
+    "run_prefix_base": os.environ["RUN_PREFIX_BASE_JSON"],
+    "use_wandb": os.environ["USE_WANDB_JSON"] == "1",
+    "wandb_mode": os.environ["WANDB_MODE_JSON"],
+    "wandb_project": os.environ["WANDB_PROJECT_JSON"],
+    "ngpu": int(os.environ["NGPU_JSON"]),
+    "train_batch_tokens": int(os.environ["TRAIN_BATCH_TOKENS_JSON"]),
+    "train_seq_len": int(os.environ["TRAIN_SEQ_LEN_JSON"]),
+    "val_loss_every": int(os.environ["VAL_LOSS_EVERY_JSON"]),
+    "train_log_every": int(os.environ["TRAIN_LOG_EVERY_JSON"]),
+    "min_val_seqs": int(os.environ["MIN_VAL_SEQS_JSON"]),
+    "val_max_seqs": int(os.environ["VAL_MAX_SEQS_JSON"]),
+    "compile": os.environ["COMPILE_JSON"] == "1",
+    "compile_strategy": os.environ["COMPILE_STRATEGY_JSON"],
+    "distributed_mode": os.environ["DISTRIBUTED_MODE_JSON"],
+    "data_path": os.environ["DATA_PATH_JSON"],
+    "tokenizer_path": os.environ["TOKENIZER_PATH_JSON"],
+    "vocab_size": int(os.environ["VOCAB_SIZE_JSON"]),
+    "recurrence_iterations": int(os.environ["RECURRENCE_ITERATIONS_JSON"]),
+    "screen_iterations": int(os.environ["SCREEN_ITERATIONS_JSON"]),
+    "confirm_iterations": int(os.environ["CONFIRM_ITERATIONS_JSON"]),
+    "secondary_iterations": int(os.environ["SECONDARY_ITERATIONS_JSON"]),
+    "confirm_top_hgdn": int(os.environ["CONFIRM_TOP_HGDN_JSON"]),
+    "recurrence_selection_metric": os.environ["RECURRENCE_SELECTION_METRIC_JSON"],
+    "screen_selection_metric": os.environ["SCREEN_SELECTION_METRIC_JSON"],
+    "confirm_selection_metric": os.environ["CONFIRM_SELECTION_METRIC_JSON"],
+    "secondary_selection_metric": os.environ["SECONDARY_SELECTION_METRIC_JSON"],
+    "screen_candidate_configs": split_csv(os.environ["SCREEN_CANDIDATE_CONFIGS_JSON"]),
+    "secondary_candidate_configs": split_csv(os.environ["SECONDARY_CANDIDATE_CONFIGS_JSON"]),
+    "secondary_force": os.environ["SECONDARY_FORCE_JSON"] == "1",
+}
+with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    json.dump(plan, fh, indent=2)
+    fh.write("\n")
+PY
 }
 
 print_plan() {
@@ -249,12 +280,6 @@ print_plan() {
     echo "data_path=${data_path}"
     echo "tokenizer_path=${tokenizer_path}"
     echo "vocab_size=${vocab_size}"
-    echo "h100_contract:"
-    echo "  ngpu=${h100_ngpu} iterations=${h100_iterations} train_batch_tokens=${h100_train_batch_tokens}"
-    echo "  train_seq_len=${h100_train_seq_len} max_wallclock_seconds=${h100_max_wallclock_seconds}"
-    echo "  min_val_seqs=${h100_min_val_seqs} val_max_seqs=${h100_val_max_seqs} val_batch_size=${h100_val_batch_size}"
-    echo "  data_path=${h100_data_path}"
-    echo "  tokenizer_path=${h100_tokenizer_path}"
     echo "min_val_seqs=${min_val_seqs}"
     echo "val_max_seqs=${val_max_seqs}"
     echo "gates:"
@@ -262,7 +287,7 @@ print_plan() {
     echo "  stage1: bounded candidate/control screen using the selected recurrence mode"
     echo "  stage2: longer confirmation for top HGDN configs plus matched controls"
     echo "  stage3: conditional OLMo-ish 6G/2A sanity check when the primary beats control"
-    echo "No H100 job is launched; the final H100 command is written for review."
+    echo "No paid-H100 job or paid-H100 handoff is launched or generated."
 }
 
 run_recurrence_stage() {
@@ -317,7 +342,7 @@ run_recurrence_stage() {
         "$(stage_bundle_dir "${stage_prefix}")" \
         "mode" \
         "${recurrence_selection_metric}" \
-        "${pipeline_dir}/stage0_decision.env"
+        "${pipeline_dir}/stage0_decision.json"
 }
 
 run_search_stage() {
@@ -329,7 +354,7 @@ run_search_stage() {
     local candidate_configs="$6"
     local decision_kind="$7"
     local metric="$8"
-    local decision_env="$9"
+    local decision_json="$9"
     local diagnostic_env=()
     if [[ -n "${torch_logs}" ]]; then
         diagnostic_env+=("TORCH_LOGS=${torch_logs}")
@@ -386,7 +411,7 @@ run_search_stage() {
         "$(stage_bundle_dir "${stage_prefix}")" \
         "${decision_kind}" \
         "${metric}" \
-        "${decision_env}"
+        "${decision_json}"
 }
 
 analyze_stage() {
@@ -394,7 +419,7 @@ analyze_stage() {
     local bundle_dir="$2"
     local select_kind="$3"
     local metric="$4"
-    local decision_env="$5"
+    local decision_json="$5"
     local output_dir="${pipeline_dir}/${stage_name}_analysis"
 
     echo
@@ -402,68 +427,37 @@ analyze_stage() {
     "${python_bin}" scripts/analyze_hgdn_experiment_bundle.py \
         --bundle-dir "${bundle_dir}" \
         --output-dir "${output_dir}" \
-        --decision-env "${decision_env}" \
+        --decision-json "${decision_json}" \
         --select "${select_kind}" \
         --metric "${metric}" \
         --confirm-top-n "${confirm_top_hgdn}" \
         --top 20
 }
 
-write_h100_next_command() {
-    local decision_env="$1"
-    local output_name="${2:-next_h100_command.sh}"
-    local run_suffix="${3:-primary_finalist}"
-    # shellcheck disable=SC1090
-    source "${decision_env}"
-    local h100_command="${pipeline_dir}/${output_name}"
-    {
-        echo "#!/bin/bash"
-        echo "set -euo pipefail"
-        printf '%q ' \
-            "USE_WANDB=0" \
-            "WANDB_MODE=offline" \
-            "ALLOW_EXISTING_LOGS=0" \
-            "NGPU=${h100_ngpu}" \
-            "GRAD_ACCUM_STEPS=${h100_grad_accum_steps}" \
-            "ITERATIONS=${h100_iterations}" \
-            "MAX_WALLCLOCK_SECONDS=${h100_max_wallclock_seconds}" \
-            "TRAIN_BATCH_TOKENS=${h100_train_batch_tokens}" \
-            "TRAIN_SEQ_LEN=${h100_train_seq_len}" \
-            "VAL_LOSS_EVERY=${h100_val_loss_every}" \
-            "TRAIN_LOG_EVERY=${h100_train_log_every}" \
-            "VAL_BATCH_SIZE=${h100_val_batch_size}" \
-            "MIN_VAL_SEQS=${h100_min_val_seqs}" \
-            "VAL_MAX_SEQS=${h100_val_max_seqs}" \
-            "DATA_PATH=${h100_data_path}" \
-            "TOKENIZER_PATH=${h100_tokenizer_path}" \
-            "VOCAB_SIZE=${h100_vocab_size}" \
-            "COMPILE=${h100_compile}" \
-            "COMPILE_STRATEGY=${h100_compile_strategy}" \
-            "ATTN_USE_FLASH_ATTN3=1" \
-            "DISTRIBUTED_MODE=parallel_muon" \
-            "MUON_DISTRIBUTED_MODE=packed_allreduce" \
-            "GDN_W_G_OPTIMIZER=matrix" \
-            "GDN_FLA_RECURRENCE_MODE=${SELECTED_GDN_FLA_RECURRENCE_MODE}" \
-            "HGDN_CONFIG=${SELECTED_CONFIG}" \
-            "ATTN_CONFIG=${SELECTED_CONTROL_CONFIG:-}" \
-            "WANDB_WATCH=none" \
-            "RUN_PREFIX_BASE=h100naive_${run_prefix_base}_${run_suffix}" \
-            bash scripts/run_h100_hgdn_naive_contract_round.sh
-        printf '\n'
-    } >"${h100_command}"
-    chmod +x "${h100_command}"
-    echo "wrote ${h100_command}"
-}
-
 write_stage3_skip() {
     local reason="$1"
-    local skip_env="${pipeline_dir}/stage3_skipped.env"
-    {
-        echo "# Generated by scripts/run_local_hgdn_overnight_pipeline.sh"
-        printf 'STAGE3_SKIPPED=%q\n' "1"
-        printf 'STAGE3_SKIP_REASON=%q\n' "${reason}"
-        printf 'SECONDARY_CANDIDATE_CONFIGS=%q\n' "${secondary_candidate_configs}"
-    } >"${skip_env}"
+    local skip_json="${pipeline_dir}/stage3_skipped.json"
+    env \
+        STAGE3_SKIP_REASON_JSON="${reason}" \
+        SECONDARY_CANDIDATE_CONFIGS_JSON="${secondary_candidate_configs}" \
+        "${python_bin}" - "${skip_json}" <<'PY'
+import json
+import os
+import sys
+
+payload = {
+    "stage3_skipped": True,
+    "reason": os.environ["STAGE3_SKIP_REASON_JSON"],
+    "secondary_candidate_configs": [
+        item
+        for item in os.environ["SECONDARY_CANDIDATE_CONFIGS_JSON"].split(",")
+        if item
+    ],
+}
+with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    json.dump(payload, fh, indent=2)
+    fh.write("\n")
+PY
     echo "stage3_skipped=${reason}"
 }
 
@@ -492,12 +486,14 @@ main() {
     selected_mode="${GDN_FLA_RECURRENCE_MODE:-direct}"
     if [[ "${run_stage0}" == "1" ]]; then
         run_recurrence_stage
-        # shellcheck disable=SC1090
-        source "${pipeline_dir}/stage0_decision.env"
-        selected_mode="${SELECTED_GDN_FLA_RECURRENCE_MODE}"
+        selected_mode="$(
+            json_get_scalar \
+                "${pipeline_dir}/stage0_decision.json" \
+                selected_gdn_fla_recurrence_mode
+        )"
     fi
 
-    stage1_decision="${pipeline_dir}/stage1_decision.env"
+    stage1_decision="${pipeline_dir}/stage1_decision.json"
     if [[ "${run_stage1}" == "1" ]]; then
         run_search_stage \
             "stage1_screen" \
@@ -513,9 +509,7 @@ main() {
 
     stage2_configs="${CONFIRM_CANDIDATE_CONFIGS:-}"
     if [[ -z "${stage2_configs}" && -f "${stage1_decision}" ]]; then
-        # shellcheck disable=SC1090
-        source "${stage1_decision}"
-        stage2_configs="${SELECTED_CONFIRM_CONFIGS_CSV}"
+        stage2_configs="$(json_get_scalar "${stage1_decision}" selected_confirm_configs)"
     fi
     if [[ "${run_stage2}" == "1" ]]; then
         if [[ -z "${stage2_configs}" ]]; then
@@ -531,21 +525,18 @@ main() {
             "${stage2_configs}" \
             "config" \
             "${confirm_selection_metric}" \
-            "${pipeline_dir}/stage2_decision.env"
-        write_h100_next_command \
-            "${pipeline_dir}/stage2_decision.env" \
-            "next_h100_command.sh" \
-            "primary_finalist"
+            "${pipeline_dir}/stage2_decision.json"
     fi
 
     if [[ "${run_stage3}" == "1" ]]; then
-        local stage2_decision="${pipeline_dir}/stage2_decision.env"
+        local stage2_decision="${pipeline_dir}/stage2_decision.json"
         if [[ ! -f "${stage2_decision}" ]]; then
             write_stage3_skip "missing_stage2_decision"
         else
-            # shellcheck disable=SC1090
-            source "${stage2_decision}"
-            if [[ "${secondary_force}" != "1" && "${SELECTED_BEATS_CONTROL:-0}" != "1" ]]; then
+            selected_beats_control="$(
+                json_get_scalar "${stage2_decision}" selected_beats_control
+            )"
+            if [[ "${secondary_force}" != "1" && "${selected_beats_control:-0}" != "1" ]]; then
                 write_stage3_skip "primary_did_not_beat_matched_control"
             else
                 run_search_stage \
@@ -557,11 +548,7 @@ main() {
                     "${secondary_candidate_configs}" \
                     "config" \
                     "${secondary_selection_metric}" \
-                    "${pipeline_dir}/stage3_decision.env"
-                write_h100_next_command \
-                    "${pipeline_dir}/stage3_decision.env" \
-                    "next_h100_secondary_command.sh" \
-                    "secondary_sanity"
+                    "${pipeline_dir}/stage3_decision.json"
             fi
         fi
     fi

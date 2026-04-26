@@ -35,7 +35,7 @@ and artifact size?
    Start with the shortlist in [Local Sparse Search](#local-sparse-search).
 3. Run the true same-wallclock local resolver in
    [Wallclock Resolver](#wallclock-resolver). If laptop timing is inconclusive,
-   carry both the primary and secondary commands forward to H100.
+   manually review both the primary and secondary candidates for H100.
 4. If the resolver still supports the primary candidate, run the exact H100
    comparison in [H100 Commands](#h100-commands).
 5. Run the optional quality-ceiling candidate when the resolver says the local
@@ -148,9 +148,8 @@ Outputs are written to `local-scratch/<prefix>_bundle/` and archived with
 `py7zr`. The resolver writes:
 
 - `analysis/summary.md` and `analysis/rows.csv`
-- `wallclock_decision.env`
-- `next_h100_primary_command.sh`
-- `next_h100_secondary_command.sh`
+- `selected_hgdn.json`
+- `wallclock_decision.json`
 
 Decision defaults are intentionally conservative and use final roundtrip BPB
 from wallclock-stopped runs, matching the compressed-artifact objective. The
@@ -158,7 +157,7 @@ primary must beat its matched attention-only diagnostic control by
 `PRIMARY_CONTROL_MARGIN=0.003` BPB, and the secondary only cleanly displaces the
 primary at `SECONDARY_PRIMARY_MARGIN=0.005` BPB. If any required wallclock
 roundtrip metric is missing or the primary/secondary margin is too close, the
-decision file sets `RUN_SECONDARY_H100=1`.
+decision JSON sets `run_secondary_h100` to true for manual review.
 
 Local sparse search helper:
 
@@ -209,14 +208,14 @@ SMOKE_SEQ_LEN=32 SMOKE_BATCH_SIZE=2 \
 conda run -s --name pg python train_gpt_fla_control.py --smoke
 ```
 
-Full calibration launch, after loading the TOML as environment:
+Full calibration launch, after loading the TOML env keys into a shell array:
 
 ```bash
-set -a
-source <(conda run -s --name pg python scripts/hgdn_helper_cli.py load-env \
-  --path configs/fla/native_prlike_gdn10_d544_sp8192.toml)
-set +a
-torchrun --standalone --nproc_per_node=1 train_gpt_fla_control.py
+mapfile -t fla_env < <(
+  conda run -s --name pg python scripts/hgdn_helper_cli.py load-env \
+    --path configs/fla/native_prlike_gdn10_d544_sp8192.toml
+)
+env "${fla_env[@]}" torchrun --standalone --nproc_per_node=1 train_gpt_fla_control.py
 ```
 
 This is calibration only. It must not change `HybridGPT` behavior or replace
@@ -279,10 +278,9 @@ For an unattended local hierarchy, use the overnight pipeline. It runs:
 4. a conditional OLMo-ish 6G/2A sanity check only when the confirmed primary
    HGDN beats its matched attention-only diagnostic control.
 
-It analyzes each bundle with `scripts/analyze_hgdn_experiment_bundle.py`, writes
-stage decision files under `local-scratch/<prefix>_pipeline`, and writes the
-next H100 command for review instead of launching paid H100 work. The secondary
-stage writes `next_h100_secondary_command.sh` when it runs. The default
+It analyzes each bundle with `scripts/analyze_hgdn_experiment_bundle.py` and
+writes JSON stage decisions under `local-scratch/<prefix>_pipeline`. It
+does not launch paid H100 work or generate H100 launch scripts. The default
 promotion metric is `equal_wallclock_bpb`; set
 `RECURRENCE_SELECTION_METRIC=final_step_ms` only for a speed-only recurrence
 implementation check.

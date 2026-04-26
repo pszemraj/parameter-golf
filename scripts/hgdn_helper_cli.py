@@ -133,7 +133,7 @@ def cmd_create_7z(args: argparse.Namespace) -> int:
 
 
 def cmd_load_env(args: argparse.Namespace) -> int:
-    """Merge TOML env files and print ``KEY=VALUE`` lines.
+    """Merge TOML ``[env]`` sections and print ``KEY=VALUE`` lines.
 
     :param argparse.Namespace args: Parsed CLI arguments.
     :return int: Shell-style exit code.
@@ -471,7 +471,7 @@ def build_parser() -> argparse.ArgumentParser:
     create_7z.set_defaults(func=cmd_create_7z)
 
     load_env = subparsers.add_parser(
-        "load-env", help="merge TOML env files and print KEY=VALUE lines"
+        "load-env", help="merge TOML [env] sections and print KEY=VALUE lines"
     )
     load_env.add_argument("--alias-aware", action="store_true")
     load_env.add_argument("--path", type=Path, nargs="+", required=True)
