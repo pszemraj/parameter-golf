@@ -24,6 +24,7 @@ from model import (
     HybridGPT,
     PackedCausalConv1d,
     gdn_recurrent_naive,
+    init_gdn_decay_params,
     l2_norm,
     rms_norm,
     make_baseline_fill,
@@ -65,6 +66,7 @@ def _make_bf16_gdn(**kwargs: object) -> GatedDeltaNet:
     ).bfloat16()
     layer.A_log.data = layer.A_log.data.float()
     layer.dt_bias.data = layer.dt_bias.data.float()
+    layer.o_norm_weight.data = layer.o_norm_weight.data.float()
     return layer
 
 
@@ -443,6 +445,25 @@ def test_gdn_split_projections() -> None:
     )
 
 
+def test_gdn_decay_init_timescale() -> None:
+    """Initialize GDN decay gates with FLA-style nonzero retention timescales."""
+    torch.manual_seed(123)
+    A_log, dt_bias = init_gdn_decay_params(1024)
+    A = A_log.detach().exp()
+    dt = F.softplus(dt_bias.detach())
+    alpha = (-A * dt).exp()
+    assert torch.isfinite(A_log).all()
+    assert torch.isfinite(dt_bias).all()
+    assert float(A.min()) >= 1e-3 * 0.999
+    assert float(A.max()) <= 16.0 * 1.001
+    assert float(dt.min()) >= 0.001 * 0.999
+    assert float(dt.max()) <= 0.1 * 1.001
+    assert float(alpha.mean()) > 0.7
+    assert getattr(A_log, "_no_weight_decay", False)
+    assert getattr(dt_bias, "_no_weight_decay", False)
+    print(f"  ✓ GDN decay init OK (alpha_mean={float(alpha.mean()):.4f})")
+
+
 def test_gdn_recurrence_input_dtypes() -> None:
     """Keep recurrence inputs aligned with activation dtype for FLA kernels."""
     layer = _make_bf16_gdn()
@@ -482,9 +503,16 @@ def test_muon_routing() -> None:
     for expected in ["w_q.weight", "w_k.weight", "w_v.weight", "w_out.weight"]:
         found = any(expected in n for n in muon_set)
         assert found, f"Expected {expected} in Muon params"
-    # w_a, w_b, w_g should be Adam
+    # w_a, w_b, w_g, and small GDN controls should be Adam
     adam_set = set(adam_params)
-    for expected in ["w_a.weight", "w_b.weight", "w_g.weight", "A_log", "dt_bias"]:
+    for expected in [
+        "w_a.weight",
+        "w_b.weight",
+        "w_g.weight",
+        "A_log",
+        "dt_bias",
+        "o_norm_weight",
+    ]:
         found = any(expected in n for n in adam_set)
         assert found, f"Expected {expected} in Adam params, got: {adam_set}"
     print(f"  ✓ Muon routing OK ({len(muon_params)} Muon, {len(adam_params)} Adam)")
@@ -1365,6 +1393,7 @@ def test_restore_low_dim_params_to_fp32_gdn_control_override() -> None:
     assert layer.w_g.weight.dtype == torch.bfloat16
     assert layer.A_log.dtype == torch.float32
     assert layer.dt_bias.dtype == torch.float32
+    assert layer.o_norm_weight.dtype == torch.float32
     print("  ✓ GDN control projection fp32 override OK")
 
 
@@ -1377,6 +1406,7 @@ def test_restore_low_dim_params_to_fp32_default_restores_gdn_control() -> None:
     assert layer.w_a.weight.dtype == torch.float32
     assert layer.w_b.weight.dtype == torch.float32
     assert layer.w_g.weight.dtype == torch.float32
+    assert layer.o_norm_weight.dtype == torch.float32
     print("  ✓ default GDN control projection fp32 restore OK")
 
 
@@ -1718,6 +1748,7 @@ if __name__ == "__main__":
         ("Recurrence", test_recurrence),
         ("Owned FLA recurrence parity", test_owned_fla_recurrence_matches_upstream),
         ("Split projections", test_gdn_split_projections),
+        ("GDN decay init", test_gdn_decay_init_timescale),
         ("Recurrence input dtypes", test_gdn_recurrence_input_dtypes),
         ("Muon routing", test_muon_routing),
         ("Causal conv", test_causal_conv),

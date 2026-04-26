@@ -36,6 +36,7 @@ import torch.distributed as dist
 from torch import Tensor, nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 
+from hgdn_cuda import extension_loaded
 from hgdn_runtime_utils import (
     dequantize_state_dict_int8,
     maybe_compile,
@@ -46,8 +47,10 @@ from hgdn_runtime_utils import (
 )
 from model import (
     _HAS_FLA,
+    GDN_FLA_RECURRENCE_MODES,
     HybridGPT,
     attention_backend_name,
+    is_gdn_decay_param,
     uses_scalar_optimizer,
     validate_gdn_w_g_optimizer,
 )
@@ -234,6 +237,9 @@ class Hyperparameters:
     gdn_use_packed_qkv_split_copy = bool(
         int(os.environ.get("GDN_PACKED_QKV_SPLIT_COPY", "0"))
     )
+    gdn_fla_recurrence_mode = os.environ.get(
+        "GDN_FLA_RECURRENCE_MODE", "compile_visible"
+    ).lower()
     cudnn_benchmark = bool(int(os.environ.get("CUDNN_BENCHMARK", "0")))
     gdn_ratio = int(os.environ.get("GDN_RATIO", 3))  # 3 GDN : 1 Attn
     block_pattern = os.environ.get("BLOCK_PATTERN", "").strip()
@@ -338,6 +344,7 @@ def build_wandb_config(
         "ATTENTION_BACKEND": attention_backend,
         "CUDNN_BENCHMARK": args.cudnn_benchmark,
         "FLA_AVAILABLE": _HAS_FLA,
+        "GDN_FLA_RECURRENCE_MODE": args.gdn_fla_recurrence_mode,
         "ATTN_USE_FLASH_ATTN3": args.attn_use_flash_attn3,
         "EMBED_LR": args.embed_lr,
         "HEAD_LR": args.head_lr,
@@ -974,6 +981,32 @@ def prewarm_eval_forward(
     return True
 
 
+def require_hgdn_cuda_ext_if_requested(args: Hyperparameters) -> None:
+    """Reject requested optional HGDN CUDA paths when the extension is absent.
+
+    :param Hyperparameters args: Parsed trainer hyperparameters.
+    :raises RuntimeError: If a `GDN_USE_CUDA_*` path needs `hgdn_cuda_ext` but it is unavailable.
+    """
+    requested = any(
+        [
+            args.gdn_use_cuda_frontend_nct,
+            args.gdn_use_cuda_packed_conv,
+            args.gdn_use_cuda_packed_conv_aten_backward,
+            args.gdn_use_cuda_packed_conv_aten_weight_backward,
+            args.gdn_use_cuda_fused_frontend,
+            args.gdn_use_cuda_fused_frontend_lib,
+            args.gdn_use_cuda_fused_output,
+            args.gdn_use_cuda_split_norm,
+            args.gdn_use_cuda_split_norm_lib,
+        ]
+    )
+    if requested and not extension_loaded():
+        raise RuntimeError(
+            "A GDN_USE_CUDA_* path was requested, but hgdn_cuda_ext is not loaded. "
+            "Refusing to silently fall back to the PyTorch reference path."
+        )
+
+
 # =====================================================================
 # MAIN
 # =====================================================================
@@ -988,6 +1021,11 @@ def main() -> None:
     code = Path(__file__).read_text(encoding="utf-8")
     args = Hyperparameters()
     args.gdn_w_g_optimizer = validate_gdn_w_g_optimizer(args.gdn_w_g_optimizer)
+    if args.gdn_fla_recurrence_mode not in GDN_FLA_RECURRENCE_MODES:
+        raise ValueError(
+            "GDN_FLA_RECURRENCE_MODE must be one of "
+            f"{sorted(GDN_FLA_RECURRENCE_MODES)}, got {args.gdn_fla_recurrence_mode!r}"
+        )
     if args.muon_distributed_mode not in {"packed_allreduce", "sharded_rsag"}:
         raise ValueError(
             "MUON_DISTRIBUTED_MODE must be 'packed_allreduce' or 'sharded_rsag', "
@@ -1133,11 +1171,13 @@ def main() -> None:
             "Refusing to silently fall back to the naive recurrence. "
             "Install/repair FLA or use GDN_RATIO=0."
         )
+    require_hgdn_cuda_ext_if_requested(args)
     log0(
         f"compile:{int(args.compile)} compile_strategy:{args.compile_strategy} "
         f"seed:{args.seed} pythonhashseed:{os.environ.get('PYTHONHASHSEED', '<unset>')} "
         f"sdp_backend:{sdp_backend} attention_backend:{attention_backend} "
         f"fla_available:{int(_HAS_FLA)} "
+        f"gdn_fla_recurrence_mode:{args.gdn_fla_recurrence_mode} "
         f"cudnn_benchmark:{int(args.cudnn_benchmark)} "
         f"wandb_watch:{wandb_watch_mode} wandb_watch_log_freq:{args.wandb_watch_log_freq} "
         f"perf_timing:{int(args.perf_timing)} perf_ignore_steps:{args.perf_ignore_steps} "
@@ -1269,6 +1309,7 @@ def main() -> None:
             gdn_use_packed_qkv_conv_custom_backward=args.gdn_use_packed_qkv_conv_custom_backward,
             gdn_use_packed_qkv_single_contig=args.gdn_use_packed_qkv_single_contig,
             gdn_use_packed_qkv_split_copy=args.gdn_use_packed_qkv_split_copy,
+            gdn_fla_recurrence_mode=args.gdn_fla_recurrence_mode,
             mlp_mult=args.mlp_mult,
             leaky_slope=args.leaky_slope,
             gdn_ratio=args.gdn_ratio,
@@ -1321,6 +1362,24 @@ def main() -> None:
         f"norm_style:{base_model.norm_style} residual_alpha:{base_model.residual_alpha:g} "
         f"block_pattern:{args.block_pattern or '<ratio>'}"
     )
+    decay_stats = [
+        module.decay_init_stats()
+        for module in base_model.modules()
+        if hasattr(module, "decay_init_stats")
+    ]
+    if decay_stats:
+        alpha_means = [row["alpha_mean"] for row in decay_stats]
+        alpha_mins = [row["alpha_min"] for row in decay_stats]
+        alpha_maxs = [row["alpha_max"] for row in decay_stats]
+        log0(
+            "gdn_decay_init:"
+            f"layers:{len(decay_stats)} "
+            f"A_mean:{sum(row['A_mean'] for row in decay_stats) / len(decay_stats):.4g} "
+            f"dt_mean:{sum(row['dt_mean'] for row in decay_stats) / len(decay_stats):.4g} "
+            f"alpha_mean:{sum(alpha_means) / len(alpha_means):.4g} "
+            f"alpha_min:{min(alpha_mins):.4g} "
+            f"alpha_max:{max(alpha_maxs):.4g}"
+        )
     log0(
         "compile_plan:"
         f"strategy:{compile_stats['strategy']} "
@@ -1381,7 +1440,9 @@ def main() -> None:
             param_ndim=p.ndim,
             gdn_w_g_optimizer=args.gdn_w_g_optimizer,
         )
+        and not is_gdn_decay_param(n)
     ]
+    gdn_decay_params = [p for n, p in block_named_params if is_gdn_decay_param(n)]
     if base_model.skip_weights.numel() > 0:
         scalar_params.append(base_model.skip_weights)
 
@@ -1416,8 +1477,25 @@ def main() -> None:
         weight_decay=args.weight_decay,
         fused=True,
     )
+    optimizer_gdn_decay = None
+    if gdn_decay_params:
+        optimizer_gdn_decay = torch.optim.Adam(
+            [
+                {
+                    "params": gdn_decay_params,
+                    "lr": args.scalar_lr,
+                    "base_lr": args.scalar_lr,
+                }
+            ],
+            betas=(args.beta1, args.beta2),
+            eps=args.adam_eps,
+            weight_decay=0.0,
+            fused=True,
+        )
     optimizer_head = None
     optimizers = [optimizer_tok, optimizer_muon, optimizer_scalar]
+    if optimizer_gdn_decay is not None:
+        optimizers.append(optimizer_gdn_decay)
     if base_model.lm_head is not None:
         optimizer_head = torch.optim.Adam(
             [
@@ -1438,9 +1516,16 @@ def main() -> None:
     if use_parallel_muon_distributed:
         replicated_params.extend(optimizer_tok.param_groups[0]["params"])
         replicated_params.extend(scalar_params)
+        if optimizer_gdn_decay is not None:
+            replicated_params.extend(gdn_decay_params)
         if optimizer_head is not None:
             replicated_params.extend(optimizer_head.param_groups[0]["params"])
         replicated_grad_sync = ReplicatedGradSync(replicated_params)
+    replicated_optimizers = [optimizer_tok, optimizer_scalar]
+    if optimizer_gdn_decay is not None:
+        replicated_optimizers.append(optimizer_gdn_decay)
+    if optimizer_head is not None:
+        replicated_optimizers.append(optimizer_head)
 
     muon_prewarm_count = 0
     if args.compile and device.type == "cuda":
@@ -1474,10 +1559,8 @@ def main() -> None:
             if args.muon_distributed_mode == "sharded_rsag":
                 optimizer_muon.launch_reduce_scatters()
             replicated_grad_sync.wait()
-            optimizer_tok.step()
-            optimizer_scalar.step()
-            if optimizer_head is not None:
-                optimizer_head.step()
+            for opt in replicated_optimizers:
+                opt.step()
             optimizer_muon.step()
             return
         for opt in optimizers:

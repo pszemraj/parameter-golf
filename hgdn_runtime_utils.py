@@ -9,7 +9,7 @@ from typing import Any
 import torch
 from torch import Tensor, nn
 
-from model import scalar_param_patterns, uses_scalar_optimizer
+from model import is_gdn_decay_param, scalar_param_patterns, uses_scalar_optimizer
 
 INT8_CLIP_Q = 99.99984 / 100.0
 INT8_KEEP_FLOAT_MAX_NUMEL = 65_536
@@ -191,18 +191,19 @@ def restore_low_dim_params_to_fp32(
     control_patterns = scalar_param_patterns(gdn_w_g_optimizer=gdn_w_g_optimizer)
     with torch.no_grad():
         for name, param in module.named_parameters():
-            if not gdn_control_proj_fp32 and any(
-                pattern in name for pattern in control_patterns
+            always_fp32 = is_gdn_decay_param(name) or "o_norm_weight" in name
+            if (
+                not gdn_control_proj_fp32
+                and any(pattern in name for pattern in control_patterns)
+                and not always_fp32
             ):
                 continue
-            if (
-                uses_scalar_optimizer(
-                    name,
-                    param_ndim=param.ndim,
-                    gdn_w_g_optimizer=gdn_w_g_optimizer,
-                )
-                and param.dtype != torch.float32
-            ):
+            should_restore = always_fp32 or uses_scalar_optimizer(
+                name,
+                param_ndim=param.ndim,
+                gdn_w_g_optimizer=gdn_w_g_optimizer,
+            )
+            if should_restore and param.dtype != torch.float32:
                 param.data = param.data.float()
 
 

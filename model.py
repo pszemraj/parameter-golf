@@ -12,6 +12,7 @@ P0 fixes from code review:
 from __future__ import annotations
 
 import json
+import math
 import os
 from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path
@@ -33,6 +34,7 @@ except ImportError:
 from hgdn_cuda import (
     HAS_FLA_GATED_DELTA_RULE,
     fla_chunk_gated_delta_rule_compile_visible,
+    fla_chunk_gated_delta_rule_direct,
     fused_packed_qkv_conv,
     fused_packed_qkv_conv_aten_backward,
     fused_packed_qkv_conv_aten_weight_backward,
@@ -57,10 +59,13 @@ _BASE_SCALAR_PARAM_PATTERNS = (
     "w_b.",
     "A_log",
     "dt_bias",  # GDN decay params → Adam
+    "o_norm_weight",
 )
 _W_G_SCALAR_PARAM_PATTERN = "w_g."
 _VALID_GDN_W_G_OPTIMIZERS = {"scalar", "matrix"}
 SCALAR_PARAM_PATTERNS = _BASE_SCALAR_PARAM_PATTERNS + (_W_G_SCALAR_PARAM_PATTERN,)
+GDN_DECAY_PARAM_PATTERNS = ("A_log", "dt_bias")
+GDN_FLA_RECURRENCE_MODES = {"compile_visible", "direct"}
 
 NormStyle = Literal["pre", "post", "keel"]
 _PROFILE_RANGES = bool(int(os.environ.get("PROFILE_RANGES", "0")))
@@ -130,6 +135,44 @@ def uses_scalar_optimizer(
         pat in param_name
         for pat in scalar_param_patterns(gdn_w_g_optimizer=gdn_w_g_optimizer)
     )
+
+
+def is_gdn_decay_param(param_name: str) -> bool:
+    """Return whether one parameter controls the GDN decay timescale.
+
+    :param str param_name: Fully-qualified parameter name.
+    :return bool: `True` for `A_log` and `dt_bias` parameters.
+    """
+    return any(pattern in param_name for pattern in GDN_DECAY_PARAM_PATTERNS)
+
+
+def init_gdn_decay_params(
+    n_heads: int,
+    *,
+    dt_min: float = 0.001,
+    dt_max: float = 0.1,
+    dt_init_floor: float = 1e-4,
+) -> tuple[nn.Parameter, nn.Parameter]:
+    """Initialize GDN decay parameters with upstream FLA-style timescales.
+
+    :param int n_heads: Number of GDN value heads.
+    :param float dt_min: Minimum initial dt, defaults to `0.001`.
+    :param float dt_max: Maximum initial dt, defaults to `0.1`.
+    :param float dt_init_floor: Lower clamp for sampled dt, defaults to `1e-4`.
+    :return tuple[nn.Parameter, nn.Parameter]: `A_log` and `dt_bias`.
+    """
+    A = torch.empty(n_heads, dtype=torch.float32).uniform_(1e-3, 16.0)
+    A_log = nn.Parameter(torch.log(A))
+    A_log._no_weight_decay = True
+
+    dt = torch.exp(
+        torch.rand(n_heads, dtype=torch.float32) * (math.log(dt_max) - math.log(dt_min))
+        + math.log(dt_min)
+    )
+    dt = torch.clamp(dt, min=dt_init_floor)
+    dt_bias = nn.Parameter(dt + torch.log(-torch.expm1(-dt)))
+    dt_bias._no_weight_decay = True
+    return A_log, dt_bias
 
 
 def normalize_block_pattern(
@@ -843,6 +886,7 @@ class GatedDeltaNet(nn.Module):
         use_packed_qkv_conv_custom_backward: bool = False,
         use_packed_qkv_single_contig: bool = False,
         use_packed_qkv_split_copy: bool = False,
+        fla_recurrence_mode: str = "compile_visible",
     ):
         """Initialize a Gated DeltaNet block.
 
@@ -876,8 +920,14 @@ class GatedDeltaNet(nn.Module):
         :param bool use_packed_qkv_conv_custom_backward: Whether to route the packed depthwise qkv conv through an exact-length custom autograd path, defaults to False.
         :param bool use_packed_qkv_single_contig: Whether to materialize one contiguous packed q/k/v tensor before splitting the packed conv output, defaults to False.
         :param bool use_packed_qkv_split_copy: Whether to materialize q/k/v with `aten.split_with_sizes_copy`, defaults to False.
+        :param str fla_recurrence_mode: Public FLA recurrence path: `compile_visible` keeps the torch.library wrapper, `direct` bypasses it, defaults to `"compile_visible"`.
         """
         super().__init__()
+        if fla_recurrence_mode not in GDN_FLA_RECURRENCE_MODES:
+            raise ValueError(
+                f"fla_recurrence_mode must be one of {sorted(GDN_FLA_RECURRENCE_MODES)}, "
+                f"got {fla_recurrence_mode!r}"
+            )
         self.d_model = d_model
         self.n_heads = n_heads
         self.head_k_dim = head_k_dim
@@ -903,6 +953,7 @@ class GatedDeltaNet(nn.Module):
         self.use_packed_qkv_conv_custom_backward = use_packed_qkv_conv_custom_backward
         self.use_packed_qkv_single_contig = use_packed_qkv_single_contig
         self.use_packed_qkv_split_copy = use_packed_qkv_split_copy
+        self.fla_recurrence_mode = fla_recurrence_mode
         q_conv_output_contiguous = (
             conv_output_contiguous
             if q_conv_output_contiguous is None
@@ -1273,9 +1324,11 @@ class GatedDeltaNet(nn.Module):
         self.w_out = CastedLinear(total_v, d_model, bias=False)
         self.w_out._zero_init = True
 
-        # Learnable decay params → Adam
-        self.A_log = nn.Parameter(torch.zeros(n_heads))
-        self.dt_bias = nn.Parameter(torch.zeros(n_heads))
+        # Learnable recurrence controls → Adam.
+        self.A_log, self.dt_bias = init_gdn_decay_params(n_heads)
+        self.o_norm_weight = nn.Parameter(
+            torch.ones(self.head_v_dim, dtype=torch.float32)
+        )
 
         # Short causal convolutions
         self.conv_size = int(conv_size)
@@ -1634,6 +1687,23 @@ class GatedDeltaNet(nn.Module):
         )
         return q, k, v, g, beta
 
+    def decay_init_stats(self) -> dict[str, float]:
+        """Return summary statistics for the current decay timescale parameters.
+
+        :return dict[str, float]: Means and extrema for `A`, `dt`, and `alpha`.
+        """
+        with torch.no_grad():
+            initial_dt = F.softplus(self.dt_bias.float())
+            initial_A = self.A_log.float().exp()
+            initial_alpha = (-initial_A * initial_dt).exp()
+            return {
+                "A_mean": float(initial_A.mean().item()),
+                "dt_mean": float(initial_dt.mean().item()),
+                "alpha_mean": float(initial_alpha.mean().item()),
+                "alpha_min": float(initial_alpha.min().item()),
+                "alpha_max": float(initial_alpha.max().item()),
+            }
+
     def forward(self, x: Tensor) -> Tensor:
         """Apply the Gated DeltaNet layer to a sequence batch.
 
@@ -1651,7 +1721,10 @@ class GatedDeltaNet(nn.Module):
 
             with profile_range("gdn.recurrence"):
                 if self.use_fla and x.is_cuda:
-                    o = fla_chunk_gated_delta_rule_compile_visible(q, k, v, g, beta)
+                    if self.fla_recurrence_mode == "direct":
+                        o = fla_chunk_gated_delta_rule_direct(q, k, v, g, beta)
+                    else:
+                        o = fla_chunk_gated_delta_rule_compile_visible(q, k, v, g, beta)
                 else:
                     o, _ = gdn_recurrent_naive(q, k, v, g.exp(), beta)
             audit_gdn_boundary("recurrence_output", audit_call_index, o=o)
@@ -1679,12 +1752,20 @@ class GatedDeltaNet(nn.Module):
                             fp32_accum=self.output_norm_fp32,
                             enabled=True,
                         )
+                    with profile_range("gdn.output_norm_weight"):
+                        o = o * self.o_norm_weight.to(
+                            dtype=o.dtype, device=o.device
+                        ).view(1, 1, 1, -1)
                 else:
                     with profile_range("gdn.output_norm"):
                         if self.output_norm_fp32:
                             o = match_reference_tensor(rms_norm(o.float()), x)
                         else:
                             o = match_reference_tensor(rms_norm(o), x)
+                    with profile_range("gdn.output_norm_weight"):
+                        o = o * self.o_norm_weight.to(
+                            dtype=o.dtype, device=o.device
+                        ).view(1, 1, 1, -1)
                     audit_gdn_boundary(
                         "output_gate_inputs", audit_call_index, o=o, g_out=g_out
                     )
@@ -1904,6 +1985,7 @@ class GDNBlock(nn.Module):
         use_packed_qkv_conv_custom_backward: bool = False,
         use_packed_qkv_single_contig: bool = False,
         use_packed_qkv_split_copy: bool = False,
+        fla_recurrence_mode: str = "compile_visible",
         leaky_slope: float = 0.5,
         norm_style: NormStyle = "pre",
         residual_alpha: float = 1.0,
@@ -1941,6 +2023,7 @@ class GDNBlock(nn.Module):
         :param bool use_packed_qkv_conv_custom_backward: Whether to route the packed depthwise qkv conv through an exact-length custom autograd path, defaults to False.
         :param bool use_packed_qkv_single_contig: Whether to materialize one contiguous packed q/k/v tensor before splitting the packed conv output, defaults to False.
         :param bool use_packed_qkv_split_copy: Whether to materialize q/k/v with `aten.split_with_sizes_copy`, defaults to False.
+        :param str fla_recurrence_mode: Public FLA recurrence path used by the GDN layer, defaults to `"compile_visible"`.
         :param float leaky_slope: LeakyReLU slope, defaults to 0.5.
         :param NormStyle norm_style: Residual norm placement, defaults to "pre".
         :param float residual_alpha: Residual scaling factor used by KEEL-style blocks, defaults to 1.0.
@@ -1982,6 +2065,7 @@ class GDNBlock(nn.Module):
             use_packed_qkv_conv_custom_backward=use_packed_qkv_conv_custom_backward,
             use_packed_qkv_single_contig=use_packed_qkv_single_contig,
             use_packed_qkv_split_copy=use_packed_qkv_split_copy,
+            fla_recurrence_mode=fla_recurrence_mode,
         )
         self.mlp = MLP(dim, mlp_mult, leaky_slope)
         self.attn_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
@@ -2144,6 +2228,7 @@ class HybridGPT(nn.Module):
         gdn_use_packed_qkv_conv_custom_backward: bool = False,
         gdn_use_packed_qkv_single_contig: bool = False,
         gdn_use_packed_qkv_split_copy: bool = False,
+        gdn_fla_recurrence_mode: str = "compile_visible",
         # Shared
         mlp_mult: float = 3.0,
         leaky_slope: float = 0.5,
@@ -2192,6 +2277,7 @@ class HybridGPT(nn.Module):
         :param bool gdn_use_packed_qkv_conv_custom_backward: Whether to route the packed depthwise qkv conv through an exact-length custom autograd path, defaults to False.
         :param bool gdn_use_packed_qkv_single_contig: Whether to materialize one contiguous packed q/k/v tensor before splitting the packed conv output, defaults to False.
         :param bool gdn_use_packed_qkv_split_copy: Whether to materialize q/k/v with `aten.split_with_sizes_copy`, defaults to False.
+        :param str gdn_fla_recurrence_mode: Public FLA recurrence path used by GDN layers, defaults to `"compile_visible"`.
         :param float mlp_mult: MLP expansion factor, defaults to 3.0.
         :param float leaky_slope: LeakyReLU slope, defaults to 0.5.
         :param int gdn_ratio: Number of GDN layers per attention layer, defaults to 3.
@@ -2272,6 +2358,7 @@ class HybridGPT(nn.Module):
                         gdn_use_packed_qkv_conv_custom_backward,
                         gdn_use_packed_qkv_single_contig,
                         gdn_use_packed_qkv_split_copy,
+                        gdn_fla_recurrence_mode,
                         leaky_slope,
                         self.norm_style,
                         self.residual_alpha,

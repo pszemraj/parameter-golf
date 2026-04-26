@@ -2033,6 +2033,26 @@ def fla_chunk_gated_delta_rule_compile_visible(
     return torch.ops.hgdn_fla_v1.chunk_gated_delta_rule(q, k, v, g, beta)
 
 
+@_dynamo_disable
+def fla_chunk_gated_delta_rule_direct(
+    q: Tensor,
+    k: Tensor,
+    v: Tensor,
+    g: Tensor,
+    beta: Tensor,
+) -> Tensor:
+    """Run the public FLA recurrence directly, preserving its native autograd path.
+
+    :param Tensor q: Query tensor shaped ``(batch, seq, heads, head_k)``.
+    :param Tensor k: Key tensor shaped ``(batch, seq, heads, head_k)``.
+    :param Tensor v: Value tensor shaped ``(batch, seq, heads, head_v)``.
+    :param Tensor g: Log-space gate tensor shaped ``(batch, seq, heads)``.
+    :param Tensor beta: Beta tensor shaped ``(batch, seq, heads)``.
+    :return Tensor: Recurrence output shaped like ``v``.
+    """
+    return run_chunk_gated_delta_rule_owned(q, k, v, g, beta, scale=1.0)
+
+
 def frontend_preact_silu_split_l2norm_nct(
     preact_nct: Tensor,
     *,
