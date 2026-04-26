@@ -2391,7 +2391,6 @@ class CoreAmplifierLM(nn.Module):
         branches, next_history = self._expand_branches(core_out, history=history)
         if self._branch_scan_backend_active is not None:
             self.scan_backend_active = self._branch_scan_backend_active
-        base_logits = self.base_path_logits(input_ids)
         base_features: Optional[torch.Tensor] = None
         if self.residual_token_gate_mode != "none" or self.branch_router_mode != "none":
             base_features = self._base_confidence_features(input_ids)
@@ -2410,7 +2409,7 @@ class CoreAmplifierLM(nn.Module):
             self._last_residual_token_gate = None
             self._last_residual_gate_mean = None
             self._last_residual_gate_std = None
-        base_logits = base_logits.to(dtype=residual_logits.dtype)
+        base_logits = self.base_path_logits(input_ids, dtype=residual_logits.dtype)
         if self.base_bigram_delta is not None:
             base_delta = self.base_bigram_delta(input_ids.long()).to(
                 device=residual_logits.device,

@@ -1076,6 +1076,7 @@ def compute_training_objective(
     hard_loss_gamma: float,
     hard_loss_cap: float = 0.0,
     base_nll_model: Optional[CoreAmplifierLM] = None,
+    collect_stats: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, float]]:
     """Compute weighted and raw training losses.
 
@@ -1087,6 +1088,7 @@ def compute_training_objective(
     :param float hard_loss_cap: Optional weight cap.
     :param Optional[CoreAmplifierLM] base_nll_model: Optional model with a
         precomputed frozen-base NLL table.
+    :param bool collect_stats: Whether to synchronize scalar diagnostics.
     :return tuple[torch.Tensor, torch.Tensor, dict[str, float]]: Weighted sum, raw sum, and stats.
     """
     per_token = cross_entropy_per_token(logits, targets)
@@ -1104,10 +1106,11 @@ def compute_training_objective(
         if hard_loss_cap > 0:
             weights = weights.clamp_max(hard_loss_cap)
         weights = weights / weights.mean().clamp_min(1e-6)
-        stats = {
-            "base_loss": float(base_per_token.mean().item()),
-            "weight_max": float(weights.max().item()),
-        }
+        if collect_stats:
+            stats = {
+                "base_loss": float(base_per_token.mean().item()),
+                "weight_max": float(weights.max().item()),
+            }
     weighted_sum = (per_token * weights).sum()
     return weighted_sum, raw_sum, stats
 
@@ -1153,10 +1156,10 @@ def evaluate(
         )
     core_model = unwrap_model(model)
     model.eval()
-    total_loss = 0.0
+    total_loss_t = torch.zeros((), dtype=torch.float32, device=device)
     total_tokens = 0
-    total_bits = 0.0
-    total_bytes = 0
+    total_bits_t = torch.zeros((), dtype=torch.float32, device=device)
+    total_bytes_t = torch.zeros((), dtype=torch.int64, device=device)
 
     usable_tokens = max(0, int(val_tokens.numel()) - 1)
     max_streams = max(1, usable_tokens // max(1, seq_len + 1))
@@ -1190,15 +1193,18 @@ def evaluate(
             with autocast_context():
                 logits, state = model(inputs, state=state, return_state=True)
             per_token = cross_entropy_per_token(logits, targets)
-            total_loss += float(per_token.sum().item())
+            total_loss_t += per_token.sum()
             total_tokens += targets.numel()
 
             if byte_count_lut is not None:
                 bits = per_token / math.log(2)  # nats → bits, per token
-                total_bits += float(bits.sum().item())
-                total_bytes += int(byte_count_lut[targets.long()].sum().item())
+                total_bits_t += bits.sum()
+                total_bytes_t += byte_count_lut[targets.long()].sum()
             state = core_model.detach_state(state)
 
+    total_loss = float(total_loss_t.item())
+    total_bits = float(total_bits_t.item())
+    total_bytes = int(total_bytes_t.item())
     val_loss = total_loss / max(1, total_tokens)
     val_bpb = (total_bits / max(1, total_bytes)) if total_bytes > 0 else float("nan")
     coverage_frac = min(1.0, float(total_tokens) / max(1, usable_tokens))
@@ -2642,15 +2648,18 @@ def main() -> None:
 
         step_started = time.time()
         optimizer.zero_grad(set_to_none=True)
-        total_weighted_loss_sum = 0.0
-        total_raw_loss_sum = 0.0
+        log_due = step % max(1, log_every) == 0
+        eval_due = val_every > 0 and step > 0 and step % val_every == 0
+        collect_step_scalars = log_due or eval_due
+        total_raw_loss_sum_t: Optional[torch.Tensor] = None
+        total_raw_loss_sum = float("nan")
         total_tokens = 0
         loss_accum: Optional[torch.Tensor] = None
         last_stats = {"base_loss": float("nan"), "weight_max": 1.0}
         last_inputs: Optional[torch.Tensor] = None
         last_targets: Optional[torch.Tensor] = None
 
-        for _ in range(grad_accum):
+        for accum_idx in range(grad_accum):
             # Truncated BPTT window. The state is detached once at the start of
             # the window, then left connected across `bptt_chunks` consecutive
             # chunks. This preserves the parallel minGRU scan inside each chunk
@@ -2669,6 +2678,9 @@ def main() -> None:
                 elif j == 0:
                     state = core_model.detach_state(state)
 
+                objective_collect_stats = (
+                    log_due and accum_idx == grad_accum - 1 and j == bptt_chunks - 1
+                )
                 with autocast_context():
                     logits, state = model(inputs, state=state, return_state=True)
                     weighted_sum, raw_sum, stats = compute_training_objective(
@@ -2679,13 +2691,20 @@ def main() -> None:
                         hard_loss_gamma=hard_loss_gamma,
                         hard_loss_cap=hard_loss_cap,
                         base_nll_model=core_model,
+                        collect_stats=objective_collect_stats,
                     )
 
-                total_weighted_loss_sum += float(weighted_sum.item())
-                total_raw_loss_sum += float(raw_sum.item())
+                if collect_step_scalars:
+                    detached_raw_sum = raw_sum.detach()
+                    total_raw_loss_sum_t = (
+                        detached_raw_sum
+                        if total_raw_loss_sum_t is None
+                        else total_raw_loss_sum_t + detached_raw_sum
+                    )
                 total_tokens += targets.numel()
                 seen_train_tokens += targets.numel()
-                last_stats = stats
+                if objective_collect_stats:
+                    last_stats = stats
                 window_loss = weighted_sum if window_loss is None else window_loss + weighted_sum
 
             assert state is not None and window_loss is not None
@@ -2700,7 +2719,11 @@ def main() -> None:
         optimizer.step()
         step_elapsed = time.time() - step_started
 
-        if step % max(1, log_every) == 0:
+        if collect_step_scalars:
+            assert total_raw_loss_sum_t is not None
+            total_raw_loss_sum = float(total_raw_loss_sum_t.item())
+
+        if log_due:
             elapsed = prior_elapsed_sec + (time.time() - start_time)
             tok_per_sec = seen_train_tokens / max(elapsed, 1e-6)
             current_lr = optimizer.param_groups[0]["lr"]
@@ -2775,7 +2798,7 @@ def main() -> None:
                         step=step,
                     )
 
-        if val_every > 0 and step > 0 and step % val_every == 0:
+        if eval_due:
             eval_result = evaluate(
                 model,
                 val_tokens,

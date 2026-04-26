@@ -36,6 +36,7 @@ def normalize_scan_backend(backend: str, *, allow_heinsen: bool) -> str:
     return normalized
 
 
+@lru_cache(maxsize=1)
 def accelerated_scan_installed() -> bool:
     """Return whether the ``accelerated-scan`` package is importable.
 
