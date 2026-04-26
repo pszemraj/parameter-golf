@@ -1268,6 +1268,14 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--model-root", type=Path, help="Root directory for generated runs.")
     ap.add_argument("--shared-spec-dir", type=Path, help="Shared or prebuilt spec directory.")
     ap.add_argument("--commands-txt", type=Path, help="Path that records emitted train commands.")
+    ap.add_argument("--data-path", type=Path, help="Token dataset path.")
+    ap.add_argument(
+        "--storage-dtype",
+        choices=["uint8", "uint16", "int32", "int64"],
+        help="On-disk token dtype.",
+    )
+    ap.add_argument("--data-max-tokens", type=int, help="Optional local token cap.")
+    ap.add_argument("--force-device", help="Force train device for generated commands.")
     ap.add_argument(
         "--run-spec",
         action="append",
@@ -1283,19 +1291,117 @@ def parse_args() -> argparse.Namespace:
         help="Effective train tokens per optimizer step.",
     )
     ap.add_argument("--core-amp-phase", help="Phase label written into generated configs.")
+    ap.add_argument("--lr-schedule", choices=["cosine", "none"], help="Learning-rate schedule.")
+    ap.add_argument("--weight-decay", type=float, help="Weight decay for generated train commands.")
+    ap.add_argument("--grad-clip", type=float, help="Gradient clipping norm.")
+    ap.add_argument("--hard-loss-gamma", type=float, help="Hard-loss weighting exponent.")
+    ap.add_argument("--hard-loss-cap", type=float, help="Hard-loss weight cap.")
+    ap.add_argument("--val-every", type=int, help="Validation cadence in optimizer steps.")
+    ap.add_argument("--val-steps", type=int, help="Sampled validation steps.")
+    ap.add_argument("--log-every", type=int, help="Train logging cadence in optimizer steps.")
+    ap.add_argument("--log-state-every", type=int, help="State/watch logging cadence.")
+    ap.add_argument("--save-every", type=int, help="Checkpoint cadence in optimizer steps.")
+    ap.add_argument("--grad-accum", type=int, help="Gradient accumulation steps.")
+    ap.add_argument("--train-frac", type=float, help="Fallback train split fraction.")
+    ap.add_argument(
+        "--full-val-final",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Run full validation at final checkpoint.",
+    )
     ap.add_argument("--core-dim", type=int, help="Core statistical basis width.")
     ap.add_argument("--core-layers", type=int, help="Number of recurrent core layers.")
     ap.add_argument("--core-expansion", help="Recurrent inner/core expansion factor.")
     ap.add_argument("--num-blocks", type=int, help="Number of frozen amplifier blocks.")
     ap.add_argument("--branch-lags", help="Comma-separated branch lag list.")
+    ap.add_argument(
+        "--branch-temporal-mode",
+        choices=["current", "lagged", "hybrid", "ema", "ema_hybrid"],
+        help="Temporal branch source mode.",
+    )
+    ap.add_argument("--branch-temporal-lag-scale", type=float, help="Temporal lag scale.")
+    ap.add_argument(
+        "--residual-token-gate-mode",
+        choices=["none", "base", "core_base"],
+        help="Tokenwise residual gate mode.",
+    )
+    ap.add_argument(
+        "--branch-router-mode",
+        choices=["none", "softmax"],
+        help="Branch router mode.",
+    )
+    ap.add_argument(
+        "--base-bigram-delta",
+        choices=["none", "full"],
+        help="Trainable base-bigram delta mode.",
+    )
     ap.add_argument("--residual-core", type=int, choices=[0, 1], help="Enable residual core.")
     ap.add_argument("--residual-core-init", help="Residual core gate initialization.")
     ap.add_argument("--trigram-memory", choices=["none", "frozen"], help="Trigram memory mode.")
     ap.add_argument("--trigram-log-scale-init", help="Initial trigram memory log scale.")
+    ap.add_argument(
+        "--residual-readout-delta-rank", type=int, help="Low-rank residual readout rank."
+    )
+    ap.add_argument(
+        "--residual-readout-delta-init-std",
+        type=float,
+        help="Low-rank residual readout init std.",
+    )
     ap.add_argument("--scan-backend", help="Requested scan backend.")
+    ap.add_argument(
+        "--wandb",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable W&B for generated train commands.",
+    )
     ap.add_argument("--wandb-project", help="W&B project for generated train commands.")
+    ap.add_argument("--wandb-entity", help="W&B entity for generated train commands.")
     ap.add_argument("--wandb-group", help="W&B group for generated train commands.")
     ap.add_argument("--wandb-tags", help="Comma-separated W&B tags for generated train commands.")
+    ap.add_argument(
+        "--wandb-watch",
+        choices=["off", "gradients", "all"],
+        help="W&B watch mode for generated train commands.",
+    )
+    ap.add_argument("--wandb-watch-log-freq", type=int, help="W&B watch logging frequency.")
+    ap.add_argument(
+        "--compile",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable torch.compile in generated train commands.",
+    )
+    ap.add_argument("--compile-after", type=int, help="Step that triggers torch.compile.")
+    ap.add_argument("--compile-mode", help="torch.compile mode.")
+    ap.add_argument(
+        "--compile-base-path",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Compile the base path when compile is enabled.",
+    )
+    ap.add_argument(
+        "--gradient-checkpointing",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable gradient checkpointing in generated train commands.",
+    )
+    ap.add_argument(
+        "--mmap",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Use mmap/direct-shard token streaming.",
+    )
+    ap.add_argument(
+        "--autocast",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Use CUDA autocast in generated train commands.",
+    )
+    ap.add_argument(
+        "--tokens-on-device",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Copy token tensors to the training device.",
+    )
     ap.add_argument(
         "--dry-run",
         action=argparse.BooleanOptionalAction,
@@ -1336,23 +1442,67 @@ def apply_cli_overrides(args: argparse.Namespace) -> None:
     set_if("MODEL_ROOT", args.model_root)
     set_if("SHARED_SPEC_DIR", args.shared_spec_dir)
     set_if("COMMANDS_TXT", args.commands_txt)
+    set_if("DATA_PATH", args.data_path)
+    set_if("STORAGE_DTYPE", args.storage_dtype)
+    set_if("DATA_MAX_TOKENS", args.data_max_tokens)
+    set_if("FORCE_DEVICE", args.force_device)
     set_if("SEED", args.seed)
     set_if("RUN_FILTER", args.run_filter)
     set_if("TARGET_EFFECTIVE_STEP_TOKENS", args.target_effective_step_tokens)
     set_if("CORE_AMP_PHASE", args.core_amp_phase)
+    set_if("LR_SCHEDULE", args.lr_schedule)
+    set_if("WEIGHT_DECAY", args.weight_decay)
+    set_if("GRAD_CLIP", args.grad_clip)
+    set_if("HARD_LOSS_GAMMA", args.hard_loss_gamma)
+    set_if("HARD_LOSS_CAP", args.hard_loss_cap)
+    set_if("VAL_EVERY", args.val_every)
+    set_if("VAL_STEPS", args.val_steps)
+    set_if("LOG_EVERY", args.log_every)
+    set_if("LOG_STATE_EVERY", args.log_state_every)
+    set_if("SAVE_EVERY", args.save_every)
+    set_if("GRAD_ACCUM", args.grad_accum)
+    set_if("TRAIN_FRAC", args.train_frac)
     set_if("CORE_DIM", args.core_dim)
     set_if("CORE_LAYERS", args.core_layers)
     set_if("CORE_EXPANSION", args.core_expansion)
     set_if("NUM_BLOCKS", args.num_blocks)
     set_if("BRANCH_LAGS", args.branch_lags)
+    set_if("BRANCH_TEMPORAL_MODE", args.branch_temporal_mode)
+    set_if("BRANCH_TEMPORAL_LAG_SCALE", args.branch_temporal_lag_scale)
+    set_if("RESIDUAL_TOKEN_GATE_MODE", args.residual_token_gate_mode)
+    set_if("BRANCH_ROUTER_MODE", args.branch_router_mode)
+    set_if("BASE_BIGRAM_DELTA", args.base_bigram_delta)
     set_if("RESIDUAL_CORE", args.residual_core)
     set_if("RESIDUAL_CORE_INIT", args.residual_core_init)
     set_if("TRIGRAM_MEMORY", args.trigram_memory)
     set_if("TRIGRAM_LOG_SCALE_INIT", args.trigram_log_scale_init)
+    set_if("RESIDUAL_READOUT_DELTA_RANK", args.residual_readout_delta_rank)
+    set_if("RESIDUAL_READOUT_DELTA_INIT_STD", args.residual_readout_delta_init_std)
     set_if("SCAN_BACKEND", args.scan_backend)
     set_if("WANDB_PROJECT", args.wandb_project)
+    set_if("WANDB_ENTITY", args.wandb_entity)
     set_if("WANDB_GROUP", args.wandb_group)
     set_if("WANDB_TAGS", args.wandb_tags)
+    set_if("WANDB_WATCH", args.wandb_watch)
+    set_if("WANDB_WATCH_LOG_FREQ", args.wandb_watch_log_freq)
+    set_if("COMPILE_AFTER", args.compile_after)
+    set_if("COMPILE_MODE", args.compile_mode)
+    if args.wandb is not None:
+        os.environ["WANDB"] = "1" if args.wandb else "0"
+    if args.full_val_final is not None:
+        os.environ["FULL_VAL_FINAL"] = "1" if args.full_val_final else "0"
+    if args.compile is not None:
+        os.environ["COMPILE"] = "1" if args.compile else "0"
+    if args.compile_base_path is not None:
+        os.environ["COMPILE_BASE_PATH"] = "1" if args.compile_base_path else "0"
+    if args.gradient_checkpointing is not None:
+        os.environ["GRADIENT_CHECKPOINTING"] = "1" if args.gradient_checkpointing else "0"
+    if args.mmap is not None:
+        os.environ["NO_MMAP"] = "0" if args.mmap else "1"
+    if args.autocast is not None:
+        os.environ["NO_AUTOCAST"] = "0" if args.autocast else "1"
+    if args.tokens_on_device is not None:
+        os.environ["TOKENS_ON_DEVICE"] = "1" if args.tokens_on_device else "0"
     if args.dry_run is not None:
         os.environ["DRY_RUN"] = "1" if args.dry_run else "0"
     if args.skip_done is not None:

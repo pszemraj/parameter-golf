@@ -9,29 +9,29 @@ PYTHON_BIN="${PYTHON:-/home/pszemraj/miniforge3/envs/train/bin/python}"
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export PYTHONUNBUFFERED=1
-export WANDB="${WANDB:-1}"
-export WANDB_PROJECT="${WANDB_PROJECT:-pg-hconv-ablations}"
-export WANDB_WATCH="${WANDB_WATCH:-gradients}"
-export WANDB_WATCH_LOG_FREQ="${WANDB_WATCH_LOG_FREQ:-25}"
-export PRESET="${PRESET:-controller_default}"
-export COMPILE="${COMPILE:-0}"
-export GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-0}"
-export SCAN_BACKEND="${SCAN_BACKEND:-auto}"
+WANDB="${WANDB:-1}"
+WANDB_PROJECT="${WANDB_PROJECT:-pg-hconv-ablations}"
+WANDB_WATCH="${WANDB_WATCH:-gradients}"
+WANDB_WATCH_LOG_FREQ="${WANDB_WATCH_LOG_FREQ:-25}"
+PRESET="${PRESET:-controller_default}"
+COMPILE="${COMPILE:-0}"
+GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-0}"
+SCAN_BACKEND="${SCAN_BACKEND:-auto}"
 export TORCH_BLAS_PREFER_CUBLASLT="${TORCH_BLAS_PREFER_CUBLASLT:-1}"
-export REBUILD_SHARED="${REBUILD_SHARED:-0}"
+REBUILD_SHARED="${REBUILD_SHARED:-0}"
 
-export RUN_VERSION="${RUN_VERSION:-geom1}"
-export SEEDS="${SEEDS:-1337}"
-export SKIP_DONE="${SKIP_DONE:-1}"
-export RUN_BLOCKS0="${RUN_BLOCKS0:-1}"
+RUN_VERSION="${RUN_VERSION:-geom1}"
+SEEDS="${SEEDS:-1337}"
+SKIP_DONE="${SKIP_DONE:-1}"
+RUN_BLOCKS0="${RUN_BLOCKS0:-1}"
 
-export LEARNING_RATE="${LEARNING_RATE:-0.0035}"
+LEARNING_RATE="${LEARNING_RATE:-0.0035}"
 LEARNING_RATE_TAG="$(pg_5090_lr_slug "${LEARNING_RATE}")"
 
-export COREAMP_SPEC_CACHE_ROOT="${COREAMP_SPEC_CACHE_ROOT:-${HOME}/.cache/experiments/param-golf-coreamp}"
-export GEOMETRY_CORE_DIM="${GEOMETRY_CORE_DIM:-128}"
-export GEOMETRY_CORE_LAYERS="${GEOMETRY_CORE_LAYERS:-4}"
-export GEOMETRY_CORE_INNER_DIM="${GEOMETRY_CORE_INNER_DIM:-512}"
+COREAMP_SPEC_CACHE_ROOT="${COREAMP_SPEC_CACHE_ROOT:-${HOME}/.cache/experiments/param-golf-coreamp}"
+GEOMETRY_CORE_DIM="${GEOMETRY_CORE_DIM:-128}"
+GEOMETRY_CORE_LAYERS="${GEOMETRY_CORE_LAYERS:-4}"
+GEOMETRY_CORE_INNER_DIM="${GEOMETRY_CORE_INNER_DIM:-512}"
 if [[ -z "${GEOMETRY_CORE_EXPANSION:-}" ]]; then
   GEOMETRY_CORE_EXPANSION="$(
     "${PYTHON_BIN}" - "${GEOMETRY_CORE_DIM}" "${GEOMETRY_CORE_INNER_DIM}" <<'PY'
@@ -43,7 +43,7 @@ print(repr(float(inner_dim) / float(core_dim)))
 PY
   )"
 fi
-export GEOMETRY_CORE_EXPANSION
+GEOMETRY_CORE_EXPANSION="${GEOMETRY_CORE_EXPANSION}"
 GEOMETRY_CORE_INNER_DIM_RESOLVED="$(
   "${PYTHON_BIN}" - "${GEOMETRY_CORE_DIM}" "${GEOMETRY_CORE_EXPANSION}" <<'PY'
 import sys
@@ -53,21 +53,21 @@ expansion = float(sys.argv[2])
 print(int(core_dim * expansion))
 PY
 )"
-export GEOMETRY_CORE_INNER_DIM_RESOLVED
+GEOMETRY_CORE_INNER_DIM_RESOLVED="${GEOMETRY_CORE_INNER_DIM_RESOLVED}"
 if [[ -n "${GEOMETRY_CORE_INNER_DIM:-}" && "${GEOMETRY_CORE_INNER_DIM_RESOLVED}" != "${GEOMETRY_CORE_INNER_DIM}" ]]; then
   pg_5090_fail "$(basename "$0")" "GEOMETRY_CORE_DIM=${GEOMETRY_CORE_DIM} and GEOMETRY_CORE_EXPANSION=${GEOMETRY_CORE_EXPANSION} resolve to inner=${GEOMETRY_CORE_INNER_DIM_RESOLVED}, expected ${GEOMETRY_CORE_INNER_DIM}"
 fi
-export GEOMETRY_NUM_BLOCKS="${GEOMETRY_NUM_BLOCKS:-0}"
-export GEOMETRY_BRANCH_LAGS="${GEOMETRY_BRANCH_LAGS:-1,2,3,4,6,8,12,16,24,32,48,64}"
-export GEOMETRY_LABEL="${GEOMETRY_LABEL:-blocks0_core${GEOMETRY_CORE_DIM}_l${GEOMETRY_CORE_LAYERS}_i${GEOMETRY_CORE_INNER_DIM_RESOLVED}}"
-export GEOMETRY_CARRY_CHUNKS="${GEOMETRY_CARRY_CHUNKS:-8}"
-export GEOMETRY_BPTT_CHUNKS="${GEOMETRY_BPTT_CHUNKS:-1}"
-export GEOMETRY_NUM_STEPS="${GEOMETRY_NUM_STEPS:-4096}"
-export GEOMETRY_BATCH_SIZE="${GEOMETRY_BATCH_SIZE:-256}"
-export GEOMETRY_SEQ_LEN="${GEOMETRY_SEQ_LEN:-512}"
-export GEOMETRY_LR_WARMUP_STEPS="${GEOMETRY_LR_WARMUP_STEPS:-100}"
-export GEOMETRY_LR_HOLD_STEPS="${GEOMETRY_LR_HOLD_STEPS:-3500}"
-export GEOMETRY_MIN_LR="${GEOMETRY_MIN_LR:-0.0003}"
+GEOMETRY_NUM_BLOCKS="${GEOMETRY_NUM_BLOCKS:-0}"
+GEOMETRY_BRANCH_LAGS="${GEOMETRY_BRANCH_LAGS:-1,2,3,4,6,8,12,16,24,32,48,64}"
+GEOMETRY_LABEL="${GEOMETRY_LABEL:-blocks0_core${GEOMETRY_CORE_DIM}_l${GEOMETRY_CORE_LAYERS}_i${GEOMETRY_CORE_INNER_DIM_RESOLVED}}"
+GEOMETRY_CARRY_CHUNKS="${GEOMETRY_CARRY_CHUNKS:-8}"
+GEOMETRY_BPTT_CHUNKS="${GEOMETRY_BPTT_CHUNKS:-1}"
+GEOMETRY_NUM_STEPS="${GEOMETRY_NUM_STEPS:-4096}"
+GEOMETRY_BATCH_SIZE="${GEOMETRY_BATCH_SIZE:-256}"
+GEOMETRY_SEQ_LEN="${GEOMETRY_SEQ_LEN:-512}"
+GEOMETRY_LR_WARMUP_STEPS="${GEOMETRY_LR_WARMUP_STEPS:-100}"
+GEOMETRY_LR_HOLD_STEPS="${GEOMETRY_LR_HOLD_STEPS:-3500}"
+GEOMETRY_MIN_LR="${GEOMETRY_MIN_LR:-0.0003}"
 if [[ -z "${GEOMETRY_TRAIN_LABEL:-}" ]]; then
   if [[ "${GEOMETRY_NUM_STEPS}" == "4096" && "${TARGET_EFFECTIVE_STEP_TOKENS:-131072}" == "131072" ]]; then
     GEOMETRY_TRAIN_LABEL="512m"
@@ -77,34 +77,52 @@ if [[ -z "${GEOMETRY_TRAIN_LABEL:-}" ]]; then
     GEOMETRY_TRAIN_LABEL="${GEOMETRY_NUM_STEPS}steps"
   fi
 fi
-export GEOMETRY_TRAIN_LABEL
+GEOMETRY_TRAIN_LABEL="${GEOMETRY_TRAIN_LABEL}"
 
-export TRIGRAM_MEMORY="${TRIGRAM_MEMORY:-frozen}"
-export TRIGRAM_LOG_SCALE_INIT="${TRIGRAM_LOG_SCALE_INIT:-0.0}"
-export TRIGRAM_TOP_K="${TRIGRAM_TOP_K:-2}"
-export TRIGRAM_RESIDUAL_CLIP="${TRIGRAM_RESIDUAL_CLIP:-8.0}"
-export TRIGRAM_CONFIDENCE_COUNT_CAP="${TRIGRAM_CONFIDENCE_COUNT_CAP:-4096}"
-export TRIGRAM_CHUNK_SIZE="${TRIGRAM_CHUNK_SIZE:-50000000}"
-export TRIGRAM_COUNT_WORKERS="${TRIGRAM_COUNT_WORKERS:-1}"
-export TRIGRAM_MEMORY_SPEC_CACHE_ROOT="${TRIGRAM_MEMORY_SPEC_CACHE_ROOT:-${COREAMP_SPEC_CACHE_ROOT}}"
-export TRIGRAM_MEMORY_TABLE_CACHE_ROOT="${TRIGRAM_MEMORY_TABLE_CACHE_ROOT:-${COREAMP_SPEC_CACHE_ROOT}/trigram_memory_tables}"
-export REBUILD_TRIGRAM_MEMORY_TABLE_CACHE="${REBUILD_TRIGRAM_MEMORY_TABLE_CACHE:-0}"
+TRIGRAM_MEMORY="${TRIGRAM_MEMORY:-frozen}"
+TRIGRAM_LOG_SCALE_INIT="${TRIGRAM_LOG_SCALE_INIT:-0.0}"
+TRIGRAM_TOP_K="${TRIGRAM_TOP_K:-2}"
+TRIGRAM_RESIDUAL_CLIP="${TRIGRAM_RESIDUAL_CLIP:-8.0}"
+TRIGRAM_CONFIDENCE_COUNT_CAP="${TRIGRAM_CONFIDENCE_COUNT_CAP:-4096}"
+TRIGRAM_CHUNK_SIZE="${TRIGRAM_CHUNK_SIZE:-50000000}"
+TRIGRAM_COUNT_WORKERS="${TRIGRAM_COUNT_WORKERS:-1}"
+TRIGRAM_MEMORY_SPEC_CACHE_ROOT="${TRIGRAM_MEMORY_SPEC_CACHE_ROOT:-${COREAMP_SPEC_CACHE_ROOT}}"
+TRIGRAM_MEMORY_TABLE_CACHE_ROOT="${TRIGRAM_MEMORY_TABLE_CACHE_ROOT:-${COREAMP_SPEC_CACHE_ROOT}/trigram_memory_tables}"
+REBUILD_TRIGRAM_MEMORY_TABLE_CACHE="${REBUILD_TRIGRAM_MEMORY_TABLE_CACHE:-0}"
 
-export TARGET_EFFECTIVE_STEP_TOKENS="${TARGET_EFFECTIVE_STEP_TOKENS:-131072}"
-export DATA_PATH="${DATA_PATH:-${REPO_ROOT}/data/datasets/fineweb10B_sp1024}"
-export STORAGE_DTYPE="${STORAGE_DTYPE:-uint16}"
-export LR_SCHEDULE="${LR_SCHEDULE:-cosine}"
-export WEIGHT_DECAY="${WEIGHT_DECAY:-0.001}"
-export VAL_EVERY="${VAL_EVERY:-256}"
-export VAL_STEPS="${VAL_STEPS:-8}"
-export LOG_EVERY="${LOG_EVERY:-64}"
-export LOG_STATE_EVERY="${LOG_STATE_EVERY:-256}"
-export SAVE_EVERY="${SAVE_EVERY:-2048}"
-export TRAIN_FRAC="${TRAIN_FRAC:-0.98}"
-export FULL_VAL_FINAL="${FULL_VAL_FINAL:-0}"
-export BASE_BIGRAM_DELTA="${BASE_BIGRAM_DELTA:-none}"
-export RESIDUAL_READOUT_DELTA_RANK="${RESIDUAL_READOUT_DELTA_RANK:-0}"
-export RESIDUAL_READOUT_DELTA_INIT_STD="${RESIDUAL_READOUT_DELTA_INIT_STD:-0.02}"
+TARGET_EFFECTIVE_STEP_TOKENS="${TARGET_EFFECTIVE_STEP_TOKENS:-131072}"
+DATA_PATH="${DATA_PATH:-${REPO_ROOT}/data/datasets/fineweb10B_sp1024}"
+STORAGE_DTYPE="${STORAGE_DTYPE:-uint16}"
+LR_SCHEDULE="${LR_SCHEDULE:-cosine}"
+WEIGHT_DECAY="${WEIGHT_DECAY:-0.001}"
+GRAD_CLIP="${GRAD_CLIP:-1.0}"
+HARD_LOSS_GAMMA="${HARD_LOSS_GAMMA:-0.5}"
+HARD_LOSS_CAP="${HARD_LOSS_CAP:-5.0}"
+VAL_EVERY="${VAL_EVERY:-256}"
+VAL_STEPS="${VAL_STEPS:-8}"
+LOG_EVERY="${LOG_EVERY:-64}"
+LOG_STATE_EVERY="${LOG_STATE_EVERY:-256}"
+SAVE_EVERY="${SAVE_EVERY:-2048}"
+TRAIN_FRAC="${TRAIN_FRAC:-0.98}"
+FULL_VAL_FINAL="${FULL_VAL_FINAL:-0}"
+if [[ -z "${MMAP+x}" ]]; then
+  if [[ "${NO_MMAP:-0}" == "1" ]]; then
+    MMAP=0
+  else
+    MMAP=1
+  fi
+fi
+if [[ -z "${AUTOCAST+x}" ]]; then
+  if [[ "${NO_AUTOCAST:-0}" == "1" ]]; then
+    AUTOCAST=0
+  else
+    AUTOCAST=1
+  fi
+fi
+TOKENS_ON_DEVICE="${TOKENS_ON_DEVICE:-0}"
+BASE_BIGRAM_DELTA="${BASE_BIGRAM_DELTA:-none}"
+RESIDUAL_READOUT_DELTA_RANK="${RESIDUAL_READOUT_DELTA_RANK:-0}"
+RESIDUAL_READOUT_DELTA_INIT_STD="${RESIDUAL_READOUT_DELTA_INIT_STD:-0.02}"
 
 pg_5090_require_serious_launcher_defaults "$(basename "$0")"
 if [[ "${ALLOW_DEGRADED_5090_SERIOUS:-0}" != "1" && -n "${TRIGRAM_MAX_TOKENS:-}" ]]; then
@@ -251,6 +269,9 @@ geometry_branch_lags=${GEOMETRY_BRANCH_LAGS}
 trigram_memory=${TRIGRAM_MEMORY} top_k=${TRIGRAM_TOP_K} log_scale_init=${TRIGRAM_LOG_SCALE_INIT} count_workers=${TRIGRAM_COUNT_WORKERS}
 learning_rate=${LEARNING_RATE}
 compile=${COMPILE} gradient_checkpointing=${GRADIENT_CHECKPOINTING} skip_done=${SKIP_DONE}
+lr_schedule=${LR_SCHEDULE} weight_decay=${WEIGHT_DECAY} grad_clip=${GRAD_CLIP} hard_loss_gamma=${HARD_LOSS_GAMMA} hard_loss_cap=${HARD_LOSS_CAP}
+val_every=${VAL_EVERY} val_steps=${VAL_STEPS} log_every=${LOG_EVERY} log_state_every=${LOG_STATE_EVERY} save_every=${SAVE_EVERY} full_val_final=${FULL_VAL_FINAL}
+train_frac=${TRAIN_FRAC} mmap=${MMAP} autocast=${AUTOCAST} tokens_on_device=${TOKENS_ON_DEVICE}
 num_steps=${GEOMETRY_NUM_STEPS} lr_hold_steps=${GEOMETRY_LR_HOLD_STEPS} carry_chunks=${GEOMETRY_CARRY_CHUNKS} bptt_chunks=${GEOMETRY_BPTT_CHUNKS}
 batch_size=${GEOMETRY_BATCH_SIZE} seq_len=${GEOMETRY_SEQ_LEN} target_effective_step_tokens=${TARGET_EFFECTIVE_STEP_TOKENS}
 coreamp_spec_cache_root=${COREAMP_SPEC_CACHE_ROOT}
@@ -283,9 +304,24 @@ EOF
   echo "[blocks0_aligned] seed=${seed} trigram_top_k=${TRIGRAM_TOP_K} lr=${LEARNING_RATE} inner_dim=${GEOMETRY_CORE_INNER_DIM_RESOLVED} model_root=${model_root}"
   local sweep_cmd=(
     "${PYTHON_BIN}" "${REPO_ROOT}/tools/run_core_amp_sweep.py" controller
+    --preset "${PRESET}"
     --seed "${seed}"
+    --data-path "${DATA_PATH}"
+    --storage-dtype "${STORAGE_DTYPE}"
+    --target-effective-step-tokens "${TARGET_EFFECTIVE_STEP_TOKENS}"
     --shared-spec-dir "${memory_spec_dir}"
     --model-root "${model_root}"
+    --lr-schedule "${LR_SCHEDULE}"
+    --weight-decay "${WEIGHT_DECAY}"
+    --grad-clip "${GRAD_CLIP}"
+    --hard-loss-gamma "${HARD_LOSS_GAMMA}"
+    --hard-loss-cap "${HARD_LOSS_CAP}"
+    --val-every "${VAL_EVERY}"
+    --val-steps "${VAL_STEPS}"
+    --log-every "${LOG_EVERY}"
+    --log-state-every "${LOG_STATE_EVERY}"
+    --save-every "${SAVE_EVERY}"
+    --train-frac "${TRAIN_FRAC}"
     --core-dim "${GEOMETRY_CORE_DIM}"
     --core-layers "${GEOMETRY_CORE_LAYERS}"
     --core-expansion "${GEOMETRY_CORE_EXPANSION}"
@@ -293,15 +329,29 @@ EOF
     --residual-core-init -3.0
     --num-blocks "${GEOMETRY_NUM_BLOCKS}"
     --branch-lags "${GEOMETRY_BRANCH_LAGS}"
+    --base-bigram-delta "${BASE_BIGRAM_DELTA}"
     --trigram-memory "${TRIGRAM_MEMORY}"
     --trigram-log-scale-init "${TRIGRAM_LOG_SCALE_INIT}"
+    --residual-readout-delta-rank "${RESIDUAL_READOUT_DELTA_RANK}"
+    --residual-readout-delta-init-std "${RESIDUAL_READOUT_DELTA_INIT_STD}"
     --scan-backend "${SCAN_BACKEND}"
     --wandb-project "${WANDB_PROJECT}"
+    --wandb-watch "${WANDB_WATCH}"
+    --wandb-watch-log-freq "${WANDB_WATCH_LOG_FREQ}"
     --wandb-group "${GEOMETRY_LABEL}_trigram512m_${RUN_VERSION}"
     --wandb-tags "core_amp,5090,architecture,trigram_memory,aligned_geometry,screening,${LEARNING_RATE_TAG}"
     --core-amp-phase "5090_trigram_aligned_geometry_screen"
     --run-spec "${run_specs}"
   )
+  pg_5090_append_bool_flag "$(basename "$0")" sweep_cmd "compile" "${COMPILE}"
+  pg_5090_append_bool_flag "$(basename "$0")" sweep_cmd "gradient-checkpointing" "${GRADIENT_CHECKPOINTING}"
+  pg_5090_append_bool_flag "$(basename "$0")" sweep_cmd "full-val-final" "${FULL_VAL_FINAL}"
+  pg_5090_append_bool_flag "$(basename "$0")" sweep_cmd "mmap" "${MMAP}"
+  pg_5090_append_bool_flag "$(basename "$0")" sweep_cmd "autocast" "${AUTOCAST}"
+  pg_5090_append_bool_flag "$(basename "$0")" sweep_cmd "tokens-on-device" "${TOKENS_ON_DEVICE}"
+  pg_5090_append_bool_flag "$(basename "$0")" sweep_cmd "skip-done" "${SKIP_DONE}"
+  pg_5090_append_bool_flag "$(basename "$0")" sweep_cmd "rebuild-shared" "${REBUILD_SHARED}"
+  pg_5090_append_bool_flag "$(basename "$0")" sweep_cmd "wandb" "${WANDB}"
   if [[ "${DRY_RUN:-0}" == "1" ]]; then
     sweep_cmd+=(--dry-run)
   fi

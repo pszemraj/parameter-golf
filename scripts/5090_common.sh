@@ -38,6 +38,26 @@ pg_5090_expect_unset_or_empty() {
   fi
 }
 
+pg_5090_append_bool_flag() {
+  local script_name="$1"
+  local array_name="$2"
+  local flag_name="$3"
+  local value="$4"
+  local -n target_array="${array_name}"
+
+  case "${value,,}" in
+    1|true|yes|on)
+      target_array+=("--${flag_name}")
+      ;;
+    0|false|no|off)
+      target_array+=("--no-${flag_name}")
+      ;;
+    *)
+      pg_5090_fail "${script_name}" "${flag_name} must be boolean-like, got ${value:-<unset>}"
+      ;;
+  esac
+}
+
 pg_5090_require_serious_launcher_defaults() {
   local script_name="$1"
   local expected_preset="${2:-controller_default}"
