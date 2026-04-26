@@ -249,6 +249,10 @@ After the geometry read, the top-K headroom question remains:
 bash scripts/run_5090_trigram_memory_screen.sh --dry-run --run-version v2 --trigram-top-k 4 --seeds 1337
 ```
 
+Current trigram memory is a sparse additive boost into base logits with one
+learned global scale. The recurrent controller does not yet receive trigram
+hit/confidence/margin features and does not arbitrate when to trust the memory.
+
 Then run:
 
 ```bash

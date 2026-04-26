@@ -296,7 +296,7 @@ ensure_shared_spec() {
 resolve_trigram_memory_spec_dir() {
   local source_spec_dir="$1"
   local family="$2"
-  if [[ "${DRY_RUN:-0}" == "1" && ! -f "${source_spec_dir}/spec.pt" ]]; then
+  if [[ "${DRY_RUN:-0}" == "1" ]]; then
     printf '%s/trigram_memory_specs/%s_k%s_dryrun' \
       "${TRIGRAM_MEMORY_SPEC_CACHE_ROOT}" \
       "$(slugify "${family}")" \
@@ -457,7 +457,10 @@ EOF
   pg_5090_append_bool_flag "$(basename "$0")" sweep_cmd "rebuild-shared" "${REBUILD_SHARED}"
   pg_5090_append_bool_flag "$(basename "$0")" sweep_cmd "wandb" "${WANDB}"
   if [[ "${DRY_RUN:-0}" == "1" ]]; then
-    sweep_cmd+=(--dry-run)
+    printf '+'
+    printf ' %q' "${sweep_cmd[@]}"
+    printf '\n'
+    return 0
   fi
   "${sweep_cmd[@]}"
 }

@@ -138,9 +138,24 @@ require_dir() {
   fi
 }
 
+slugify() {
+  local raw="$1"
+  raw="${raw//./p}"
+  raw="${raw//,/m}"
+  raw="${raw// /_}"
+  printf '%s' "${raw}"
+}
+
 resolve_trigram_memory_spec_dir() {
   local source_spec_dir="$1"
   local family="$2"
+  if [[ "${DRY_RUN:-0}" == "1" ]]; then
+    printf '%s/trigram_memory_specs/%s_k%s_dryrun' \
+      "${TRIGRAM_MEMORY_SPEC_CACHE_ROOT}" \
+      "$(slugify "${family}")" \
+      "${TRIGRAM_TOP_K}"
+    return 0
+  fi
   local cmd=(
     "${PYTHON_BIN}" "${REPO_ROOT}/tools/trigram_memory_spec_path.py"
     "${source_spec_dir}"
@@ -166,7 +181,9 @@ ensure_trigram_memory_spec() {
   local source_spec_dir="$1"
   local out_spec_dir="$2"
 
-  require_dir "${source_spec_dir}"
+  if [[ "${DRY_RUN:-0}" != "1" ]]; then
+    require_dir "${source_spec_dir}"
+  fi
 
   echo "Ensuring dense trigram top-${TRIGRAM_TOP_K} memory spec from full training shards ..."
   local cmd=(
@@ -296,7 +313,10 @@ EOF
   pg_5090_append_bool_flag "$(basename "$0")" sweep_cmd "rebuild-shared" "${REBUILD_SHARED}"
   pg_5090_append_bool_flag "$(basename "$0")" sweep_cmd "wandb" "${WANDB}"
   if [[ "${DRY_RUN:-0}" == "1" ]]; then
-    sweep_cmd+=(--dry-run)
+    printf '+'
+    printf ' %q' "${sweep_cmd[@]}"
+    printf '\n'
+    return 0
   fi
   "${sweep_cmd[@]}"
 }

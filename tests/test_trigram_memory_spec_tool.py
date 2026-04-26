@@ -11,6 +11,7 @@ from core_amplifier_lm import AmplifierSpec
 from tools.build_trigram_memory_spec import (
     _copy_model_dir_metadata,
     _spec_with_trigram_table,
+    _validate_trigram_table,
 )
 
 
@@ -121,3 +122,17 @@ def test_spec_with_trigram_table_rejects_bad_cache_payloads(mutate, match: str) 
 
     with pytest.raises(ValueError, match=match):
         _spec_with_trigram_table(spec, table, top_k=2)
+
+
+def test_validate_trigram_table_rejects_metadata_mismatch() -> None:
+    """Cached table reuse should fail on stale request metadata."""
+    spec = _minimal_spec(vocab_size=4)
+    table = _valid_table(vocab_size=4, top_k=2)
+
+    with pytest.raises(ValueError, match="metadata mismatch"):
+        _validate_trigram_table(
+            table,
+            base_spec=spec,
+            top_k=2,
+            expected_metadata={"trigram_top_k": 4},
+        )

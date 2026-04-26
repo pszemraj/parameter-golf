@@ -160,12 +160,15 @@ def _validate_trigram_table(
     *,
     base_spec: AmplifierSpec,
     top_k: int,
+    expected_metadata: dict[str, Any] | None = None,
 ) -> None:
     """Validate a cached trigram tensor table before attaching it.
 
     :param dict[str, Any] table: Cached trigram table payload.
     :param AmplifierSpec base_spec: Base spec that will receive the table.
     :param int top_k: Expected number of top tokens per context.
+    :param dict[str, Any] | None expected_metadata: Optional exact metadata
+        fields expected for this cache request.
     :raises ValueError: If required keys, tensor shapes, or dtypes are invalid.
     """
     if not isinstance(table, dict):
@@ -181,6 +184,15 @@ def _validate_trigram_table(
         raise ValueError(f"trigram table cache is missing required keys: {missing}")
     if not isinstance(table["metadata"], dict):
         raise ValueError("trigram table cache metadata must be a dict")
+    if expected_metadata is not None:
+        mismatches = []
+        for key, expected_value in expected_metadata.items():
+            actual_value = table["metadata"].get(key)
+            if actual_value != expected_value:
+                mismatches.append(f"{key}: cached={actual_value!r} expected={expected_value!r}")
+        if mismatches:
+            joined = "\n  - ".join(mismatches)
+            raise ValueError(f"trigram table cache metadata mismatch:\n  - {joined}")
 
     vocab_size = int(base_spec.vocab_size)
     expected_top_shape = (vocab_size * vocab_size, int(top_k))
@@ -376,7 +388,12 @@ def main() -> None:
     if args.table_cache_root:
         if table_cache_path.exists() and not args.rebuild_table_cache:
             table_payload = torch.load(table_cache_path, map_location="cpu", weights_only=False)
-            _validate_trigram_table(table_payload, base_spec=base_spec, top_k=int(args.top_k))
+            _validate_trigram_table(
+                table_payload,
+                base_spec=base_spec,
+                top_k=int(args.top_k),
+                expected_metadata=_expected_metadata(args, data_fingerprint),
+            )
             print(f"Loaded cached trigram memory table: {table_cache_path}")
         elif args.rebuild_table_cache:
             print(f"Rebuilding trigram memory table cache: {table_cache_path}")

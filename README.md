@@ -52,15 +52,22 @@ conda run -s --name train python tools/check_dataset_shards.py \
 Dry-run the current geometry/top-K protocol:
 
 ```bash
-DRY_RUN=1 FRONTIER_BATCH_ID=geom1 RUN_VERSION=geom1 SEEDS=1337 RUN_BENCHMARK=0 \
-  bash scripts/run_5090_final3day_frontier_batch.sh
+bash scripts/run_5090_final3day_frontier_batch.sh \
+  --dry-run \
+  --frontier-batch-id geom1 \
+  --run-version geom1 \
+  --seeds 1337 \
+  --no-run-benchmark
 ```
 
 Run it:
 
 ```bash
-FRONTIER_BATCH_ID=geom1 RUN_VERSION=geom1 SEEDS=1337 RUN_BENCHMARK=0 \
-  bash scripts/run_5090_final3day_frontier_batch.sh
+bash scripts/run_5090_final3day_frontier_batch.sh \
+  --frontier-batch-id geom1 \
+  --run-version geom1 \
+  --seeds 1337 \
+  --no-run-benchmark
 ```
 
 ## Guardrails

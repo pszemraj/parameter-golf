@@ -175,6 +175,9 @@ Default contract:
   - `trigram_memory=frozen`
   - `TRIGRAM_TOP_K=2`
   - `(x[t-1], x[t]) -> top-K residual logits over the frozen bigram base`
+  - current K2 memory is a sparse additive boost into base logits with one
+    learned global scale; controller features/gates/routers do not arbitrate the
+    boost yet
 - `base_bigram_delta=none`
 - `residual_readout_delta_rank=0`
 - all serious-run protocol invariants still apply

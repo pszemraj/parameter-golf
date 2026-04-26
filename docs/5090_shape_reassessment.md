@@ -104,8 +104,8 @@ dominant unknown.
 Run the staged batch:
 
 ```bash
-DRY_RUN=1 RUN_VERSION=geom1 SEEDS=1337 bash scripts/run_5090_final3day_frontier_batch.sh
-RUN_VERSION=geom1 SEEDS=1337 bash scripts/run_5090_final3day_frontier_batch.sh
+bash scripts/run_5090_final3day_frontier_batch.sh --dry-run --run-version geom1 --seeds 1337
+bash scripts/run_5090_final3day_frontier_batch.sh --run-version geom1 --seeds 1337
 ```
 
 The batch does two things and then stops:
@@ -173,7 +173,7 @@ TARGET_EFFECTIVE_STEP_TOKENS=131072
 Only after geometry and BPTT are read should top-K headroom run:
 
 ```bash
-RUN_VERSION=v2 TRIGRAM_TOP_K=4 SEEDS=1337 bash scripts/run_5090_trigram_memory_screen.sh
+bash scripts/run_5090_trigram_memory_screen.sh --run-version v2 --trigram-top-k 4 --seeds 1337
 ```
 
 If the winning geometry is not the old `48x12x10`, run K4 through
