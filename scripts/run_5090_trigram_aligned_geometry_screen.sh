@@ -43,6 +43,7 @@ export TRIGRAM_RESIDUAL_CLIP="${TRIGRAM_RESIDUAL_CLIP:-8.0}"
 export TRIGRAM_CONFIDENCE_COUNT_CAP="${TRIGRAM_CONFIDENCE_COUNT_CAP:-4096}"
 export TRIGRAM_CHUNK_SIZE="${TRIGRAM_CHUNK_SIZE:-50000000}"
 export TRIGRAM_SPEC_CACHE_ROOT="${TRIGRAM_SPEC_CACHE_ROOT:-${COREAMP_SPEC_CACHE_ROOT}}"
+export TRIGRAM_TABLE_CACHE_ROOT="${TRIGRAM_TABLE_CACHE_ROOT:-${COREAMP_SPEC_CACHE_ROOT}/trigram_tables}"
 
 export TARGET_EFFECTIVE_STEP_TOKENS="${TARGET_EFFECTIVE_STEP_TOKENS:-131072}"
 export DATA_PATH="${DATA_PATH:-${REPO_ROOT}/data/datasets/fineweb10B_sp1024}"
@@ -170,9 +171,13 @@ ensure_trigram_spec() {
     --residual-clip "${TRIGRAM_RESIDUAL_CLIP}"
     --confidence-count-cap "${TRIGRAM_CONFIDENCE_COUNT_CAP}"
     --chunk-size "${TRIGRAM_CHUNK_SIZE}"
+    --table-cache-root "${TRIGRAM_TABLE_CACHE_ROOT}"
   )
   if [[ "${REBUILD_TRIGRAM_SIDECAR:-0}" == "1" ]]; then
     cmd+=(--force)
+  fi
+  if [[ "${REBUILD_TRIGRAM_TABLE_CACHE:-0}" == "1" ]]; then
+    cmd+=(--rebuild-table-cache)
   fi
   if [[ -n "${TRIGRAM_MAX_TOKENS:-}" ]]; then
     cmd+=(--max-tokens "${TRIGRAM_MAX_TOKENS}")
@@ -201,6 +206,7 @@ compile=${COMPILE} gradient_checkpointing=${GRADIENT_CHECKPOINTING} skip_done=${
 target_effective_step_tokens=${TARGET_EFFECTIVE_STEP_TOKENS}
 coreamp_spec_cache_root=${COREAMP_SPEC_CACHE_ROOT}
 trigram_spec_cache_root=${TRIGRAM_SPEC_CACHE_ROOT}
+trigram_table_cache_root=${TRIGRAM_TABLE_CACHE_ROOT}
 scan_backend=${SCAN_BACKEND} wandb_project=${WANDB_PROJECT} cublaslt=${TORCH_BLAS_PREFER_CUBLASLT} py_unbuffered=${PYTHONUNBUFFERED}
 EOF
   if [[ "${DRY_RUN:-0}" == "1" ]]; then

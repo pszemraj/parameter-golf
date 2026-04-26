@@ -107,6 +107,8 @@ Performance interruption:
 - this makes one bounded GPU-friendly geometry probe in-scope before more
   top-K headroom, despite the earlier stop rule against arbitrary `core_dim`
   churn
+- detailed shape rationale and rerun priorities:
+  - [docs/5090_shape_reassessment.md](/home/pszemraj/workspace/projects/parameter-golf/docs/5090_shape_reassessment.md)
 
 ## Protocol Invariants
 
@@ -420,19 +422,19 @@ Seed policy:
 
 Next headroom test after top-2 confirmation:
 
-Before increasing top-K, run the bounded aligned-geometry probe:
+Before increasing top-K, run the bounded aligned-geometry matrix:
 
 ```bash
-DRY_RUN=1 RUN_VERSION=v1 SEEDS=1337 bash scripts/run_5090_trigram_aligned_geometry_screen.sh
-RUN_VERSION=v1 SEEDS=1337 bash scripts/run_5090_trigram_aligned_geometry_screen.sh
+DRY_RUN=1 RUN_VERSION=v1 SEEDS=1337 bash scripts/run_5090_trigram_geometry_matrix.sh
+RUN_VERSION=v1 SEEDS=1337 bash scripts/run_5090_trigram_geometry_matrix.sh
 ```
 
 Promotion rule:
 
 - compare against the current top-2 seed-`1337` `512M` screen
   (`2.0751715673`)
-- promote aligned `128x4x4` if it is better at fixed tokens, or if it is
-  within about `0.015` bpb while preserving the expected large throughput gain
+- promote an aligned shape if it is better at fixed tokens, or if it is within
+  about `0.01-0.015` bpb while preserving a large throughput gain
 - if it is clearly worse, keep current `48x12x10` as the quality leader and
   return to top-K headroom:
 
@@ -538,8 +540,9 @@ Do not spend the final week on:
 
 - more frozen blocks under the already-tested `core_dim=48` setup
 - arbitrary `core_dim` changes that create unfriendly CUDA shapes
-- geometry sweeps beyond the single bounded `128x4x4` probe unless it produces
-  a real metric read
+- open-ended geometry sweeps beyond the bounded matrix in
+  [docs/5090_shape_reassessment.md](/home/pszemraj/workspace/projects/parameter-golf/docs/5090_shape_reassessment.md)
+  unless one row produces a real metric read
 - larger controller ladders unless a new mechanism wins decisively
 - attention-like ideas
 - token-token mixing

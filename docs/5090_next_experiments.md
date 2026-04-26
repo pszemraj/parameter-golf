@@ -55,6 +55,10 @@ Interpretation:
 - the next metric read should test whether the faster aligned controller keeps
   or improves fixed-token `val_bpb`
 
+The detailed reassessment and rerun matrix now live in:
+
+- [docs/5090_shape_reassessment.md](/home/pszemraj/workspace/projects/parameter-golf/docs/5090_shape_reassessment.md)
+
 ## Locked Schedule Defaults
 
 The post-confirmation hold-retune screen is complete.
@@ -215,24 +219,24 @@ Optional repeatable benchmark:
 TORCH_BLAS_PREFER_CUBLASLT=1 conda run -s --name train python tools/benchmark_core_amp_perf.py --mode full --shape current_blocks0_d48_l12_e10:48:12:10 --shape aligned_d128_l4_e4:128:4:4 --batch-size 256 --seq-len 512 --warmup 4 --steps 10
 ```
 
-Dry run the aligned top-2 geometry probe first:
+Dry run the aligned top-2 geometry matrix first:
 
 ```bash
-DRY_RUN=1 RUN_VERSION=v1 SEEDS=1337 bash scripts/run_5090_trigram_aligned_geometry_screen.sh
+DRY_RUN=1 RUN_VERSION=v1 SEEDS=1337 bash scripts/run_5090_trigram_geometry_matrix.sh
 ```
 
 Then run:
 
 ```bash
-RUN_VERSION=v1 SEEDS=1337 bash scripts/run_5090_trigram_aligned_geometry_screen.sh
+RUN_VERSION=v1 SEEDS=1337 bash scripts/run_5090_trigram_geometry_matrix.sh
 ```
 
 Promotion rule:
 
 - compare fixed-token `512M` `val_bpb` against the current top-2 seed-`1337`
   screen (`2.0751715673`)
-- if aligned `128x4x4` is better, or within about `0.015` bpb while retaining
-  the expected large throughput gain, promote it to a `1B` confirmation
+- if an aligned shape is better, or within about `0.01-0.015` bpb while
+  retaining a large throughput gain, promote it to a `1B` confirmation
 - if it is clearly worse at fixed tokens, keep current `48x12x10` for quality
   and return to top-K headroom
 
