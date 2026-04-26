@@ -329,25 +329,60 @@ All three final evals used exact BPB and full validation coverage. Learned
 trigram boost scale converged tightly around `1.17x`, so log-scale-init tuning
 is lower priority than top-K headroom.
 
-Top-K headroom run after the aligned-geometry read:
+Aligned-geometry closeout read:
+
+| Run | Contract | `val_bpb` | Steady tok/s | Artifact bytes |
+|---|---:|---:|---:|---:|
+| `d96_l6_i512` K2 | `512M` | `2.0668155804` | `990,977` | `7,856,990` |
+| `d64_l10_i512` K2 | `512M` | `2.0677617650` | `645,010` | `7,954,836` |
+| `d128_l4_i512` K2 | `512M` | `2.0681435993` | `1,372,453` | `8,568,493` |
+| `d128_l5_i512` K2 | `512M` | `2.0563568016` | `1,128,480` | `8,806,358` |
+| `d96_l6_i512` K2 | `1B` full-val | `2.0264627708` | `1,006,543` | `7,942,889` |
+| `d128_l5_i512` K2 | `1B` full-val | `2.0031207874` | `1,137,730` | `8,830,483` |
+| `d128_l5_i512` K2 BPTT2 | `512M` | `2.0560344760` | `1,140,618` | `8,805,457` |
+| `d128_l5_i512` K4 BPTT2 | `512M` | `2.0155952297` | `1,140,404` | `11,281,814` |
+
+Current interpretation:
+
+- `d128_l5_i512` is the aligned K2 winner and should be treated as the current
+  local finalist.
+- BPTT2 is not independently established; the K2 gain is only `0.0003` bpb at
+  `512M`.
+- K4 is the next serious run. It improves the matching K2+BPTT2 screen by about
+  `0.0404` bpb and still leaves about `4.7 MB` artifact headroom.
+- The completed `1B` full-val rows predate the fixed exact-tail validation
+  iterator. The over-count was small, but final evidence should be generated
+  with the fixed iterator.
+
+Top-K headroom confirmation:
 
 ```bash
-bash scripts/run_5090_adaptive_closeout.sh \
-  --frontier-batch-id geom1 \
-  --run-version geom1 \
-  --seed 1337 \
-  --no-run-benchmark \
-  --count-workers 2 \
-  --stop-after k4
+bash scripts/run_5090_trigram_aligned_geometry_screen.sh \
+  --run-version geom1_k4_confirm \
+  --seeds 1337 \
+  --geometry-label blocks0_d128_l5_i512 \
+  --geometry-core-dim 128 \
+  --geometry-core-layers 5 \
+  --geometry-core-inner-dim 512 \
+  --trigram-top-k 4 \
+  --num-steps 8192 \
+  --lr-hold-steps 7000 \
+  --full-val-final \
+  --val-every 512 \
+  --log-every 128 \
+  --log-state-every 512 \
+  --save-every 4096 \
+  --count-workers 4
 ```
 
 Promotion rule:
 
-- compare to the top-2 seed-`1337` `512M` screen (`2.0751715673`)
-- if `K=4` improves by at least `0.015` bpb and artifact estimate stays under
-  roughly `12 MB`, confirm `K=4` at `1B`
-- if flat or worse, keep top-2 and stop architecture changes unless the
-  remaining time can absorb a blocks1 geometry check
+- compare to the `d128_l5_i512` K2 `1B` full-val result (`2.0031207874`)
+- if K4 improves by at least `0.010` bpb, keep K4 as the local finalist and
+  rerun final full-val evidence under the fixed iterator
+- if K4 is flat or slightly positive, run the paired K4+BPTT2 `1B` confirmation
+  before deciding
+- if K4 regresses, keep K2 `d128_l5_i512` as the local finalist
 
 ### 2. Optional adapter probes
 

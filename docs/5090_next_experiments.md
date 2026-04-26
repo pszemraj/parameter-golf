@@ -204,113 +204,38 @@ Practical consequence:
 
 ## Immediate Next Commands
 
-The top-2 blocks0 trigram memory is confirmed under the `1B` contract. The
-performance read makes the reviewer-aligned geometry frontier higher priority
-than top-K headroom, because the current controller shape is both slow and
-memory-heavy.
+The `geom1` adaptive closeout completed. Current read:
 
-For bounded execution, use the adaptive runner:
+| Run | Contract | `val_bpb` | Steady tok/s | Artifact |
+|---|---:|---:|---:|---:|
+| `d96_l6_i512` K2 | `512M` screen | `2.0668155804` | `990,977` | `7,856,990` |
+| `d64_l10_i512` K2 | `512M` screen | `2.0677617650` | `645,010` | `7,954,836` |
+| `d128_l4_i512` K2 | `512M` screen | `2.0681435993` | `1,372,453` | `8,568,493` |
+| `d128_l5_i512` K2 | `512M` screen | `2.0563568016` | `1,128,480` | `8,806,358` |
+| `d96_l6_i512` K2 | `1B` full-val | `2.0264627708` | `1,006,543` | `7,942,889` |
+| `d128_l5_i512` K2 | `1B` full-val | `2.0031207874` | `1,137,730` | `8,830,483` |
+| `d128_l5_i512` K2 BPTT2 | `512M` screen | `2.0560344760` | `1,140,618` | `8,805,457` |
+| `d128_l5_i512` K4 BPTT2 | `512M` screen | `2.0155952297` | `1,140,404` | `11,281,814` |
 
-```bash
-bash scripts/run_5090_adaptive_closeout.sh \
-  --dry-run \
-  --frontier-batch-id geom1 \
-  --run-version geom1 \
-  --seed 1337 \
-  --no-run-benchmark \
-  --count-workers 2 \
-  --max-confirmations 2 \
-  --stop-after k4
+Interpretation:
 
-bash scripts/run_5090_adaptive_closeout.sh \
-  --frontier-batch-id geom1 \
-  --run-version geom1 \
-  --seed 1337 \
-  --no-run-benchmark \
-  --count-workers 2 \
-  --max-confirmations 2 \
-  --stop-after k4
-```
-
-The runner is intentionally sequential and adaptive:
-
-1. finish the fixed-token K2/blocks0 geometry screen
-2. select at most two rows that clear the analyzer promotion rules
-3. run `1B` confirmation only for selected rows
-4. test `BPTT2` only on the best completed confirmation
-5. run one K4 screen on the selected best geometry/BPTT setting
-
-The manual equivalent starts with the staged frontier batch:
-
-```bash
-bash scripts/run_5090_final3day_frontier_batch.sh --dry-run --run-version geom1 --seeds 1337
-bash scripts/run_5090_final3day_frontier_batch.sh --run-version geom1 --seeds 1337
-```
-
-This runs the synthetic benchmark frontier, then runs the fixed-token K2/blocks0
-screen for:
-
-- `blocks0_d96_l6_i512`
-- `blocks0_d64_l10_i512`
-- `blocks0_d128_l4_i512`
-- `blocks0_d128_l5_i512`
-
-It intentionally stops after Stage 1. Analyze before launching confirmations:
-
-```bash
-conda run -s --name train python tools/analyze_5090_geometry_frontier.py \
-  --run-version geom1 \
-  --benchmark logs/5090_final3day/<batch_id>/geometry_frontier_benchmark.json
-```
-
-Promotion rule:
-
-- better than the current top-2 seed-`1337` screen (`2.0751715673`):
-  promote to `8192`-step / `1B`
-- within `0.020` bpb and at least `1.5x` faster:
-  run `8192` steps before killing
-- within `0.035` bpb and at least `2.0x` faster:
-  run one time-matched confirmation before killing
-- worse by `>0.040` bpb:
-  kill unless the curve slope is clearly unfinished
-
-After the geometry read, the top-K headroom question remains:
-
-```bash
-bash scripts/run_5090_adaptive_closeout.sh \
-  --dry-run \
-  --frontier-batch-id geom1 \
-  --run-version geom1 \
-  --seed 1337 \
-  --no-run-benchmark \
-  --count-workers 2 \
-  --stop-after k4
-```
+- `d128_l5_i512` is the current geometry winner. It beats `d96_l6_i512` by
+  about `0.0233` bpb at `1B` while running faster.
+- `BPTT2` is not established. The K2 BPTT2 gain over K2 BPTT1 at `512M` is
+  only `0.0003` bpb, which is noise for this screen.
+- `K4` is established as a real signal. K4+BPTT2 beats the matching K2+BPTT2
+  `512M` screen by about `0.0404` bpb and stays under the artifact cap with
+  about `4.7 MB` headroom.
+- The `1B` full-val rows were produced before the exact-tail full-validation
+  iterator fix. The over-count was only about `0.17%`, so the ranking is likely
+  stable, but final evidence should be rerun or re-evaluated with the fixed
+  iterator.
 
 Current trigram memory is a sparse additive boost into base logits with one
 learned global scale. The recurrent controller does not yet receive trigram
 hit/confidence/margin features and does not arbitrate when to trust the memory.
 
-Then run:
-
-```bash
-bash scripts/run_5090_adaptive_closeout.sh \
-  --frontier-batch-id geom1 \
-  --run-version geom1 \
-  --seed 1337 \
-  --no-run-benchmark \
-  --count-workers 2 \
-  --stop-after k4
-```
-
-Promotion rule:
-
-- compare `K=4` to the matching `K=2` `512M` seed-`1337` screen
-  (`2.0751715673`)
-- if `K=4` improves by at least `0.015` bpb and artifact estimate stays under
-  roughly `12 MB`, confirm `K=4` at `1B`
-- if `K=4` is flat or worse, keep top-2 and move to packaging / optional
-  blocks1 check
+Next run:
 
 ```bash
 bash scripts/run_5090_trigram_aligned_geometry_screen.sh \
@@ -323,8 +248,22 @@ bash scripts/run_5090_trigram_aligned_geometry_screen.sh \
   --trigram-top-k 4 \
   --num-steps 8192 \
   --lr-hold-steps 7000 \
-  --full-val-final
+  --full-val-final \
+  --val-every 512 \
+  --log-every 128 \
+  --log-state-every 512 \
+  --save-every 4096 \
+  --count-workers 4
 ```
+
+Promotion rule:
+
+- if K4 `1B` beats K2 `1B` (`2.0031207874`) by at least `0.010` bpb, keep K4
+  as the new local finalist and run final fixed-iterator full-val evidence
+- if K4 `1B` is only flat to slightly better, rerun K4 with BPTT2 before
+  deciding because the existing K4 screen used BPTT2
+- if K4 `1B` regresses, treat the previous K4 screen as sampled-eval optimism
+  and keep K2 `d128_l5_i512` as the confirmed local finalist
 
 Replay `blocks1` only as a geometry check after the blocks0 top-K and aligned
 geometry decisions:
