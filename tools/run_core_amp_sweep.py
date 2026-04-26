@@ -237,6 +237,14 @@ def _contract_values_match(actual: object, expected: object) -> bool:
         except (TypeError, ValueError):
             return False
     if isinstance(expected, bool):
+        if isinstance(actual, bool):
+            return actual is expected
+        if isinstance(actual, str):
+            normalized = actual.strip().lower()
+            if normalized in {"1", "true", "yes", "on"}:
+                return expected is True
+            if normalized in {"0", "false", "no", "off"}:
+                return expected is False
         return bool(actual) is expected
     if isinstance(expected, list):
         return list(actual) == expected if isinstance(actual, list) else False
@@ -342,9 +350,23 @@ def run_complete(
         planned_steps
     ):
         return False
+    resolved = read_json(run_dir / "resolved_config.json")
+    full_val_expected = False
+    if expected_contract and "training.full_val_final" in expected_contract:
+        full_val_expected = bool(expected_contract["training.full_val_final"])
+    elif isinstance(resolved, dict):
+        training = resolved.get("training", {})
+        if isinstance(training, dict):
+            full_val_expected = bool(training.get("full_val_final", False))
+    if full_val_expected and not bool(results.get("last_eval_full_coverage")):
+        print(
+            f"Completed run exists but requested final full validation is absent; "
+            f"not skipping {run_dir.name}",
+            flush=True,
+        )
+        return False
     if not expected_contract:
         return True
-    resolved = read_json(run_dir / "resolved_config.json")
     mismatches: list[str] = []
     for key, expected in expected_contract.items():
         actual = _contract_value(resolved, key)
@@ -743,6 +765,7 @@ def update_controller_config(
     cfg.model["branch_router_mode"] = env("BRANCH_ROUTER_MODE", "none")
     cfg.model["base_bigram_delta"] = env("BASE_BIGRAM_DELTA", "none")
     cfg.model["trigram_memory"] = env("TRIGRAM_MEMORY", "none")
+    cfg.model["trigram_top_k"] = int(env("TRIGRAM_TOP_K", str(cfg.model.get("trigram_top_k", 2))))
     cfg.model["trigram_log_scale_init"] = float(env("TRIGRAM_LOG_SCALE_INIT", "0.0"))
     cfg.model["residual_readout_delta_rank"] = int(env("RESIDUAL_READOUT_DELTA_RANK", "0"))
     cfg.model["residual_readout_delta_init_std"] = float(
@@ -888,6 +911,18 @@ def run_controller_sweep(repo_root: Path) -> None:
         env("TRIGRAM_MEMORY", "none"),
         "--trigram-log-scale-init",
         env("TRIGRAM_LOG_SCALE_INIT", "0.0"),
+        "--trigram-top-k",
+        env("TRIGRAM_TOP_K", "2"),
+        "--trigram-smoothing",
+        env("TRIGRAM_SMOOTHING", "0.25"),
+        "--trigram-residual-clip",
+        env("TRIGRAM_RESIDUAL_CLIP", "8.0"),
+        "--trigram-confidence-count-cap",
+        env("TRIGRAM_CONFIDENCE_COUNT_CAP", "4096"),
+        "--trigram-chunk-size",
+        env("TRIGRAM_CHUNK_SIZE", "50000000"),
+        "--trigram-count-workers",
+        env("TRIGRAM_COUNT_WORKERS", "1"),
         "--residual-readout-delta-rank",
         env("RESIDUAL_READOUT_DELTA_RANK", "0"),
         "--residual-readout-delta-init-std",
@@ -922,6 +957,12 @@ def run_controller_sweep(repo_root: Path) -> None:
     print(f"Frozen spec budget: {spec_budget_label}", flush=True)
     if spec_max_tokens:
         init_cmd += ["--max-tokens", spec_max_tokens]
+    if env("TRIGRAM_TABLE_CACHE_ROOT", ""):
+        init_cmd += ["--trigram-table-cache-root", env("TRIGRAM_TABLE_CACHE_ROOT", "")]
+    if env("TRIGRAM_MAX_TOKENS", ""):
+        init_cmd += ["--trigram-max-tokens", env("TRIGRAM_MAX_TOKENS", "")]
+    if env_bool("REBUILD_TRIGRAM_TABLE_CACHE", False):
+        init_cmd.append("--rebuild-trigram-table-cache")
 
     if dry_run and explicit_shared_spec_dir:
         print(f"Dry-run assuming explicit shared spec is prepared: {shared_spec_dir}")
@@ -1233,6 +1274,18 @@ def run_structure_sweep(repo_root: Path) -> None:
             env("TRIGRAM_MEMORY", "none"),
             "--trigram-log-scale-init",
             env("TRIGRAM_LOG_SCALE_INIT", "0.0"),
+            "--trigram-top-k",
+            env("TRIGRAM_TOP_K", "2"),
+            "--trigram-smoothing",
+            env("TRIGRAM_SMOOTHING", "0.25"),
+            "--trigram-residual-clip",
+            env("TRIGRAM_RESIDUAL_CLIP", "8.0"),
+            "--trigram-confidence-count-cap",
+            env("TRIGRAM_CONFIDENCE_COUNT_CAP", "4096"),
+            "--trigram-chunk-size",
+            env("TRIGRAM_CHUNK_SIZE", "50000000"),
+            "--trigram-count-workers",
+            env("TRIGRAM_COUNT_WORKERS", "1"),
             "--residual-readout-delta-rank",
             env("RESIDUAL_READOUT_DELTA_RANK", "0"),
             "--residual-readout-delta-init-std",
@@ -1267,6 +1320,12 @@ def run_structure_sweep(repo_root: Path) -> None:
         print(f"Frozen spec budget: {spec_budget_label}", flush=True)
         if spec_max_tokens:
             init_cmd += ["--max-tokens", spec_max_tokens]
+        if env("TRIGRAM_TABLE_CACHE_ROOT", ""):
+            init_cmd += ["--trigram-table-cache-root", env("TRIGRAM_TABLE_CACHE_ROOT", "")]
+        if env("TRIGRAM_MAX_TOKENS", ""):
+            init_cmd += ["--trigram-max-tokens", env("TRIGRAM_MAX_TOKENS", "")]
+        if env_bool("REBUILD_TRIGRAM_TABLE_CACHE", False):
+            init_cmd.append("--rebuild-trigram-table-cache")
         if spec.readout_rank is not None:
             init_cmd += ["--readout-rank", str(spec.readout_rank)]
 
@@ -1281,6 +1340,9 @@ def run_structure_sweep(repo_root: Path) -> None:
             cfg.meta["phase"] = env("CORE_AMP_PHASE", "5090_structure_screening")
             cfg.model["base_bigram_delta"] = env("BASE_BIGRAM_DELTA", "none")
             cfg.model["trigram_memory"] = env("TRIGRAM_MEMORY", "none")
+            cfg.model["trigram_top_k"] = int(
+                env("TRIGRAM_TOP_K", str(cfg.model.get("trigram_top_k", 2)))
+            )
             cfg.model["trigram_log_scale_init"] = float(env("TRIGRAM_LOG_SCALE_INIT", "0.0"))
             cfg.model["residual_readout_delta_rank"] = int(env("RESIDUAL_READOUT_DELTA_RANK", "0"))
             cfg.model["residual_readout_delta_init_std"] = float(
@@ -1509,6 +1571,24 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--residual-core-init", help="Residual core gate initialization.")
     ap.add_argument("--trigram-memory", choices=["none", "frozen"], help="Trigram memory mode.")
     ap.add_argument("--trigram-log-scale-init", help="Initial trigram memory log scale.")
+    ap.add_argument("--trigram-top-k", type=int, help="Frozen trigram-memory top-K.")
+    ap.add_argument("--trigram-smoothing", type=float, help="Frozen trigram-memory smoothing.")
+    ap.add_argument("--trigram-residual-clip", type=float, help="Frozen trigram residual clip.")
+    ap.add_argument(
+        "--trigram-confidence-count-cap",
+        type=int,
+        help="Frozen trigram confidence count cap.",
+    )
+    ap.add_argument("--trigram-chunk-size", type=int, help="Frozen trigram counting chunk size.")
+    ap.add_argument("--trigram-count-workers", type=int, help="Frozen trigram counting workers.")
+    ap.add_argument("--trigram-table-cache-root", help="Frozen trigram tensor-table cache root.")
+    ap.add_argument("--trigram-max-tokens", type=int, help="Frozen trigram smoke/debug token cap.")
+    ap.add_argument(
+        "--rebuild-trigram-table-cache",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Rebuild the frozen trigram tensor-table cache.",
+    )
     ap.add_argument(
         "--residual-readout-delta-rank", type=int, help="Low-rank residual readout rank."
     )
@@ -1605,6 +1685,11 @@ def apply_cli_overrides(args: argparse.Namespace) -> None:
     """
 
     def set_if(name: str, value: object | None) -> None:
+        """Set an environment value when the matching CLI flag was provided.
+
+        :param str name: Environment variable name.
+        :param object | None value: Parsed CLI value.
+        """
         if value is not None:
             os.environ[name] = str(value)
 
@@ -1646,6 +1731,14 @@ def apply_cli_overrides(args: argparse.Namespace) -> None:
     set_if("RESIDUAL_CORE_INIT", args.residual_core_init)
     set_if("TRIGRAM_MEMORY", args.trigram_memory)
     set_if("TRIGRAM_LOG_SCALE_INIT", args.trigram_log_scale_init)
+    set_if("TRIGRAM_TOP_K", args.trigram_top_k)
+    set_if("TRIGRAM_SMOOTHING", args.trigram_smoothing)
+    set_if("TRIGRAM_RESIDUAL_CLIP", args.trigram_residual_clip)
+    set_if("TRIGRAM_CONFIDENCE_COUNT_CAP", args.trigram_confidence_count_cap)
+    set_if("TRIGRAM_CHUNK_SIZE", args.trigram_chunk_size)
+    set_if("TRIGRAM_COUNT_WORKERS", args.trigram_count_workers)
+    set_if("TRIGRAM_TABLE_CACHE_ROOT", args.trigram_table_cache_root)
+    set_if("TRIGRAM_MAX_TOKENS", args.trigram_max_tokens)
     set_if("RESIDUAL_READOUT_DELTA_RANK", args.residual_readout_delta_rank)
     set_if("RESIDUAL_READOUT_DELTA_INIT_STD", args.residual_readout_delta_init_std)
     set_if("SCAN_BACKEND", args.scan_backend)
@@ -1679,6 +1772,8 @@ def apply_cli_overrides(args: argparse.Namespace) -> None:
         os.environ["SKIP_DONE"] = "1" if args.skip_done else "0"
     if args.rebuild_shared is not None:
         os.environ["REBUILD_SHARED"] = "1" if args.rebuild_shared else "0"
+    if args.rebuild_trigram_table_cache is not None:
+        os.environ["REBUILD_TRIGRAM_TABLE_CACHE"] = "1" if args.rebuild_trigram_table_cache else "0"
 
     run_spec_lines: list[str] = []
     if args.run_specs_file is not None:

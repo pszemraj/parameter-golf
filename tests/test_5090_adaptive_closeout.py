@@ -220,6 +220,35 @@ def test_k4_planner_uses_bptt1_when_bptt_gain_is_noise(tmp_path: Path) -> None:
     assert "--geometry-bptt-chunks" not in commands[0].command
 
 
+def test_k4_planner_ignores_bptt_gain_when_base_screen_invalid(tmp_path: Path) -> None:
+    """BPTT selection should not compare against a stale/mismatched base screen."""
+    label = "blocks0_d96_l6_i512"
+    _write_summary(tmp_path, label, "geom1", bpb=2.20, steps=1024)
+    _write_summary(
+        tmp_path,
+        label,
+        "geom1_confirm",
+        steps=8192,
+        bpb=2.03,
+        full_coverage=True,
+    )
+    _write_summary(
+        tmp_path,
+        label,
+        "geom1_bptt2",
+        bpb=2.00,
+        batch_size=DEFAULT_BPTT_BATCH_SIZE,
+        bptt_chunks=DEFAULT_BPTT_CHUNKS,
+    )
+    args = _args(tmp_path, "k4")
+
+    commands = plan_k4(args)
+
+    assert len(commands) == 1
+    assert "--geometry-bptt-chunks" not in commands[0].command
+    assert "base screen invalid" in commands[0].reason
+
+
 def test_k4_planner_waits_for_completed_bptt_read(tmp_path: Path) -> None:
     """K4 should not run before the selected geometry has a BPTT result."""
     label = "blocks0_d96_l6_i512"

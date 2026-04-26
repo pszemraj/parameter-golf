@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import gzip
 import hashlib
+import json
 import math
 import os
 import random
@@ -791,6 +792,65 @@ def _concat_shards_to_flat(
     return total
 
 
+def _mmap_shard_cache_key(
+    *,
+    source: Path,
+    train_shards: list[Path],
+    val_shards: list[Path],
+    storage_dtype: str,
+    max_tokens: Optional[int],
+    allow_train_frac_val_split: bool,
+) -> str:
+    """Return a cache key for a concrete mmap shard contract.
+
+    :param Path source: Source directory.
+    :param list[Path] train_shards: Training shard paths.
+    :param list[Path] val_shards: Validation shard paths.
+    :param str storage_dtype: On-disk integer dtype.
+    :param Optional[int] max_tokens: Optional train token cap.
+    :param bool allow_train_frac_val_split: Whether train-split fallback is allowed.
+    :return str: Short SHA256 cache key.
+    """
+
+    def shard_entry(path: Path) -> dict[str, Any]:
+        """Return the file identity fields used by the mmap cache key.
+
+        :param Path path: Shard path.
+        :return dict[str, Any]: Relative path, size, and mtime metadata.
+        """
+        stat = path.stat()
+        try:
+            rel = str(path.resolve().relative_to(source.resolve()))
+        except ValueError:
+            rel = str(path.resolve())
+        return {
+            "path": rel,
+            "bytes": int(stat.st_size),
+            "mtime_ns": int(stat.st_mtime_ns),
+        }
+
+    payload = {
+        "version": 1,
+        "source": str(source.resolve()),
+        "storage_dtype": str(storage_dtype),
+        "max_tokens": None if max_tokens is None else int(max_tokens),
+        "allow_train_frac_val_split": bool(allow_train_frac_val_split),
+        "train_shards": [shard_entry(path) for path in train_shards],
+        "val_shards": [shard_entry(path) for path in val_shards],
+    }
+    raw = json_dumps_stable(payload).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:20]
+
+
+def json_dumps_stable(payload: Any) -> str:
+    """Serialize a payload with stable JSON formatting.
+
+    :param Any payload: JSON-serializable value.
+    :return str: Stable compact JSON string.
+    """
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
 def mmap_train_val(
     source: str | Path,
     *,
@@ -833,8 +893,17 @@ def mmap_train_val(
             raise FileNotFoundError(f"no .bin files in {p}")
 
         cdir = Path(cache_dir) if cache_dir else p / ".mmap_cache"
-        train_flat = cdir / "train_int32.bin"
-        val_flat = cdir / "val_int32.bin"
+        cache_key = _mmap_shard_cache_key(
+            source=p,
+            train_shards=train_shards,
+            val_shards=val_shards,
+            storage_dtype=storage_dtype,
+            max_tokens=max_tokens,
+            allow_train_frac_val_split=allow_train_frac_val_split,
+        )
+        train_flat = cdir / f"train_int32_{cache_key}.bin"
+        val_flat = cdir / f"val_int32_{cache_key}.bin"
+        manifest = cdir / f"manifest_{cache_key}.json"
 
         # Build caches independently
         if not train_flat.exists():
@@ -842,6 +911,20 @@ def mmap_train_val(
                 print(f"Building train mmap cache ({len(train_shards)} shards) ...", flush=True)
             cdir.mkdir(parents=True, exist_ok=True)
             _concat_shards_to_flat(train_shards, train_flat, max_tokens=max_tokens, verbose=verbose)
+            manifest.write_text(
+                json_dumps_stable(
+                    {
+                        "cache_key": cache_key,
+                        "source": str(p.resolve()),
+                        "storage_dtype": storage_dtype,
+                        "max_tokens": max_tokens,
+                        "train_flat": train_flat.name,
+                        "val_flat": val_flat.name,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
 
         if val_shards and not val_flat.exists():
             if verbose:
@@ -2045,6 +2128,12 @@ def build_resolved_config_payload(
             "trigram_memory": trigram_memory,
             "trigram_log_scale_init": float(trigram_log_scale_init),
             "trigram_top_k": spec.metadata.get("trigram_top_k"),
+            "trigram_tokens_seen": spec.metadata.get("trigram_tokens_seen"),
+            "trigram_triples_seen": spec.metadata.get("trigram_triples_seen"),
+            "trigram_train_fingerprint": spec.metadata.get("trigram_train_fingerprint"),
+            "trigram_residual_clip": spec.metadata.get("trigram_residual_clip"),
+            "trigram_confidence_count_cap": spec.metadata.get("trigram_confidence_count_cap"),
+            "trigram_max_tokens": spec.metadata.get("trigram_max_tokens"),
             "trigram_residual_scale": spec.metadata.get("trigram_residual_scale"),
             "residual_readout_delta_rank": int(residual_readout_delta_rank),
             "residual_readout_delta_init_std": float(residual_readout_delta_init_std),

@@ -1178,6 +1178,39 @@ def test_mmap_train_val_requires_explicit_val_shard():
             raise AssertionError("expected explicit validation shard requirement")
 
 
+def test_mmap_train_val_cache_is_keyed_by_contract():
+    """Mmap caches should not reuse fixed filenames across incompatible contracts."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir = Path(tmpdir)
+        _, shard_dir = _make_shard_dir(tmpdir)
+        cache_dir = tmpdir / "cache"
+
+        train_a, val_a = mmap_train_val(
+            shard_dir,
+            storage_dtype="uint16",
+            max_tokens=10_000,
+            cache_dir=cache_dir,
+            verbose=False,
+        )
+        train_b, val_b = mmap_train_val(
+            shard_dir,
+            storage_dtype="uint16",
+            max_tokens=20_000,
+            cache_dir=cache_dir,
+            verbose=False,
+        )
+
+        train_files = sorted(cache_dir.glob("train_int32_*.bin"))
+        val_files = sorted(cache_dir.glob("val_int32_*.bin"))
+        assert len(train_files) == 2
+        assert len(val_files) == 2
+        assert not (cache_dir / "train_int32.bin").exists()
+        assert not (cache_dir / "val_int32.bin").exists()
+        assert train_a.shape[0] == 10_000
+        assert train_b.shape[0] == 20_000
+        assert val_a.shape == val_b.shape
+
+
 def test_spec_save_load_roundtrip():
     """Spec survives save → load cycle."""
     with tempfile.TemporaryDirectory() as tmpdir:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -22,7 +23,9 @@ from core_amplifier_lm.experiment import (
     trainable_int8_zlib_bytes,
 )
 from tools.run_core_amp_sweep import (
+    apply_cli_overrides,
     controller_spec_max_tokens_default,
+    parse_args,
     parse_controller_specs,
     resolve_step_token_contract,
     run_complete,
@@ -110,6 +113,35 @@ def test_controller_default_preset_uses_full_frozen_spec_budget():
     assert controller_spec_max_tokens_default("cpu_smoke") == "500000"
 
 
+def test_run_core_amp_sweep_cli_exposes_trigram_protocol(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_core_amp_sweep.py",
+            "controller",
+            "--trigram-memory",
+            "frozen",
+            "--trigram-top-k",
+            "4",
+            "--trigram-count-workers",
+            "8",
+            "--trigram-table-cache-root",
+            "/tmp/trigram-cache",
+            "--rebuild-trigram-table-cache",
+        ],
+    )
+
+    args = parse_args()
+    apply_cli_overrides(args)
+
+    assert os.environ["TRIGRAM_MEMORY"] == "frozen"
+    assert os.environ["TRIGRAM_TOP_K"] == "4"
+    assert os.environ["TRIGRAM_COUNT_WORKERS"] == "8"
+    assert os.environ["TRIGRAM_TABLE_CACHE_ROOT"] == "/tmp/trigram-cache"
+    assert os.environ["REBUILD_TRIGRAM_TABLE_CACHE"] == "1"
+
+
 def test_parse_controller_specs_accepts_optional_per_run_warmup():
     legacy = parse_controller_specs("plain3_e20 3 2.0 8 1 0 -2.0 0.003 1500 0.0003 384 256 512")
     assert legacy[0].warmup_steps is None
@@ -165,6 +197,26 @@ def test_run_complete_rejects_completed_run_with_contract_mismatch(tmp_path: Pat
     )
 
 
+def test_run_complete_rejects_full_val_run_without_full_coverage(tmp_path: Path):
+    run_dir = tmp_path / "run_full_val"
+    run_dir.mkdir()
+    _write_json(
+        run_dir / "run_results.json",
+        {"completed": True, "final_step": 100, "last_eval_full_coverage": False},
+    )
+    _write_json(
+        run_dir / "resolved_config.json",
+        {"run_name": "run_full_val", "training": {"num_steps": 100, "full_val_final": True}},
+    )
+
+    assert not run_complete(run_dir, 100)
+    assert not run_complete(
+        run_dir,
+        100,
+        expected_contract={"run_name": "run_full_val", "training.full_val_final": True},
+    )
+
+
 def test_summarize_run_dir_reads_structured_artifacts(tmp_path: Path):
     run_dir = tmp_path / "run_a"
     run_dir.mkdir()
@@ -185,6 +237,12 @@ def test_summarize_run_dir_reads_structured_artifacts(tmp_path: Path):
                 "base_bigram_delta": "full",
                 "trigram_memory": "frozen",
                 "trigram_top_k": 2,
+                "trigram_tokens_seen": 12345,
+                "trigram_triples_seen": 12343,
+                "trigram_train_fingerprint": "train-sha",
+                "trigram_residual_clip": 8.0,
+                "trigram_confidence_count_cap": 4096,
+                "trigram_max_tokens": None,
                 "residual_readout_delta_rank": 128,
                 "residual_readout_delta_init_std": 0.02,
                 "branch_lags": [1, 2, 4],
@@ -220,6 +278,7 @@ def test_summarize_run_dir_reads_structured_artifacts(tmp_path: Path):
                 },
             },
             "tokenizer_path": "/tmp/tok.model",
+            "tokenizer_sha256": "tokenizer-sha",
             "spec": {"spec_bytes": 1234, "gzip_spec_bytes": 234},
         },
     )
@@ -282,6 +341,9 @@ def test_summarize_run_dir_reads_structured_artifacts(tmp_path: Path):
     assert row["base_bigram_delta"] == "full"
     assert row["trigram_memory"] == "frozen"
     assert row["trigram_top_k"] == "2"
+    assert row["trigram_tokens_seen"] == "12345"
+    assert row["trigram_train_fingerprint"] == "train-sha"
+    assert row["trigram_residual_clip"] == "8.0"
     assert row["residual_readout_delta_rank"] == "128"
     assert row["residual_readout_delta_init_std"] == "0.02"
     assert row["scan_backend"] == "assoc"
@@ -297,6 +359,7 @@ def test_summarize_run_dir_reads_structured_artifacts(tmp_path: Path):
     assert row["driver_version"] == "580.126.20"
     assert row["gpu_total_memory_mib"] == "32109"
     assert row["blas_prefer_cublaslt"] == "true"
+    assert row["tokenizer_sha256"] == "tokenizer-sha"
 
 
 def test_rebuild_summary_cli_writes_tsv_and_markdown(tmp_path: Path):

@@ -264,6 +264,21 @@ def row_bool(row: dict[str, str], field: str) -> bool:
     return str(row.get(field, "")).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def row_float_matches(
+    row: dict[str, str], field: str, expected: float, *, tol: float = 1e-9
+) -> bool:
+    """Return whether a row float field matches an expected value.
+
+    :param dict[str, str] row: Summary row.
+    :param str field: Field name.
+    :param float expected: Expected numeric value.
+    :param float tol: Absolute tolerance.
+    :return bool: ``True`` when the field parses and matches.
+    """
+    actual = as_float(row.get(field))
+    return actual is not None and abs(actual - float(expected)) <= float(tol)
+
+
 def expected_screen_batch_size(args: argparse.Namespace) -> int:
     """Return expected BPTT1 screen/confirmation batch size.
 
@@ -299,7 +314,7 @@ def valid_confirmation_row(row: dict[str, str], args: argparse.Namespace) -> boo
         and as_int(row.get("seq_len")) == expected_seq_len(args)
         and as_int(row.get("bptt_chunks")) == 1
         and as_int(row.get("lr_hold_steps")) == int(args.confirm_hold_steps)
-        and as_float(row.get("learning_rate")) == DEFAULT_LEARNING_RATE
+        and row_float_matches(row, "learning_rate", DEFAULT_LEARNING_RATE)
         and row_bool(row, "exact_val_bpb")
         and row.get("artifact_status") != "OVER_LIMIT"
     )
@@ -339,7 +354,7 @@ def valid_screen_variant_row(
         return False
     if as_int(row.get("lr_hold_steps")) != int(args.variant_hold_steps):
         return False
-    if as_float(row.get("learning_rate")) != DEFAULT_LEARNING_RATE:
+    if not row_float_matches(row, "learning_rate", DEFAULT_LEARNING_RATE):
         return False
     if not row_bool(row, "exact_val_bpb"):
         return False
@@ -691,6 +706,9 @@ def bptt_selected_for_k4(
         run_version=args.run_version,
         seed=str(args.seed),
     )
+    base_errors = screen_eligibility_errors(geometry, base_row, args)
+    if base_errors:
+        return False, f"default BPTT1 selected; base screen invalid={','.join(base_errors)}"
     bptt_row = load_summary_row(
         args.repo_root.resolve(),
         geometry,
@@ -751,7 +769,7 @@ def plan_k4(args: argparse.Namespace) -> list[PlannedCommand]:
         existing,
         args,
         top_k=4,
-        batch_size=int(args.bptt_batch_size) if use_bptt else args.screen_batch_size,
+        batch_size=int(args.bptt_batch_size) if use_bptt else expected_screen_batch_size(args),
         bptt_chunks=int(args.bptt_chunks) if use_bptt else None,
     ):
         return []
@@ -834,7 +852,7 @@ def plan_k4_stage(args: argparse.Namespace) -> StagePlan:
         existing,
         args,
         top_k=4,
-        batch_size=int(args.bptt_batch_size) if use_bptt else args.screen_batch_size,
+        batch_size=int(args.bptt_batch_size) if use_bptt else expected_screen_batch_size(args),
         bptt_chunks=int(args.bptt_chunks) if use_bptt else None,
     ):
         return StagePlan("already_complete", f"K4 screen already completed for {label}", [])

@@ -17,6 +17,8 @@ import torch
 from core_amplifier_lm import AmplifierSpec
 from core_amplifier_lm.experiment import (
     artifact_estimate_bytes,
+    artifact_headroom_bytes,
+    artifact_status,
     estimate_repo_code_bytes,
     spec_size_bytes,
     trainable_int8_zlib_bytes,
@@ -24,6 +26,11 @@ from core_amplifier_lm.experiment import (
 
 
 def _buffer_bytes(spec: AmplifierSpec) -> dict[str, int]:
+    """Return raw fixed-buffer bytes by spec field.
+
+    :param AmplifierSpec spec: Loaded frozen spec.
+    :return dict[str, int]: Buffer byte counts keyed by field name.
+    """
     out: dict[str, int] = {}
     for name in (
         "token_embed",
@@ -46,6 +53,12 @@ def _buffer_bytes(spec: AmplifierSpec) -> dict[str, int]:
 
 
 def _code_files(root: Path, mode: str) -> list[Path]:
+    """List code files included in the artifact estimate.
+
+    :param Path root: Repository or record root.
+    :param str mode: Code accounting mode.
+    :return list[Path]: Files included in code-byte accounting.
+    """
     if mode == "train_gpt":
         return [root / "train_gpt.py"]
     return [
@@ -60,6 +73,11 @@ def _code_files(root: Path, mode: str) -> list[Path]:
 
 
 def _trainable_int8_payload_bytes(model_dir: Path) -> int | None:
+    """Return existing or estimated compressed trainable payload bytes.
+
+    :param Path model_dir: Model directory containing final artifacts.
+    :return int | None: Payload size, or ``None`` when no final state exists.
+    """
     exported_path = model_dir / "final_trainable.int8.ptz"
     if exported_path.exists():
         return int(exported_path.stat().st_size)
@@ -75,6 +93,7 @@ def _trainable_int8_payload_bytes(model_dir: Path) -> int | None:
 
 
 def main() -> None:
+    """Estimate artifact bytes for a built Core/Amplifier model directory."""
     ap = argparse.ArgumentParser()
     ap.add_argument("model_dir", help="Path to a built model dir containing spec.pt")
     ap.add_argument(
@@ -84,6 +103,17 @@ def main() -> None:
         help="Optional record folder for code-byte accounting",
     )
     ap.add_argument("--code-mode", choices=["all-py", "train_gpt"], default="all-py")
+    ap.add_argument(
+        "--assume-trainable-payload-bytes",
+        type=int,
+        default=None,
+        help="Use this trainable payload estimate when final.pt/export is absent.",
+    )
+    ap.add_argument(
+        "--fail-over-limit",
+        action="store_true",
+        help="Exit nonzero if the estimated artifact exceeds the 16 MB limit.",
+    )
     args = ap.parse_args()
 
     model_dir = Path(args.model_dir).resolve()
@@ -102,6 +132,9 @@ def main() -> None:
     print(f"gzip(spec.pt): {spec_gzip_bytes:,}")
     if trainable_payload_bytes is not None:
         print(f"int8 zlib(trainable payload): {trainable_payload_bytes:,}")
+    elif args.assume_trainable_payload_bytes is not None:
+        trainable_payload_bytes = int(args.assume_trainable_payload_bytes)
+        print(f"assumed int8 zlib(trainable payload): {trainable_payload_bytes:,}")
     print()
     print("Fixed-buffer breakdown:")
     for name, nbytes in sorted(buf_bytes.items(), key=lambda kv: kv[1], reverse=True):
@@ -127,7 +160,13 @@ def main() -> None:
         trainable_payload_bytes=trainable_payload_bytes,
         repo_code_bytes=code_total,
     )
+    headroom = artifact_headroom_bytes(estimate)
+    status = artifact_status(estimate)
     print(f"artifact estimate = code + gzip(spec.pt) + int8 trainable: {estimate:,}")
+    print(f"artifact headroom: {headroom:,}")
+    print(f"artifact status: {status}")
+    if args.fail_over_limit and status == "OVER_LIMIT":
+        raise SystemExit(2)
 
 
 if __name__ == "__main__":

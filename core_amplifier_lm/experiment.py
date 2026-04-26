@@ -45,6 +45,12 @@ SUMMARY_FIELDS = [
     "base_bigram_delta",
     "trigram_memory",
     "trigram_top_k",
+    "trigram_tokens_seen",
+    "trigram_triples_seen",
+    "trigram_train_fingerprint",
+    "trigram_residual_clip",
+    "trigram_confidence_count_cap",
+    "trigram_max_tokens",
     "residual_readout_delta_rank",
     "residual_readout_delta_init_std",
     "carry_chunks",
@@ -105,6 +111,7 @@ SUMMARY_FIELDS = [
     "exact_val_bpb",
     "data_path",
     "tokenizer_path",
+    "tokenizer_sha256",
     "run_dir",
 ]
 
@@ -721,6 +728,12 @@ def summarize_run_dir(run_dir: str | Path) -> dict[str, str]:
         "base_bigram_delta": _stringify(model.get("base_bigram_delta")),
         "trigram_memory": _stringify(trigram_memory_config_value(model)),
         "trigram_top_k": _stringify(model.get("trigram_top_k")),
+        "trigram_tokens_seen": _stringify(model.get("trigram_tokens_seen")),
+        "trigram_triples_seen": _stringify(model.get("trigram_triples_seen")),
+        "trigram_train_fingerprint": _stringify(model.get("trigram_train_fingerprint")),
+        "trigram_residual_clip": _stringify(model.get("trigram_residual_clip")),
+        "trigram_confidence_count_cap": _stringify(model.get("trigram_confidence_count_cap")),
+        "trigram_max_tokens": _stringify(model.get("trigram_max_tokens")),
         "residual_readout_delta_rank": _stringify(model.get("residual_readout_delta_rank")),
         "residual_readout_delta_init_std": _stringify(model.get("residual_readout_delta_init_std")),
         "carry_chunks": _stringify(training.get("carry_chunks")),
@@ -790,6 +803,7 @@ def summarize_run_dir(run_dir: str | Path) -> dict[str, str]:
         "exact_val_bpb": _stringify(runtime.get("exact_val_bpb")),
         "data_path": _stringify(data.get("source")),
         "tokenizer_path": _stringify(resolved.get("tokenizer_path")),
+        "tokenizer_sha256": _stringify(resolved.get("tokenizer_sha256")),
         "run_dir": str(root),
     }
     return row
