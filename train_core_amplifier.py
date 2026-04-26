@@ -2934,6 +2934,13 @@ def main() -> None:
         "last_eval_step": last_eval.get("step"),
         "last_val_loss": last_eval.get("val_loss"),
         "last_val_bpb": last_eval.get("val_bpb"),
+        "last_eval_tokens": last_eval.get("eval_tokens"),
+        "last_eval_bytes": last_eval.get("eval_bytes"),
+        "last_eval_coverage_frac": last_eval.get("eval_coverage_frac"),
+        "last_eval_full_coverage": last_eval.get("eval_full_coverage"),
+        "last_eval_steps": last_eval.get("eval_steps"),
+        "last_eval_batch_size": last_eval.get("eval_batch_size"),
+        "last_eval_seq_len": last_eval.get("eval_seq_len"),
         "repo_code_bytes": int(repo_code_bytes),
         "spec_bytes": spec_bytes,
         "gzip_spec_bytes": gzip_spec_bytes,
@@ -2968,6 +2975,10 @@ def main() -> None:
         summary["eval/final_step"] = last_eval.get("step")
         summary["eval/loss_final"] = last_eval.get("val_loss")
         summary["eval/bpb_final"] = last_eval.get("val_bpb")
+        summary["eval/tokens_final"] = last_eval.get("eval_tokens")
+        summary["eval/bytes_final"] = last_eval.get("eval_bytes")
+        summary["eval/coverage_frac_final"] = last_eval.get("eval_coverage_frac")
+        summary["eval/full_coverage_final"] = last_eval.get("eval_full_coverage")
         summary["artifact/code_bytes_final"] = int(repo_code_bytes)
         summary["artifact/spec_bytes_final"] = spec_bytes
         summary["artifact/gzip_spec_bytes_final"] = gzip_spec_bytes
