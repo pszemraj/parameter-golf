@@ -386,6 +386,34 @@ RUN_VERSION=v2 TRIGRAM_TOP_K=4 SEEDS=1337 bash scripts/run_5090_trigram_sidecar_
 Only consider `K=8` if `K=4` improves and the measured artifact estimate still
 leaves enough submission bytes for code and trainable payload.
 
+Confirmation read:
+
+| Seed | Full-val `val_bpb` | Steady tok/s | Artifact bytes | W&B |
+|---:|---:|---:|---:|---|
+| `1337` | `2.0394517881` | `574,571` | `7,331,661` | `d6r3b7uc` |
+| `2027` | `2.0429425206` | `574,798` | `7,332,800` | `9thh1ep8` |
+| `3141` | `2.0422903971` | `575,025` | `7,331,445` | `mue7m0o2` |
+
+Mean `val_bpb=2.0415615686`, std `0.0018559894`. This improves over the
+previous cleaned blocks0 finalist mean `2.1757877509` by about `0.1342` bpb.
+All three final evals used exact BPB and full validation coverage. Learned
+trigram boost scale converged tightly around `1.17x`, so log-scale-init tuning
+is lower priority than top-K headroom.
+
+Next run:
+
+```bash
+RUN_VERSION=v2 TRIGRAM_TOP_K=4 SEEDS=1337 bash scripts/run_5090_trigram_sidecar_screen.sh
+```
+
+Promotion rule:
+
+- compare to the top-2 seed-`1337` `512M` screen (`2.0751715673`)
+- if `K=4` improves by at least `0.015` bpb and artifact estimate stays under
+  roughly `12 MB`, confirm `K=4` at `1B`
+- if flat or worse, keep top-2 and stop architecture changes unless the
+  remaining time can absorb a blocks1 geometry check
+
 ### 7. Secondary lane: base-bigram delta
 
 Script:

@@ -25,6 +25,8 @@ experiments/**/final_trainable.int8.ptz
 experiments/**/summary.tsv
 experiments/**/summary.md
 experiments/**/commands.txt
+experiments/**/diagnostics.json
+experiments/**/diagnostics.md
 experiments/**/*.model
 experiments/**/*.vocab
 experiments/**/wandb/

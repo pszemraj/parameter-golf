@@ -1,6 +1,6 @@
 # 5090 Next Experiments
 
-Last updated: `2026-04-25`
+Last updated: `2026-04-26`
 
 This note is the short working summary. The full architecture source of truth is now:
 
@@ -9,27 +9,24 @@ This note is the short working summary. The full architecture source of truth is
 
 ## Frontier Snapshot
 
-Current best completed `1B` local points by three-seed mean after the cleaned
-`v2` finalist rerun:
+Current best completed `1B` local points by three-seed mean:
 
 | Rank | Run | Mean `val_bpb` | Std | Mean steady tok/s | Mean artifact bytes |
 |---|---|---:|---:|---:|---:|
-| 1 | `blocks0_resid12_e10_lr0035_final_h7000_1b` | `2.1757877509` | `0.0029076698` | `576,426` | `4,007,243` |
-| 2 | `blocks1_resid10_e12_lr0035_final_h7000_1b` | `2.1765101841` | `0.0061762455` | `552,843` | `4,853,073` |
+| 1 | `blocks0_resid12_e10_trigramk2_lr0035_h7000_1b` | `2.0415615686` | `0.0018559894` | `574,798` | `7,331,969` |
+| 2 | `blocks0_resid12_e10_lr0035_final_h7000_1b` | `2.1757877509` | `0.0029076698` | `576,426` | `4,007,243` |
+| 3 | `blocks1_resid10_e12_lr0035_final_h7000_1b` | `2.1765101841` | `0.0061762455` | `552,843` | `4,853,073` |
 
 Interpretation:
 
-- `blocks0 12x10` is now the local mean leader by a small margin and is much faster.
+- `blocks0 12x10 + trigram top-2` is now the local mean leader by a large
+  margin.
 - `blocks1 10x12` is still close enough to keep as the quality counterweight.
-- Both finalists are far under the 16 MB artifact budget, so the next useful
-  architecture ideas should spend some of that budget on non-transformer
-  capacity instead of rechecking small schedule variants.
-- The top-2 trigram sidecar is not yet a `1B` confirmation, but its first
-  `512M` screen is a decisive new local architecture signal:
-  - `blocks0_resid12_e10_trigramk2_lr0035_h3500_512m_s1337`: `2.0751715673`
-  - matching no-sidecar point: `2.2529073228`
-  - sampled gain: about `0.1777` bpb
-  - artifact estimate: `7,333,039` bytes, still `8,666,961` bytes under cap
+- The top-2 trigram confirmation improved over the previous blocks0 finalist
+  mean by about `0.1342` bpb with full final validation coverage.
+- Artifact estimate is still only about `7.33 MB`, so the remaining
+  non-transformer budget should go into top-K/context-memory headroom rather
+  than schedule microtuning.
 
 ## Locked Schedule Defaults
 
@@ -152,31 +149,36 @@ Practical consequence:
 
 ## Immediate Next Commands
 
-The dense SP1024 trigram sidecar has cleared its first continuation bar. The
-next step is to confirm the top-2 blocks0 lane under the `1B` contract with a
-full validation final pass:
+The top-2 blocks0 trigram sidecar is confirmed under the `1B` contract. The
+next serious question is whether more top-K memory buys enough quality to
+justify the extra artifact bytes.
 
 Dry run first:
 
 ```bash
-DRY_RUN=1 RUN_VERSION=v1 SEEDS="1337 2027 3141" bash scripts/run_5090_trigram_confirm1b.sh
+DRY_RUN=1 RUN_VERSION=v2 TRIGRAM_TOP_K=4 SEEDS=1337 bash scripts/run_5090_trigram_sidecar_screen.sh
 ```
 
 Then run:
 
 ```bash
-RUN_VERSION=v1 SEEDS="1337 2027 3141" bash scripts/run_5090_trigram_confirm1b.sh
-```
-
-If the `1B` top-2 confirmation keeps a real margin, spend the next slot on
-top-K headroom, still on blocks0 first:
-
-```bash
 RUN_VERSION=v2 TRIGRAM_TOP_K=4 SEEDS=1337 bash scripts/run_5090_trigram_sidecar_screen.sh
 ```
 
-Replay `blocks1` only after blocks0 top-2 is confirmed or after top-K headroom
-still looks strong:
+Promotion rule:
+
+- compare `K=4` to the matching `K=2` `512M` seed-`1337` screen
+  (`2.0751715673`)
+- if `K=4` improves by at least `0.015` bpb and artifact estimate stays under
+  roughly `12 MB`, confirm `K=4` at `1B`
+- if `K=4` is flat or worse, keep top-2 and move to packaging / optional
+  blocks1 check
+
+```bash
+RUN_VERSION=v2 SIDECAR_VERSION=v2 TRIGRAM_TOP_K=4 SEEDS="1337 2027 3141" bash scripts/run_5090_trigram_confirm1b.sh
+```
+
+Replay `blocks1` only as a geometry check after the blocks0 top-K decision:
 
 ```bash
 RUN_VERSION=v1 SEEDS=1337 RUN_BLOCKS1=1 RUN_BLOCKS0=0 bash scripts/run_5090_trigram_sidecar_screen.sh
@@ -209,10 +211,10 @@ The schedule question is no longer the biggest uncertainty. The stronger thesis 
 
 That means the next architecture order is now:
 
-1. confirm top-2 trigram on blocks0 under the `1B` contract
-2. test top-K headroom (`K=4`, then only consider `K=8` if artifact estimate
+1. test top-K headroom (`K=4`, then only consider `K=8` if artifact estimate
    remains comfortably under cap)
-3. replay `blocks1` only if blocks0 confirmation/headroom stays strong
+2. confirm `K=4` only if it clearly beats top-2 on the same screen contract
+3. replay `blocks1` only after the blocks0 top-K decision
 4. base-bigram delta or readout-delta only as secondary calibration/capacity
    checks
 5. optional score-first adaptive n-gram cache only after the static sidecar is
