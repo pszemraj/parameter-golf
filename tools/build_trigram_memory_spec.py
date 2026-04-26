@@ -255,6 +255,7 @@ def main() -> None:
 
     if not source_spec.exists():
         raise SystemExit(f"missing source spec: {source_spec}")
+    base_spec = AmplifierSpec.load(source_spec)
     data_fingerprint = training_token_file_fingerprint(args.data)
     print(
         "Training shard fingerprint: "
@@ -263,27 +264,7 @@ def main() -> None:
         f"digest={str(data_fingerprint['digest'])[:16]}",
         flush=True,
     )
-    if out_spec.exists() and not args.force:
-        existing = AmplifierSpec.load(out_spec)
-        if existing.trigram_top_tokens is not None:
-            mismatches = _metadata_mismatches(
-                existing.metadata,
-                _expected_metadata(args, data_fingerprint),
-            )
-            if mismatches:
-                joined = "\n  - ".join(mismatches)
-                raise SystemExit(
-                    f"{out_spec} exists with different trigram memory metadata; "
-                    f"pass --force to overwrite:\n  - {joined}"
-                )
-            print(f"Existing trigram memory spec found: {out_spec}")
-            print(existing.summary())
-            return
-        raise SystemExit(f"{out_spec} exists but has no trigram memory; pass --force")
-
-    base_spec = AmplifierSpec.load(source_spec)
     table_cache_path = None
-    table_payload = None
     if args.table_cache_root:
         table_cache_path = _table_cache_path(
             cache_root=args.table_cache_root,
@@ -297,6 +278,30 @@ def main() -> None:
             confidence_count_cap=args.confidence_count_cap,
             max_tokens=args.max_tokens,
         )
+    if out_spec.exists() and not args.force:
+        existing = AmplifierSpec.load(out_spec)
+        if existing.trigram_top_tokens is not None:
+            mismatches = _metadata_mismatches(
+                existing.metadata,
+                _expected_metadata(args, data_fingerprint),
+            )
+            if mismatches:
+                joined = "\n  - ".join(mismatches)
+                raise SystemExit(
+                    f"{out_spec} exists with different trigram memory metadata; "
+                    f"pass --force to overwrite:\n  - {joined}"
+                )
+            if table_cache_path is not None and not table_cache_path.exists():
+                table_cache_path.parent.mkdir(parents=True, exist_ok=True)
+                torch.save(_table_from_spec(existing), table_cache_path)
+                print(f"Backfilled trigram memory table cache: {table_cache_path}")
+            print(f"Existing trigram memory spec found: {out_spec}")
+            print(existing.summary())
+            return
+        raise SystemExit(f"{out_spec} exists but has no trigram memory; pass --force")
+
+    table_payload = None
+    if args.table_cache_root:
         if table_cache_path.exists() and not args.rebuild_table_cache:
             table_payload = torch.load(table_cache_path, map_location="cpu", weights_only=False)
             print(f"Loaded cached trigram memory table: {table_cache_path}")
