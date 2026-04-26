@@ -1,6 +1,6 @@
 datasets
 einops
-fla-core
+flash-linear-attention
 huggingface-hub
 kernels
 numpy

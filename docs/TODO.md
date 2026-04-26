@@ -1,6 +1,27 @@
 # HGDN TODO
 
-## 1. Run The Primary H100 Sparse Confirmation
+## 1. Rerun The Sparse Shortlist After GDN Dynamics Fix
+
+The `localnaivehgdn_sparse3` evidence predates the upstream-style `A_log` /
+`dt_bias` initialization, no-weight-decay decay params, and learned output norm
+weight. Rerun the local sparse exact-contract helper before treating any sparse
+candidate as finalist evidence:
+
+```bash
+USE_WANDB=0 WANDB_MODE=offline \
+DISTRIBUTED_MODE=parallel_muon \
+RUN_PREFIX_BASE=localnaivehgdn_decayfix \
+bash scripts/run_local_hgdn_naive_contract_search.sh
+```
+
+Shortlist to inspect first:
+
+- `configs/hgdn/naive_contract_l8_d512_mid2_dk48_m2.toml`
+- `configs/hgdn/naive_contract_l8_d512_mid2_dk48_v2_m1p5.toml`
+- `configs/hgdn/naive_contract_l8_d512_olmoish_6g2a_v2_m1p25.toml`
+- `configs/hgdn/naive_contract_l8_d512_r0_m2.toml`
+
+## 2. Run The Primary H100 Sparse Confirmation
 
 Use the exact-baseline helper with:
 
@@ -28,7 +49,7 @@ Promotion rule: sparse HGDN must improve the exact `train_gpt.py` comparison
 after speed and artifact size are accounted for. Same-shell attention-only
 wins are diagnostic, not leaderboard evidence.
 
-## 2. Optional Quality-Ceiling Probe
+## 3. Optional Quality-Ceiling Probe
 
 Only run this if the primary H100 result leaves a real quality/speed tradeoff
 unresolved:
@@ -38,9 +59,10 @@ HGDN_CONFIG=configs/hgdn/naive_contract_l9_d512_mid3_dk48_v1p5_m1p75.toml
 ```
 
 The local evidence says this is the fixed-step quality leader but slower enough
-to lose the speed-aware HGDN rank.
+to lose the speed-aware HGDN rank. Because that evidence predates the decay fix,
+rerun it only if the corrected primary shortlist leaves an unresolved margin.
 
-## 3. Calibrate Native FLA After Source Reinstall
+## 4. Calibrate Native FLA After Source Reinstall
 
 First probe the local stack:
 
@@ -58,10 +80,24 @@ conda run -s --name pg python train_gpt_fla_control.py --smoke
 ```
 
 H100 calibration, if requested, uses
-`configs/fla/native_gdn10_d544_sp8192.toml` and `train_gpt_fla_control.py`.
-Keep it isolated from `HybridGPT`.
+`configs/fla/native_prlike_gdn10_d544_sp8192.toml` or
+`configs/fla/native_olmoish_gdn8_d512_sp1024.toml` and
+`train_gpt_fla_control.py`. Keep it isolated from `HybridGPT`.
 
-## 4. Keep Hygiene Checks Green
+Measure wrapper/direct/native FLA path cost locally before paying for a trainer
+ablation:
+
+```bash
+conda run -s --name pg python scripts/bench_fla_recurrence_paths.py --iters 20
+```
+
+For a training-level direct-op ablation, set:
+
+```bash
+GDN_FLA_RECURRENCE_MODE=direct
+```
+
+## 5. Keep Hygiene Checks Green
 
 Before handing off a run bundle or branch:
 
@@ -76,7 +112,8 @@ conda run -s --name pg python -m py_compile \
   hgdn_runtime_utils.py scripts/hgdn_helper_cli.py \
   scripts/screen_hgdn_arch_sizes.py \
   scripts/analyze_local_naive_contract_bundle.py \
-  scripts/check_bpb_sanity.py scripts/probe_fla_stack.py
+  scripts/check_bpb_sanity.py scripts/probe_fla_stack.py \
+  scripts/bench_fla_recurrence_paths.py
 
 conda run -s --name pg ruff check --fix
 conda run -s --name pg ruff format

@@ -168,6 +168,11 @@ Configs live under `configs/hgdn/`, and the active branch notes live in
 `train_gpt.py`; the hybrid trainer's attention-only mode is a diagnostic
 control only.
 
+The custom HGDN layer now uses upstream-style GatedDeltaNet decay initialization,
+keeps `A_log` and `dt_bias` out of weight decay, and adds a learned output norm
+weight. Local sparse results from before that change are useful archaeology but
+should be rerun before paid finalist promotion.
+
 If you cloned fresh and do not yet have the tokenizer or dataset locally, download the published `sp1024` assets first:
 
 ```bash
@@ -201,6 +206,17 @@ WANDB_WATCH=none \
 RUN_PREFIX_BASE=h100naive_sparse_primary \
 bash scripts/run_h100_hgdn_naive_contract_round.sh
 ```
+
+For FLA calibration and recurrence-path timing:
+
+```bash
+conda run -s --name pg python scripts/probe_fla_stack.py
+conda run -s --name pg python scripts/bench_fla_recurrence_paths.py --iters 20
+```
+
+Native FLA control configs are split into
+`configs/fla/native_prlike_gdn10_d544_sp8192.toml` and
+`configs/fla/native_olmoish_gdn8_d512_sp1024.toml`.
 
 For the current branch state, screening protocol, W&B schema, and active
 follow-up work, see:

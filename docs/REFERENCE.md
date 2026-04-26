@@ -50,6 +50,13 @@ beta = sigmoid(w_b(x))        scalar gate (0, 1) per head
 g_dt = -exp(A_log) * softplus(w_a(x) + dt_bias)   decay rate
 ```
 
+The branch initializes `A_log` and `dt_bias` with the same timescale prior used
+by public FLA: `A` is sampled in a positive range up to 16, and `dt_bias` is the
+inverse-softplus of a log-uniform `dt` in `[0.001, 0.1]`. These parameters stay
+in fp32 and are optimized in a no-weight-decay Adam group. Zero initialization
+would start around `exp(-softplus(0)) ~= 0.5` retention per token, which is not
+an OLMo/FLA-faithful GDN starting point.
+
 ### 3.2 Head Dimensions
 
 OLMo Hybrid uses **asymmetric head dimensions**:
@@ -85,6 +92,9 @@ out   = w_out(FusedRMSNormGated(o, g_out).view(B, T, -1))
 ```
 
 The chunked kernel processes sequences in blocks for hardware efficiency. The output is gated with a separate `w_g` projection before the final linear projection back to d_model.
+The custom HGDN path keeps the norm/gate in PyTorch or the optional sidecar
+output op, but includes the learned per-`head_v_dim` norm weight so the
+parameterization matches the important part of `FusedRMSNormGated`.
 
 ### 3.6 GDN Parameter Count (per layer)
 

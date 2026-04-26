@@ -12,6 +12,14 @@ Branch: `exp/hgdn-final`
   tests.
 - Preserved path: `hgdn_cuda/`, `setup_hgdn_cuda.py`, packed QKV projection,
   packed depthwise QKV conv, and FLA recurrence support.
+- GDN dynamics now match the important upstream FLA priors more closely:
+  `A_log` and `dt_bias` use timescale-aware initialization, those decay params
+  run in a no-weight-decay Adam group, negative eigenvalues stay enabled by
+  default, and each GDN layer has a learned output RMSNorm weight.
+- `GDN_FLA_RECURRENCE_MODE=direct` is available for wrapper-tax ablations; the
+  default remains `compile_visible`.
+- Requested optional `GDN_USE_CUDA_*` paths now fail fast in the trainer when
+  `hgdn_cuda_ext` is not loaded instead of silently falling back.
 - Local Python commands on this checkout use `conda run -s --name pg ...`.
 
 The active branch question is narrow: can a sparse HGDN shell beat the exact
@@ -28,7 +36,11 @@ Analyze it with:
 conda run -s --name pg python scripts/analyze_local_naive_contract_bundle.py --top 20
 ```
 
-Current promotion call:
+The completed sparse3 bundle predates the decay-init/no-WD/output-norm fix, so
+it should be treated as pre-fix evidence. It still identifies useful shapes,
+but exact promotion should rerun the shortlist under the corrected GDN dynamics.
+
+Pre-fix promotion call:
 
 | Role | Config | Local result |
 |---|---|---|
@@ -36,9 +48,11 @@ Current promotion call:
 | Secondary quality ceiling | `configs/hgdn/naive_contract_l9_d512_mid3_dk48_v1p5_m1p75.toml` | `586.24 ms/step`, sampled BPB `1.6839`, fixed-step rank HGDN `1`, `UNDER_LIMIT` |
 | Matched attention-only diagnostic control | `configs/hgdn/naive_contract_l8_d512_r0_m2.toml` | `444.40 ms/step`, sampled BPB `1.6921`, `UNDER_LIMIT` |
 
-The primary candidate is the H100 default because it wins the speed-aware HGDN
-ranking locally. The 9-layer candidate is a quality-ceiling probe only if H100
-budget allows.
+The practical rerun shortlist starts with the same primary candidate, the
+matched attention-only diagnostic control, and two new OLMo-prior checks:
+
+- `configs/hgdn/naive_contract_l8_d512_mid2_dk48_v2_m1p5.toml`
+- `configs/hgdn/naive_contract_l8_d512_olmoish_6g2a_v2_m1p25.toml`
 
 ## H100 Commands
 
@@ -86,16 +100,21 @@ The native FLA stack is now checked explicitly:
 conda run -s --name pg python scripts/probe_fla_stack.py
 ```
 
-The isolated native-FLA control lives in `train_gpt_fla_control.py` with config:
+The isolated native-FLA control lives in `train_gpt_fla_control.py` with two
+separate configs:
 
 ```bash
-configs/fla/native_gdn10_d544_sp8192.toml
+configs/fla/native_prlike_gdn10_d544_sp8192.toml
+configs/fla/native_olmoish_gdn8_d512_sp1024.toml
 ```
 
-It uses 10 pure native `fla.layers.GatedDeltaNet` layers, `d_model=544`,
-8 heads, `head_dim=64`, MLP multiplier `3.0`, SP8192 data/tokenizer defaults,
-and the repo's canonical BPB scorer. Optional knobs include `FLA_SHARE_QK`,
-`FLA_SHARE_KV`, `BIGRAM_HASH_BUCKETS`, and `TRIGRAM_HASH_BUCKETS`.
+The PR-like config keeps the 10 pure native `fla.layers.GatedDeltaNet` layers,
+`d_model=544`, 8 heads, `head_dim=64`, MLP multiplier `3.0`, and SP8192
+data/tokenizer defaults. The OLMo-ish config uses `d_model=512`, 8 heads,
+`head_dim=48`, `FLA_VALUE_EXPAND=2.0`, `FLA_ALLOW_NEG_EIGVAL=true`, and SP1024
+so it can be compared against the exact-contract HGDN surface. Optional knobs
+include `FLA_SHARE_QK`, `FLA_SHARE_KV`, `BIGRAM_HASH_BUCKETS`, and
+`TRIGRAM_HASH_BUCKETS`.
 
 Tiny smoke:
 
@@ -111,7 +130,7 @@ Full calibration launch, after loading the TOML as environment:
 ```bash
 set -a
 source <(conda run -s --name pg python scripts/hgdn_helper_cli.py load-env \
-  --path configs/fla/native_gdn10_d544_sp8192.toml)
+  --path configs/fla/native_prlike_gdn10_d544_sp8192.toml)
 set +a
 torchrun --standalone --nproc_per_node=1 train_gpt_fla_control.py
 ```
@@ -120,11 +139,19 @@ This is calibration only. It must not change `HybridGPT` behavior or replace
 the sparse HGDN finalist path unless its canonical score, artifact size, and
 speed justify promotion.
 
+Wrapper/direct/native timing ablation:
+
+```bash
+conda run -s --name pg python scripts/bench_fla_recurrence_paths.py --iters 20
+```
+
 ## Analysis And Sanity Tools
 
 - `scripts/analyze_local_naive_contract_bundle.py`: local sparse bundle ranking.
 - `scripts/check_bpb_sanity.py`: nats/BPB/implied bytes-per-token checks.
 - `scripts/probe_fla_stack.py`: FLA package/API/kernel import probe.
+- `scripts/bench_fla_recurrence_paths.py`: wrapper versus direct public FLA
+  recurrence timing, plus native `fla.layers.GatedDeltaNet` timing.
 - `scripts/screen_hgdn_arch_sizes.py`: artifact-size screen for active configs.
 
 Example BPB sanity check:

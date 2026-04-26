@@ -51,6 +51,12 @@ gdn_expand_v = 1.5
 notes = "Same 8L two-GDN shell with wider value recurrence state."
 
 [[candidates]]
+name = "l8_d512_mid2_dk48_v2_m1p5"
+mlp_mult = 1.5
+gdn_expand_v = 2.0
+notes = "OLMo-faithful GDN state width on the practical two-GDN shell with reduced MLP."
+
+[[candidates]]
 name = "l8_d512_boundary2_dk48_m2"
 block_pattern = ["attn", "attn", "attn", "gdn", "gdn", "attn", "attn", "attn"]
 notes = "Two-GDN cluster straddling the encoder/decoder boundary."
@@ -61,6 +67,14 @@ mlp_mult = 1.75
 gdn_ratio = 2
 block_pattern = ["attn", "gdn", "attn", "gdn", "attn", "gdn", "attn", "attn"]
 notes = "8L sparse hybrid with three distributed GDN islands."
+
+[[candidates]]
+name = "l8_d512_olmoish_6g2a_v2_m1p25"
+mlp_mult = 1.25
+gdn_expand_v = 2.0
+gdn_ratio = 3
+block_pattern = ["gdn", "gdn", "gdn", "attn", "gdn", "gdn", "gdn", "attn"]
+notes = "Small OLMo-style 3:1 hybrid reality check; likely slower, but tests the design prior."
 
 [[candidates]]
 name = "l9_d512_mid2_dk48_m1p75"

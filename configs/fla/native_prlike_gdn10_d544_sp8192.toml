@@ -3,7 +3,7 @@ DATA_PATH = "./data/datasets/fineweb10B_sp8192"
 TOKENIZER_PATH = "./data/tokenizers/fineweb_8192_bpe.model"
 VOCAB_SIZE = 8192
 
-RUN_ID = "native_fla_gdn10_d544_sp8192"
+RUN_ID = "native_prlike_gdn10_d544_sp8192"
 SEED = 1337
 NUM_LAYERS = 10
 MODEL_DIM = 544
@@ -18,7 +18,7 @@ FLA_MODE = "chunk"
 FLA_VALUE_EXPAND = 1.0
 FLA_USE_GATE = true
 FLA_USE_SHORT_CONV = true
-FLA_ALLOW_NEG_EIGVAL = false
+FLA_ALLOW_NEG_EIGVAL = true
 FLA_CONV_SIZE = 4
 FLA_CONV_BIAS = false
 FLA_NORM_EPS = 1e-5

@@ -55,6 +55,7 @@ DEFAULT_MODEL_KWARGS: dict[str, Any] = {
     "gdn_v_conv_output_contiguous": True,
     "gdn_gates_fp32": True,
     "gdn_output_norm_fp32": True,
+    "gdn_fla_recurrence_mode": "compile_visible",
     "mlp_mult": 3.25,
     "leaky_slope": 0.5,
     "gdn_ratio": 1,

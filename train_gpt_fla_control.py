@@ -77,12 +77,12 @@ class Hyperparameters:
     logit_softcap = float(os.environ.get("LOGIT_SOFTCAP", 30.0))
 
     fla_mode = os.environ.get("FLA_MODE", "chunk")
-    fla_value_expand = float(os.environ.get("FLA_VALUE_EXPAND", 1.0))
+    fla_value_expand = float(os.environ.get("FLA_VALUE_EXPAND", 2.0))
     fla_num_v_heads = os.environ.get("FLA_NUM_V_HEADS")
     fla_num_v_heads = None if fla_num_v_heads in {None, ""} else int(fla_num_v_heads)
     fla_use_gate = env_bool("FLA_USE_GATE", True)
     fla_use_short_conv = env_bool("FLA_USE_SHORT_CONV", True)
-    fla_allow_neg_eigval = env_bool("FLA_ALLOW_NEG_EIGVAL", False)
+    fla_allow_neg_eigval = env_bool("FLA_ALLOW_NEG_EIGVAL", True)
     fla_conv_size = int(os.environ.get("FLA_CONV_SIZE", 4))
     fla_conv_bias = env_bool("FLA_CONV_BIAS", False)
     fla_norm_eps = float(os.environ.get("FLA_NORM_EPS", 1e-5))
@@ -676,7 +676,8 @@ def main() -> int:
     log0(
         "native_fla_knobs:"
         f" mode:{args.fla_mode} short_conv:{int(args.fla_use_short_conv)} "
-        f"gate:{int(args.fla_use_gate)} share_qk:{int(args.fla_share_qk)} "
+        f"gate:{int(args.fla_use_gate)} allow_neg:{int(args.fla_allow_neg_eigval)} "
+        f"share_qk:{int(args.fla_share_qk)} "
         f"share_kv:{int(args.fla_share_kv)} bigram:{args.bigram_hash_buckets} "
         f"trigram:{args.trigram_hash_buckets}"
     )
