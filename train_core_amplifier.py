@@ -3156,7 +3156,7 @@ def main() -> None:
                     step=step,
                 )
             print(
-                f"step {step:6d} | train_bpb ~{train_bpb_approx:.4f} | train_loss {train_loss:.4f} | "
+                f"step {step:6d} | train_bpb {train_bpb_approx:.4f} | train_loss {train_loss:.4f} | "
                 f"base_loss {last_stats['base_loss']:.4f} | w_max {last_stats['weight_max']:.2f} | "
                 f"lr {current_lr:.2e} | tok/s {tok_per_sec:,.0f}"
             )
