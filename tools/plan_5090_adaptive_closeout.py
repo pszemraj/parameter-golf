@@ -24,6 +24,7 @@ from tools.analyze_5090_geometry_frontier import (  # noqa: E402
     SCREEN_EFFECTIVE_STEP_TOKENS,
     AnalyzedRow,
     Geometry,
+    ScreenContract,
     as_float,
     as_int,
     confirmation_train_label,
@@ -692,6 +693,7 @@ def plan_bptt(args: argparse.Namespace) -> list[PlannedCommand]:
     confirmations = completed_confirmations(args)
     if not confirmations:
         return []
+    contract = screen_contract(args)
     label, confirm_row = confirmations[0]
     existing = load_summary_row(
         args.repo_root.resolve(),
@@ -702,7 +704,7 @@ def plan_bptt(args: argparse.Namespace) -> list[PlannedCommand]:
     if valid_screen_variant_row(
         existing,
         args,
-        top_k=2,
+        top_k=contract.trigram_top_k,
         batch_size=int(args.bptt_batch_size),
         bptt_chunks=int(args.bptt_chunks),
     ):
@@ -722,7 +724,7 @@ def plan_bptt(args: argparse.Namespace) -> list[PlannedCommand]:
                 seed=str(args.seed),
                 num_steps=int(args.variant_steps),
                 hold_steps=int(args.variant_hold_steps),
-                trigram_top_k=2,
+                trigram_top_k=contract.trigram_top_k,
                 full_val_final=False,
                 val_every=256,
                 log_every=64,
@@ -730,7 +732,21 @@ def plan_bptt(args: argparse.Namespace) -> list[PlannedCommand]:
                 save_every=2048,
                 batch_size=int(args.bptt_batch_size),
                 bptt_chunks=int(args.bptt_chunks),
-                train_label="smoke_bptt2" if bool(args.smoke_test) else "512m_bptt2",
+                train_label=(
+                    "smoke_bptt2"
+                    if bool(args.smoke_test)
+                    else confirmation_train_label(
+                        ScreenContract(
+                            planned_steps=contract.planned_steps,
+                            effective_step_tokens=contract.effective_step_tokens,
+                            num_blocks=contract.num_blocks,
+                            trigram_top_k=contract.trigram_top_k,
+                            seq_len=contract.seq_len,
+                            batch_size=int(args.bptt_batch_size),
+                            bptt_chunks=int(args.bptt_chunks),
+                        )
+                    ).replace("1b", "512m", 1)
+                ),
                 **shared_command_kwargs(args),
             ),
         )
@@ -759,7 +775,7 @@ def plan_bptt_stage(args: argparse.Namespace) -> StagePlan:
     if valid_screen_variant_row(
         existing,
         args,
-        top_k=2,
+        top_k=expected_screen_trigram_top_k(args),
         batch_size=int(args.bptt_batch_size),
         bptt_chunks=int(args.bptt_chunks),
     ):

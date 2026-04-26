@@ -173,6 +173,35 @@ def test_bptt_planner_uses_best_completed_confirmation(tmp_path: Path) -> None:
     assert str(BPTT_STEPS) in commands[0].command
 
 
+def test_bptt_planner_preserves_k4_long_context_contract(tmp_path: Path) -> None:
+    """BPTT follow-up after a K4 context confirmation must not fall back to K2."""
+    label = "blocks0_d128_l5_i512"
+    _write_summary(
+        tmp_path,
+        label,
+        "geom1_seq2048_confirm",
+        steps=8192,
+        bpb=1.973,
+        top_k=4,
+        batch_size=64,
+        seq_len=2048,
+        full_coverage=True,
+    )
+    args = _args(tmp_path, "bptt")
+    args.run_version = "geom1_seq2048"
+
+    commands = plan_bptt(args)
+
+    assert len(commands) == 1
+    command = commands[0].command
+    assert "--trigram-top-k" in command
+    assert "4" in command
+    assert "--geometry-seq-len" in command
+    assert "2048" in command
+    assert "--geometry-train-label" in command
+    assert "512m_seq2048_bptt2_k4" in command
+
+
 def test_k4_planner_combines_bptt_only_when_it_wins(tmp_path: Path) -> None:
     """K4 should combine with BPTT2 only after the BPTT screen improves."""
     label = "blocks0_d96_l6_i512"
