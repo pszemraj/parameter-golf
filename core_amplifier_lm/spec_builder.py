@@ -19,6 +19,7 @@ import math
 import multiprocessing as mp
 import os
 import resource
+import shutil
 import tempfile
 import time
 from pathlib import Path
@@ -47,6 +48,63 @@ def _get_rss_gb() -> float:
     if os.uname().sysname == "Darwin":
         return maxrss / 1e9
     return maxrss / 1e6  # Linux: KB → GB
+
+
+def _available_memory_bytes() -> Optional[int]:
+    """Return best-effort available system memory in bytes.
+
+    :return Optional[int]: Available bytes, or ``None`` when unavailable.
+    """
+    meminfo = Path("/proc/meminfo")
+    if meminfo.exists():
+        for line in meminfo.read_text(encoding="utf-8").splitlines():
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) * 1024
+    if hasattr(os, "sysconf"):
+        try:
+            pages = int(os.sysconf("SC_AVPHYS_PAGES"))
+            page_size = int(os.sysconf("SC_PAGE_SIZE"))
+            return pages * page_size
+        except (OSError, ValueError):
+            return None
+    return None
+
+
+def _preflight_parallel_trigram_count(
+    *,
+    vocab_size: int,
+    count_workers: int,
+    tmpdir: Path,
+) -> None:
+    """Fail loudly when exact parallel trigram counting lacks RAM or temp disk.
+
+    :param int vocab_size: Vocabulary size.
+    :param int count_workers: Number of worker-local dense tables.
+    :param Path tmpdir: Temporary directory used for worker table files.
+    """
+    table_bytes = int(vocab_size) * int(vocab_size) * int(vocab_size) * np.dtype(np.uint32).itemsize
+    required_tmp_bytes = table_bytes * int(count_workers)
+    tmp_free_bytes = shutil.disk_usage(tmpdir).free
+    if tmp_free_bytes < required_tmp_bytes:
+        raise RuntimeError(
+            "parallel trigram memory counting needs more temporary disk space: "
+            f"workers={count_workers} table={table_bytes / 1e9:.2f} GB "
+            f"required_tmp={required_tmp_bytes / 1e9:.2f} GB "
+            f"available_tmp={tmp_free_bytes / 1e9:.2f} GB at {tmpdir}"
+        )
+
+    available_ram = _available_memory_bytes()
+    if available_ram is None:
+        return
+    required_ram_bytes = int(table_bytes * (int(count_workers) + 1) * 1.05)
+    if available_ram < required_ram_bytes:
+        raise RuntimeError(
+            "parallel trigram memory counting needs more RAM headroom: "
+            f"workers={count_workers} table={table_bytes / 1e9:.2f} GB "
+            f"estimated_required={required_ram_bytes / 1e9:.2f} GB "
+            f"available={available_ram / 1e9:.2f} GB. "
+            "Lower --count-workers or use the serial exact counter."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1078,6 +1136,11 @@ def _count_trigram_dense_parallel(
     num_contexts = vocab_size * vocab_size
     blocks = _split_contiguous_files(files, count_workers)
     workers = len(blocks)
+    _preflight_parallel_trigram_count(
+        vocab_size=vocab_size,
+        count_workers=workers,
+        tmpdir=Path(tempfile.gettempdir()),
+    )
     counts = np.zeros((num_contexts, vocab_size), dtype=np.uint32)
     started = time.monotonic()
 
