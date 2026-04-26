@@ -349,6 +349,43 @@ Promotion rule:
 - between those: run diagnostics and a full-val sanity check before replaying
 - replay `blocks1` only after `blocks0` shows a real signal
 
+Current read:
+
+- `blocks0_resid12_e10_trigramk2_lr0035_h3500_512m_s1337`: `2.0751715673`
+- matching no-sidecar `blocks0_resid12_e10_lr0035_h3500_512m_s1337`:
+  `2.2529073228`
+- sampled gain: about `0.1777` bpb
+- final-checkpoint diagnostic on `2.1M` validation tokens:
+  - full gain over frozen bigram base: about `0.4171` bpb
+  - disabling only the trigram sidecar costs about `0.2648` bpb
+- artifact estimate: `7,333,039` bytes, leaving `8,666,961` bytes headroom
+
+The continuation bar is cleared. Use the dedicated confirmation launcher:
+
+```bash
+bash scripts/run_5090_trigram_confirm1b.sh
+```
+
+Default confirmation contract:
+
+- reps:
+  - `blocks0_resid12_e10`
+- seeds:
+  - `1337 2027 3141`
+- `8192` steps / `1B` planned tokens
+- `lr_hold_steps=7000`
+- `FULL_VAL_FINAL=1`
+- sidecar defaults remain `TRIGRAM_TOP_K=2`, `trigram_sidecar=frozen`
+
+Next headroom test after top-2 confirmation:
+
+```bash
+RUN_VERSION=v2 TRIGRAM_TOP_K=4 SEEDS=1337 bash scripts/run_5090_trigram_sidecar_screen.sh
+```
+
+Only consider `K=8` if `K=4` improves and the measured artifact estimate still
+leaves enough submission bytes for code and trainable payload.
+
 ### 7. Secondary lane: base-bigram delta
 
 Script:

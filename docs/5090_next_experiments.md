@@ -1,6 +1,6 @@
 # 5090 Next Experiments
 
-Last updated: `2026-04-24`
+Last updated: `2026-04-25`
 
 This note is the short working summary. The full architecture source of truth is now:
 
@@ -24,6 +24,12 @@ Interpretation:
 - Both finalists are far under the 16 MB artifact budget, so the next useful
   architecture ideas should spend some of that budget on non-transformer
   capacity instead of rechecking small schedule variants.
+- The top-2 trigram sidecar is not yet a `1B` confirmation, but its first
+  `512M` screen is a decisive new local architecture signal:
+  - `blocks0_resid12_e10_trigramk2_lr0035_h3500_512m_s1337`: `2.0751715673`
+  - matching no-sidecar point: `2.2529073228`
+  - sampled gain: about `0.1777` bpb
+  - artifact estimate: `7,333,039` bytes, still `8,666,961` bytes under cap
 
 ## Locked Schedule Defaults
 
@@ -146,36 +152,40 @@ Practical consequence:
 
 ## Immediate Next Commands
 
-The next serious architecture probe is now the dense SP1024 trigram sidecar.
-This spends artifact budget on literal high-order context memory instead of
-another current-token/base-logit adapter. The sidecar stores top-K residual
-boosts for `(x[t-1], x[t])` contexts and the model carries the previous token
-through chunk state, so training/eval/`step()` all use the same causal context.
+The dense SP1024 trigram sidecar has cleared its first continuation bar. The
+next step is to confirm the top-2 blocks0 lane under the `1B` contract with a
+full validation final pass:
 
 Dry run first:
 
 ```bash
-DRY_RUN=1 RUN_VERSION=v1 SEEDS=1337 bash scripts/run_5090_trigram_sidecar_screen.sh
+DRY_RUN=1 RUN_VERSION=v1 SEEDS="1337 2027 3141" bash scripts/run_5090_trigram_confirm1b.sh
 ```
 
 Then run:
 
 ```bash
-RUN_VERSION=v1 SEEDS=1337 bash scripts/run_5090_trigram_sidecar_screen.sh
+RUN_VERSION=v1 SEEDS="1337 2027 3141" bash scripts/run_5090_trigram_confirm1b.sh
 ```
 
-The default first pass intentionally runs only `blocks0` seed `1337`. Replay
-`blocks1` only if the sampled screen shows a real sidecar signal:
+If the `1B` top-2 confirmation keeps a real margin, spend the next slot on
+top-K headroom, still on blocks0 first:
+
+```bash
+RUN_VERSION=v2 TRIGRAM_TOP_K=4 SEEDS=1337 bash scripts/run_5090_trigram_sidecar_screen.sh
+```
+
+Replay `blocks1` only after blocks0 top-2 is confirmed or after top-K headroom
+still looks strong:
 
 ```bash
 RUN_VERSION=v1 SEEDS=1337 RUN_BLOCKS1=1 RUN_BLOCKS0=0 bash scripts/run_5090_trigram_sidecar_screen.sh
 ```
 
-Use the diagnostic tool on completed or partial runs before extending a losing
-lane:
+Use diagnostics on completed or partial runs before adding secondary adapters:
 
 ```bash
-conda run -s --name train python tools/analyze_core_amp_run.py /path/to/run_dir --steps 16
+conda run -s --name train python tools/analyze_core_amp_run.py /path/to/run_dir --checkpoint /path/to/run_dir/final.pt --steps 64 --batch-size 64 --device cuda
 ```
 
 The old `gate x lr` sidecar is no longer recommended.
@@ -199,9 +209,10 @@ The schedule question is no longer the biggest uncertainty. The stronger thesis 
 
 That means the next architecture order is now:
 
-1. diagnostics on completed finalists and any partial probe
-2. dense SP1024 trigram top-K sidecar
-3. replay `blocks1` only if `blocks0` shows a real sidecar signal
+1. confirm top-2 trigram on blocks0 under the `1B` contract
+2. test top-K headroom (`K=4`, then only consider `K=8` if artifact estimate
+   remains comfortably under cap)
+3. replay `blocks1` only if blocks0 confirmation/headroom stays strong
 4. base-bigram delta or readout-delta only as secondary calibration/capacity
    checks
 5. optional score-first adaptive n-gram cache only after the static sidecar is
@@ -214,7 +225,8 @@ Current practical interpretation:
 - the existing gate cross-term did not survive at `lr=3.5e-3`
 - current lag operators are not evidence against temporal structure because
   they do not expose literal high-order context identity
-- trigram sidecar is now the strongest non-transformer use of artifact budget
+- top-2 trigram sidecar is now the strongest non-transformer use of artifact
+  budget and should own the remaining confirmation window
 
 ## Fast-Scan Note
 
