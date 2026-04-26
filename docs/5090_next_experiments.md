@@ -2,10 +2,10 @@
 
 Last updated: `2026-04-26`
 
-This note is the short working summary. The full architecture source of truth is now:
+This note is the short working summary. Current protocol details live in:
 
-- [docs/5090_architecture_plan.md](/home/pszemraj/workspace/projects/parameter-golf/docs/5090_architecture_plan.md)
 - [docs/5090_final_week_plan.md](/home/pszemraj/workspace/projects/parameter-golf/docs/5090_final_week_plan.md)
+- [docs/5090_shape_reassessment.md](/home/pszemraj/workspace/projects/parameter-golf/docs/5090_shape_reassessment.md)
 
 ## Frontier Snapshot
 
@@ -116,19 +116,12 @@ being packaged as final evidence.
 
 ## Final-Week Execution Read
 
-The original final-week sequence has run far enough to close its main loop:
+The original final-week sequence has run far enough to close its main loop. The
+safe-LR, gate, EMA, router, old finalist-confirmation, schedule-retune,
+wide-confirm, and gate/LR follow-up launchers are retired and removed from the
+active script surface.
 
-Launchers:
-
-```bash
-bash scripts/run_5090_safe_maxlr_probe.sh
-bash scripts/run_5090_architecture_gate_screen.sh
-bash scripts/run_5090_architecture_temporal_screen.sh
-bash scripts/run_5090_architecture_router_screen.sh
-bash scripts/run_5090_finalist_confirm1b.sh
-```
-
-Serious final-week launchers now fail before training if a shell override would
+Serious maintained launchers fail before training if a shell override would
 change the maintained protocol. Defaults are:
 
 - `WANDB_PROJECT=pg-hconv-ablations`
@@ -194,9 +187,8 @@ Completed so far in the final-week lane:
 
 ## Plan Delta From The No-Fallback Audit
 
-The high-level batch order did not change.
-
-What changed is the acceptance contract for serious runs:
+The pre-pivot batch order is now closed. What remains from that work is the
+acceptance contract for serious runs:
 
 - serious runs now count only if they keep exact `val_bpb`
 - serious CUDA runs now count only if `scan_backend=auto` resolves to `assoc_accel`
@@ -205,9 +197,10 @@ What changed is the acceptance contract for serious runs:
 
 Practical consequence:
 
-- the next steps are still `max_lr`, gating, EMA, router, and then `1B` finalists
-- but any run that only “works” by slipping onto approximate `bpb`, a slower scan backend, or another degraded path should be treated as invalid and rerun
-- explicit smoke/debug opt-ins still exist, but they are no longer ambiguous with maintained-path experiment results
+- any run that only “works” by slipping onto approximate `bpb`, a slower scan
+  backend, or another degraded path should be treated as invalid and rerun
+- explicit smoke/debug opt-ins still exist, but they are no longer ambiguous
+  with maintained-path experiment results
 
 ## Immediate Next Commands
 
@@ -282,22 +275,16 @@ geometry decisions:
 RUN_VERSION=v1 SEEDS=1337 RUN_BLOCKS1=1 RUN_BLOCKS0=0 bash scripts/run_5090_trigram_memory_screen.sh
 ```
 
-Use diagnostics on completed or partial runs before adding secondary adapters:
+Use diagnostics on completed or partial runs before recovering any secondary
+adapter probe from history:
 
 ```bash
 conda run -s --name train python tools/analyze_core_amp_run.py /path/to/run_dir --checkpoint /path/to/run_dir/final.pt --steps 64 --batch-size 64 --device cuda
 ```
 
-The old `gate x lr` follow-up is no longer recommended.
-The base-bigram delta and readout-delta scripts remain available, but they are
-now secondary to the trigram memory probe.
-
-Readout-delta is still available, but it is a secondary adapter lane. Use it
-only after the trigram memory read is understood:
-
-```bash
-RUN_VERSION=v1 SEEDS=1337 RANKS="128 256" bash scripts/run_5090_readout_delta_screen.sh
-```
+The old `gate x lr` follow-up is removed. The base-bigram delta and
+readout-delta launcher scripts are also removed from the active script surface;
+recover them from git only if diagnostics make them clearly relevant.
 
 ## Why The Architecture Lane Changed
 
@@ -315,9 +302,7 @@ That means the next architecture order is now:
 3. test longer BPTT on the best aligned survivor only
 4. test top-K headroom (`K=4`, then only consider `K=8` if artifact estimate
    remains comfortably under cap)
-5. base-bigram delta or readout-delta only as secondary calibration/capacity
-   checks
-6. optional score-first adaptive n-gram cache only after the static memory is
+5. optional score-first adaptive n-gram cache only after the static memory is
    validated and compliance is documented
 
 Current practical interpretation:
