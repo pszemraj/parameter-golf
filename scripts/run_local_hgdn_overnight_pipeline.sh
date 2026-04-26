@@ -316,7 +316,7 @@ print_plan() {
     echo "  stage1: bounded candidate/control screen using the selected recurrence mode"
     echo "  stage2: longer confirmation for top HGDN configs plus matched controls"
     echo "  stage3: conditional OLMo-ish 6G/2A sanity check when the primary beats control"
-    echo "No paid-H100 job or paid-H100 handoff is launched or generated."
+    echo "h100_handoff=none"
 }
 
 run_recurrence_stage() {
