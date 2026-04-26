@@ -11,7 +11,6 @@ RUN_VERSION="${RUN_VERSION:-v2}"
 RUN_BLOCKS1="${RUN_BLOCKS1:-0}"
 RUN_BLOCKS0="${RUN_BLOCKS0:-1}"
 LEARNING_RATE="${LEARNING_RATE:-0.0035}"
-LEARNING_RATE_TAG="$(pg_5090_lr_slug "${LEARNING_RATE}")"
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export TORCH_BLAS_PREFER_CUBLASLT="${TORCH_BLAS_PREFER_CUBLASLT:-1}"
@@ -73,6 +72,49 @@ WANDB="${WANDB:-1}"
 WANDB_PROJECT="${WANDB_PROJECT:-pg-hconv-ablations}"
 WANDB_WATCH="${WANDB_WATCH:-gradients}"
 WANDB_WATCH_LOG_FREQ="${WANDB_WATCH_LOG_FREQ:-25}"
+DRY_RUN="${DRY_RUN:-0}"
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [options]
+
+Options:
+  --run-version VALUE
+  --seeds VALUE
+  --run-blocks1 | --no-run-blocks1
+  --run-blocks0 | --no-run-blocks0
+  --learning-rate VALUE
+  --trigram-top-k VALUE
+  --count-workers VALUE
+  --full-val-final | --no-full-val-final
+  --dry-run
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --run-version) RUN_VERSION="$2"; shift 2 ;;
+    --seeds) SEEDS="$2"; shift 2 ;;
+    --run-blocks1) RUN_BLOCKS1=1; shift ;;
+    --no-run-blocks1) RUN_BLOCKS1=0; shift ;;
+    --run-blocks0) RUN_BLOCKS0=1; shift ;;
+    --no-run-blocks0) RUN_BLOCKS0=0; shift ;;
+    --learning-rate) LEARNING_RATE="$2"; shift 2 ;;
+    --trigram-top-k) TRIGRAM_TOP_K="$2"; shift 2 ;;
+    --trigram-count-workers|--count-workers) TRIGRAM_COUNT_WORKERS="$2"; shift 2 ;;
+    --full-val-final) FULL_VAL_FINAL=1; shift ;;
+    --no-full-val-final) FULL_VAL_FINAL=0; shift ;;
+    --val-every) VAL_EVERY="$2"; shift 2 ;;
+    --val-steps) VAL_STEPS="$2"; shift 2 ;;
+    --log-every) LOG_EVERY="$2"; shift 2 ;;
+    --log-state-every) LOG_STATE_EVERY="$2"; shift 2 ;;
+    --save-every) SAVE_EVERY="$2"; shift 2 ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+LEARNING_RATE_TAG="$(pg_5090_lr_slug "${LEARNING_RATE}")"
 
 pg_5090_require_serious_launcher_defaults "$(basename "$0")"
 
@@ -125,12 +167,8 @@ ensure_trigram_memory_spec() {
   local out_spec_dir="$2"
 
   require_dir "${source_spec_dir}"
-  if [[ "${REBUILD_TRIGRAM_MEMORY:-0}" != "1" && -f "${out_spec_dir}/spec.pt" && -f "${out_spec_dir}/config.json" ]]; then
-    echo "Using cached trigram memory spec: ${out_spec_dir}"
-    return 0
-  fi
 
-  echo "Building dense trigram top-${TRIGRAM_TOP_K} memory spec from full training shards ..."
+  echo "Ensuring dense trigram top-${TRIGRAM_TOP_K} memory spec from full training shards ..."
   local cmd=(
     "${PYTHON_BIN}" "${REPO_ROOT}/tools/build_trigram_memory_spec.py"
     "${source_spec_dir}"

@@ -31,7 +31,10 @@ SUMMARY_FIELDS = [
     "phase",
     "git_commit",
     "seed",
+    "core_dim",
     "core_layers",
+    "core_inner_dim",
+    "recurrent_cells",
     "core_expansion",
     "residual_core",
     "residual_core_init",
@@ -627,6 +630,44 @@ def _parse_env_bool(value: Any) -> Optional[bool]:
     return None
 
 
+def _resolved_core_inner_dim(model: dict[str, Any]) -> Optional[int]:
+    """Compute the resolved recurrent inner dimension from model config.
+
+    :param dict[str, Any] model: Resolved model config.
+    :return Optional[int]: Explicit ``core_inner_dim`` or ``core_dim * core_expansion``.
+    """
+    raw_inner = model.get("core_inner_dim")
+    if raw_inner is not None:
+        try:
+            return int(raw_inner)
+        except (TypeError, ValueError):
+            return None
+    try:
+        core_dim = int(model["core_dim"])
+        core_expansion = float(model["core_expansion"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return int(core_dim * core_expansion)
+
+
+def _resolved_recurrent_cells(
+    model: dict[str, Any], core_inner_dim: Optional[int]
+) -> Optional[int]:
+    """Compute the total stacked recurrent cell count from model config.
+
+    :param dict[str, Any] model: Resolved model config.
+    :param Optional[int] core_inner_dim: Resolved recurrent inner dimension.
+    :return Optional[int]: ``core_layers * core_inner_dim`` when both are known.
+    """
+    if core_inner_dim is None:
+        return None
+    try:
+        core_layers = int(model["core_layers"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return core_layers * core_inner_dim
+
+
 def summarize_run_dir(run_dir: str | Path) -> dict[str, str]:
     """Build one flat summary row from per-run artifacts.
 
@@ -648,6 +689,8 @@ def summarize_run_dir(run_dir: str | Path) -> dict[str, str]:
     system = metadata.get("system", {})
     env = metadata.get("env", {})
     compile_cfg = runtime.get("compile", {})
+    core_inner_dim = _resolved_core_inner_dim(model)
+    recurrent_cells = _resolved_recurrent_cells(model, core_inner_dim)
 
     status = "partial"
     if results.get("completed"):
@@ -663,7 +706,10 @@ def summarize_run_dir(run_dir: str | Path) -> dict[str, str]:
         "phase": _stringify(resolved.get("phase")),
         "git_commit": _stringify(metadata.get("git_commit")),
         "seed": _stringify(resolved.get("seed")),
+        "core_dim": _stringify(model.get("core_dim")),
         "core_layers": _stringify(model.get("core_layers")),
+        "core_inner_dim": _stringify(core_inner_dim),
+        "recurrent_cells": _stringify(recurrent_cells),
         "core_expansion": _stringify(model.get("core_expansion")),
         "residual_core": _stringify(model.get("residual_core")),
         "residual_core_init": _stringify(model.get("residual_core_init")),

@@ -212,8 +212,8 @@ memory-heavy.
 Run the staged frontier batch:
 
 ```bash
-DRY_RUN=1 RUN_VERSION=geom1 SEEDS=1337 bash scripts/run_5090_final3day_frontier_batch.sh
-RUN_VERSION=geom1 SEEDS=1337 bash scripts/run_5090_final3day_frontier_batch.sh
+bash scripts/run_5090_final3day_frontier_batch.sh --dry-run --run-version geom1 --seeds 1337
+bash scripts/run_5090_final3day_frontier_batch.sh --run-version geom1 --seeds 1337
 ```
 
 This runs the synthetic benchmark frontier, then runs the fixed-token K2/blocks0
@@ -246,13 +246,13 @@ Promotion rule:
 After the geometry read, the top-K headroom question remains:
 
 ```bash
-DRY_RUN=1 RUN_VERSION=v2 TRIGRAM_TOP_K=4 SEEDS=1337 bash scripts/run_5090_trigram_memory_screen.sh
+bash scripts/run_5090_trigram_memory_screen.sh --dry-run --run-version v2 --trigram-top-k 4 --seeds 1337
 ```
 
 Then run:
 
 ```bash
-RUN_VERSION=v2 TRIGRAM_TOP_K=4 SEEDS=1337 bash scripts/run_5090_trigram_memory_screen.sh
+bash scripts/run_5090_trigram_memory_screen.sh --run-version v2 --trigram-top-k 4 --seeds 1337
 ```
 
 Promotion rule:
@@ -265,14 +265,14 @@ Promotion rule:
   blocks1 check
 
 ```bash
-RUN_VERSION=v2 TRIGRAM_TOP_K=4 SEEDS=1337 bash scripts/run_5090_trigram_confirm1b.sh
+bash scripts/run_5090_trigram_confirm1b.sh --run-version v2 --trigram-top-k 4 --seeds 1337
 ```
 
 Replay `blocks1` only as a geometry check after the blocks0 top-K and aligned
 geometry decisions:
 
 ```bash
-RUN_VERSION=v2 SEEDS=1337 RUN_BLOCKS1=1 RUN_BLOCKS0=0 bash scripts/run_5090_trigram_memory_screen.sh
+bash scripts/run_5090_trigram_memory_screen.sh --run-version v2 --seeds 1337 --run-blocks1 --no-run-blocks0
 ```
 
 Use diagnostics on completed or partial runs before recovering any secondary

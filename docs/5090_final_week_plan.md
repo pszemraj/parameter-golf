@@ -240,8 +240,8 @@ Next headroom test after top-2 confirmation:
 Before increasing top-K, run the reviewer-aligned geometry frontier batch:
 
 ```bash
-DRY_RUN=1 RUN_VERSION=geom1 SEEDS=1337 bash scripts/run_5090_final3day_frontier_batch.sh
-RUN_VERSION=geom1 SEEDS=1337 bash scripts/run_5090_final3day_frontier_batch.sh
+bash scripts/run_5090_final3day_frontier_batch.sh --dry-run --run-version geom1 --seeds 1337
+bash scripts/run_5090_final3day_frontier_batch.sh --run-version geom1 --seeds 1337
 ```
 
 Promotion rule:
@@ -258,7 +258,7 @@ Promotion rule:
   return to top-K headroom:
 
 ```bash
-RUN_VERSION=v2 TRIGRAM_TOP_K=4 SEEDS=1337 bash scripts/run_5090_trigram_memory_screen.sh
+bash scripts/run_5090_trigram_memory_screen.sh --run-version v2 --trigram-top-k 4 --seeds 1337
 ```
 
 Only consider `K=8` if `K=4` improves and the measured artifact estimate still
@@ -281,7 +281,7 @@ is lower priority than top-K headroom.
 Top-K headroom run after the aligned-geometry read:
 
 ```bash
-RUN_VERSION=v2 TRIGRAM_TOP_K=4 SEEDS=1337 bash scripts/run_5090_trigram_memory_screen.sh
+bash scripts/run_5090_trigram_memory_screen.sh --run-version v2 --trigram-top-k 4 --seeds 1337
 ```
 
 Promotion rule:
