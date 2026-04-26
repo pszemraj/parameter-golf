@@ -21,6 +21,7 @@ from core_amplifier_lm import (
     build_spec_optimized,
     load_tokens_int32,
     load_train_val_int32,
+    training_token_file_fingerprint,
 )
 from core_amplifier_lm.model import (
     _count_bigrams,
@@ -468,6 +469,25 @@ def test_add_trigram_memory_to_spec_counts_top_contexts(tmp_path: Path):
     assert int(memory.trigram_top_tokens[context, 0].item()) == 3
     assert int(memory.trigram_context_confidence[context].item()) > 0
     assert memory.metadata["trigram_top_k"] == 2
+    assert memory.metadata["trigram_max_tokens"] is None
+
+
+def test_training_token_file_fingerprint_tracks_train_shard_set(tmp_path: Path):
+    """Dataset fingerprints should ignore validation shards and change with train shards."""
+    shard_dir = tmp_path / "shards"
+    shard_dir.mkdir()
+    np.array([1, 2, 3], dtype=np.uint16).tofile(shard_dir / "fineweb_train_000000.bin")
+    np.array([4, 5], dtype=np.uint16).tofile(shard_dir / "fineweb_val_000000.bin")
+
+    before = training_token_file_fingerprint(shard_dir)
+    assert before["train_file_count"] == 1
+    assert before["train_total_bytes"] == 6
+
+    np.array([6, 7], dtype=np.uint16).tofile(shard_dir / "fineweb_train_000001.bin")
+    after = training_token_file_fingerprint(shard_dir)
+    assert after["train_file_count"] == 2
+    assert after["train_total_bytes"] == 10
+    assert after["digest"] != before["digest"]
 
 
 def test_residual_token_gate_is_initially_neutral():

@@ -670,6 +670,7 @@ def run_controller_sweep(repo_root: Path) -> None:
         python_bin=python_bin,
         dry_run=dry_run,
     )
+    explicit_shared_spec_dir = "SHARED_SPEC_DIR" in os.environ
     shared_spec_dir = Path(env("SHARED_SPEC_DIR", str(model_root / "_shared_spec")))
     commands_txt = Path(env("COMMANDS_TXT", str(model_root / "commands.txt")))
 
@@ -779,7 +780,9 @@ def run_controller_sweep(repo_root: Path) -> None:
     if spec_max_tokens:
         init_cmd += ["--max-tokens", spec_max_tokens]
 
-    if (
+    if dry_run and explicit_shared_spec_dir:
+        print(f"Dry-run assuming explicit shared spec is prepared: {shared_spec_dir}")
+    elif (
         rebuild_shared
         or not (shared_spec_dir / "spec.pt").exists()
         or not (shared_spec_dir / "config.json").exists()

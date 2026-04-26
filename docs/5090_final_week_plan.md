@@ -66,12 +66,14 @@ Frozen spec/statistics coverage:
 - validation shards: `1`
 - validation tokens: `62,021,846`
 - validation tokens are not used for frozen statistics
+- quick coverage check:
+  - `conda run -s --name train python tools/check_dataset_shards.py data/datasets/fineweb10B_sp1024 --expected-train-files 195 --expected-val-files 1`
 
 Trigram memory specs are cached under
 `${TRIGRAM_MEMORY_SPEC_CACHE_ROOT:-~/.cache/experiments/param-golf-coreamp}` and keyed
-by source `spec.pt` hash plus memory parameters. Compatible ablations reuse
-the same full-data top-K build instead of rebuilding inside each experiment
-root.
+by source `spec.pt` hash, training-shard fingerprint, and memory parameters.
+Compatible ablations reuse the same full-data top-K build instead of
+rebuilding inside each experiment root.
 
 Primary reps:
 

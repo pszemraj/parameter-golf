@@ -194,6 +194,7 @@ ${TRIGRAM_MEMORY_TABLE_CACHE_ROOT:-~/.cache/experiments/param-golf-coreamp/trigr
 The key uses:
 
 - data path
+- training-shard fingerprint
 - storage dtype
 - vocab size
 - base-bigram logits hash

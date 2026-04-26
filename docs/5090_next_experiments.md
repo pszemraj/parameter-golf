@@ -86,10 +86,12 @@ Working defaults now:
   - `1` shard
   - `62,021,846` tokens
   - used only for eval/full-val evidence, not frozen statistics
+- Validate local shard coverage before long cached builds:
+  - `conda run -s --name train python tools/check_dataset_shards.py data/datasets/fineweb10B_sp1024 --expected-train-files 195 --expected-val-files 1`
 - Trigram memory specs are cached outside the repo under
   `${TRIGRAM_MEMORY_SPEC_CACHE_ROOT:-~/.cache/experiments/param-golf-coreamp}` and are
-  keyed by the source spec hash plus memory parameters, so compatible ablations
-  reuse the same full-data build.
+  keyed by the source spec hash, the training-shard fingerprint, and memory
+  parameters, so compatible ablations reuse the same full-data build.
 - `512M` is the default serious screening budget.
 - `1B` is the confirmation budget for finalists.
 - Anything shorter than `512M` is only for smoke tests or harness checks.

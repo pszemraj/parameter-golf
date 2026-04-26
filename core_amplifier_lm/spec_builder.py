@@ -13,6 +13,8 @@ Drop this next to core_amplifier_lm.py and use build_spec_optimized().
 from __future__ import annotations
 
 import gzip
+import hashlib
+import json
 import math
 import multiprocessing as mp
 import os
@@ -919,6 +921,39 @@ def _training_token_files(source: str | Path) -> list[Path]:
     return [p]
 
 
+def training_token_file_fingerprint(source: str | Path) -> dict[str, object]:
+    """Fingerprint the train-token shard set used for frozen statistics.
+
+    :param str | Path source: Token source.
+    :return dict[str, object]: Stable file-count, byte-count, and digest fields.
+    """
+    p = Path(source).expanduser().resolve()
+    files = _training_token_files(p)
+    root = p if p.is_dir() else p.parent
+    entries: list[dict[str, object]] = []
+    total_bytes = 0
+    for path in files:
+        resolved = path.expanduser().resolve()
+        stat = resolved.stat()
+        try:
+            rel = str(resolved.relative_to(root))
+        except ValueError:
+            rel = str(resolved)
+        total_bytes += int(stat.st_size)
+        entries.append({"path": rel, "bytes": int(stat.st_size)})
+    payload = {"version": 1, "source": str(p), "files": entries}
+    digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    return {
+        "version": 1,
+        "source": str(p),
+        "train_file_count": len(entries),
+        "train_total_bytes": total_bytes,
+        "digest": digest,
+    }
+
+
 def add_trigram_memory_to_spec(
     spec: AmplifierSpec,
     source: str | Path,
@@ -1043,6 +1078,7 @@ def add_trigram_memory_to_spec(
             "trigram_residual_clip": float(residual_clip),
             "trigram_residual_scale": residual_scale,
             "trigram_confidence_count_cap": int(confidence_count_cap),
+            "trigram_max_tokens": None if max_tokens is None else int(max_tokens),
         }
     )
     return AmplifierSpec(
@@ -1072,4 +1108,5 @@ __all__ = [
     "count_all",
     "load_tokens_int32",
     "load_train_val_int32",
+    "training_token_file_fingerprint",
 ]

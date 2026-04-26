@@ -187,8 +187,10 @@ resolve_trigram_memory_spec_dir() {
     --smoothing 0.25
     --residual-clip "${TRIGRAM_RESIDUAL_CLIP}"
     --confidence-count-cap "${TRIGRAM_CONFIDENCE_COUNT_CAP}"
-    --mkdir
   )
+  if [[ "${DRY_RUN:-0}" != "1" ]]; then
+    cmd+=(--mkdir)
+  fi
   if [[ -n "${TRIGRAM_MAX_TOKENS:-}" ]]; then
     cmd+=(--max-tokens "${TRIGRAM_MAX_TOKENS}")
   fi

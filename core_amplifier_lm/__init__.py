@@ -17,6 +17,7 @@ from .spec_builder import (
     count_all,
     load_tokens_int32,
     load_train_val_int32,
+    training_token_file_fingerprint,
 )
 
 __all__ = [
@@ -33,4 +34,5 @@ __all__ = [
     "load_tokens_int32",
     "load_train_val_int32",
     "trigram_memory_config_value",
+    "training_token_file_fingerprint",
 ]

@@ -22,7 +22,7 @@ export COMPILE="${COMPILE:-0}"
 export GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-0}"
 export SKIP_DONE="${SKIP_DONE:-1}"
 export REBUILD_SHARED="${REBUILD_SHARED:-0}"
-export CORE_AMP_PHASE="${CORE_AMP_PHASE:-5090_gate_lr_sidecar}"
+export CORE_AMP_PHASE="${CORE_AMP_PHASE:-5090_gate_lr_followup}"
 export TARGET_EFFECTIVE_STEP_TOKENS="${TARGET_EFFECTIVE_STEP_TOKENS:-131072}"
 export WEIGHT_DECAY="${WEIGHT_DECAY:-0.001}"
 export VAL_EVERY="${VAL_EVERY:-256}"
@@ -56,7 +56,7 @@ require_dir() {
 }
 
 print_header() {
-  echo "5090 gate x lr sidecar"
+  echo "5090 gate x lr follow-up"
   echo "repo_root=${REPO_ROOT}"
   echo "python=${PYTHON_BIN}"
   echo "seeds=${SEEDS}"
@@ -106,13 +106,13 @@ EOF
 run_blocks1_gate_lr_seed() {
   local seed="$1"
   local shared_spec_dir="${REPO_ROOT}/experiments/5090_schedule/blocks1_hold_confirm1b_v1/blocks1_resid10_e12_h7000_1b"
-  local model_root="${REPO_ROOT}/experiments/5090_architecture/blocks1_gate_lr_sidecar_seed${seed}_${RUN_VERSION}"
+  local model_root="${REPO_ROOT}/experiments/5090_architecture/blocks1_gate_lr_followup_seed${seed}_${RUN_VERSION}"
   run_family_gate_lr_seed \
     "blocks1" \
     "${seed}" \
     "${shared_spec_dir}" \
     "${model_root}" \
-    "blocks1_gate_lr_sidecar512m_${RUN_VERSION}" \
+    "blocks1_gate_lr_followup512m_${RUN_VERSION}" \
     "core_amp,5090,architecture,gating,screening,blocks1,gate_${GATE_MODE},${LEARNING_RATE_TAG}" \
     "blocks1_resid10_e12_gate_${GATE_MODE}_${LEARNING_RATE_TAG}_h3500_512m_s${seed}" \
     "10" \
@@ -122,13 +122,13 @@ run_blocks1_gate_lr_seed() {
 run_blocks0_gate_lr_seed() {
   local seed="$1"
   local shared_spec_dir="${REPO_ROOT}/experiments/5090_schedule/blocks0_12x10_hold_confirm1b_v1/blocks0_resid12_e10_h7000_1b"
-  local model_root="${REPO_ROOT}/experiments/5090_architecture/blocks0_gate_lr_sidecar_seed${seed}_${RUN_VERSION}"
+  local model_root="${REPO_ROOT}/experiments/5090_architecture/blocks0_gate_lr_followup_seed${seed}_${RUN_VERSION}"
   run_family_gate_lr_seed \
     "blocks0" \
     "${seed}" \
     "${shared_spec_dir}" \
     "${model_root}" \
-    "blocks0_gate_lr_sidecar512m_${RUN_VERSION}" \
+    "blocks0_gate_lr_followup512m_${RUN_VERSION}" \
     "core_amp,5090,architecture,gating,screening,blocks0,gate_${GATE_MODE},${LEARNING_RATE_TAG}" \
     "blocks0_resid12_e10_gate_${GATE_MODE}_${LEARNING_RATE_TAG}_h3500_512m_s${seed}" \
     "12" \

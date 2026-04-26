@@ -20,7 +20,11 @@ if str(REPO_ROOT) not in sys.path:
 
 import torch
 
-from core_amplifier_lm import AmplifierSpec, add_trigram_memory_to_spec
+from core_amplifier_lm import (
+    AmplifierSpec,
+    add_trigram_memory_to_spec,
+    training_token_file_fingerprint,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -98,6 +102,7 @@ def _table_cache_path(
     cache_root: str | Path,
     base_spec: AmplifierSpec,
     data: str | Path,
+    data_fingerprint: dict[str, object],
     storage_dtype: str,
     top_k: int,
     smoothing: float,
@@ -110,6 +115,7 @@ def _table_cache_path(
     :param str | Path cache_root: Cache root directory.
     :param AmplifierSpec base_spec: Source spec containing base bigram logits.
     :param str | Path data: Training-token source.
+    :param dict[str, object] data_fingerprint: Training-shard fingerprint.
     :param str storage_dtype: Token storage dtype.
     :param int top_k: Number of top tokens per context.
     :param float smoothing: Trigram smoothing.
@@ -123,6 +129,7 @@ def _table_cache_path(
         "vocab_size": int(base_spec.vocab_size),
         "base_bigram_sha256": _tensor_sha256(base_spec.base_bigram_logits),
         "data_path": str(Path(data).expanduser().resolve()),
+        "data_fingerprint": data_fingerprint,
         "storage_dtype": str(storage_dtype),
         "top_k": int(top_k),
         "smoothing": float(smoothing),
@@ -187,6 +194,57 @@ def _table_from_spec(spec: AmplifierSpec) -> dict[str, Any]:
     }
 
 
+def _record_data_fingerprint(spec: AmplifierSpec, data_fingerprint: dict[str, object]) -> None:
+    """Record training-shard fingerprint metadata on a memory spec.
+
+    :param AmplifierSpec spec: Spec to annotate.
+    :param dict[str, object] data_fingerprint: Training-shard fingerprint.
+    """
+    spec.metadata.update(
+        {
+            "trigram_train_file_count": data_fingerprint["train_file_count"],
+            "trigram_train_total_bytes": data_fingerprint["train_total_bytes"],
+            "trigram_train_fingerprint": data_fingerprint["digest"],
+        }
+    )
+
+
+def _expected_metadata(
+    args: argparse.Namespace, data_fingerprint: dict[str, object]
+) -> dict[str, Any]:
+    """Return metadata values that identify the requested memory spec.
+
+    :param argparse.Namespace args: Parsed build arguments.
+    :param dict[str, object] data_fingerprint: Training-shard fingerprint.
+    :return dict[str, Any]: Expected metadata fields.
+    """
+    return {
+        "trigram_top_k": int(args.top_k),
+        "trigram_smoothing": float(args.smoothing),
+        "trigram_residual_clip": float(args.residual_clip),
+        "trigram_confidence_count_cap": int(args.confidence_count_cap),
+        "trigram_max_tokens": None if args.max_tokens is None else int(args.max_tokens),
+        "trigram_train_file_count": data_fingerprint["train_file_count"],
+        "trigram_train_total_bytes": data_fingerprint["train_total_bytes"],
+        "trigram_train_fingerprint": data_fingerprint["digest"],
+    }
+
+
+def _metadata_mismatches(metadata: dict[str, Any], expected: dict[str, Any]) -> list[str]:
+    """Return cache-safety metadata mismatches.
+
+    :param dict[str, Any] metadata: Existing spec metadata.
+    :param dict[str, Any] expected: Expected metadata fields.
+    :return list[str]: Human-readable mismatch strings.
+    """
+    mismatches: list[str] = []
+    for key, expected_value in expected.items():
+        actual_value = metadata.get(key)
+        if actual_value != expected_value:
+            mismatches.append(f"{key}: existing={actual_value!r} expected={expected_value!r}")
+    return mismatches
+
+
 def main() -> None:
     """Build and write the trigram memory spec."""
     args = parse_args()
@@ -197,9 +255,27 @@ def main() -> None:
 
     if not source_spec.exists():
         raise SystemExit(f"missing source spec: {source_spec}")
+    data_fingerprint = training_token_file_fingerprint(args.data)
+    print(
+        "Training shard fingerprint: "
+        f"files={data_fingerprint['train_file_count']} "
+        f"bytes={data_fingerprint['train_total_bytes']} "
+        f"digest={str(data_fingerprint['digest'])[:16]}",
+        flush=True,
+    )
     if out_spec.exists() and not args.force:
         existing = AmplifierSpec.load(out_spec)
         if existing.trigram_top_tokens is not None:
+            mismatches = _metadata_mismatches(
+                existing.metadata,
+                _expected_metadata(args, data_fingerprint),
+            )
+            if mismatches:
+                joined = "\n  - ".join(mismatches)
+                raise SystemExit(
+                    f"{out_spec} exists with different trigram memory metadata; "
+                    f"pass --force to overwrite:\n  - {joined}"
+                )
             print(f"Existing trigram memory spec found: {out_spec}")
             print(existing.summary())
             return
@@ -213,6 +289,7 @@ def main() -> None:
             cache_root=args.table_cache_root,
             base_spec=base_spec,
             data=args.data,
+            data_fingerprint=data_fingerprint,
             storage_dtype=args.storage_dtype,
             top_k=args.top_k,
             smoothing=args.smoothing,
@@ -242,6 +319,7 @@ def main() -> None:
             chunk_size=args.chunk_size,
             verbose=True,
         )
+        _record_data_fingerprint(memory_spec, data_fingerprint)
         table_payload = _table_from_spec(memory_spec)
         if table_cache_path is not None:
             table_cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -249,6 +327,7 @@ def main() -> None:
             print(f"Cached trigram memory table: {table_cache_path}")
     else:
         memory_spec = _spec_with_trigram_table(base_spec, table_payload)
+        _record_data_fingerprint(memory_spec, data_fingerprint)
 
     _copy_model_dir_metadata(source_dir, out_dir)
     memory_spec.save(out_spec)

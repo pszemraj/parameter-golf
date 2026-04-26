@@ -1,14 +1,23 @@
 #!/usr/bin/env python3
 """Resolve the deterministic cache directory for a trigram memory spec."""
 
+# ruff: noqa: E402
+
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
 import re
+import sys
 from pathlib import Path
 from typing import Any
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from core_amplifier_lm import training_token_file_fingerprint
 
 
 DEFAULT_CACHE_ROOT = Path.home() / ".cache" / "experiments" / "param-golf-coreamp"
@@ -77,9 +86,11 @@ def main() -> None:
     data_path = Path(args.data).expanduser().resolve()
     cache_root = Path(args.cache_root).expanduser().resolve()
     source_digest = _file_sha256(spec_path)
+    data_fingerprint = training_token_file_fingerprint(data_path)
     payload = {
         "source_spec_sha256": source_digest,
         "data_path": str(data_path),
+        "data_fingerprint": data_fingerprint,
         "storage_dtype": str(args.storage_dtype),
         "top_k": int(args.top_k),
         "smoothing": float(args.smoothing),
@@ -92,7 +103,8 @@ def main() -> None:
     dirname = (
         f"{readable}_k{int(args.top_k)}_smooth{float(args.smoothing):g}_"
         f"clip{float(args.residual_clip):g}_cap{int(args.confidence_count_cap)}_"
-        f"{token_scope}_{source_digest[:12]}_{_cache_key(payload)}"
+        f"{token_scope}_data{str(data_fingerprint['digest'])[:10]}_"
+        f"{source_digest[:12]}_{_cache_key(payload)}"
     )
     out = cache_root / "trigram_memory_specs" / dirname
     if args.mkdir:
