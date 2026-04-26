@@ -73,7 +73,6 @@ VAL_STEPS="${VAL_STEPS:-8}"
 LOG_EVERY="${LOG_EVERY:-64}"
 LOG_STATE_EVERY="${LOG_STATE_EVERY:-256}"
 SAVE_EVERY="${SAVE_EVERY:-2048}"
-TRAIN_FRAC="${TRAIN_FRAC:-0.98}"
 FULL_VAL_FINAL="${FULL_VAL_FINAL:-0}"
 if [[ -z "${MMAP+x}" ]]; then
   if [[ "${NO_MMAP:-0}" == "1" ]]; then
@@ -170,7 +169,6 @@ parse_args() {
       --log-every) LOG_EVERY="$2"; shift 2 ;;
       --log-state-every) LOG_STATE_EVERY="$2"; shift 2 ;;
       --save-every) SAVE_EVERY="$2"; shift 2 ;;
-      --train-frac) TRAIN_FRAC="$2"; shift 2 ;;
       --full-val-final) FULL_VAL_FINAL=1; shift ;;
       --no-full-val-final) FULL_VAL_FINAL=0; shift ;;
       --mmap) MMAP=1; shift ;;
@@ -392,7 +390,7 @@ learning_rate=${LEARNING_RATE}
 compile=${COMPILE} gradient_checkpointing=${GRADIENT_CHECKPOINTING} skip_done=${SKIP_DONE}
 lr_schedule=${LR_SCHEDULE} weight_decay=${WEIGHT_DECAY} grad_clip=${GRAD_CLIP} hard_loss_gamma=${HARD_LOSS_GAMMA} hard_loss_cap=${HARD_LOSS_CAP}
 val_every=${VAL_EVERY} val_steps=${VAL_STEPS} log_every=${LOG_EVERY} log_state_every=${LOG_STATE_EVERY} save_every=${SAVE_EVERY} full_val_final=${FULL_VAL_FINAL}
-train_frac=${TRAIN_FRAC} mmap=${MMAP} autocast=${AUTOCAST} tokens_on_device=${TOKENS_ON_DEVICE}
+validation_policy=explicit_val_shard_required mmap=${MMAP} autocast=${AUTOCAST} tokens_on_device=${TOKENS_ON_DEVICE}
 num_steps=${GEOMETRY_NUM_STEPS} lr_hold_steps=${GEOMETRY_LR_HOLD_STEPS} carry_chunks=${GEOMETRY_CARRY_CHUNKS} bptt_chunks=${GEOMETRY_BPTT_CHUNKS}
 batch_size=${GEOMETRY_BATCH_SIZE} seq_len=${GEOMETRY_SEQ_LEN} target_effective_step_tokens=${TARGET_EFFECTIVE_STEP_TOKENS}
 data_max_tokens=${DATA_MAX_TOKENS:-}
@@ -444,7 +442,6 @@ EOF
     --log-every "${LOG_EVERY}"
     --log-state-every "${LOG_STATE_EVERY}"
     --save-every "${SAVE_EVERY}"
-    --train-frac "${TRAIN_FRAC}"
     --core-dim "${GEOMETRY_CORE_DIM}"
     --core-layers "${GEOMETRY_CORE_LAYERS}"
     --core-expansion "${GEOMETRY_CORE_EXPANSION}"

@@ -81,6 +81,7 @@ pg_5090_require_serious_launcher_defaults() {
 
   pg_5090_expect_unset_or_empty "${script_name}" "SPEC_MAX_TOKENS"
   pg_5090_expect_unset_or_empty "${script_name}" "DATA_MAX_TOKENS"
+  pg_5090_expect_unset_or_empty "${script_name}" "TRAIN_FRAC"
 
   if [[ "${ALLOW_APPROX_BPB:-0}" != "0" ]]; then
     pg_5090_fail "${script_name}" "ALLOW_APPROX_BPB is not allowed for serious runs"

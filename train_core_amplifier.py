@@ -92,6 +92,7 @@ class EvalResult:
     bpb: float
     tokens: int
     bytes: int
+    usable_tokens: int
     coverage_frac: float
     full_coverage: bool
     steps: int
@@ -1189,12 +1190,14 @@ def evaluate(
     :param Optional[torch.Tensor] byte_count_lut: Optional exact byte-count lookup.
     :return EvalResult: Validation loss, bpb, and coverage metadata.
     """
+    usable_tokens = max(0, int(val_tokens.numel()) - 1)
     if steps <= 0:
         return EvalResult(
             loss=float("nan"),
             bpb=float("nan"),
             tokens=0,
             bytes=0,
+            usable_tokens=usable_tokens,
             coverage_frac=0.0,
             full_coverage=False,
             steps=int(steps),
@@ -1208,7 +1211,6 @@ def evaluate(
     total_bits_t = torch.zeros((), dtype=torch.float32, device=device)
     total_bytes_t = torch.zeros((), dtype=torch.int64, device=device)
 
-    usable_tokens = max(0, int(val_tokens.numel()) - 1)
     max_streams = max(1, usable_tokens // max(1, seq_len + 1))
     eval_batch_size = min(batch_size, max_streams)
     batcher = SequentialStreamBatcher(
@@ -1260,6 +1262,7 @@ def evaluate(
         bpb=val_bpb,
         tokens=int(total_tokens),
         bytes=int(total_bytes),
+        usable_tokens=int(usable_tokens),
         coverage_frac=coverage_frac,
         full_coverage=coverage_frac >= 0.999,
         steps=int(steps),
@@ -1299,12 +1302,29 @@ def eval_payload_fields(result: EvalResult) -> dict[str, int | float | bool]:
     return {
         "eval_tokens": int(result.tokens),
         "eval_bytes": int(result.bytes),
+        "eval_coverage_denominator_tokens": int(result.usable_tokens),
         "eval_coverage_frac": float(result.coverage_frac),
         "eval_full_coverage": bool(result.full_coverage),
         "eval_steps": int(result.steps),
         "eval_batch_size": int(result.batch_size),
         "eval_seq_len": int(result.seq_len),
     }
+
+
+def format_eval_coverage(result: EvalResult, *, validation_source: str) -> str:
+    """Format validation coverage so sampled evals cannot be confused with train coverage.
+
+    :param EvalResult result: Evaluation result to describe.
+    :param str validation_source: Validation-token source label.
+    :return str: Human-readable validation coverage string.
+    """
+    if result.usable_tokens > 0:
+        return (
+            f"val_coverage {result.coverage_frac:.3%} "
+            f"({result.tokens:,}/{result.usable_tokens:,} target tokens, "
+            f"source={validation_source})"
+        )
+    return f"val_coverage {result.coverage_frac:.3%} (source={validation_source})"
 
 
 def build_expected_spec_metadata(
@@ -1900,7 +1920,7 @@ def build_resolved_config_payload(
     if readout_rank in (0, None):
         readout_rank = None
 
-    return {
+    metadata = {
         "run_name": run_name,
         "phase": phase,
         "seed": int(args.seed),
@@ -1966,10 +1986,14 @@ def build_resolved_config_payload(
         "data": {
             "source": str(data_source),
             "storage_dtype": storage_dtype,
-            "train_frac": float(train_frac),
             "allow_train_frac_val_split": bool(allow_train_frac_val_split),
             "allow_approx_bpb": bool(allow_approx_bpb),
             "validation_source": validation_source,
+            "validation_policy": (
+                "explicit_val_shard_required"
+                if not allow_train_frac_val_split
+                else "train_split_fallback_allowed"
+            ),
             "data_max_tokens": None if data_max_tokens is None else int(data_max_tokens),
             "train_tokens": int(train_tokens_count),
             "val_tokens": int(val_tokens_count),
@@ -2018,6 +2042,9 @@ def build_resolved_config_payload(
             "cli_args": vars(args),
         },
     }
+    if allow_train_frac_val_split or validation_source != "explicit_val_shard":
+        metadata["data"]["fallback_train_frac"] = float(train_frac)
+    return metadata
 
 
 def build_run_metadata(
@@ -2270,7 +2297,14 @@ def main() -> None:
     print(f"  data: {data_source}")
     if data_max_tokens is not None:
         print(f"  data_max_tokens={int(data_max_tokens):,}")
-    print(f"  allow_train_frac_val_split={allow_train_frac_val_split}")
+    validation_policy = (
+        "explicit_val_shard_required"
+        if not allow_train_frac_val_split
+        else "train_split_fallback_allowed"
+    )
+    print(f"  validation_policy={validation_policy}")
+    if allow_train_frac_val_split:
+        print(f"  fallback_train_frac={train_frac}")
     print(f"  allow_approx_bpb={allow_approx_bpb}")
     print(
         f"  batch_size={batch_size} seq_len={seq_len} steps={num_steps} lr={learning_rate} "
@@ -2878,7 +2912,7 @@ def main() -> None:
             print(
                 f"step {step:6d} | val_loss {eval_result.loss:.4f} | "
                 f"val_bpb {eval_result.bpb:.4f} | "
-                f"coverage {eval_result.coverage_frac:.3%}"
+                f"{format_eval_coverage(eval_result, validation_source=validation_source)}"
             )
             append_jsonl(metrics_path, payload)
             eval_rows.append(payload)
@@ -2946,7 +2980,8 @@ def main() -> None:
         payload.update(eval_payload_fields(eval_result))
         print(
             f"final eval @ step {final_eval_step:6d} | val_loss {eval_result.loss:.4f} | "
-            f"val_bpb {eval_result.bpb:.4f} | coverage {eval_result.coverage_frac:.3%}"
+            f"val_bpb {eval_result.bpb:.4f} | "
+            f"{format_eval_coverage(eval_result, validation_source=validation_source)}"
         )
         append_jsonl(metrics_path, payload)
         eval_rows.append(payload)
@@ -3010,6 +3045,7 @@ def main() -> None:
         "last_val_bpb": last_eval.get("val_bpb"),
         "last_eval_tokens": last_eval.get("eval_tokens"),
         "last_eval_bytes": last_eval.get("eval_bytes"),
+        "last_eval_coverage_denominator_tokens": last_eval.get("eval_coverage_denominator_tokens"),
         "last_eval_coverage_frac": last_eval.get("eval_coverage_frac"),
         "last_eval_full_coverage": last_eval.get("eval_full_coverage"),
         "last_eval_steps": last_eval.get("eval_steps"),
@@ -3051,6 +3087,9 @@ def main() -> None:
         summary["eval/bpb_final"] = last_eval.get("val_bpb")
         summary["eval/tokens_final"] = last_eval.get("eval_tokens")
         summary["eval/bytes_final"] = last_eval.get("eval_bytes")
+        summary["eval/coverage_denominator_tokens_final"] = last_eval.get(
+            "eval_coverage_denominator_tokens"
+        )
         summary["eval/coverage_frac_final"] = last_eval.get("eval_coverage_frac")
         summary["eval/full_coverage_final"] = last_eval.get("eval_full_coverage")
         summary["artifact/code_bytes_final"] = int(repo_code_bytes)

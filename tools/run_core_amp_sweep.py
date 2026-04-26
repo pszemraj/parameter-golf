@@ -483,7 +483,6 @@ def structure_preset_defaults(preset: str) -> dict[str, str | bool]:
             "NO_MMAP": False,
             "COMPILE": False,
             "GRADIENT_CHECKPOINTING": True,
-            "TRAIN_FRAC": "0.98",
         }
     if preset == "cpu_structure":
         return {
@@ -518,7 +517,6 @@ def structure_preset_defaults(preset: str) -> dict[str, str | bool]:
             "NO_MMAP": True,
             "COMPILE": False,
             "GRADIENT_CHECKPOINTING": False,
-            "TRAIN_FRAC": "0.98",
         }
     raise SystemExit(f"unknown structure preset: {preset}")
 
@@ -634,7 +632,10 @@ def update_controller_config(
     cfg.training["log_every"] = int(train_defaults["LOG_EVERY"])
     cfg.training["log_state_every"] = int(train_defaults["LOG_STATE_EVERY"])
     cfg.training["save_every"] = int(train_defaults["SAVE_EVERY"])
-    cfg.data["train_frac"] = float(train_defaults["TRAIN_FRAC"])
+    if "TRAIN_FRAC" in os.environ:
+        cfg.data["train_frac"] = float(os.environ["TRAIN_FRAC"])
+    else:
+        cfg.data.pop("train_frac", None)
     if train_defaults["DATA_MAX_TOKENS"]:
         cfg.data["max_tokens"] = int(train_defaults["DATA_MAX_TOKENS"])
     cfg.save()
@@ -688,7 +689,6 @@ def run_controller_sweep(repo_root: Path) -> None:
         "SAVE_EVERY": env("SAVE_EVERY", "1000"),
         "GRAD_ACCUM": env("GRAD_ACCUM", "1"),
         "DATA_MAX_TOKENS": env("DATA_MAX_TOKENS", ""),
-        "TRAIN_FRAC": env("TRAIN_FRAC", "0.9"),
         "GRADIENT_CHECKPOINTING": env(
             "GRADIENT_CHECKPOINTING", "0" if preset == "cpu_smoke" else "1"
         ),
@@ -920,11 +920,11 @@ def run_controller_sweep(repo_root: Path) -> None:
             train_defaults["LOG_EVERY"],
             "--log-state-every",
             train_defaults["LOG_STATE_EVERY"],
-            "--train-frac",
-            train_defaults["TRAIN_FRAC"],
             "--seed",
             env("SEED", "1337"),
         ]
+        if "TRAIN_FRAC" in os.environ:
+            cmd += ["--train-frac", os.environ["TRAIN_FRAC"]]
         if env_bool("FULL_VAL_FINAL", False):
             cmd.append("--full-val-final")
         if train_defaults["DATA_MAX_TOKENS"]:
@@ -1210,11 +1210,11 @@ def run_structure_sweep(repo_root: Path) -> None:
             env("LOG_STATE_EVERY", str(defaults["LOG_STATE_EVERY"])),
             "--save-every",
             env("SAVE_EVERY", str(defaults["SAVE_EVERY"])),
-            "--train-frac",
-            env("TRAIN_FRAC", str(defaults["TRAIN_FRAC"])),
             "--seed",
             env("SEED", "1337"),
         ]
+        if "TRAIN_FRAC" in os.environ:
+            train_cmd += ["--train-frac", os.environ["TRAIN_FRAC"]]
         if env_bool("FULL_VAL_FINAL", False):
             train_cmd.append("--full-val-final")
         data_max_tokens = env("DATA_MAX_TOKENS", str(defaults["DATA_MAX_TOKENS"]))
@@ -1302,7 +1302,11 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--log-state-every", type=int, help="State/watch logging cadence.")
     ap.add_argument("--save-every", type=int, help="Checkpoint cadence in optimizer steps.")
     ap.add_argument("--grad-accum", type=int, help="Gradient accumulation steps.")
-    ap.add_argument("--train-frac", type=float, help="Fallback train split fraction.")
+    ap.add_argument(
+        "--train-frac",
+        type=float,
+        help="Debug fallback split fraction when no explicit validation shard exists.",
+    )
     ap.add_argument(
         "--full-val-final",
         action=argparse.BooleanOptionalAction,

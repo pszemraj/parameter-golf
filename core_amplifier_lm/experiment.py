@@ -73,6 +73,7 @@ SUMMARY_FIELDS = [
     "last_val_bpb",
     "last_eval_tokens",
     "last_eval_bytes",
+    "last_eval_coverage_denominator_tokens",
     "last_eval_coverage_frac",
     "last_eval_full_coverage",
     "elapsed_sec",
@@ -748,6 +749,10 @@ def summarize_run_dir(run_dir: str | Path) -> dict[str, str]:
         "last_val_bpb": _stringify(last.get("val_bpb") or results.get("last_val_bpb")),
         "last_eval_tokens": _stringify(last.get("eval_tokens")),
         "last_eval_bytes": _stringify(last.get("eval_bytes")),
+        "last_eval_coverage_denominator_tokens": _stringify(
+            last.get("eval_coverage_denominator_tokens")
+            or results.get("last_eval_coverage_denominator_tokens")
+        ),
         "last_eval_coverage_frac": _stringify(last.get("eval_coverage_frac")),
         "last_eval_full_coverage": _stringify(last.get("eval_full_coverage")),
         "elapsed_sec": _stringify(results.get("elapsed_sec")),

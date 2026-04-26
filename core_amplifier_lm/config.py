@@ -97,7 +97,6 @@ DEFAULTS = {
     "data": {
         "source": None,
         "storage_dtype": "uint16",
-        "train_frac": 0.98,
         "max_tokens": None,
     },
     "spec": {
