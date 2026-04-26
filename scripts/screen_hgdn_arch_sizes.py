@@ -28,7 +28,7 @@ from hgdn_runtime_utils import (  # noqa: E402
     serialize_quantized_state_dict_int8,
 )
 
-DEFAULT_CONFIG = REPO_ROOT / "configs" / "hgdn" / "current_winner_retune.toml"
+DEFAULT_CONFIG = REPO_ROOT / "configs" / "hgdn" / "naive_contract_search.toml"
 TRAINER_PATH = REPO_ROOT / "train_gpt_hybrid.py"
 PROFILE_ROOT = REPO_ROOT / "profiles" / "arch_size"
 DEFAULT_ARTIFACT_LIMIT_BYTES = 16_000_000

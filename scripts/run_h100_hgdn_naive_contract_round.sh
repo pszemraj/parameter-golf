@@ -273,11 +273,10 @@ run_round() {
         "TRAIN_LOG_EVERY=${train_log_every}" \
         "VAL_BATCH_SIZE=${val_batch_size}" \
         "${config_env[@]}" \
-        bash scripts/sweep.sh single
+        torchrun --standalone --nproc_per_node="${ngpu}" train_gpt_hybrid.py
 
-    hgdn_run_sweep \
+    hgdn_run_hybrid_train \
         "naive-contract HGDN candidate" \
-        single \
         "OMP_NUM_THREADS=${omp_num_threads}" \
         "MKL_NUM_THREADS=${mkl_num_threads}" \
         "OPENBLAS_NUM_THREADS=${openblas_num_threads}" \
@@ -340,11 +339,10 @@ run_round() {
         "TRAIN_LOG_EVERY=${train_log_every}" \
         "VAL_BATCH_SIZE=${val_batch_size}" \
         "${config_env[@]}" \
-        bash scripts/sweep.sh single
+        torchrun --standalone --nproc_per_node="${ngpu}" train_gpt_hybrid.py
 
-    hgdn_run_sweep \
+    hgdn_run_hybrid_train \
         "naive-contract attention-only baseline diagnostic control" \
-        single \
         "OMP_NUM_THREADS=${omp_num_threads}" \
         "MKL_NUM_THREADS=${mkl_num_threads}" \
         "OPENBLAS_NUM_THREADS=${openblas_num_threads}" \

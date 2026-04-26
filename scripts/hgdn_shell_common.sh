@@ -17,10 +17,9 @@ hgdn_require_cmd() {
     fi
 }
 
-hgdn_run_sweep() {
+hgdn_run_hybrid_train() {
     local label="$1"
-    local preset="$2"
-    shift 2
+    shift
 
     echo
     echo ">>> $label"
@@ -28,7 +27,7 @@ hgdn_run_sweep() {
         for kv in "$@"; do
             export "$kv"
         done
-        bash "$HGDN_REPO_ROOT/scripts/sweep.sh" "$preset"
+        torchrun --standalone --nproc_per_node="${NGPU:-1}" "$HGDN_REPO_ROOT/train_gpt_hybrid.py"
     )
 }
 

@@ -1,144 +1,15 @@
-# HGDN Next Steps
+# HGDN TODO
 
-Last updated: 2026-04-23 15:27 EDT
+## 1. Run The Primary H100 Sparse Confirmation
 
-## 1. Run the local sparse exact-contract HGDN search before more H100 spend
+Use the exact-baseline helper with:
 
-- The fair exact naive-contract batch already answered the branch-goal
-  question for the current live14 replay shell:
-  - exact repo baseline: `44.00 ms/step`, exact roundtrip `1.23710448`,
-    `UNDER_LIMIT`
-  - live14 HGDN replay shell: `98.08 ms/step`, exact roundtrip `1.24735121`,
-    `OVER_LIMIT`
-- That means the next work is **not** another blind H100 rerun of live14.
-  The next work is a contract-native HGDN shell search on the exact
-  surface:
-  - `TRAIN_SEQ_LEN=1024`
-  - `TRAIN_BATCH_TOKENS=65536`
-  - `ITERATIONS=500`
-  - `VAL_LOSS_EVERY=100`
-  - `TRAIN_LOG_EVERY=25`
-  - `WEIGHT_DECAY=0`
-- New helper:
-  [`../scripts/run_local_hgdn_naive_contract_search.sh`](../scripts/run_local_hgdn_naive_contract_search.sh)
-- New size-screen config:
-  [`../configs/hgdn/naive_contract_search.toml`](../configs/hgdn/naive_contract_search.toml)
-- The first baseline-shaped local pass is now superseded. The active local
-  search surface is:
-  - sparse `BLOCK_PATTERN` hybrids instead of periodic `GDN_RATIO=1`
-  - `GDN_HEAD_K_DIM=48`
-  - `DISTRIBUTED_MODE=parallel_muon`
-  - `MUON_DISTRIBUTED_MODE=packed_allreduce`
-  - `GDN_W_G_OPTIMIZER=matrix`
-  - exact-contract profiler / CUDA preflight / size-screen helpers now follow
-    the same `w_g` routing policy as the trainer
-- Current active candidate set:
-  - `l8_d512_mid2_dk48_m2`
-  - `l8_d512_mid2_dk48_m1p75`
-  - `l8_d512_mid2_dk48_v1p5_m1p75`
-  - `l8_d512_boundary2_dk48_m2`
-  - `l8_d512_mid3_dk48_m1p75`
-  - `l9_d512_mid2_dk48_m1p75`
-  - `l9_d512_mid2_dk48_v1p5_m1p75`
-  - `l9_d512_mid2_dk48_m2`
-  - `l9_d512_mid3_dk48_m1p75`
-  - `l9_d512_mid3_dk48_v1p5_m1p75`
-  - `l9_d512_tail2_dk48_m1p75`
-  - attention-only baselines (diagnostic controls):
-    - `l8_d512_r0_m1p75`
-    - `l8_d512_r0_m2`
-    - `l9_d512_r0_m1p75`
-    - `l9_d512_r0_m2`
-- The helper now defaults `PERF_SKIP_FINAL_EVAL=1` for local screening so the
-  size screen handles artifact triage and the local run is not dominated by the
-  quantized roundtrip tail. It also writes the full command snapshot before
-  training, refuses pre-existing run logs unless `ALLOW_EXISTING_LOGS=1`, and
-  bundles partial/interrupted runs on exit.
-- The attention-only baselines are diagnostic controls that exist only to
-  isolate the HGDN tax on the exact challenge shell. They are not replacements
-  for the exact `train_gpt.py` baseline.
+- HGDN: `configs/hgdn/naive_contract_l8_d512_mid2_dk48_m2.toml`
+- attention-only diagnostic control:
+  `configs/hgdn/naive_contract_l8_d512_r0_m2.toml`
+- exact comparator: direct `train_gpt.py` leg inside the helper
 
-```bash
-USE_WANDB=0 WANDB_MODE=offline \
-DISTRIBUTED_MODE=parallel_muon \
-RUN_PREFIX_BASE=localnaivehgdn_sparse3 \
-bash scripts/run_local_hgdn_naive_contract_search.sh
-```
-
-- Immediate local follow-up from this screen:
-  - run the sparse `Dk=48` screen before spending more H100 time
-  - promote only the best sparse exact-contract shell to the next exact
-    repo-baseline comparison
-
-## 2. Re-run the exact 8x packed HGDN tiebreak on the patched surface
-
-- The `1xH100` compile matrix closed at `59d0817a` on the live14 replay shell:
-  - `hybrid`: `799.05 ms/step`
-  - `model`: `799.32 ms/step`, worse quality than `hybrid`
-  - `selective`: `875.67 ms/step`, still alive because its final roundtrip
-    stayed stronger than `hybrid`
-- The first exact `8xH100` tiebreak closed on `2026-04-21 06:15 UTC`:
-  - `hybrid`: `373.13 ms/step`, final exact roundtrip `2.39929889`
-  - `selective`: `403.46 ms/step`, final exact roundtrip `2.39044828`
-- That run answered the old compile-strategy question, but it did **not** yet
-  include the current local fairness/perf patchset:
-  - FA3 attention path on Hopper
-  - `DISTRIBUTED_MODE=parallel_muon`
-  - hard FLA fast-path preflight
-  - manifest provenance fields
-  - `cb026ab` distributed-runtime cleanup:
-    - bucketed replicated-grad all-reduces in `parallel_muon`
-    - baseline-style Muon bank sharding restored on the DDP path
-    - bridge helper aligned with the same FA3 / distributed flags as the other
-      exact-8x helpers
-    - exact-8x bridge/tiebreak helpers default to `WANDB_WATCH=none`
-- The latest distributed compile follow-up suppresses top-level model compile
-  on multi-rank runs. On the exact `8xH100` `parallel_muon` surface,
-  `COMPILE_STRATEGY=hybrid` now normalizes to the same effective plan as
-  `selective`.
-- Re-run the exact `8xH100` packed-HGDN helper under the same live14 finalist
-  shell with the patched runtime surface. Treat the resulting bundle as the
-  new distributed-safe packed compile reference instead of a meaningful
-  `hybrid` vs `selective` tiebreak:
-
-```bash
-USE_WANDB=1 WANDB_MODE=online \
-ATTN_USE_FLASH_ATTN3=1 \
-DISTRIBUTED_MODE=parallel_muon \
-WANDB_WATCH=none \
-RUN_PREFIX_BASE=h100packed_tiebreak \
-bash scripts/run_h100_hgdn_compile_tiebreak_round.sh
-```
-
-## 3. Re-run the naive-contract sanity batch against the exact repo baseline
-
-- Use [`../scripts/run_h100_hgdn_naive_contract_round.sh`](../scripts/run_h100_hgdn_naive_contract_round.sh).
-- Include exactly three legs:
-  - exact repo baseline from `train_gpt.py`
-  - exact-contract HGDN candidate
-  - same-shell attention-only baseline diagnostic control
-- The first fair naive-contract run on `2026-04-21 06:15 UTC` said:
-  - exact repo baseline: `44.00 ms/step`, exact roundtrip `1.23710448`,
-    `UNDER_LIMIT`
-  - live14 HGDN replay shell: `98.08 ms/step`, exact roundtrip `1.24735121`,
-    `OVER_LIMIT`
-  - hybrid attention-only baseline diagnostic control: `46.09 ms/step`, exact
-    roundtrip
-    `1.24098267`, `OVER_LIMIT`
-- That is the branch-goal comparison. Packed HGDN lost badly on the exact
-  baseline contract.
-- The next rerun should keep the same comparison surface but use the new
-  config-driven HGDN candidate path. Pin the hybrid-trainer legs to
-  `WEIGHT_DECAY=0`.
-- The helper now infers the matched same-shell attention control from
-  `HGDN_CONFIG` when `ATTN_CONFIG` is not set, but promotion runs should still
-  pass both configs explicitly once local screening picks the top shells.
-- Pin the direct baseline leg explicitly to:
-  - `DATA_PATH`
-  - `TOKENIZER_PATH`
-  - `VOCAB_SIZE`
-- Treat the repo baseline as the calibration anchor. The hybrid attention-only
-  control remains diagnostic only.
+Command:
 
 ```bash
 USE_WANDB=0 WANDB_MODE=offline \
@@ -146,78 +17,72 @@ ATTN_USE_FLASH_ATTN3=1 \
 DISTRIBUTED_MODE=parallel_muon \
 MUON_DISTRIBUTED_MODE=packed_allreduce \
 GDN_W_G_OPTIMIZER=matrix \
-HGDN_CONFIG=configs/hgdn/<promoted_hgdn_candidate>.toml \
-ATTN_CONFIG=configs/hgdn/<matched_attention_control>.toml \
+HGDN_CONFIG=configs/hgdn/naive_contract_l8_d512_mid2_dk48_m2.toml \
+ATTN_CONFIG=configs/hgdn/naive_contract_l8_d512_r0_m2.toml \
 WANDB_WATCH=none \
-RUN_PREFIX_BASE=h100naive1 \
+RUN_PREFIX_BASE=h100naive_sparse_primary \
 bash scripts/run_h100_hgdn_naive_contract_round.sh
 ```
 
-## 4. Keep HGDN-only finalist work bounded to closing the exact-baseline gap
+Promotion rule: sparse HGDN must improve the exact `train_gpt.py` comparison
+after speed and artifact size are accounted for. Same-shell attention-only
+wins are diagnostic, not leaderboard evidence.
 
-- The branch objective is no longer ambiguous: HGDN only counts if it improves
-  against the exact repo baseline in `train_gpt.py`.
-- Do not spend more H100 time on HGDN-internal wins that do not move that
-  comparison.
-- Keep the live `14L x 384d x mlp3.25` family fixed while closing the speed gap.
-- Current local priorities are:
-  - remove attention-path delta versus the record-grade baseline stack
-  - remove distributed optimizer / communication tax versus the record-grade
-    baseline stack
-  - fail fast if HGDN loses the FLA fast recurrence path
-- Only after the patched reruns land should the next HGDN ablation screen be
-  revisited.
+## 2. Optional Quality-Ceiling Probe
 
-## 5. Finish packed-path compile/runtime cleanup only where it still matters
+Only run this if the primary H100 result leaves a real quality/speed tradeoff
+unresolved:
 
-- Treat the packed FLA recurrence path as compile-eligible; do not force it
-  into eager-only islands again.
-- Keep `TORCH_LOGS=recompiles,graph_breaks` opt-in only.
-- The live local patchset now includes:
-  - FA3 on Hopper for standard attention blocks
-  - `DISTRIBUTED_MODE=parallel_muon`
-  - `COMPILE_STRATEGY=hybrid` defaults in the active packed helpers
-  - `--compile-strategy selective` in the structured launcher
-  - W&B-off default for the naive-contract helper
-  - helper manifests with git/branch/host/timestamp/attention/distributed fields
-  - bucketed replicated-grad sync for the non-Muon params in `parallel_muon`
-  - baseline-style Muon bank sharding on the DDP path
-  - `WANDB_WATCH=none` default on the exact-8x bridge and tiebreak helpers
-- Use explicit overrides instead of changing shared defaults again when running
-  controlled comparisons.
+```bash
+HGDN_CONFIG=configs/hgdn/naive_contract_l9_d512_mid3_dk48_v1p5_m1p75.toml
+```
 
-## 6. Leave archived kernel paths archived
+The local evidence says this is the fixed-step quality leader but slower enough
+to lose the speed-aware HGDN rank.
 
-- Full-block megakernel: research-only.
-- Core-kernel pivot: research-only.
-- Do not spend new H100 time on either archived path unless a local rewrite
-  produces a materially different result first.
+## 3. Calibrate Native FLA After Source Reinstall
 
-## Recent checkpoints
+First probe the local stack:
 
-- `7df6f8d1` (2026-04-18 branch point): core-kernel fork split from `exp/hgdn`.
-- `c96ff08` (2026-04-18 19:03 CDT / 2026-04-19 00:03 UTC): clean `1xH100`
-  core compare; packed `1191.52 ms/step`, core `6369.37 ms/step`.
-- `0a433c9` (2026-04-19 12:47 CDT): packed helper defaults switched to the live
-  `single-live14` replay shell.
-- `d3842b6` (2026-04-19 12:50 CDT): packed eval path moved to `torch.no_grad()`
-  after compile prewarm.
-- `f3d8c2f` (2026-04-19 19:08 CDT): packed FLA-backed GDN blocks became
-  compile-eligible in `selective` / `hybrid`.
-- `59d0817a` (2026-04-20 02:38 UTC / 2026-04-19 21:38 CDT): live14 packed
-  `1xH100` compile matrix
-  closed with `hybrid` as the speed default and `selective` retained for the
-  exact-8x tiebreak.
-- `2026-04-21 06:15 UTC`: first exact `8xH100` packed tiebreak and first fair
-  naive-contract sanity batch. Those runs are now historical references, not
-  the final patched-runtime answer.
-- `cb026ab` (2026-04-21 07:01 UTC / 2026-04-21 03:01 EDT): packed distributed
-  runtime cleanup before the next exact-8x rerun.
+```bash
+conda run -s --name pg python scripts/probe_fla_stack.py
+```
 
-## References
+Then run only bounded smoke locally:
 
-- branch status and commands: [README.md](README.md)
-- chronology and exact scoreboards: [PROFILING_LOG.md](PROFILING_LOG.md)
-- packed replay audit: [HGDN_PACKED_DRIFT_AUDIT.md](HGDN_PACKED_DRIFT_AUDIT.md)
-- archived core-kernel notes: [HGDN_CORE_KERNEL_PLAN.md](HGDN_CORE_KERNEL_PLAN.md)
-- cleanup backlog: [REDUNDANCY_AUDIT.md](REDUNDANCY_AUDIT.md)
+```bash
+env COMPILE=0 VOCAB_SIZE=128 NUM_LAYERS=1 MODEL_DIM=64 NUM_HEADS=2 \
+HEAD_DIM=32 MLP_MULT=2 FLA_VALUE_EXPAND=1 TRAIN_SEQ_LEN=32 \
+SMOKE_SEQ_LEN=32 SMOKE_BATCH_SIZE=2 \
+conda run -s --name pg python train_gpt_fla_control.py --smoke
+```
+
+H100 calibration, if requested, uses
+`configs/fla/native_gdn10_d544_sp8192.toml` and `train_gpt_fla_control.py`.
+Keep it isolated from `HybridGPT`.
+
+## 4. Keep Hygiene Checks Green
+
+Before handing off a run bundle or branch:
+
+```bash
+bash -n scripts/hgdn_shell_common.sh \
+  scripts/run_local_hgdn_naive_contract_search.sh \
+  scripts/run_h100_hgdn_naive_contract_round.sh \
+  scripts/bootstrap_challenge_data.sh
+
+conda run -s --name pg python -m py_compile \
+  model.py train_gpt.py train_gpt_hybrid.py train_gpt_fla_control.py \
+  hgdn_runtime_utils.py scripts/hgdn_helper_cli.py \
+  scripts/screen_hgdn_arch_sizes.py \
+  scripts/analyze_local_naive_contract_bundle.py \
+  scripts/check_bpb_sanity.py scripts/probe_fla_stack.py
+
+conda run -s --name pg ruff check --fix
+conda run -s --name pg ruff format
+conda run -s --name pg ruff check
+git diff --check
+```
+
+Do not launch multi-run sweeps or non-trivial training unless the user requests
+the exact run.

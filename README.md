@@ -163,9 +163,10 @@ By default, this command prints `train_loss` step logs during training and print
 ### Hybrid HGDN Workflow
 
 The hybrid Gated DeltaNet trainer lives at the repo root as `train_gpt_hybrid.py`.
-Configs live under `configs/hgdn/`, the structured launcher lives at
-`scripts/hgdn.py`, and the active branch notes live in
-[docs/README.md](docs/README.md).
+Configs live under `configs/hgdn/`, and the active branch notes live in
+[docs/README.md](docs/README.md). The exact repo baseline remains
+`train_gpt.py`; the hybrid trainer's attention-only mode is a diagnostic
+control only.
 
 If you cloned fresh and do not yet have the tokenizer or dataset locally, download the published `sp1024` assets first:
 
@@ -177,22 +178,28 @@ Once those files exist at `./data/datasets/fineweb10B_sp1024/` and
 `./data/tokenizers/fineweb_1024_bpe.model`, the current HGDN entrypoints are:
 
 ```bash
-python3 scripts/hgdn.py --help
-bash scripts/run_local_hgdn_resize_round.sh
-bash scripts/run_h100_hgdn_resize_round.sh
+bash scripts/run_local_hgdn_naive_contract_search.sh
+bash scripts/run_h100_hgdn_naive_contract_round.sh
 ```
 
-- `scripts/run_local_hgdn_resize_round.sh` runs the current local fixed-token architecture batch.
-- `scripts/run_h100_hgdn_resize_round.sh` runs the current 1xH100 finalist / packing batch.
+- `scripts/run_local_hgdn_naive_contract_search.sh` runs the local sparse exact-contract screen.
+- `scripts/run_h100_hgdn_naive_contract_round.sh` runs the exact `train_gpt.py` baseline, a config-driven sparse HGDN candidate, and the matched attention-only diagnostic control.
 - Both scripts print the launch contract up front and bundle the relevant logs and configs afterward.
 - Real HGDN ablations should log to the W&B project `pg-hgdn-ablations`.
 
-For one-off 1xH100 perf and profile runs, use the structured launcher directly,
-for example:
+Current primary H100 candidate command:
 
 ```bash
-python scripts/hgdn.py h100-perf perf --preset winner-20260405-19-live14 --run-prefix h100k_example --offline
-python scripts/hgdn.py h100-profile hybrid --preset winner-20260405-19-live14 --run-prefix h100k_profile --offline
+USE_WANDB=0 WANDB_MODE=offline \
+ATTN_USE_FLASH_ATTN3=1 \
+DISTRIBUTED_MODE=parallel_muon \
+MUON_DISTRIBUTED_MODE=packed_allreduce \
+GDN_W_G_OPTIMIZER=matrix \
+HGDN_CONFIG=configs/hgdn/naive_contract_l8_d512_mid2_dk48_m2.toml \
+ATTN_CONFIG=configs/hgdn/naive_contract_l8_d512_r0_m2.toml \
+WANDB_WATCH=none \
+RUN_PREFIX_BASE=h100naive_sparse_primary \
+bash scripts/run_h100_hgdn_naive_contract_round.sh
 ```
 
 For the current branch state, screening protocol, W&B schema, and active

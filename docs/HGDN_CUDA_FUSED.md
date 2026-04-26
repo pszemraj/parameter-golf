@@ -88,4 +88,4 @@ If the extension is unavailable, the model falls back to the PyTorch reference p
 - Keep the extension in-tree only for narrower future kernel work.
 - Do not use extension presets for architecture ranking or quality sweeps unless the kernel family itself is the question.
 
-Exact result history and scoreboards live in [PROFILING_LOG.md](PROFILING_LOG.md).
+Current branch status and active commands live in [README.md](README.md).

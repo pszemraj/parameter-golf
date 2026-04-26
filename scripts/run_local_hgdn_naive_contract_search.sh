@@ -214,7 +214,7 @@ append_train_command() {
         "WEIGHT_DECAY=${weight_decay}" \
         "PERF_SKIP_FINAL_EVAL=${perf_skip_final_eval}" \
         "${config_env[@]}" \
-        bash scripts/sweep.sh single
+        torchrun --standalone --nproc_per_node="${ngpu}" train_gpt_hybrid.py
 }
 
 write_command_log() {
@@ -313,9 +313,8 @@ run_batch() {
         echo ">>> local naive-contract search: ${labels[$i]}"
         echo "run_id=${run_id}"
 
-        hgdn_run_sweep \
+        hgdn_run_hybrid_train \
             "local naive-contract search: ${labels[$i]}" \
-            single \
             "NGPU=${ngpu}" \
             "USE_WANDB=${use_wandb}" \
             "WANDB_MODE=${wandb_mode}" \
