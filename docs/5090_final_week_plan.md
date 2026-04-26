@@ -55,7 +55,7 @@ Fixed screening contract:
 - `scan_backend=auto`
 - `TORCH_BLAS_PREFER_CUBLASLT=1`
 - W&B project:
-  - `pg-hconv-ablations`
+  - `pg-core-amp`
 - output version:
   - `RUN_VERSION=v2` for the cleaned post-audit rerun
 
@@ -137,7 +137,7 @@ Runs only count toward screening or confirmation if all of the following are tru
   - `TORCH_BLAS_PREFER_CUBLASLT` must be `1`
   - `COMPILE` and `GRADIENT_CHECKPOINTING` must stay `0`
   - `SPEC_MAX_TOKENS` and `DATA_MAX_TOKENS` must be unset
-  - W&B must be online in `pg-hconv-ablations`
+  - W&B must be online in `pg-core-amp`
 
 Explicit low-quality or convenience modes remain allowed only for local smoke or debugging:
 

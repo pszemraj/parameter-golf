@@ -95,7 +95,7 @@ Maintained 5090 runs are expected to keep:
 - `COMPILE=0`
 - `GRADIENT_CHECKPOINTING=0`
 - no `SPEC_MAX_TOKENS` / `DATA_MAX_TOKENS` cap
-- W&B project `pg-hconv-ablations` for real ablations
+- W&B project `pg-core-amp` for real ablations
 
 Do not silently fall back to slower scan backends, approximate BPB, capped spec
 builds, or transformer-like token-token mixing on maintained competition paths.

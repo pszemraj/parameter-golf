@@ -124,7 +124,7 @@ active script surface.
 Serious maintained launchers fail before training if a shell override would
 change the maintained protocol. Defaults are:
 
-- `WANDB_PROJECT=pg-hconv-ablations`
+- `WANDB_PROJECT=pg-core-amp`
 - `SCAN_BACKEND=auto`
 - `TORCH_BLAS_PREFER_CUBLASLT=1`
 - `COMPILE=0`

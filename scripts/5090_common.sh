@@ -73,7 +73,7 @@ pg_5090_require_serious_launcher_defaults() {
   pg_5090_expect_env "${script_name}" "SCAN_BACKEND" "auto"
   pg_5090_expect_env "${script_name}" "TORCH_BLAS_PREFER_CUBLASLT" "1"
   pg_5090_expect_env "${script_name}" "WANDB" "1"
-  pg_5090_expect_env "${script_name}" "WANDB_PROJECT" "pg-hconv-ablations"
+  pg_5090_expect_env "${script_name}" "WANDB_PROJECT" "pg-core-amp"
 
   if [[ -n "${WANDB_MODE:-}" && "${WANDB_MODE}" != "online" ]]; then
     pg_5090_fail "${script_name}" "WANDB_MODE must be unset or online, got ${WANDB_MODE}"
