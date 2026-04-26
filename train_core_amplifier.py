@@ -1563,20 +1563,20 @@ def eval_payload_fields(result: EvalResult) -> dict[str, int | float | bool]:
     }
 
 
-def format_eval_coverage(result: EvalResult, *, validation_source: str) -> str:
-    """Format validation coverage so sampled evals cannot be confused with train coverage.
+def format_eval_sample(result: EvalResult, *, validation_source: str) -> str:
+    """Format validation sample size without coverage-percent framing.
 
     :param EvalResult result: Evaluation result to describe.
     :param str validation_source: Validation-token source label.
-    :return str: Human-readable validation coverage string.
+    :return str: Human-readable validation sample-size string.
     """
+    prefix = "full_val" if result.full_coverage else "val_sample"
     if result.usable_tokens > 0:
         return (
-            f"val_coverage {result.coverage_frac:.3%} "
-            f"({result.tokens:,}/{result.usable_tokens:,} target tokens, "
-            f"source={validation_source})"
+            f"{prefix} {result.tokens:,}/{result.usable_tokens:,} target tokens "
+            f"(source={validation_source})"
         )
-    return f"val_coverage {result.coverage_frac:.3%} (source={validation_source})"
+    return f"{prefix} {result.tokens:,} target tokens (source={validation_source})"
 
 
 def build_expected_spec_metadata(
@@ -2717,6 +2717,16 @@ def main() -> None:
             val_tokens = val_tokens.to(device=device, non_blocking=True)
 
     print(f"  validation_source={validation_source}")
+    usable_val_targets = max(0, int(val_tokens.numel()) - 1)
+    max_eval_streams = max(1, usable_val_targets // max(1, seq_len + 1))
+    sampled_eval_batch_size = min(batch_size, max_eval_streams)
+    sampled_eval_targets = int(max(0, val_steps) * sampled_eval_batch_size * seq_len)
+    print(
+        "Validation eval contract: "
+        f"sampled_eval_targets={sampled_eval_targets:,}/{usable_val_targets:,}; "
+        f"val_steps={val_steps} seq_len={seq_len} eval_batch_size={sampled_eval_batch_size} "
+        f"source={validation_source} full_val_final={full_val_final}"
+    )
 
     # --- Model ---
     model = CoreAmplifierLM(
@@ -3209,9 +3219,7 @@ def main() -> None:
             }
             payload.update(eval_payload_fields(eval_result))
             print(
-                f"step {step:6d} | val_loss {eval_result.loss:.4f} | "
-                f"val_bpb {eval_result.bpb:.4f} | "
-                f"{format_eval_coverage(eval_result, validation_source=validation_source)}"
+                f"step {step:6d} | val_loss {eval_result.loss:.4f} | val_bpb {eval_result.bpb:.4f}"
             )
             append_jsonl(metrics_path, payload)
             eval_rows.append(payload)
@@ -3282,7 +3290,7 @@ def main() -> None:
         print(
             f"final eval @ step {final_eval_step:6d} | val_loss {eval_result.loss:.4f} | "
             f"val_bpb {eval_result.bpb:.4f} | "
-            f"{format_eval_coverage(eval_result, validation_source=validation_source)}"
+            f"{format_eval_sample(eval_result, validation_source=validation_source)}"
         )
         append_jsonl(metrics_path, payload)
         eval_rows.append(payload)

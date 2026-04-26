@@ -13,7 +13,7 @@ from train_core_amplifier import (
     evaluate,
     eval_payload_fields,
     file_sha256,
-    format_eval_coverage,
+    format_eval_sample,
     full_validation_steps,
     validate_exact_bpb_targets,
 )
@@ -149,7 +149,7 @@ def test_eval_payload_fields_are_explicit():
     assert fields["eval_steps"] == 3
 
 
-def test_format_eval_coverage_names_validation_source():
+def test_format_eval_sample_names_validation_source_without_percentage():
     result = EvalResult(
         loss=1.0,
         bpb=2.0,
@@ -162,7 +162,8 @@ def test_format_eval_coverage_names_validation_source():
         batch_size=4,
         seq_len=8,
     )
-    text = format_eval_coverage(result, validation_source="explicit_val_shard")
-    assert text.startswith("val_coverage 25.000%")
+    text = format_eval_sample(result, validation_source="explicit_val_shard")
+    assert text.startswith("val_sample ")
     assert "100/400 target tokens" in text
+    assert "%" not in text
     assert "source=explicit_val_shard" in text
