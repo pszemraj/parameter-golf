@@ -32,6 +32,7 @@ allow_active_cuda_jobs="${ALLOW_ACTIVE_CUDA_JOBS:-0}"
 ngpu="${NGPU:-1}"
 train_batch_tokens="${TRAIN_BATCH_TOKENS:-65536}"
 train_seq_len="${TRAIN_SEQ_LEN:-1024}"
+grad_accum_steps_override="${GRAD_ACCUM_STEPS:-}"
 val_loss_every="${VAL_LOSS_EVERY:-100}"
 train_log_every="${TRAIN_LOG_EVERY:-25}"
 min_val_seqs="${MIN_VAL_SEQS:-512}"
@@ -81,6 +82,26 @@ screen_candidate_configs="${SCREEN_CANDIDATE_CONFIGS:-$(join_by_comma "${default
 secondary_candidate_configs="${SECONDARY_CANDIDATE_CONFIGS:-configs/hgdn/naive_contract_l8_d512_olmoish_6g2a_v2_m1p25.toml,configs/hgdn/naive_contract_l8_d512_r0_m1p25.toml}"
 
 hgdn_ensure_python_module "${python_bin}" py7zr py7zr
+
+resolve_grad_accum_steps() {
+    if [[ -n "${grad_accum_steps_override}" ]]; then
+        if ((grad_accum_steps_override < 1)); then
+            echo "GRAD_ACCUM_STEPS must be >= 1, got ${grad_accum_steps_override}" >&2
+            exit 1
+        fi
+        echo "${grad_accum_steps_override}"
+        return
+    fi
+    if ((8 % ngpu != 0)); then
+        echo "NGPU must evenly divide 8 when GRAD_ACCUM_STEPS is not set: NGPU=${ngpu}" >&2
+        exit 1
+    fi
+    echo $((8 / ngpu))
+}
+
+grad_accum_steps="$(resolve_grad_accum_steps)"
+val_batch_size="$(hgdn_resolve_val_batch_size "${ngpu}" "${grad_accum_steps}" "${train_seq_len}")"
+val_batch_seqs=$((val_batch_size / train_seq_len))
 
 case "${wandb_mode}" in
 online | offline) ;;
@@ -191,10 +212,13 @@ write_plan() {
         NGPU_JSON="${ngpu}" \
         TRAIN_BATCH_TOKENS_JSON="${train_batch_tokens}" \
         TRAIN_SEQ_LEN_JSON="${train_seq_len}" \
+        GRAD_ACCUM_STEPS_JSON="${grad_accum_steps}" \
         VAL_LOSS_EVERY_JSON="${val_loss_every}" \
         TRAIN_LOG_EVERY_JSON="${train_log_every}" \
         MIN_VAL_SEQS_JSON="${min_val_seqs}" \
         VAL_MAX_SEQS_JSON="${val_max_seqs}" \
+        VAL_BATCH_SIZE_JSON="${val_batch_size}" \
+        VAL_BATCH_SEQS_JSON="${val_batch_seqs}" \
         COMPILE_JSON="${compile}" \
         COMPILE_STRATEGY_JSON="${compile_strategy}" \
         DISTRIBUTED_MODE_JSON="${distributed_mode}" \
@@ -231,10 +255,13 @@ plan = {
     "ngpu": int(os.environ["NGPU_JSON"]),
     "train_batch_tokens": int(os.environ["TRAIN_BATCH_TOKENS_JSON"]),
     "train_seq_len": int(os.environ["TRAIN_SEQ_LEN_JSON"]),
+    "grad_accum_steps": int(os.environ["GRAD_ACCUM_STEPS_JSON"]),
     "val_loss_every": int(os.environ["VAL_LOSS_EVERY_JSON"]),
     "train_log_every": int(os.environ["TRAIN_LOG_EVERY_JSON"]),
     "min_val_seqs": int(os.environ["MIN_VAL_SEQS_JSON"]),
     "val_max_seqs": int(os.environ["VAL_MAX_SEQS_JSON"]),
+    "val_batch_size": int(os.environ["VAL_BATCH_SIZE_JSON"]),
+    "val_batch_seqs": int(os.environ["VAL_BATCH_SEQS_JSON"]),
     "compile": os.environ["COMPILE_JSON"] == "1",
     "compile_strategy": os.environ["COMPILE_STRATEGY_JSON"],
     "distributed_mode": os.environ["DISTRIBUTED_MODE_JSON"],
@@ -280,8 +307,10 @@ print_plan() {
     echo "data_path=${data_path}"
     echo "tokenizer_path=${tokenizer_path}"
     echo "vocab_size=${vocab_size}"
+    echo "grad_accum_steps=${grad_accum_steps}"
     echo "min_val_seqs=${min_val_seqs}"
     echo "val_max_seqs=${val_max_seqs}"
+    echo "val_batch_size=${val_batch_size} tokens (${val_batch_seqs} sequences)"
     echo "gates:"
     echo "  stage0: recurrence mode matrix on v2_m1p5"
     echo "  stage1: bounded candidate/control screen using the selected recurrence mode"
@@ -322,6 +351,7 @@ run_recurrence_stage() {
         ALLOW_EXISTING_LOGS="${allow_existing_logs}" \
         CHECK_CUDA_IDLE=0 \
         NGPU="${ngpu}" \
+        GRAD_ACCUM_STEPS="${grad_accum_steps}" \
         ITERATIONS="${recurrence_iterations}" \
         TRAIN_BATCH_TOKENS="${train_batch_tokens}" \
         TRAIN_SEQ_LEN="${train_seq_len}" \
@@ -329,6 +359,8 @@ run_recurrence_stage() {
         TRAIN_LOG_EVERY="${train_log_every}" \
         MIN_VAL_SEQS="${min_val_seqs}" \
         VAL_MAX_SEQS="${val_max_seqs}" \
+        VAL_BATCH_SIZE="${val_batch_size}" \
+        VAL_BATCH_SEQS= \
         MAX_WALLCLOCK_SECONDS="${max_wallclock_seconds}" \
         COMPILE="${compile}" \
         COMPILE_STRATEGY="${compile_strategy}" \
@@ -391,6 +423,7 @@ run_search_stage() {
         CANDIDATE_CONFIGS="${candidate_configs}" \
         GDN_FLA_RECURRENCE_MODE="${selected_mode}" \
         NGPU="${ngpu}" \
+        GRAD_ACCUM_STEPS="${grad_accum_steps}" \
         ITERATIONS="${iterations}" \
         TRAIN_BATCH_TOKENS="${train_batch_tokens}" \
         TRAIN_SEQ_LEN="${train_seq_len}" \
@@ -398,6 +431,8 @@ run_search_stage() {
         TRAIN_LOG_EVERY="${train_log_every}" \
         MIN_VAL_SEQS="${min_val_seqs}" \
         VAL_MAX_SEQS="${val_max_seqs}" \
+        VAL_BATCH_SIZE="${val_batch_size}" \
+        VAL_BATCH_SEQS= \
         MAX_WALLCLOCK_SECONDS="${max_wallclock_seconds}" \
         COMPILE="${compile}" \
         COMPILE_STRATEGY="${compile_strategy}" \

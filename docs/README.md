@@ -306,7 +306,10 @@ from a toy validation split. Local helpers default to `VAL_MAX_SEQS=512`, a
 deterministic prefix of the dedicated validation shard; H100 helpers and raw
 trainers default to `VAL_MAX_SEQS=0`, meaning the full validation shard. For
 plumbing-only smoke tests on tiny synthetic validation data, set
-`MIN_VAL_SEQS=1` explicitly.
+`MIN_VAL_SEQS=1` explicitly. `VAL_BATCH_SIZE` is the global validation batch in
+tokens, matching the trainers. Local helpers also accept `VAL_BATCH_SEQS=8` for
+the common human-facing sequence-count form and resolve it to
+`VAL_BATCH_SIZE=8192` when `TRAIN_SEQ_LEN=1024`.
 
 ## Analysis And Sanity Tools
 

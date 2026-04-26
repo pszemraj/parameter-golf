@@ -29,6 +29,64 @@ hgdn_validate_fla_recurrence_mode() {
     esac
 }
 
+hgdn_resolve_val_batch_size() {
+    local ngpu="${1:?ngpu required}"
+    local grad_accum_steps="${2:?grad accum steps required}"
+    local train_seq_len="${3:?train sequence length required}"
+    local min_val_batch_size=$((ngpu * grad_accum_steps * train_seq_len))
+    local min_val_batch_seqs=$((ngpu * grad_accum_steps))
+    local requested_tokens="${VAL_BATCH_SIZE:-}"
+    local requested_seqs="${VAL_BATCH_SEQS:-}"
+
+    if [[ -n "${requested_tokens}" && -n "${requested_seqs}" ]]; then
+        echo "Set only one of VAL_BATCH_SIZE or VAL_BATCH_SEQS." >&2
+        return 1
+    fi
+
+    if [[ -n "${requested_seqs}" ]]; then
+        if [[ ! "${requested_seqs}" =~ ^[0-9]+$ ]]; then
+            echo "VAL_BATCH_SEQS must be a positive integer, got ${requested_seqs}" >&2
+            return 1
+        fi
+        if ((requested_seqs < 1)); then
+            echo "VAL_BATCH_SEQS must be a positive integer, got ${requested_seqs}" >&2
+            return 1
+        fi
+        if ((requested_seqs < min_val_batch_seqs)); then
+            echo "VAL_BATCH_SEQS must be at least ${min_val_batch_seqs} for NGPU=${ngpu}, GRAD_ACCUM_STEPS=${grad_accum_steps}" >&2
+            return 1
+        fi
+        echo $((requested_seqs * train_seq_len))
+        return 0
+    fi
+
+    if [[ -z "${requested_tokens}" ]]; then
+        echo "${min_val_batch_size}"
+        return 0
+    fi
+
+    if [[ ! "${requested_tokens}" =~ ^[0-9]+$ ]]; then
+        echo "VAL_BATCH_SIZE must be a positive integer token count, got ${requested_tokens}" >&2
+        return 1
+    fi
+    if ((requested_tokens < 1)); then
+        echo "VAL_BATCH_SIZE must be a positive integer token count, got ${requested_tokens}" >&2
+        return 1
+    fi
+
+    if ((requested_tokens < min_val_batch_size)); then
+        if ((requested_tokens >= min_val_batch_seqs)); then
+            echo "Interpreting VAL_BATCH_SIZE=${requested_tokens} as validation sequences for compatibility; use VAL_BATCH_SEQS=${requested_tokens} or VAL_BATCH_SIZE=$((requested_tokens * train_seq_len))." >&2
+            echo $((requested_tokens * train_seq_len))
+            return 0
+        fi
+        echo "VAL_BATCH_SIZE is a global token count and must be at least ${min_val_batch_size} for NGPU=${ngpu}, GRAD_ACCUM_STEPS=${grad_accum_steps}, TRAIN_SEQ_LEN=${train_seq_len}; use VAL_BATCH_SEQS for sequence-count input." >&2
+        return 1
+    fi
+
+    echo "${requested_tokens}"
+}
+
 hgdn_filter_recurrence_env() {
     local kv
     for kv in "$@"; do

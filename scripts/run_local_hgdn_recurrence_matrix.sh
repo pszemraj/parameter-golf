@@ -74,12 +74,7 @@ resolve_grad_accum_steps() {
 }
 
 grad_accum_steps="$(resolve_grad_accum_steps)"
-min_val_batch_size=$((ngpu * grad_accum_steps * train_seq_len))
-val_batch_size="${VAL_BATCH_SIZE:-${min_val_batch_size}}"
-if (( val_batch_size < min_val_batch_size )); then
-    echo "VAL_BATCH_SIZE must be at least ${min_val_batch_size} for NGPU=${ngpu}, GRAD_ACCUM_STEPS=${grad_accum_steps}, TRAIN_SEQ_LEN=${train_seq_len}" >&2
-    exit 1
-fi
+val_batch_size="$(hgdn_resolve_val_batch_size "${ngpu}" "${grad_accum_steps}" "${train_seq_len}")"
 
 case "${wandb_mode}" in
 online | offline) ;;
