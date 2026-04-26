@@ -1,0 +1,217 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+PYTHON_BIN="${PYTHON:-/home/pszemraj/miniforge3/envs/train/bin/python}"
+
+RUN_VERSION="geom1"
+SEED="1337"
+FRONTIER_BATCH_ID="geom1"
+TRIGRAM_TOP_K="2"
+TRIGRAM_COUNT_WORKERS="1"
+MAX_CONFIRMATIONS="2"
+STOP_AFTER="k4"
+RUN_BENCHMARK="auto"
+DRY_RUN="0"
+RUN_ID="$(date +%Y%m%d_%H%M%S)"
+LOG_DIR="${REPO_ROOT}/logs/5090_adaptive_closeout/${RUN_ID}"
+BENCHMARK_JSON=""
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [options]
+
+Adaptive 5090 closeout:
+  1. finish the fixed-token K2 blocks0 geometry frontier
+  2. confirm at most N promoted geometry rows
+  3. run BPTT2 only on the best completed confirmation
+  4. run one K4 screen on the selected best geometry/BPTT setting
+
+Options:
+  --run-version VALUE          default: geom1
+  --seed VALUE                 default: 1337
+  --frontier-batch-id VALUE    default: geom1
+  --benchmark-json PATH
+  --count-workers VALUE        trigram count workers for any cache miss
+  --max-confirmations VALUE    default: 2
+  --stop-after VALUE           frontier|confirm|bptt|k4, default: k4
+  --run-benchmark | --no-run-benchmark
+  --run-id VALUE
+  --log-dir PATH
+  --dry-run
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --run-version) RUN_VERSION="$2"; shift 2 ;;
+    --seed) SEED="$2"; shift 2 ;;
+    --frontier-batch-id) FRONTIER_BATCH_ID="$2"; shift 2 ;;
+    --benchmark-json) BENCHMARK_JSON="$2"; shift 2 ;;
+    --trigram-top-k) TRIGRAM_TOP_K="$2"; shift 2 ;;
+    --trigram-count-workers|--count-workers) TRIGRAM_COUNT_WORKERS="$2"; shift 2 ;;
+    --max-confirmations) MAX_CONFIRMATIONS="$2"; shift 2 ;;
+    --stop-after) STOP_AFTER="$2"; shift 2 ;;
+    --run-benchmark) RUN_BENCHMARK="1"; shift ;;
+    --no-run-benchmark) RUN_BENCHMARK="0"; shift ;;
+    --run-id)
+      RUN_ID="$2"
+      LOG_DIR="${REPO_ROOT}/logs/5090_adaptive_closeout/${RUN_ID}"
+      shift 2
+      ;;
+    --log-dir) LOG_DIR="$2"; shift 2 ;;
+    --dry-run) DRY_RUN="1"; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+case "${STOP_AFTER}" in
+  frontier|confirm|bptt|k4) ;;
+  *) echo "Invalid --stop-after: ${STOP_AFTER}" >&2; usage >&2; exit 2 ;;
+esac
+
+if [[ "${TRIGRAM_TOP_K}" != "2" ]]; then
+  echo "Adaptive closeout frontier must start from trigram top-K=2, got ${TRIGRAM_TOP_K}" >&2
+  exit 2
+fi
+
+if [[ -z "${BENCHMARK_JSON}" ]]; then
+  BENCHMARK_JSON="${REPO_ROOT}/logs/5090_final3day/${FRONTIER_BATCH_ID}/geometry_frontier_benchmark.json"
+fi
+
+if [[ "${RUN_BENCHMARK}" == "auto" ]]; then
+  if [[ -f "${BENCHMARK_JSON}" ]]; then
+    RUN_BENCHMARK="0"
+  else
+    RUN_BENCHMARK="1"
+  fi
+fi
+
+export TORCH_BLAS_PREFER_CUBLASLT="${TORCH_BLAS_PREFER_CUBLASLT:-1}"
+export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
+
+mkdir -p "${LOG_DIR}"
+
+print_cmd() {
+  printf '+'
+  printf ' %q' "$@"
+  printf '\n'
+}
+
+stage_rank() {
+  case "$1" in
+    frontier) echo 1 ;;
+    confirm) echo 2 ;;
+    bptt) echo 3 ;;
+    k4) echo 4 ;;
+    *) echo 999 ;;
+  esac
+}
+
+should_run_stage() {
+  local stage="$1"
+  [[ "$(stage_rank "${stage}")" -le "$(stage_rank "${STOP_AFTER}")" ]]
+}
+
+run_logged() {
+  local name="$1"
+  shift
+  echo
+  echo "=== ${name} ==="
+  print_cmd "$@"
+  "$@" 2>&1 | tee "${LOG_DIR}/${name}.log"
+}
+
+PLAN_SCRIPT=""
+
+write_plan() {
+  local stage="$1"
+  local out_script="${LOG_DIR}/${stage}.sh"
+  local out_md="${LOG_DIR}/${stage}.md"
+  run_logged "plan_${stage}" \
+    "${PYTHON_BIN}" "${REPO_ROOT}/tools/plan_5090_adaptive_closeout.py" \
+      --stage "${stage}" \
+      --run-version "${RUN_VERSION}" \
+      --seed "${SEED}" \
+      --benchmark "${BENCHMARK_JSON}" \
+      --max-confirmations "${MAX_CONFIRMATIONS}" \
+      --write-script "${out_script}" \
+      --emit markdown
+  cp "${LOG_DIR}/plan_${stage}.log" "${out_md}"
+  PLAN_SCRIPT="${out_script}"
+}
+
+run_plan_script() {
+  local stage="$1"
+  local script_path="$2"
+  echo
+  echo "=== execute_${stage} ==="
+  if [[ -f "${script_path}" ]]; then
+    sed -n '1,220p' "${script_path}"
+  else
+    echo "Missing generated plan script: ${script_path}" >&2
+    exit 1
+  fi
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    return 0
+  fi
+  bash "${script_path}" 2>&1 | tee "${LOG_DIR}/execute_${stage}.log"
+}
+
+cat <<EOF | tee "${LOG_DIR}/header.txt"
+5090 adaptive closeout runner
+repo_root=${REPO_ROOT}
+python=${PYTHON_BIN}
+run_version=${RUN_VERSION}
+seed=${SEED}
+frontier_batch_id=${FRONTIER_BATCH_ID}
+benchmark_json=${BENCHMARK_JSON}
+run_benchmark=${RUN_BENCHMARK}
+max_confirmations=${MAX_CONFIRMATIONS}
+stop_after=${STOP_AFTER}
+count_workers=${TRIGRAM_COUNT_WORKERS}
+log_dir=${LOG_DIR}
+cublaslt=${TORCH_BLAS_PREFER_CUBLASLT}
+dry_run=${DRY_RUN}
+EOF
+
+if should_run_stage frontier; then
+  frontier_cmd=(
+    bash "${SCRIPT_DIR}/run_5090_final3day_frontier_batch.sh"
+    --frontier-batch-id "${FRONTIER_BATCH_ID}"
+    --run-version "${RUN_VERSION}"
+    --seeds "${SEED}"
+    --trigram-top-k "2"
+    --count-workers "${TRIGRAM_COUNT_WORKERS}"
+    --benchmark-json "${BENCHMARK_JSON}"
+  )
+  if [[ "${RUN_BENCHMARK}" == "1" ]]; then
+    frontier_cmd+=(--run-benchmark)
+  else
+    frontier_cmd+=(--no-run-benchmark)
+  fi
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    frontier_cmd+=(--dry-run)
+  fi
+  run_logged frontier "${frontier_cmd[@]}"
+fi
+
+if should_run_stage confirm; then
+  write_plan confirmations
+  run_plan_script confirmations "${PLAN_SCRIPT}"
+fi
+
+if should_run_stage bptt; then
+  write_plan bptt
+  run_plan_script bptt "${PLAN_SCRIPT}"
+fi
+
+if should_run_stage k4; then
+  write_plan k4
+  run_plan_script k4 "${PLAN_SCRIPT}"
+fi
+
+echo
+echo "Adaptive closeout runner complete. Logs: ${LOG_DIR}"

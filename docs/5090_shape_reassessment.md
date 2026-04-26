@@ -101,7 +101,14 @@ Lower-impact:
 Use top-2 trigram memory first. Do not test K=4 until shape is no longer the
 dominant unknown.
 
-Run the staged batch:
+Run the adaptive closeout:
+
+```bash
+bash scripts/run_5090_adaptive_closeout.sh --dry-run --frontier-batch-id geom1 --run-version geom1 --seed 1337 --no-run-benchmark --count-workers 2 --max-confirmations 2 --stop-after k4
+bash scripts/run_5090_adaptive_closeout.sh --frontier-batch-id geom1 --run-version geom1 --seed 1337 --no-run-benchmark --count-workers 2 --max-confirmations 2 --stop-after k4
+```
+
+Manual staged equivalent:
 
 ```bash
 bash scripts/run_5090_final3day_frontier_batch.sh --dry-run --run-version geom1 --seeds 1337

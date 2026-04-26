@@ -16,6 +16,7 @@ does not preserve the upstream transformer baseline, MLX baseline, or historical
 - `scripts/run_5090_trigram_aligned_geometry_screen.sh`: one geometry screen
 - `scripts/run_5090_trigram_memory_screen.sh`: top-K trigram-memory screen
 - `scripts/run_5090_trigram_confirm1b.sh`: top-K trigram-memory confirmation
+- `scripts/run_5090_adaptive_closeout.sh`: bounded adaptive closeout
 
 Current planning docs:
 
@@ -49,25 +50,31 @@ conda run -s --name train python tools/check_dataset_shards.py \
 
 ## Current Closeout Command
 
-Dry-run the current geometry/top-K protocol:
+Dry-run the bounded adaptive closeout:
 
 ```bash
-bash scripts/run_5090_final3day_frontier_batch.sh \
+bash scripts/run_5090_adaptive_closeout.sh \
   --dry-run \
   --frontier-batch-id geom1 \
   --run-version geom1 \
-  --seeds 1337 \
-  --no-run-benchmark
+  --seed 1337 \
+  --no-run-benchmark \
+  --count-workers 2 \
+  --max-confirmations 2 \
+  --stop-after k4
 ```
 
 Run it:
 
 ```bash
-bash scripts/run_5090_final3day_frontier_batch.sh \
+bash scripts/run_5090_adaptive_closeout.sh \
   --frontier-batch-id geom1 \
   --run-version geom1 \
-  --seeds 1337 \
-  --no-run-benchmark
+  --seed 1337 \
+  --no-run-benchmark \
+  --count-workers 2 \
+  --max-confirmations 2 \
+  --stop-after k4
 ```
 
 ## Guardrails

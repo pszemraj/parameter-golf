@@ -240,7 +240,32 @@ Seed policy:
 
 Next headroom test after top-2 confirmation:
 
-Before increasing top-K, run the reviewer-aligned geometry frontier batch:
+Before increasing top-K, run the reviewer-aligned geometry frontier. The
+adaptive closeout runner is the preferred command because it selects follow-ups from
+completed summaries rather than running a permutation grid:
+
+```bash
+bash scripts/run_5090_adaptive_closeout.sh \
+  --dry-run \
+  --frontier-batch-id geom1 \
+  --run-version geom1 \
+  --seed 1337 \
+  --no-run-benchmark \
+  --count-workers 2 \
+  --max-confirmations 2 \
+  --stop-after k4
+
+bash scripts/run_5090_adaptive_closeout.sh \
+  --frontier-batch-id geom1 \
+  --run-version geom1 \
+  --seed 1337 \
+  --no-run-benchmark \
+  --count-workers 2 \
+  --max-confirmations 2 \
+  --stop-after k4
+```
+
+Manual staged equivalent:
 
 ```bash
 bash scripts/run_5090_final3day_frontier_batch.sh --dry-run --run-version geom1 --seeds 1337

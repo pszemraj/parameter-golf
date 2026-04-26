@@ -209,7 +209,38 @@ performance read makes the reviewer-aligned geometry frontier higher priority
 than top-K headroom, because the current controller shape is both slow and
 memory-heavy.
 
-Run the staged frontier batch:
+For bounded execution, use the adaptive runner:
+
+```bash
+bash scripts/run_5090_adaptive_closeout.sh \
+  --dry-run \
+  --frontier-batch-id geom1 \
+  --run-version geom1 \
+  --seed 1337 \
+  --no-run-benchmark \
+  --count-workers 2 \
+  --max-confirmations 2 \
+  --stop-after k4
+
+bash scripts/run_5090_adaptive_closeout.sh \
+  --frontier-batch-id geom1 \
+  --run-version geom1 \
+  --seed 1337 \
+  --no-run-benchmark \
+  --count-workers 2 \
+  --max-confirmations 2 \
+  --stop-after k4
+```
+
+The runner is intentionally sequential and adaptive:
+
+1. finish the fixed-token K2/blocks0 geometry screen
+2. select at most two rows that clear the analyzer promotion rules
+3. run `1B` confirmation only for selected rows
+4. test `BPTT2` only on the best completed confirmation
+5. run one K4 screen on the selected best geometry/BPTT setting
+
+The manual equivalent starts with the staged frontier batch:
 
 ```bash
 bash scripts/run_5090_final3day_frontier_batch.sh --dry-run --run-version geom1 --seeds 1337
