@@ -387,6 +387,15 @@ class RandomStreamBatcher:
             else None
         )
         self.offsets = torch.arange(self.seq_len + 1, device=self.index_device)
+        self._pinned_batch_cpu: Optional[torch.Tensor] = (
+            torch.empty(
+                (self.batch_size, self.seq_len + 1),
+                dtype=torch.long,
+                pin_memory=True,
+            )
+            if self.output_device.type == "cuda" and self.numpy_tokens is not None
+            else None
+        )
         self.starts: Optional[torch.Tensor] = None
         self.remaining = 0
         self.max_start = self.tokens.numel() - self.carry_chunks * self.seq_len - 1
@@ -420,13 +429,21 @@ class RandomStreamBatcher:
         idx = self.starts[:, None] + self.offsets[None, :]
         if self.numpy_tokens is not None:
             gathered = np.asarray(self.numpy_tokens[idx.cpu().numpy()], dtype=np.int64)
-            batch = torch.from_numpy(gathered)
+            gathered_t = torch.from_numpy(gathered)
+            if self._pinned_batch_cpu is not None:
+                self._pinned_batch_cpu.copy_(gathered_t)
+                batch = self._pinned_batch_cpu
+            else:
+                batch = gathered_t
         else:
             batch = self.tokens[idx].long()  # .long() only on the small gathered batch
         self.starts = self.starts + self.seq_len
         self.remaining -= 1
         if batch.device != self.output_device:
-            batch = batch.to(self.output_device, non_blocking=(self.output_device.type == "cuda"))
+            batch = batch.to(
+                self.output_device,
+                non_blocking=(self.output_device.type == "cuda" and self._pinned_batch_cpu is None),
+            )
         return batch, reset_state
 
 
@@ -481,6 +498,15 @@ class DirectoryRandomStreamBatcher:
         self.valid_shard_ids = torch.tensor(valid_ids, dtype=torch.long)
         self.valid_max_starts = torch.tensor(max_starts, dtype=torch.long)
         self.valid_start_weights = torch.tensor(start_weights, dtype=torch.float64)
+        self._batch_cpu: Optional[torch.Tensor] = (
+            torch.empty(
+                (self.batch_size, self.seq_len + 1),
+                dtype=torch.long,
+                pin_memory=True,
+            )
+            if self.output_device.type == "cuda"
+            else None
+        )
         self.shard_ids: Optional[torch.Tensor] = None
         self.starts: Optional[torch.Tensor] = None
         self.remaining = 0
@@ -517,10 +543,10 @@ class DirectoryRandomStreamBatcher:
             reset_state = True
 
         assert self.shard_ids is not None and self.starts is not None
-        batch_cpu = torch.empty(
-            (self.batch_size, self.seq_len + 1),
-            dtype=torch.long,
-            pin_memory=(self.output_device.type == "cuda"),
+        batch_cpu = (
+            self._batch_cpu
+            if self._batch_cpu is not None
+            else torch.empty((self.batch_size, self.seq_len + 1), dtype=torch.long)
         )
 
         for shard_id in torch.unique(self.shard_ids).tolist():
@@ -534,7 +560,7 @@ class DirectoryRandomStreamBatcher:
         self.remaining -= 1
 
         if self.output_device.type != "cpu":
-            batch = batch_cpu.to(self.output_device, non_blocking=True)
+            batch = batch_cpu.to(self.output_device, non_blocking=False)
         else:
             batch = batch_cpu
         return batch, reset_state
@@ -570,6 +596,15 @@ class SequentialStreamBatcher:
             else None
         )
         self.offsets = torch.arange(self.seq_len + 1, device=self.index_device)
+        self._pinned_batch_cpu: Optional[torch.Tensor] = (
+            torch.empty(
+                (self.batch_size, self.seq_len + 1),
+                dtype=torch.long,
+                pin_memory=True,
+            )
+            if self.output_device.type == "cuda" and self.numpy_tokens is not None
+            else None
+        )
 
         usable = self.tokens.numel() - 1
         if usable < self.batch_size * (self.seq_len + 1):
@@ -595,12 +630,20 @@ class SequentialStreamBatcher:
         idx = starts[:, None] + self.offsets[None, :]
         if self.numpy_tokens is not None:
             gathered = np.asarray(self.numpy_tokens[idx.cpu().numpy()], dtype=np.int64)
-            batch = torch.from_numpy(gathered)
+            gathered_t = torch.from_numpy(gathered)
+            if self._pinned_batch_cpu is not None:
+                self._pinned_batch_cpu.copy_(gathered_t)
+                batch = self._pinned_batch_cpu
+            else:
+                batch = gathered_t
         else:
             batch = self.tokens[idx].long()  # .long() only on the small gathered batch
         self.position += self.seq_len
         if batch.device != self.output_device:
-            batch = batch.to(self.output_device, non_blocking=(self.output_device.type == "cuda"))
+            batch = batch.to(
+                self.output_device,
+                non_blocking=(self.output_device.type == "cuda" and self._pinned_batch_cpu is None),
+            )
         return batch, reset_state
 
 
@@ -1022,8 +1065,12 @@ def cross_entropy_per_token(logits: torch.Tensor, targets: torch.Tensor) -> torc
     :param torch.Tensor targets: Target token ids.
     :return torch.Tensor: Per-token loss tensor.
     """
+    if logits.device.type == "cuda" and torch.is_autocast_enabled("cuda"):
+        loss_logits = logits
+    else:
+        loss_logits = logits.float()
     per_token = F.cross_entropy(
-        logits.float().reshape(-1, logits.size(-1)),
+        loss_logits.reshape(-1, logits.size(-1)),
         targets.reshape(-1),
         reduction="none",
     )
@@ -2446,12 +2493,16 @@ def main() -> None:
 
     # --- Byte count LUT for competition-exact bpb ---
     byte_count_lut: Optional[torch.Tensor] = None
+    avg_bytes_per_token: Optional[float] = None
     tok_path = cfg.tokenizer_path
     if tok_path is not None:
         try:
             byte_count_lut = build_byte_count_lut(tok_path, spec.vocab_size, device)
-            avg_bpt = byte_count_lut.float().mean().item()
-            print(f"Byte count LUT loaded from {tok_path.name} (avg {avg_bpt:.2f} bytes/token)")
+            avg_bytes_per_token = float(byte_count_lut.float().mean().item())
+            print(
+                f"Byte count LUT loaded from {tok_path.name} "
+                f"(avg {avg_bytes_per_token:.2f} bytes/token)"
+            )
         except Exception as e:
             if not allow_approx_bpb:
                 raise SystemExit(
@@ -2730,8 +2781,8 @@ def main() -> None:
             train_loss = total_raw_loss_sum / max(1, total_tokens)
             # Approximate train bpb (exact would require per-token byte counts accumulated in loop)
             train_bpb_approx = train_loss / math.log(2)
-            if byte_count_lut is not None:
-                train_bpb_approx /= byte_count_lut.float().mean().item()
+            if avg_bytes_per_token is not None:
+                train_bpb_approx /= avg_bytes_per_token
             peak_alloc_mib, peak_reserved_mib = current_peak_memory_mib(device)
             train_payload = {
                 "kind": "train",
