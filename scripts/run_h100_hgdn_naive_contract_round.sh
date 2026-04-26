@@ -26,8 +26,6 @@ archive_output="${ARCHIVE_OUTPUT:-local-scratch/${run_prefix_base}_bundle.7z}"
 command_log="${COMMAND_LOG:-local-scratch/${run_prefix_base}_commands.sh}"
 torch_logs="${TORCH_LOGS:-}"
 torch_trace="${TORCH_TRACE:-}"
-build_hgdn_cuda="${BUILD_HGDN_CUDA:-0}"
-run_hgdn_cuda_parity="${RUN_HGDN_CUDA_PARITY:-0}"
 omp_num_threads="${OMP_NUM_THREADS:-1}"
 mkl_num_threads="${MKL_NUM_THREADS:-1}"
 openblas_num_threads="${OPENBLAS_NUM_THREADS:-1}"
@@ -127,8 +125,6 @@ print_plan() {
     echo "OPENBLAS_NUM_THREADS=${openblas_num_threads}"
     echo "NUMEXPR_NUM_THREADS=${numexpr_num_threads}"
     echo "NCCL_IB_DISABLE=${nccl_ib_disable}"
-    echo "build_hgdn_cuda=${build_hgdn_cuda}"
-    echo "run_hgdn_cuda_parity=${run_hgdn_cuda_parity}"
     echo "ngpu=${ngpu}"
     echo "iterations=${iterations}"
     echo "train_batch_tokens=${train_batch_tokens}"
@@ -158,30 +154,12 @@ print_plan() {
     echo "goal=measure whether the exact repo naive baseline, the exact-contract HGDN candidate, and the same-shell attention-only baseline diagnostic control can all be compared on the official naive-baseline contract"
 }
 
-prepare_cuda() {
+prepare_command_log() {
     mkdir -p "$(dirname "${command_log}")"
     {
         echo "#!/bin/bash"
         echo "set -euo pipefail"
     } >"${command_log}"
-
-    if [[ "${build_hgdn_cuda}" == "1" ]]; then
-        echo
-        echo ">>> build HGDN CUDA extension"
-        hgdn_append_plain_command \
-            "${command_log}" \
-            "${python_bin}" setup_hgdn_cuda.py build_ext --inplace
-        "${python_bin}" setup_hgdn_cuda.py build_ext --inplace
-    fi
-
-    if [[ "${run_hgdn_cuda_parity}" == "1" ]]; then
-        echo
-        echo ">>> HGDN CUDA parity"
-        hgdn_append_plain_command \
-            "${command_log}" \
-            "${python_bin}" scripts/hgdn_cuda_parity.py
-        "${python_bin}" scripts/hgdn_cuda_parity.py
-    fi
 }
 
 run_round() {
@@ -451,6 +429,6 @@ build_bundle() {
 }
 
 print_plan
-prepare_cuda
+prepare_command_log
 run_round
 build_bundle

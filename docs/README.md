@@ -11,9 +11,7 @@ Branch: `exp/hgdn-final`
   The live trainer no longer has owned-kernel flags, branches, preflight, or
   tests.
 - Preserved active path: packed QKV projection, packed depthwise QKV conv, and
-  public-FLA recurrence support. The old `hgdn_cuda_ext` sidecar extension is
-  still present for explicit archaeology but is no longer built or parity-tested
-  by default.
+  public-FLA recurrence support.
 - GDN dynamics now match the important upstream FLA priors more closely:
   `A_log` and `dt_bias` use timescale-aware initialization, those decay params
   run in a no-weight-decay Adam group, negative eigenvalues stay enabled by
@@ -24,8 +22,6 @@ Branch: `exp/hgdn-final`
   in-kernel q/k L2 normalization and decay-gate activation. The default remains
   `compile_visible`. All FLA recurrence modes now use the public FLA default
   scale, `1 / sqrt(head_k_dim)`.
-- Requested optional `GDN_USE_CUDA_*` paths now fail fast in the trainer when
-  `hgdn_cuda_ext` is not loaded instead of silently falling back.
 - Local Python commands on this checkout use `conda run -s --name pg ...`.
 
 The active branch question is narrow: can a sparse HGDN shell beat the exact
@@ -61,7 +57,7 @@ The external GDN/OLMo design notes are in [REFERENCE.md](REFERENCE.md).
 | 3:1 GDN:attention prior | Added as candidate | `l8_d512_olmoish_6g2a_v2_m1p25` is the 6G/2A reality check; it is not the default promotion candidate until wallclock evidence supports it. |
 | Native FLA control | Clarified | `train_gpt_fla_control.py` remains pure native GDN calibration, not OLMo Hybrid; an OLMo-ish SP1024 native config exists for dimension/value-width calibration. |
 | Wrapper overhead | Measurable | `scripts/bench_fla_recurrence_paths.py` times wrapper, direct custom recurrence, direct fused FLA semantics, and native `fla.layers.GatedDeltaNet`. |
-| Optional local CUDA extension | Archived / opt-in | Requested `GDN_USE_CUDA_*` paths fail fast if `hgdn_cuda_ext` is absent; H100 helpers no longer build or parity-test the sidecar extension unless explicitly requested. |
+| Optional local CUDA extension | Removed | The old `hgdn_cuda_ext` sidecar, build scripts, parity scripts, and trainer flags are no longer part of this branch. |
 
 ## Local Sparse Search
 
@@ -121,10 +117,6 @@ HGDN_CONFIG=configs/hgdn/naive_contract_l9_d512_mid3_dk48_v1p5_m1p75.toml
 The helper runs three legs: exact `train_gpt.py` baseline, config-driven sparse
 HGDN, and the matched attention-only diagnostic control. It pins `DATA_PATH`,
 `TOKENIZER_PATH`, and `VOCAB_SIZE` for the exact baseline leg.
-
-The archived `hgdn_cuda_ext` sidecar build/parity steps are off by default. For
-sidecar archaeology only, opt in with `BUILD_HGDN_CUDA=1` and
-`RUN_HGDN_CUDA_PARITY=1`.
 
 Local sparse search helper:
 
@@ -254,7 +246,7 @@ bash -n scripts/hgdn_shell_common.sh \
 
 conda run -s --name pg python -m py_compile \
   model.py train_gpt.py train_gpt_hybrid.py train_gpt_fla_control.py \
-  hgdn_runtime_utils.py scripts/hgdn_helper_cli.py \
+  hgdn_fla.py hgdn_runtime_utils.py scripts/hgdn_helper_cli.py \
   scripts/screen_hgdn_arch_sizes.py \
   scripts/analyze_local_naive_contract_bundle.py \
   scripts/check_bpb_sanity.py scripts/probe_fla_stack.py \

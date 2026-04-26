@@ -36,7 +36,6 @@ import torch.distributed as dist
 from torch import Tensor, nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from hgdn_cuda import extension_loaded
 from hgdn_runtime_utils import (
     dequantize_state_dict_int8,
     maybe_compile,
@@ -203,31 +202,6 @@ class Hyperparameters:
     gdn_control_proj_fp32 = bool(int(os.environ.get("GDN_CONTROL_PROJ_FP32", "1")))
     gdn_gates_fp32 = bool(int(os.environ.get("GDN_GATES_FP32", "1")))
     gdn_output_norm_fp32 = bool(int(os.environ.get("GDN_OUTPUT_NORM_FP32", "1")))
-    gdn_use_cuda_frontend_nct = bool(
-        int(os.environ.get("GDN_USE_CUDA_FRONTEND_NCT", "0"))
-    )
-    gdn_use_cuda_packed_conv = bool(
-        int(os.environ.get("GDN_USE_CUDA_PACKED_CONV", "0"))
-    )
-    gdn_use_cuda_packed_conv_aten_backward = bool(
-        int(os.environ.get("GDN_USE_CUDA_PACKED_CONV_ATEN_BACKWARD", "0"))
-    )
-    gdn_use_cuda_packed_conv_aten_weight_backward = bool(
-        int(os.environ.get("GDN_USE_CUDA_PACKED_CONV_ATEN_WEIGHT_BACKWARD", "0"))
-    )
-    gdn_use_cuda_fused_frontend = bool(
-        int(os.environ.get("GDN_USE_CUDA_FUSED_FRONTEND", "0"))
-    )
-    gdn_use_cuda_fused_frontend_lib = bool(
-        int(os.environ.get("GDN_USE_CUDA_FUSED_FRONTEND_LIB", "0"))
-    )
-    gdn_use_cuda_fused_output = bool(
-        int(os.environ.get("GDN_USE_CUDA_FUSED_OUTPUT", "0"))
-    )
-    gdn_use_cuda_split_norm = bool(int(os.environ.get("GDN_USE_CUDA_SPLIT_NORM", "0")))
-    gdn_use_cuda_split_norm_lib = bool(
-        int(os.environ.get("GDN_USE_CUDA_SPLIT_NORM_LIB", "0"))
-    )
     gdn_use_packed_qkv_conv_custom_backward = bool(
         int(os.environ.get("GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD", "0"))
     )
@@ -374,15 +348,6 @@ def build_wandb_config(
         "GDN_CONTROL_PROJ_FP32": args.gdn_control_proj_fp32,
         "GDN_GATES_FP32": args.gdn_gates_fp32,
         "GDN_OUTPUT_NORM_FP32": args.gdn_output_norm_fp32,
-        "GDN_USE_CUDA_FRONTEND_NCT": args.gdn_use_cuda_frontend_nct,
-        "GDN_USE_CUDA_PACKED_CONV": args.gdn_use_cuda_packed_conv,
-        "GDN_USE_CUDA_PACKED_CONV_ATEN_BACKWARD": args.gdn_use_cuda_packed_conv_aten_backward,
-        "GDN_USE_CUDA_PACKED_CONV_ATEN_WEIGHT_BACKWARD": args.gdn_use_cuda_packed_conv_aten_weight_backward,
-        "GDN_USE_CUDA_FUSED_FRONTEND": args.gdn_use_cuda_fused_frontend,
-        "GDN_USE_CUDA_FUSED_FRONTEND_LIB": args.gdn_use_cuda_fused_frontend_lib,
-        "GDN_USE_CUDA_FUSED_OUTPUT": args.gdn_use_cuda_fused_output,
-        "GDN_USE_CUDA_SPLIT_NORM": args.gdn_use_cuda_split_norm,
-        "GDN_USE_CUDA_SPLIT_NORM_LIB": args.gdn_use_cuda_split_norm_lib,
         "GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD": args.gdn_use_packed_qkv_conv_custom_backward,
         "GDN_PACKED_QKV_SINGLE_CONTIG": args.gdn_use_packed_qkv_single_contig,
         "GDN_PACKED_QKV_SPLIT_COPY": args.gdn_use_packed_qkv_split_copy,
@@ -983,32 +948,6 @@ def prewarm_eval_forward(
     return True
 
 
-def require_hgdn_cuda_ext_if_requested(args: Hyperparameters) -> None:
-    """Reject requested optional HGDN CUDA paths when the extension is absent.
-
-    :param Hyperparameters args: Parsed trainer hyperparameters.
-    :raises RuntimeError: If a `GDN_USE_CUDA_*` path needs `hgdn_cuda_ext` but it is unavailable.
-    """
-    requested = any(
-        [
-            args.gdn_use_cuda_frontend_nct,
-            args.gdn_use_cuda_packed_conv,
-            args.gdn_use_cuda_packed_conv_aten_backward,
-            args.gdn_use_cuda_packed_conv_aten_weight_backward,
-            args.gdn_use_cuda_fused_frontend,
-            args.gdn_use_cuda_fused_frontend_lib,
-            args.gdn_use_cuda_fused_output,
-            args.gdn_use_cuda_split_norm,
-            args.gdn_use_cuda_split_norm_lib,
-        ]
-    )
-    if requested and not extension_loaded():
-        raise RuntimeError(
-            "A GDN_USE_CUDA_* path was requested, but hgdn_cuda_ext is not loaded. "
-            "Refusing to silently fall back to the PyTorch reference path."
-        )
-
-
 # =====================================================================
 # MAIN
 # =====================================================================
@@ -1173,7 +1112,6 @@ def main() -> None:
             "Refusing to silently fall back to the naive recurrence. "
             "Install/repair FLA or use GDN_RATIO=0."
         )
-    require_hgdn_cuda_ext_if_requested(args)
     log0(
         f"compile:{int(args.compile)} compile_strategy:{args.compile_strategy} "
         f"seed:{args.seed} pythonhashseed:{os.environ.get('PYTHONHASHSEED', '<unset>')} "
@@ -1198,16 +1136,7 @@ def main() -> None:
         f"v_output_contiguous={int(args.gdn_v_conv_output_contiguous)} "
         f"control_proj_fp32={int(args.gdn_control_proj_fp32)} "
         f"gates_fp32={int(args.gdn_gates_fp32)} "
-        f"output_norm_fp32={int(args.gdn_output_norm_fp32)} "
-        f"cuda_frontend_nct={int(args.gdn_use_cuda_frontend_nct)} "
-        f"cuda_packed_conv={int(args.gdn_use_cuda_packed_conv)} "
-        f"cuda_packed_conv_aten_bwd={int(args.gdn_use_cuda_packed_conv_aten_backward)} "
-        f"cuda_packed_conv_aten_weight_bwd={int(args.gdn_use_cuda_packed_conv_aten_weight_backward)} "
-        f"cuda_fused_frontend={int(args.gdn_use_cuda_fused_frontend)} "
-        f"cuda_fused_frontend_lib={int(args.gdn_use_cuda_fused_frontend_lib)} "
-        f"cuda_fused_output={int(args.gdn_use_cuda_fused_output)} "
-        f"cuda_split_norm={int(args.gdn_use_cuda_split_norm)} "
-        f"cuda_split_norm_lib={int(args.gdn_use_cuda_split_norm_lib)}",
+        f"output_norm_fp32={int(args.gdn_output_norm_fp32)} ",
         console=False,
     )
     if args.profile:
@@ -1299,15 +1228,6 @@ def main() -> None:
             gdn_v_conv_output_contiguous=args.gdn_v_conv_output_contiguous,
             gdn_gates_fp32=args.gdn_gates_fp32,
             gdn_output_norm_fp32=args.gdn_output_norm_fp32,
-            gdn_use_cuda_frontend_nct=args.gdn_use_cuda_frontend_nct,
-            gdn_use_cuda_packed_conv=args.gdn_use_cuda_packed_conv,
-            gdn_use_cuda_packed_conv_aten_backward=args.gdn_use_cuda_packed_conv_aten_backward,
-            gdn_use_cuda_packed_conv_aten_weight_backward=args.gdn_use_cuda_packed_conv_aten_weight_backward,
-            gdn_use_cuda_fused_frontend=args.gdn_use_cuda_fused_frontend,
-            gdn_use_cuda_fused_frontend_lib=args.gdn_use_cuda_fused_frontend_lib,
-            gdn_use_cuda_fused_output=args.gdn_use_cuda_fused_output,
-            gdn_use_cuda_split_norm=args.gdn_use_cuda_split_norm,
-            gdn_use_cuda_split_norm_lib=args.gdn_use_cuda_split_norm_lib,
             gdn_use_packed_qkv_conv_custom_backward=args.gdn_use_packed_qkv_conv_custom_backward,
             gdn_use_packed_qkv_single_contig=args.gdn_use_packed_qkv_single_contig,
             gdn_use_packed_qkv_split_copy=args.gdn_use_packed_qkv_split_copy,

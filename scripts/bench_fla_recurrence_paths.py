@@ -20,7 +20,7 @@ from _repo_bootstrap import ensure_repo_root_on_sys_path
 
 REPO_ROOT = ensure_repo_root_on_sys_path()
 
-from hgdn_cuda import (  # noqa: E402
+from hgdn_fla import (  # noqa: E402
     fla_chunk_gated_delta_rule_compile_visible,
     fla_chunk_gated_delta_rule_direct,
     fla_chunk_gated_delta_rule_direct_fused_gate_norm,

@@ -31,20 +31,11 @@ except ImportError:
     flash_attn_3_func = None
     _HAS_FLASH_ATTN_3 = False
 
-from hgdn_cuda import (
+from hgdn_fla import (
     HAS_FLA_GATED_DELTA_RULE,
     fla_chunk_gated_delta_rule_compile_visible,
     fla_chunk_gated_delta_rule_direct,
     fla_chunk_gated_delta_rule_direct_fused_gate_norm,
-    fused_packed_qkv_conv,
-    fused_packed_qkv_conv_aten_backward,
-    fused_packed_qkv_conv_aten_weight_backward,
-    fused_packed_qkv_frontend,
-    fused_packed_qkv_split_l2norm,
-    fused_rmsnorm_silu_gate,
-    frontend_preact_silu_split_l2norm_nct,
-    packed_qkv_frontend_compile_visible,
-    packed_qkv_split_l2norm_compile_visible,
 )
 
 _HAS_FLA = HAS_FLA_GATED_DELTA_RULE
@@ -875,15 +866,6 @@ class GatedDeltaNet(nn.Module):
         v_conv_output_contiguous: bool | None = None,
         gates_fp32: bool = True,
         output_norm_fp32: bool = True,
-        use_cuda_frontend_nct: bool = False,
-        use_cuda_packed_conv: bool = False,
-        use_cuda_packed_conv_aten_backward: bool = False,
-        use_cuda_packed_conv_aten_weight_backward: bool = False,
-        use_cuda_fused_frontend: bool = False,
-        use_cuda_fused_frontend_lib: bool = False,
-        use_cuda_fused_output: bool = False,
-        use_cuda_split_norm: bool = False,
-        use_cuda_split_norm_lib: bool = False,
         use_packed_qkv_conv_custom_backward: bool = False,
         use_packed_qkv_single_contig: bool = False,
         use_packed_qkv_split_copy: bool = False,
@@ -909,15 +891,6 @@ class GatedDeltaNet(nn.Module):
         :param bool | None v_conv_output_contiguous: Optional v-path override for contiguous conv outputs, defaults to None.
         :param bool gates_fp32: Whether to keep the decay-gate softplus path in fp32, defaults to True.
         :param bool output_norm_fp32: Whether to keep the post-recurrence RMSNorm in fp32 before casting back to the activation dtype, defaults to True.
-        :param bool use_cuda_frontend_nct: Whether to route the packed post-conv preactivation through a compile-visible NCT frontend op, defaults to False.
-        :param bool use_cuda_packed_conv: Whether to route the packed post-projection causal depthwise conv through the optional CUDA extension, defaults to False.
-        :param bool use_cuda_packed_conv_aten_backward: Whether to route the packed post-projection causal depthwise conv through the optional CUDA extension for forward only while keeping backward on ATen/cuDNN, defaults to False.
-        :param bool use_cuda_packed_conv_aten_weight_backward: Whether to route the packed post-projection causal depthwise conv through the optional CUDA extension for forward/input-grad while keeping weight grad on ATen/cuDNN, defaults to False.
-        :param bool use_cuda_fused_frontend: Whether to route the packed qkv post-projection conv+q/k norm front-end through the optional CUDA extension, defaults to False.
-        :param bool use_cuda_fused_frontend_lib: Whether to route the packed qkv post-projection conv+q/k norm front-end through a compile-visible `torch.library` op, defaults to False.
-        :param bool use_cuda_fused_output: Whether to route the output RMSNorm*SiLU(gate) path through the optional CUDA extension, defaults to False.
-        :param bool use_cuda_split_norm: Whether to route packed post-conv q/k split+L2 normalization through the optional CUDA extension, defaults to False.
-        :param bool use_cuda_split_norm_lib: Whether to route packed post-conv q/k split+L2 normalization through a compile-visible `torch.library` op, defaults to False.
         :param bool use_packed_qkv_conv_custom_backward: Whether to route the packed depthwise qkv conv through an exact-length custom autograd path, defaults to False.
         :param bool use_packed_qkv_single_contig: Whether to materialize one contiguous packed q/k/v tensor before splitting the packed conv output, defaults to False.
         :param bool use_packed_qkv_split_copy: Whether to materialize q/k/v with `aten.split_with_sizes_copy`, defaults to False.
@@ -942,17 +915,6 @@ class GatedDeltaNet(nn.Module):
         self.use_fla = use_fla and _HAS_FLA
         self.gates_fp32 = gates_fp32
         self.output_norm_fp32 = output_norm_fp32
-        self.use_cuda_frontend_nct = use_cuda_frontend_nct
-        self.use_cuda_packed_conv = use_cuda_packed_conv
-        self.use_cuda_packed_conv_aten_backward = use_cuda_packed_conv_aten_backward
-        self.use_cuda_packed_conv_aten_weight_backward = (
-            use_cuda_packed_conv_aten_weight_backward
-        )
-        self.use_cuda_fused_frontend = use_cuda_fused_frontend
-        self.use_cuda_fused_frontend_lib = use_cuda_fused_frontend_lib
-        self.use_cuda_fused_output = use_cuda_fused_output
-        self.use_cuda_split_norm = use_cuda_split_norm
-        self.use_cuda_split_norm_lib = use_cuda_split_norm_lib
         self.use_packed_qkv_conv = use_packed_qkv_conv
         self.use_packed_qkv_proj = use_packed_qkv_proj
         self.use_packed_qkv_conv_custom_backward = use_packed_qkv_conv_custom_backward
@@ -1020,300 +982,9 @@ class GatedDeltaNet(nn.Module):
             raise ValueError(
                 "use_packed_qkv_split_copy requires packed qkv output_contiguous"
             )
-        if self.use_cuda_fused_frontend and not (
-            self.use_packed_qkv_proj and self.use_packed_qkv_conv
-        ):
-            raise ValueError(
-                "use_cuda_fused_frontend requires use_packed_qkv_proj and use_packed_qkv_conv"
-            )
-        if self.use_cuda_fused_frontend and self.use_packed_qkv_conv_custom_backward:
-            raise ValueError(
-                "use_cuda_fused_frontend is incompatible with use_packed_qkv_conv_custom_backward"
-            )
-        if self.use_cuda_fused_frontend and self.use_packed_qkv_single_contig:
-            raise ValueError(
-                "use_cuda_fused_frontend is incompatible with use_packed_qkv_single_contig"
-            )
-        if self.use_cuda_fused_frontend and self.use_packed_qkv_split_copy:
-            raise ValueError(
-                "use_cuda_fused_frontend is incompatible with use_packed_qkv_split_copy"
-            )
-        if self.use_cuda_fused_frontend_lib and not (
-            self.use_packed_qkv_proj and self.use_packed_qkv_conv
-        ):
-            raise ValueError(
-                "use_cuda_fused_frontend_lib requires use_packed_qkv_proj and use_packed_qkv_conv"
-            )
-        if (
-            self.use_cuda_fused_frontend_lib
-            and self.use_packed_qkv_conv_custom_backward
-        ):
-            raise ValueError(
-                "use_cuda_fused_frontend_lib is incompatible with use_packed_qkv_conv_custom_backward"
-            )
-        if self.use_cuda_fused_frontend_lib and self.use_packed_qkv_single_contig:
-            raise ValueError(
-                "use_cuda_fused_frontend_lib is incompatible with use_packed_qkv_single_contig"
-            )
-        if self.use_cuda_fused_frontend_lib and self.use_packed_qkv_split_copy:
-            raise ValueError(
-                "use_cuda_fused_frontend_lib is incompatible with use_packed_qkv_split_copy"
-            )
-        if self.use_cuda_frontend_nct and not (
-            self.use_packed_qkv_proj and self.use_packed_qkv_conv
-        ):
-            raise ValueError(
-                "use_cuda_frontend_nct requires use_packed_qkv_proj and use_packed_qkv_conv"
-            )
-        if self.use_cuda_frontend_nct and self.use_cuda_packed_conv:
-            raise ValueError(
-                "use_cuda_frontend_nct is incompatible with use_cuda_packed_conv"
-            )
-        if self.use_cuda_frontend_nct and self.use_cuda_packed_conv_aten_backward:
-            raise ValueError(
-                "use_cuda_frontend_nct is incompatible with use_cuda_packed_conv_aten_backward"
-            )
-        if (
-            self.use_cuda_frontend_nct
-            and self.use_cuda_packed_conv_aten_weight_backward
-        ):
-            raise ValueError(
-                "use_cuda_frontend_nct is incompatible with use_cuda_packed_conv_aten_weight_backward"
-            )
-        if self.use_cuda_frontend_nct and self.use_cuda_fused_frontend:
-            raise ValueError(
-                "use_cuda_frontend_nct is incompatible with use_cuda_fused_frontend"
-            )
-        if self.use_cuda_frontend_nct and self.use_cuda_fused_frontend_lib:
-            raise ValueError(
-                "use_cuda_frontend_nct is incompatible with use_cuda_fused_frontend_lib"
-            )
-        if self.use_cuda_frontend_nct and self.use_cuda_split_norm:
-            raise ValueError(
-                "use_cuda_frontend_nct is incompatible with use_cuda_split_norm"
-            )
-        if self.use_cuda_frontend_nct and self.use_packed_qkv_single_contig:
-            raise ValueError(
-                "use_cuda_frontend_nct is incompatible with use_packed_qkv_single_contig"
-            )
-        if self.use_cuda_frontend_nct and self.use_packed_qkv_split_copy:
-            raise ValueError(
-                "use_cuda_frontend_nct is incompatible with use_packed_qkv_split_copy"
-            )
-        if self.use_cuda_packed_conv and not (
-            self.use_packed_qkv_proj and self.use_packed_qkv_conv
-        ):
-            raise ValueError(
-                "use_cuda_packed_conv requires use_packed_qkv_proj and use_packed_qkv_conv"
-            )
-        if self.use_cuda_packed_conv and self.use_packed_qkv_conv_custom_backward:
-            raise ValueError(
-                "use_cuda_packed_conv is incompatible with use_packed_qkv_conv_custom_backward"
-            )
-        if self.use_cuda_packed_conv and self.use_cuda_fused_frontend:
-            raise ValueError(
-                "use_cuda_packed_conv is incompatible with use_cuda_fused_frontend"
-            )
-        if self.use_cuda_packed_conv and self.use_cuda_fused_frontend_lib:
-            raise ValueError(
-                "use_cuda_packed_conv is incompatible with use_cuda_fused_frontend_lib"
-            )
-        if self.use_cuda_packed_conv and self.use_cuda_split_norm:
-            raise ValueError(
-                "use_cuda_packed_conv is incompatible with use_cuda_split_norm"
-            )
-        if self.use_cuda_packed_conv and self.use_packed_qkv_single_contig:
-            raise ValueError(
-                "use_cuda_packed_conv is incompatible with use_packed_qkv_single_contig"
-            )
-        if self.use_cuda_packed_conv and self.use_packed_qkv_split_copy:
-            raise ValueError(
-                "use_cuda_packed_conv is incompatible with use_packed_qkv_split_copy"
-            )
-        if self.use_cuda_packed_conv_aten_backward and not (
-            self.use_packed_qkv_proj and self.use_packed_qkv_conv
-        ):
-            raise ValueError(
-                "use_cuda_packed_conv_aten_backward requires use_packed_qkv_proj and use_packed_qkv_conv"
-            )
-        if self.use_cuda_packed_conv_aten_backward and self.use_cuda_packed_conv:
-            raise ValueError(
-                "use_cuda_packed_conv_aten_backward is incompatible with use_cuda_packed_conv"
-            )
-        if (
-            self.use_cuda_packed_conv_aten_backward
-            and self.use_packed_qkv_conv_custom_backward
-        ):
-            raise ValueError(
-                "use_cuda_packed_conv_aten_backward is incompatible with use_packed_qkv_conv_custom_backward"
-            )
-        if self.use_cuda_packed_conv_aten_backward and self.use_cuda_fused_frontend:
-            raise ValueError(
-                "use_cuda_packed_conv_aten_backward is incompatible with use_cuda_fused_frontend"
-            )
-        if self.use_cuda_packed_conv_aten_backward and self.use_cuda_fused_frontend_lib:
-            raise ValueError(
-                "use_cuda_packed_conv_aten_backward is incompatible with use_cuda_fused_frontend_lib"
-            )
-        if self.use_cuda_packed_conv_aten_backward and self.use_cuda_split_norm:
-            raise ValueError(
-                "use_cuda_packed_conv_aten_backward is incompatible with use_cuda_split_norm"
-            )
-        if (
-            self.use_cuda_packed_conv_aten_backward
-            and self.use_packed_qkv_single_contig
-        ):
-            raise ValueError(
-                "use_cuda_packed_conv_aten_backward is incompatible with use_packed_qkv_single_contig"
-            )
-        if self.use_cuda_packed_conv_aten_backward and self.use_packed_qkv_split_copy:
-            raise ValueError(
-                "use_cuda_packed_conv_aten_backward is incompatible with use_packed_qkv_split_copy"
-            )
-        if self.use_cuda_packed_conv_aten_weight_backward and not (
-            self.use_packed_qkv_proj and self.use_packed_qkv_conv
-        ):
-            raise ValueError(
-                "use_cuda_packed_conv_aten_weight_backward requires use_packed_qkv_proj and use_packed_qkv_conv"
-            )
-        if self.use_cuda_packed_conv_aten_weight_backward and self.use_cuda_packed_conv:
-            raise ValueError(
-                "use_cuda_packed_conv_aten_weight_backward is incompatible with use_cuda_packed_conv"
-            )
-        if (
-            self.use_cuda_packed_conv_aten_weight_backward
-            and self.use_cuda_packed_conv_aten_backward
-        ):
-            raise ValueError(
-                "use_cuda_packed_conv_aten_weight_backward is incompatible with use_cuda_packed_conv_aten_backward"
-            )
-        if (
-            self.use_cuda_packed_conv_aten_weight_backward
-            and self.use_packed_qkv_conv_custom_backward
-        ):
-            raise ValueError(
-                "use_cuda_packed_conv_aten_weight_backward is incompatible with use_packed_qkv_conv_custom_backward"
-            )
-        if (
-            self.use_cuda_packed_conv_aten_weight_backward
-            and self.use_cuda_fused_frontend
-        ):
-            raise ValueError(
-                "use_cuda_packed_conv_aten_weight_backward is incompatible with use_cuda_fused_frontend"
-            )
-        if (
-            self.use_cuda_packed_conv_aten_weight_backward
-            and self.use_cuda_fused_frontend_lib
-        ):
-            raise ValueError(
-                "use_cuda_packed_conv_aten_weight_backward is incompatible with use_cuda_fused_frontend_lib"
-            )
-        if self.use_cuda_packed_conv_aten_weight_backward and self.use_cuda_split_norm:
-            raise ValueError(
-                "use_cuda_packed_conv_aten_weight_backward is incompatible with use_cuda_split_norm"
-            )
-        if (
-            self.use_cuda_packed_conv_aten_weight_backward
-            and self.use_packed_qkv_single_contig
-        ):
-            raise ValueError(
-                "use_cuda_packed_conv_aten_weight_backward is incompatible with use_packed_qkv_single_contig"
-            )
-        if (
-            self.use_cuda_packed_conv_aten_weight_backward
-            and self.use_packed_qkv_split_copy
-        ):
-            raise ValueError(
-                "use_cuda_packed_conv_aten_weight_backward is incompatible with use_packed_qkv_split_copy"
-            )
-        if self.use_cuda_split_norm and not (
-            self.use_packed_qkv_proj and self.use_packed_qkv_conv
-        ):
-            raise ValueError(
-                "use_cuda_split_norm requires use_packed_qkv_proj and use_packed_qkv_conv"
-            )
-        if self.use_cuda_split_norm and self.use_cuda_fused_frontend:
-            raise ValueError(
-                "use_cuda_split_norm is incompatible with use_cuda_fused_frontend"
-            )
-        if self.use_cuda_split_norm and self.use_cuda_fused_frontend_lib:
-            raise ValueError(
-                "use_cuda_split_norm is incompatible with use_cuda_fused_frontend_lib"
-            )
-        if self.use_cuda_split_norm and self.use_cuda_split_norm_lib:
-            raise ValueError(
-                "use_cuda_split_norm is incompatible with use_cuda_split_norm_lib"
-            )
-        if self.use_cuda_split_norm and self.use_packed_qkv_single_contig:
-            raise ValueError(
-                "use_cuda_split_norm is incompatible with use_packed_qkv_single_contig"
-            )
-        if self.use_cuda_split_norm and self.use_packed_qkv_split_copy:
-            raise ValueError(
-                "use_cuda_split_norm is incompatible with use_packed_qkv_split_copy"
-            )
-        if self.use_cuda_split_norm_lib and not (
-            self.use_packed_qkv_proj and self.use_packed_qkv_conv
-        ):
-            raise ValueError(
-                "use_cuda_split_norm_lib requires use_packed_qkv_proj and use_packed_qkv_conv"
-            )
-        if self.use_cuda_split_norm_lib and self.use_cuda_frontend_nct:
-            raise ValueError(
-                "use_cuda_split_norm_lib is incompatible with use_cuda_frontend_nct"
-            )
-        if self.use_cuda_split_norm_lib and self.use_cuda_packed_conv:
-            raise ValueError(
-                "use_cuda_split_norm_lib is incompatible with use_cuda_packed_conv"
-            )
-        if self.use_cuda_split_norm_lib and self.use_cuda_packed_conv_aten_backward:
-            raise ValueError(
-                "use_cuda_split_norm_lib is incompatible with use_cuda_packed_conv_aten_backward"
-            )
-        if (
-            self.use_cuda_split_norm_lib
-            and self.use_cuda_packed_conv_aten_weight_backward
-        ):
-            raise ValueError(
-                "use_cuda_split_norm_lib is incompatible with use_cuda_packed_conv_aten_weight_backward"
-            )
-        if self.use_cuda_split_norm_lib and self.use_cuda_fused_frontend:
-            raise ValueError(
-                "use_cuda_split_norm_lib is incompatible with use_cuda_fused_frontend"
-            )
-        if self.use_cuda_split_norm_lib and self.use_cuda_fused_frontend_lib:
-            raise ValueError(
-                "use_cuda_split_norm_lib is incompatible with use_cuda_fused_frontend_lib"
-            )
-        if self.use_cuda_split_norm_lib and self.use_packed_qkv_single_contig:
-            raise ValueError(
-                "use_cuda_split_norm_lib is incompatible with use_packed_qkv_single_contig"
-            )
-        if self.use_cuda_split_norm_lib and self.use_packed_qkv_split_copy:
-            raise ValueError(
-                "use_cuda_split_norm_lib is incompatible with use_packed_qkv_split_copy"
-            )
-        if self.use_cuda_fused_frontend and self.use_cuda_fused_frontend_lib:
-            raise ValueError(
-                "use_cuda_fused_frontend is incompatible with use_cuda_fused_frontend_lib"
-            )
         if self.use_packed_qkv_single_contig and self.use_packed_qkv_split_copy:
             raise ValueError(
                 "use_packed_qkv_single_contig is incompatible with use_packed_qkv_split_copy"
-            )
-        if self.use_cuda_fused_output and not self.output_norm_fp32:
-            raise ValueError("use_cuda_fused_output requires output_norm_fp32=True")
-        if self.fla_recurrence_mode == "direct_fused" and (
-            self.use_cuda_frontend_nct
-            or self.use_cuda_fused_frontend
-            or self.use_cuda_fused_frontend_lib
-            or self.use_cuda_split_norm
-            or self.use_cuda_split_norm_lib
-        ):
-            raise ValueError(
-                "fla_recurrence_mode='direct_fused' requires raw post-conv q/k; "
-                "it is incompatible with CUDA frontend or split-norm paths that "
-                "already normalize q/k."
             )
 
         # Feature-map projections → Muon
@@ -1400,245 +1071,38 @@ class GatedDeltaNet(nn.Module):
         """
         B, T, _ = x.shape
         H, Dk, Dv = self.n_heads, self.head_k_dim, self.head_v_dim
-        q: Tensor | None = None
-        k: Tensor | None = None
-        v: Tensor | None = None
 
         with profile_range("gdn.project_qkv"):
             if self.w_qkv is not None:
                 with profile_range("gdn.project_qkv_packed"):
                     qkv = self.w_qkv.forward_packed(x)
-                if (
-                    (not self.use_cuda_fused_frontend)
-                    and (not self.use_cuda_fused_frontend_lib)
-                    and (not self.use_cuda_frontend_nct)
-                    and (not self.use_cuda_split_norm)
-                ) or audit_call_index is not None:
-                    q, k, v = qkv.split((H * Dk, H * Dk, H * Dv), dim=-1)
+                q, k, v = qkv.split((H * Dk, H * Dk, H * Dv), dim=-1)
             else:
-                qkv = None
                 q = self.w_q(x)
                 k = self.w_k(x)
                 v = self.w_v(x)
-            if q is not None and k is not None and v is not None:
-                audit_gdn_boundary(
-                    "project_qkv",
-                    audit_call_index,
-                    q=q,
-                    k=k,
-                    v=v,
-                )
+            audit_gdn_boundary(
+                "project_qkv",
+                audit_call_index,
+                q=q,
+                k=k,
+                v=v,
+            )
 
         with profile_range("gdn.conv_qkv"):
-            if (
-                self.use_cuda_fused_frontend_lib
-                and qkv is not None
-                and self.qkv_conv is not None
-                and audit_call_index is None
-            ):
-                weight = self.qkv_conv.conv.weight.view(
-                    self.qkv_conv.conv.weight.shape[0], -1
-                )
-                with profile_range("gdn.qkv_frontend_fused_lib"):
-                    q, k, v = packed_qkv_frontend_compile_visible(
-                        qkv,
-                        weight,
-                        n_heads=H,
-                        head_k_dim=Dk,
-                        head_v_dim=Dv,
-                        eps=1e-6,
-                    )
-            elif (
-                self.use_cuda_fused_frontend
-                and qkv is not None
-                and self.qkv_conv is not None
-                and audit_call_index is None
-            ):
-                weight = self.qkv_conv.conv.weight.view(
-                    self.qkv_conv.conv.weight.shape[0], -1
-                )
-                with profile_range("gdn.qkv_frontend_fused"):
-                    q, k, v = fused_packed_qkv_frontend(
-                        qkv,
-                        weight,
-                        n_heads=H,
-                        head_k_dim=Dk,
-                        head_v_dim=Dv,
-                        eps=1e-6,
-                        enabled=True,
-                    )
-            elif (
-                self.use_cuda_frontend_nct
-                and qkv is not None
-                and self.qkv_conv is not None
-                and audit_call_index is None
-            ):
-                with profile_range("gdn.qkv_frontend_nct_preact"):
-                    preact_nct = self.qkv_conv.forward_packed_preact_nct(qkv)
-                with profile_range("gdn.qkv_frontend_nct_cuda"):
-                    q, k, v = frontend_preact_silu_split_l2norm_nct(
-                        preact_nct,
-                        n_heads=H,
-                        head_k_dim=Dk,
-                        head_v_dim=Dv,
-                        eps=1e-6,
-                    )
-            elif (
-                self.use_cuda_packed_conv_aten_backward
-                and qkv is not None
-                and self.qkv_conv is not None
-                and audit_call_index is None
-            ):
-                weight = self.qkv_conv.conv.weight.view(
-                    self.qkv_conv.conv.weight.shape[0], -1
-                )
-                with profile_range("gdn.qkv_conv_cuda_aten_bwd"):
-                    packed = fused_packed_qkv_conv_aten_backward(
-                        qkv,
-                        weight,
-                        enabled=True,
-                    )
-                with profile_range("gdn.qkv_conv_split"):
-                    q_dim, k_dim, v_dim = self.qkv_conv.dims
-                    q, k, v = packed.split((q_dim, k_dim, v_dim), dim=-1)
-                if self.qkv_conv.output_contiguous:
-                    with profile_range("gdn.qkv_conv_output_contiguous"):
-                        q = q.contiguous()
-                        k = k.contiguous()
-                        v = v.contiguous()
-            elif (
-                self.use_cuda_packed_conv_aten_weight_backward
-                and qkv is not None
-                and self.qkv_conv is not None
-                and audit_call_index is None
-            ):
-                weight = self.qkv_conv.conv.weight.view(
-                    self.qkv_conv.conv.weight.shape[0], -1
-                )
-                with profile_range("gdn.qkv_conv_cuda_aten_weight_bwd"):
-                    packed = fused_packed_qkv_conv_aten_weight_backward(
-                        qkv,
-                        weight,
-                        enabled=True,
-                    )
-                with profile_range("gdn.qkv_conv_split"):
-                    q_dim, k_dim, v_dim = self.qkv_conv.dims
-                    q, k, v = packed.split((q_dim, k_dim, v_dim), dim=-1)
-                if self.qkv_conv.output_contiguous:
-                    with profile_range("gdn.qkv_conv_output_contiguous"):
-                        q = q.contiguous()
-                        k = k.contiguous()
-                        v = v.contiguous()
-            elif (
-                self.use_cuda_packed_conv
-                and qkv is not None
-                and self.qkv_conv is not None
-                and audit_call_index is None
-            ):
-                weight = self.qkv_conv.conv.weight.view(
-                    self.qkv_conv.conv.weight.shape[0], -1
-                )
-                with profile_range("gdn.qkv_conv_cuda"):
-                    packed = fused_packed_qkv_conv(
-                        qkv,
-                        weight,
-                        enabled=True,
-                    )
-                with profile_range("gdn.qkv_conv_split"):
-                    q_dim, k_dim, v_dim = self.qkv_conv.dims
-                    q, k, v = packed.split((q_dim, k_dim, v_dim), dim=-1)
-                if self.qkv_conv.output_contiguous:
-                    with profile_range("gdn.qkv_conv_output_contiguous"):
-                        q = q.contiguous()
-                        k = k.contiguous()
-                        v = v.contiguous()
-            elif (
-                self.use_cuda_split_norm_lib
-                and qkv is not None
-                and self.qkv_conv is not None
-                and audit_call_index is None
-            ):
+            if self.qkv_conv is not None:
                 with profile_range("gdn.qkv_conv_packed"):
-                    packed = self.qkv_conv.forward_packed_tensor(qkv)
-                with profile_range("gdn.qkv_split_norm_cuda_lib"):
-                    q, k, v = packed_qkv_split_l2norm_compile_visible(
-                        packed,
-                        n_heads=H,
-                        head_k_dim=Dk,
-                        head_v_dim=Dv,
-                        eps=1e-6,
-                    )
-            elif (
-                self.use_cuda_split_norm
-                and qkv is not None
-                and self.qkv_conv is not None
-                and audit_call_index is None
-            ):
-                with profile_range("gdn.qkv_conv_packed"):
-                    packed = self.qkv_conv.forward_packed_tensor(qkv)
-                with profile_range("gdn.qkv_split_norm_cuda"):
-                    q, k, v = fused_packed_qkv_split_l2norm(
-                        packed,
-                        n_heads=H,
-                        head_k_dim=Dk,
-                        head_v_dim=Dv,
-                        eps=1e-6,
-                        enabled=True,
-                    )
-            else:
-                if self.qkv_conv is not None:
-                    with profile_range("gdn.qkv_conv_packed"):
-                        if qkv is not None:
-                            q, k, v = self.qkv_conv.forward_packed(qkv)
-                        else:
-                            q, k, v = self.qkv_conv(q, k, v)
-                else:
-                    with profile_range("gdn.q_conv"):
-                        q = self.q_conv(q)
-                    with profile_range("gdn.k_conv"):
-                        k = self.k_conv(k)
-                    with profile_range("gdn.v_conv"):
-                        v = self.v_conv(v)
-                audit_gdn_boundary(
-                    "conv_qkv",
-                    audit_call_index,
-                    q=q,
-                    k=k,
-                    v=v,
-                )
-
-                with profile_range("gdn.norm_qkv"):
-                    # Keep the recurrence inputs on one activation dtype across PyTorch /
-                    # platform variants. Some stacks promote F.normalize to fp32 here.
-                    if fused_fla_semantics:
-                        with profile_range("gdn.q_reshape_raw"):
-                            q = match_reference_tensor(q.view(B, T, H, Dk), x)
-                        with profile_range("gdn.k_reshape_raw"):
-                            k = match_reference_tensor(k.view(B, T, H, Dk), x)
+                    if self.w_qkv is not None:
+                        q, k, v = self.qkv_conv.forward_packed(qkv)
                     else:
-                        with profile_range("gdn.q_norm"):
-                            q = match_reference_tensor(l2_norm(q.view(B, T, H, Dk)), x)
-                        with profile_range("gdn.k_norm"):
-                            k = match_reference_tensor(l2_norm(k.view(B, T, H, Dk)), x)
-                    with profile_range("gdn.v_reshape"):
-                        v = v.view(B, T, H, Dv)
-                        if self.use_packed_qkv_single_contig and not v.is_contiguous():
-                            with profile_range("gdn.v_contiguous"):
-                                v = v.contiguous()
-                        v = match_reference_tensor(v, x)
-                audit_gdn_boundary(
-                    "norm_qkv",
-                    audit_call_index,
-                    q=q,
-                    k=k,
-                    v=v,
-                )
-
-        if (
-            self.use_cuda_packed_conv
-            or self.use_cuda_packed_conv_aten_backward
-            or self.use_cuda_packed_conv_aten_weight_backward
-        ) and audit_call_index is None:
+                        q, k, v = self.qkv_conv(q, k, v)
+            else:
+                with profile_range("gdn.q_conv"):
+                    q = self.q_conv(q)
+                with profile_range("gdn.k_conv"):
+                    k = self.k_conv(k)
+                with profile_range("gdn.v_conv"):
+                    v = self.v_conv(v)
             audit_gdn_boundary(
                 "conv_qkv",
                 audit_call_index,
@@ -1646,6 +1110,7 @@ class GatedDeltaNet(nn.Module):
                 k=k,
                 v=v,
             )
+
             with profile_range("gdn.norm_qkv"):
                 if fused_fla_semantics:
                     with profile_range("gdn.q_reshape_raw"):
@@ -1658,7 +1123,11 @@ class GatedDeltaNet(nn.Module):
                     with profile_range("gdn.k_norm"):
                         k = match_reference_tensor(l2_norm(k.view(B, T, H, Dk)), x)
                 with profile_range("gdn.v_reshape"):
-                    v = match_reference_tensor(v.view(B, T, H, Dv), x)
+                    v = v.view(B, T, H, Dv)
+                    if self.use_packed_qkv_single_contig and not v.is_contiguous():
+                        with profile_range("gdn.v_contiguous"):
+                            v = v.contiguous()
+                    v = match_reference_tensor(v, x)
             audit_gdn_boundary(
                 "norm_qkv",
                 audit_call_index,
@@ -1666,23 +1135,6 @@ class GatedDeltaNet(nn.Module):
                 k=k,
                 v=v,
             )
-        elif (
-            self.use_cuda_frontend_nct
-            or self.use_cuda_split_norm
-            or self.use_cuda_split_norm_lib
-        ) and audit_call_index is None:
-            q = match_reference_tensor(q, x)
-            k = match_reference_tensor(k, x)
-            v = match_reference_tensor(v, x)
-            audit_gdn_boundary(
-                "norm_qkv",
-                audit_call_index,
-                q=q,
-                k=k,
-                v=v,
-            )
-
-        assert q is not None and k is not None and v is not None
 
         with profile_range("gdn.gates"):
             if fused_fla_semantics:
@@ -1786,45 +1238,20 @@ class GatedDeltaNet(nn.Module):
             with profile_range("gdn.output_gate"):
                 with profile_range("gdn.output_gate_proj"):
                     g_out = self.w_g(x).view(B, T, H, Dv)
-                if self.use_cuda_fused_output:
-                    if audit_call_index is not None:
-                        if self.output_norm_fp32:
-                            audit_o = match_reference_tensor(rms_norm(o.float()), x)
-                        else:
-                            audit_o = match_reference_tensor(rms_norm(o), x)
-                        audit_gdn_boundary(
-                            "output_gate_inputs",
-                            audit_call_index,
-                            o=audit_o,
-                            g_out=g_out,
-                        )
-                    with profile_range("gdn.output_fused"):
-                        o = fused_rmsnorm_silu_gate(
-                            o,
-                            g_out,
-                            eps=1e-6,
-                            fp32_accum=self.output_norm_fp32,
-                            enabled=True,
-                        )
-                    with profile_range("gdn.output_norm_weight"):
-                        o = o * self.o_norm_weight.to(
-                            dtype=o.dtype, device=o.device
-                        ).view(1, 1, 1, -1)
-                else:
-                    with profile_range("gdn.output_norm"):
-                        if self.output_norm_fp32:
-                            o = match_reference_tensor(rms_norm(o.float()), x)
-                        else:
-                            o = match_reference_tensor(rms_norm(o), x)
-                    with profile_range("gdn.output_norm_weight"):
-                        o = o * self.o_norm_weight.to(
-                            dtype=o.dtype, device=o.device
-                        ).view(1, 1, 1, -1)
-                    audit_gdn_boundary(
-                        "output_gate_inputs", audit_call_index, o=o, g_out=g_out
+                with profile_range("gdn.output_norm"):
+                    if self.output_norm_fp32:
+                        o = match_reference_tensor(rms_norm(o.float()), x)
+                    else:
+                        o = match_reference_tensor(rms_norm(o), x)
+                with profile_range("gdn.output_norm_weight"):
+                    o = o * self.o_norm_weight.to(dtype=o.dtype, device=o.device).view(
+                        1, 1, 1, -1
                     )
-                    with profile_range("gdn.output_gate_mul"):
-                        o = o * F.silu(g_out)
+                audit_gdn_boundary(
+                    "output_gate_inputs", audit_call_index, o=o, g_out=g_out
+                )
+                with profile_range("gdn.output_gate_mul"):
+                    o = o * F.silu(g_out)
             audit_gdn_boundary("output_proj_input", audit_call_index, o=o)
 
             with profile_range("gdn.output_proj"):
@@ -2027,15 +1454,6 @@ class GDNBlock(nn.Module):
         v_conv_output_contiguous: bool | None = None,
         gates_fp32: bool = True,
         output_norm_fp32: bool = True,
-        use_cuda_frontend_nct: bool = False,
-        use_cuda_packed_conv: bool = False,
-        use_cuda_packed_conv_aten_backward: bool = False,
-        use_cuda_packed_conv_aten_weight_backward: bool = False,
-        use_cuda_fused_frontend: bool = False,
-        use_cuda_fused_frontend_lib: bool = False,
-        use_cuda_fused_output: bool = False,
-        use_cuda_split_norm: bool = False,
-        use_cuda_split_norm_lib: bool = False,
         use_packed_qkv_conv_custom_backward: bool = False,
         use_packed_qkv_single_contig: bool = False,
         use_packed_qkv_split_copy: bool = False,
@@ -2065,15 +1483,6 @@ class GDNBlock(nn.Module):
         :param bool | None v_conv_output_contiguous: Optional v-path override for contiguous conv outputs, defaults to None.
         :param bool gates_fp32: Whether to keep the decay-gate softplus path in fp32, defaults to True.
         :param bool output_norm_fp32: Whether to keep the post-recurrence RMSNorm in fp32 before casting back to the activation dtype, defaults to True.
-        :param bool use_cuda_frontend_nct: Whether to route the packed post-conv preactivation through a compile-visible NCT frontend op, defaults to False.
-        :param bool use_cuda_packed_conv: Whether to route the packed post-projection causal depthwise conv through the optional CUDA extension, defaults to False.
-        :param bool use_cuda_packed_conv_aten_backward: Whether to route the packed post-projection causal depthwise conv through the optional CUDA extension for forward only while keeping backward on ATen/cuDNN, defaults to False.
-        :param bool use_cuda_packed_conv_aten_weight_backward: Whether to route the packed post-projection causal depthwise conv through the optional CUDA extension for forward/input-grad while keeping weight grad on ATen/cuDNN, defaults to False.
-        :param bool use_cuda_fused_frontend: Whether to route the packed qkv post-projection conv+q/k norm front-end through the optional CUDA extension, defaults to False.
-        :param bool use_cuda_fused_frontend_lib: Whether to route the packed qkv post-projection conv+q/k norm front-end through a compile-visible `torch.library` op, defaults to False.
-        :param bool use_cuda_fused_output: Whether to route the output RMSNorm*SiLU(gate) path through the optional CUDA extension, defaults to False.
-        :param bool use_cuda_split_norm: Whether to route packed post-conv q/k split+L2 normalization through the optional CUDA extension, defaults to False.
-        :param bool use_cuda_split_norm_lib: Whether to route packed post-conv q/k split+L2 normalization through a compile-visible `torch.library` op, defaults to False.
         :param bool use_packed_qkv_conv_custom_backward: Whether to route the packed depthwise qkv conv through an exact-length custom autograd path, defaults to False.
         :param bool use_packed_qkv_single_contig: Whether to materialize one contiguous packed q/k/v tensor before splitting the packed conv output, defaults to False.
         :param bool use_packed_qkv_split_copy: Whether to materialize q/k/v with `aten.split_with_sizes_copy`, defaults to False.
@@ -2107,15 +1516,6 @@ class GDNBlock(nn.Module):
             v_conv_output_contiguous=v_conv_output_contiguous,
             gates_fp32=gates_fp32,
             output_norm_fp32=output_norm_fp32,
-            use_cuda_frontend_nct=use_cuda_frontend_nct,
-            use_cuda_packed_conv=use_cuda_packed_conv,
-            use_cuda_packed_conv_aten_backward=use_cuda_packed_conv_aten_backward,
-            use_cuda_packed_conv_aten_weight_backward=use_cuda_packed_conv_aten_weight_backward,
-            use_cuda_fused_frontend=use_cuda_fused_frontend,
-            use_cuda_fused_frontend_lib=use_cuda_fused_frontend_lib,
-            use_cuda_fused_output=use_cuda_fused_output,
-            use_cuda_split_norm=use_cuda_split_norm,
-            use_cuda_split_norm_lib=use_cuda_split_norm_lib,
             use_packed_qkv_conv_custom_backward=use_packed_qkv_conv_custom_backward,
             use_packed_qkv_single_contig=use_packed_qkv_single_contig,
             use_packed_qkv_split_copy=use_packed_qkv_split_copy,
@@ -2270,15 +1670,6 @@ class HybridGPT(nn.Module):
         gdn_v_conv_output_contiguous: bool | None = None,
         gdn_gates_fp32: bool = True,
         gdn_output_norm_fp32: bool = True,
-        gdn_use_cuda_frontend_nct: bool = False,
-        gdn_use_cuda_packed_conv: bool = False,
-        gdn_use_cuda_packed_conv_aten_backward: bool = False,
-        gdn_use_cuda_packed_conv_aten_weight_backward: bool = False,
-        gdn_use_cuda_fused_frontend: bool = False,
-        gdn_use_cuda_fused_frontend_lib: bool = False,
-        gdn_use_cuda_fused_output: bool = False,
-        gdn_use_cuda_split_norm: bool = False,
-        gdn_use_cuda_split_norm_lib: bool = False,
         gdn_use_packed_qkv_conv_custom_backward: bool = False,
         gdn_use_packed_qkv_single_contig: bool = False,
         gdn_use_packed_qkv_split_copy: bool = False,
@@ -2319,15 +1710,6 @@ class HybridGPT(nn.Module):
         :param bool | None gdn_v_conv_output_contiguous: Optional v-path override for contiguous conv outputs, defaults to None.
         :param bool gdn_gates_fp32: Whether to keep the decay-gate softplus path in fp32, defaults to True.
         :param bool gdn_output_norm_fp32: Whether to keep the post-recurrence RMSNorm in fp32 before casting back to the activation dtype, defaults to True.
-        :param bool gdn_use_cuda_frontend_nct: Whether to route the packed post-conv preactivation through a compile-visible NCT frontend op, defaults to False.
-        :param bool gdn_use_cuda_packed_conv: Whether to route the packed post-projection causal depthwise conv through the optional CUDA extension, defaults to False.
-        :param bool gdn_use_cuda_packed_conv_aten_backward: Whether to route the packed post-projection causal depthwise conv through the optional CUDA extension for forward only while keeping backward on ATen/cuDNN, defaults to False.
-        :param bool gdn_use_cuda_packed_conv_aten_weight_backward: Whether to route the packed post-projection causal depthwise conv through the optional CUDA extension for forward/input-grad while keeping weight grad on ATen/cuDNN, defaults to False.
-        :param bool gdn_use_cuda_fused_frontend: Whether to route packed qkv post-projection conv+q/k norm front-ends through the optional CUDA extension, defaults to False.
-        :param bool gdn_use_cuda_fused_frontend_lib: Whether to route packed qkv post-projection conv+q/k norm front-ends through a compile-visible `torch.library` op, defaults to False.
-        :param bool gdn_use_cuda_fused_output: Whether to route the GDN output RMSNorm*SiLU(gate) path through the optional CUDA extension, defaults to False.
-        :param bool gdn_use_cuda_split_norm: Whether to route packed post-conv q/k split+L2 normalization through the optional CUDA extension, defaults to False.
-        :param bool gdn_use_cuda_split_norm_lib: Whether to route packed post-conv q/k split+L2 normalization through a compile-visible `torch.library` op, defaults to False.
         :param bool gdn_use_packed_qkv_conv_custom_backward: Whether to route the packed depthwise qkv conv through an exact-length custom autograd path, defaults to False.
         :param bool gdn_use_packed_qkv_single_contig: Whether to materialize one contiguous packed q/k/v tensor before splitting the packed conv output, defaults to False.
         :param bool gdn_use_packed_qkv_split_copy: Whether to materialize q/k/v with `aten.split_with_sizes_copy`, defaults to False.
@@ -2400,15 +1782,6 @@ class HybridGPT(nn.Module):
                         gdn_v_conv_output_contiguous,
                         gdn_gates_fp32,
                         gdn_output_norm_fp32,
-                        gdn_use_cuda_frontend_nct,
-                        gdn_use_cuda_packed_conv,
-                        gdn_use_cuda_packed_conv_aten_backward,
-                        gdn_use_cuda_packed_conv_aten_weight_backward,
-                        gdn_use_cuda_fused_frontend,
-                        gdn_use_cuda_fused_frontend_lib,
-                        gdn_use_cuda_fused_output,
-                        gdn_use_cuda_split_norm,
-                        gdn_use_cuda_split_norm_lib,
                         gdn_use_packed_qkv_conv_custom_backward,
                         gdn_use_packed_qkv_single_contig,
                         gdn_use_packed_qkv_split_copy,

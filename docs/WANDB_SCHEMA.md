@@ -92,24 +92,11 @@ HGDN kernel and layout knobs:
 - `GDN_CONTROL_PROJ_FP32`
 - `GDN_GATES_FP32`
 - `GDN_OUTPUT_NORM_FP32`
-- `GDN_USE_CUDA_FRONTEND_NCT`
-- `GDN_USE_CUDA_PACKED_CONV`
-- `GDN_USE_CUDA_PACKED_CONV_ATEN_BACKWARD`
-- `GDN_USE_CUDA_PACKED_CONV_ATEN_WEIGHT_BACKWARD`
-- `GDN_USE_CUDA_FUSED_FRONTEND`
-- `GDN_USE_CUDA_FUSED_FRONTEND_LIB`
-- `GDN_USE_CUDA_FUSED_OUTPUT`
-- `GDN_USE_CUDA_SPLIT_NORM`
-- `GDN_USE_CUDA_SPLIT_NORM_LIB`
 - `GDN_USE_PACKED_QKV_CONV_CUSTOM_BACKWARD`
 - `GDN_PACKED_QKV_SINGLE_CONTIG`
 - `GDN_PACKED_QKV_SPLIT_COPY`
 - `WANDB_WATCH`
 - `WANDB_WATCH_LOG_FREQ`
-
-The `GDN_USE_CUDA_*` fields are archived sidecar-extension controls. They remain
-logged if explicitly set, but active H100 helpers no longer build or parity-test
-`hgdn_cuda_ext` by default.
 
 `GRAD_ACCUM_STEPS` defaults to the matched-contract value derived from
 `WORLD_SIZE`, but may be explicitly overridden for packing and batch-scale
