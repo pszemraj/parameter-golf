@@ -6,9 +6,8 @@ REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 PYTHON_BIN="${PYTHON:-/home/pszemraj/miniforge3/envs/train/bin/python}"
 source "${SCRIPT_DIR}/5090_common.sh"
 
-SEEDS="${SEEDS:-1337 2027 3141}"
+SEEDS="${SEEDS:-1337}"
 RUN_VERSION="${RUN_VERSION:-v1}"
-SIDECAR_VERSION="${SIDECAR_VERSION:-${RUN_VERSION}}"
 RUN_BLOCKS1="${RUN_BLOCKS1:-0}"
 RUN_BLOCKS0="${RUN_BLOCKS0:-1}"
 LEARNING_RATE="${LEARNING_RATE:-0.0035}"
@@ -42,6 +41,7 @@ export TRIGRAM_TOP_K="${TRIGRAM_TOP_K:-2}"
 export TRIGRAM_RESIDUAL_CLIP="${TRIGRAM_RESIDUAL_CLIP:-8.0}"
 export TRIGRAM_CONFIDENCE_COUNT_CAP="${TRIGRAM_CONFIDENCE_COUNT_CAP:-4096}"
 export TRIGRAM_CHUNK_SIZE="${TRIGRAM_CHUNK_SIZE:-50000000}"
+export TRIGRAM_SPEC_CACHE_ROOT="${TRIGRAM_SPEC_CACHE_ROOT:-${HOME}/.cache/experiments/param-golf-coreamp}"
 export RESIDUAL_READOUT_DELTA_RANK="${RESIDUAL_READOUT_DELTA_RANK:-0}"
 export RESIDUAL_READOUT_DELTA_INIT_STD="${RESIDUAL_READOUT_DELTA_INIT_STD:-0.02}"
 export SCAN_BACKEND="${SCAN_BACKEND:-auto}"
@@ -68,6 +68,28 @@ require_dir() {
     echo "Missing required config: $path/config.json" >&2
     exit 1
   fi
+}
+
+resolve_trigram_spec_dir() {
+  local source_spec_dir="$1"
+  local family="$2"
+  local cmd=(
+    "${PYTHON_BIN}" "${REPO_ROOT}/tools/trigram_sidecar_cache_path.py"
+    "${source_spec_dir}"
+    --data "${DATA_PATH:-${REPO_ROOT}/data/datasets/fineweb10B_sp1024}"
+    --family "${family}"
+    --cache-root "${TRIGRAM_SPEC_CACHE_ROOT}"
+    --storage-dtype "${STORAGE_DTYPE:-uint16}"
+    --top-k "${TRIGRAM_TOP_K}"
+    --smoothing "${SMOOTHING:-0.25}"
+    --residual-clip "${TRIGRAM_RESIDUAL_CLIP}"
+    --confidence-count-cap "${TRIGRAM_CONFIDENCE_COUNT_CAP}"
+    --mkdir
+  )
+  if [[ -n "${TRIGRAM_MAX_TOKENS:-}" ]]; then
+    cmd+=(--max-tokens "${TRIGRAM_MAX_TOKENS}")
+  fi
+  "${cmd[@]}"
 }
 
 ensure_trigram_spec() {
@@ -112,12 +134,13 @@ print_header() {
   echo "repo_root=${REPO_ROOT}"
   echo "python=${PYTHON_BIN}"
   echo "seeds=${SEEDS}"
-  echo "run_version=${RUN_VERSION} sidecar_version=${SIDECAR_VERSION}"
+  echo "run_version=${RUN_VERSION}"
   echo "trigram_sidecar=${TRIGRAM_SIDECAR} top_k=${TRIGRAM_TOP_K} log_scale_init=${TRIGRAM_LOG_SCALE_INIT}"
   echo "learning_rate=${LEARNING_RATE}"
   echo "run_blocks1=${RUN_BLOCKS1} run_blocks0=${RUN_BLOCKS0}"
   echo "compile=${COMPILE} gradient_checkpointing=${GRADIENT_CHECKPOINTING} skip_done=${SKIP_DONE}"
   echo "target_effective_step_tokens=${TARGET_EFFECTIVE_STEP_TOKENS}"
+  echo "trigram_spec_cache_root=${TRIGRAM_SPEC_CACHE_ROOT}"
   echo "num_steps=8192 lr_hold_steps=7000 full_val_final=${FULL_VAL_FINAL}"
   echo "branch_temporal_mode=${BRANCH_TEMPORAL_MODE} residual_token_gate_mode=${RESIDUAL_TOKEN_GATE_MODE} branch_router_mode=${BRANCH_ROUTER_MODE}"
   echo "scan_backend=${SCAN_BACKEND} wandb_project=${WANDB_PROJECT} cublaslt=${TORCH_BLAS_PREFER_CUBLASLT} py_unbuffered=${PYTHONUNBUFFERED}"
@@ -163,7 +186,8 @@ EOF
 run_blocks1_seed() {
   local seed="$1"
   local shared_spec_dir="${REPO_ROOT}/experiments/5090_schedule/blocks1_hold_confirm1b_v1/blocks1_resid10_e12_h7000_1b"
-  local sidecar_spec_dir="${REPO_ROOT}/experiments/5090_architecture/_trigram_specs/blocks1_top${TRIGRAM_TOP_K}_${SIDECAR_VERSION}"
+  local sidecar_spec_dir
+  sidecar_spec_dir="$(resolve_trigram_spec_dir "${shared_spec_dir}" "blocks1")"
   local model_root="${REPO_ROOT}/experiments/5090_architecture/blocks1_trigram_confirm1b_seed${seed}_${RUN_VERSION}"
   run_family_seed \
     "blocks1" \
@@ -181,7 +205,8 @@ run_blocks1_seed() {
 run_blocks0_seed() {
   local seed="$1"
   local shared_spec_dir="${REPO_ROOT}/experiments/5090_schedule/blocks0_12x10_hold_confirm1b_v1/blocks0_resid12_e10_h7000_1b"
-  local sidecar_spec_dir="${REPO_ROOT}/experiments/5090_architecture/_trigram_specs/blocks0_top${TRIGRAM_TOP_K}_${SIDECAR_VERSION}"
+  local sidecar_spec_dir
+  sidecar_spec_dir="$(resolve_trigram_spec_dir "${shared_spec_dir}" "blocks0")"
   local model_root="${REPO_ROOT}/experiments/5090_architecture/blocks0_trigram_confirm1b_seed${seed}_${RUN_VERSION}"
   run_family_seed \
     "blocks0" \

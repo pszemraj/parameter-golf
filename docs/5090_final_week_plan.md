@@ -1,6 +1,6 @@
 # 5090 Final Week Plan
 
-Last updated: `2026-04-24`
+Last updated: `2026-04-26`
 
 This is the deadline-focused execution note for the final week on the local RTX 5090. It complements the architecture note instead of replacing it.
 
@@ -26,13 +26,13 @@ Out of scope for this note:
 
 ## Locked Context
 
-Current confirmed frontier by three-seed mean after the cleaned `v2`
-confirmation batch:
+Current confirmed frontier by three-seed mean:
 
 | Rank | Run | Mean `val_bpb` | Mean steady tok/s |
 |---|---|---:|---:|
-| 1 | `blocks0_resid12_e10_lr0035_final_h7000_1b` | `2.1757877509` | `576,426` |
-| 2 | `blocks1_resid10_e12_lr0035_final_h7000_1b` | `2.1765101841` | `552,843` |
+| 1 | `blocks0_resid12_e10_trigramk2_lr0035_h7000_1b` | `2.0415615686` | `574,798` |
+| 2 | `blocks0_resid12_e10_lr0035_final_h7000_1b` | `2.1757877509` | `576,426` |
+| 3 | `blocks1_resid10_e12_lr0035_final_h7000_1b` | `2.1765101841` | `552,843` |
 
 Locked schedule defaults:
 
@@ -58,6 +58,20 @@ Fixed screening contract:
   - `pg-hconv-ablations`
 - output version:
   - `RUN_VERSION=v2` for the cleaned post-audit rerun
+
+Frozen spec/statistics coverage:
+
+- train shards: `195`
+- train tokens used for specs/sidecars: `19,473,201,340`
+- validation shards: `1`
+- validation tokens: `62,021,846`
+- validation tokens are not used for frozen statistics
+
+Trigram sidecar specs are cached under
+`${TRIGRAM_SPEC_CACHE_ROOT:-~/.cache/experiments/param-golf-coreamp}` and keyed
+by source `spec.pt` hash plus sidecar parameters. Compatible ablations reuse
+the same full-data top-K build instead of rebuilding inside each experiment
+root.
 
 Primary reps:
 
@@ -371,11 +385,21 @@ Default confirmation contract:
 - reps:
   - `blocks0_resid12_e10`
 - seeds:
-  - `1337 2027 3141`
+  - `1337`
 - `8192` steps / `1B` planned tokens
 - `lr_hold_steps=7000`
 - `FULL_VAL_FINAL=1`
 - sidecar defaults remain `TRIGRAM_TOP_K=2`, `trigram_sidecar=frozen`
+
+Seed policy:
+
+- seeds are not a tuning axis
+- use seed `1337` for normal screens and first confirmations
+- add `2027` / `3141` only for final evidence or when a result is near a
+  threshold
+- the completed top-2 trigram three-seed confirmation already showed low seed
+  variation relative to effect size, so remaining headroom probes should not
+  run all seeds by default
 
 Next headroom test after top-2 confirmation:
 

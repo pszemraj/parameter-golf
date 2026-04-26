@@ -47,10 +47,39 @@ Working defaults now:
 
 ## Training Budget Policy
 
-- Full-dataset frozen spec/statistics build is always required.
+- Full-dataset frozen spec/statistics build is always required:
+  - all `195` train shards
+  - `19,473,201,340` train tokens
+  - no validation tokens
+- The explicit validation shard is separate:
+  - `1` shard
+  - `62,021,846` tokens
+  - used only for eval/full-val evidence, not frozen statistics
+- Trigram sidecar specs are cached outside the repo under
+  `${TRIGRAM_SPEC_CACHE_ROOT:-~/.cache/experiments/param-golf-coreamp}` and are
+  keyed by the source spec hash plus sidecar parameters, so compatible ablations
+  reuse the same full-data build.
 - `512M` is the default serious screening budget.
 - `1B` is the confirmation budget for finalists.
 - Anything shorter than `512M` is only for smoke tests or harness checks.
+
+## Seed Policy
+
+Seeds are not a search axis. They only protect us from mistaking a lucky or
+unlucky controller initialization/order for an architecture result.
+
+Current policy:
+
+- default screens use one canonical seed: `1337`
+- rerun another seed only when a screen is close to a promotion threshold
+- use `SEEDS="1337 2027 3141"` only for final evidence or when a result is
+  likely to become the submission candidate
+- do not pick winners by best seed
+
+The top-2 trigram confirmation already showed low seed variation
+(`std=0.0018559894`) relative to the architecture gain (`~0.1342` bpb), so the
+remaining top-K/headroom probes should stay single-seed unless a result is
+being packaged as final evidence.
 
 ## Final-Week Execution Read
 
@@ -175,7 +204,7 @@ Promotion rule:
   blocks1 check
 
 ```bash
-RUN_VERSION=v2 SIDECAR_VERSION=v2 TRIGRAM_TOP_K=4 SEEDS="1337 2027 3141" bash scripts/run_5090_trigram_confirm1b.sh
+RUN_VERSION=v2 TRIGRAM_TOP_K=4 SEEDS=1337 bash scripts/run_5090_trigram_confirm1b.sh
 ```
 
 Replay `blocks1` only as a geometry check after the blocks0 top-K decision:
