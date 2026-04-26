@@ -12,6 +12,7 @@ from tools.plan_5090_adaptive_closeout import (
     CONFIRM_STEPS,
     DEFAULT_BPTT_BATCH_SIZE,
     DEFAULT_BPTT_CHUNKS,
+    DEFAULT_BPTT_IMPROVEMENT_BPB,
     geometry_command,
     parse_args,
     plan_bptt,
@@ -181,6 +182,35 @@ def test_k4_planner_combines_bptt_only_when_it_wins(tmp_path: Path) -> None:
     assert "--trigram-top-k" in commands[0].command
     assert "4" in commands[0].command
     assert "--geometry-bptt-chunks" in commands[0].command
+
+
+def test_k4_planner_uses_bptt1_when_bptt_gain_is_noise(tmp_path: Path) -> None:
+    """Tiny BPTT2 gains should not be compounded into K4."""
+    label = "blocks0_d96_l6_i512"
+    _write_summary(tmp_path, label, "geom1", bpb=2.0600)
+    _write_summary(
+        tmp_path,
+        label,
+        "geom1_confirm",
+        steps=8192,
+        bpb=2.0300,
+        full_coverage=True,
+    )
+    _write_summary(
+        tmp_path,
+        label,
+        "geom1_bptt2",
+        bpb=2.0600 - (DEFAULT_BPTT_IMPROVEMENT_BPB / 2.0),
+        batch_size=DEFAULT_BPTT_BATCH_SIZE,
+        bptt_chunks=DEFAULT_BPTT_CHUNKS,
+    )
+    args = _args(tmp_path, "k4")
+
+    commands = plan_k4(args)
+
+    assert len(commands) == 1
+    assert "--trigram-top-k" in commands[0].command
+    assert "--geometry-bptt-chunks" not in commands[0].command
 
 
 def test_k4_planner_waits_for_completed_bptt_read(tmp_path: Path) -> None:

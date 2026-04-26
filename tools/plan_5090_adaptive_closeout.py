@@ -41,6 +41,7 @@ BPTT_STEPS = 4096
 BPTT_HOLD_STEPS = 3500
 DEFAULT_BPTT_BATCH_SIZE = 128
 DEFAULT_BPTT_CHUNKS = 2
+DEFAULT_BPTT_IMPROVEMENT_BPB = 0.005
 SCREEN_PLANNED_STEPS = 4096
 SCREEN_TRIGRAM_TOP_K = 2
 
@@ -83,7 +84,15 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     ap.add_argument("--bptt-run-version", default=None)
     ap.add_argument("--k4-run-version", default=None)
     ap.add_argument("--k4-bptt-run-version", default=None)
-    ap.add_argument("--bptt-improvement-bpb", type=float, default=0.0)
+    ap.add_argument(
+        "--bptt-improvement-bpb",
+        type=float,
+        default=DEFAULT_BPTT_IMPROVEMENT_BPB,
+        help=(
+            "Minimum fixed-token BPB improvement required before combining "
+            "BPTT2 with K4. Defaults to a small noise guard."
+        ),
+    )
     ap.add_argument("--screen-steps", type=int, default=SCREEN_PLANNED_STEPS)
     ap.add_argument("--effective-step-tokens", type=int, default=SCREEN_EFFECTIVE_STEP_TOKENS)
     ap.add_argument("--confirm-steps", type=int, default=CONFIRM_STEPS)
