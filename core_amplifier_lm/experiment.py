@@ -109,6 +109,9 @@ SUMMARY_FIELDS = [
     "artifact_headroom_bytes",
     "artifact_status",
     "exact_val_bpb",
+    "exact_bpb_positive_target_count",
+    "exact_bpb_zero_byte_target_count",
+    "exact_bpb_zero_byte_target_ids",
     "data_path",
     "tokenizer_path",
     "tokenizer_sha256",
@@ -801,6 +804,22 @@ def summarize_run_dir(run_dir: str | Path) -> dict[str, str]:
         "artifact_headroom_bytes": _stringify(results.get("artifact_headroom_bytes")),
         "artifact_status": _stringify(results.get("artifact_status")),
         "exact_val_bpb": _stringify(runtime.get("exact_val_bpb")),
+        "exact_bpb_positive_target_count": _stringify(
+            results.get("exact_bpb_positive_target_count")
+            or runtime.get("exact_bpb_positive_target_count")
+        ),
+        "exact_bpb_zero_byte_target_count": _stringify(
+            results.get("exact_bpb_zero_byte_target_count")
+            or runtime.get("exact_bpb_zero_byte_target_count")
+        ),
+        "exact_bpb_zero_byte_target_ids": ",".join(
+            str(tid)
+            for tid in (
+                results.get("exact_bpb_zero_byte_target_ids")
+                or runtime.get("exact_bpb_zero_byte_target_ids")
+                or []
+            )
+        ),
         "data_path": _stringify(data.get("source")),
         "tokenizer_path": _stringify(resolved.get("tokenizer_path")),
         "tokenizer_sha256": _stringify(resolved.get("tokenizer_sha256")),

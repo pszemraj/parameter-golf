@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import math
+
+import pytest
 import torch
 
 from train_core_amplifier import (
     EvalResult,
     SequentialStreamBatcher,
+    evaluate,
     eval_payload_fields,
     file_sha256,
     format_eval_coverage,
@@ -58,17 +62,62 @@ def test_full_validation_batcher_covers_each_target_once():
     assert sorted(seen) == list(range(1, tokens.numel()))
 
 
-def test_exact_bpb_target_validation_rejects_zero_byte_targets():
-    """Exact BPB should fail if validation targets include zero-byte token ids."""
+def test_exact_bpb_target_validation_reports_allowed_zero_byte_targets():
+    """Exact BPB may skip tokenizer sentinels with zero byte length."""
     byte_count_lut = torch.tensor([0, 1, 2], dtype=torch.int32)
     val_tokens = torch.tensor([1, 2, 0, 1], dtype=torch.long)
 
-    try:
+    result = validate_exact_bpb_targets(
+        byte_count_lut,
+        val_tokens,
+        allowed_zero_byte_ids=(0,),
+    )
+
+    assert result.total_target_count == 3
+    assert result.positive_byte_target_count == 2
+    assert result.zero_byte_target_count == 1
+    assert result.zero_byte_target_ids == (0,)
+
+
+def test_exact_bpb_target_validation_rejects_unexpected_zero_byte_targets():
+    """Exact BPB should fail if non-sentinel zero-byte target ids appear."""
+    byte_count_lut = torch.tensor([0, 1, 2], dtype=torch.int32)
+    val_tokens = torch.tensor([1, 2, 0, 1], dtype=torch.long)
+
+    with pytest.raises(ValueError, match="non-sentinel zero-byte"):
         validate_exact_bpb_targets(byte_count_lut, val_tokens)
-    except ValueError as exc:
-        assert "zero-byte" in str(exc)
-    else:
-        raise AssertionError("expected zero-byte validation target failure")
+
+
+def test_evaluate_masks_zero_byte_targets_for_exact_bpb():
+    """Zero-byte sentinels should not contribute bits or bytes to BPB."""
+
+    class DummyModel(torch.nn.Module):
+        def initial_state(self, batch_size, device):  # noqa: ANN001
+            return None
+
+        def detach_state(self, state):  # noqa: ANN001
+            return state
+
+        def forward(self, input_ids, state=None, return_state=True):  # noqa: ANN001
+            logits = torch.zeros((*input_ids.shape, 3), device=input_ids.device)
+            return logits, state
+
+    result = evaluate(
+        DummyModel(),
+        torch.tensor([0, 1, 2, 0, 1, 2], dtype=torch.long),
+        seq_len=2,
+        batch_size=1,
+        device=torch.device("cpu"),
+        device_type="cpu",
+        amp_dtype=torch.float32,
+        steps=2,
+        use_autocast=False,
+        byte_count_lut=torch.tensor([0, 1, 2], dtype=torch.int32),
+    )
+
+    assert result.tokens == 4
+    assert result.bytes == 4
+    assert result.bpb == pytest.approx(math.log2(3.0) * 3.0 / 4.0)
 
 
 def test_file_sha256_hashes_file_contents(tmp_path):

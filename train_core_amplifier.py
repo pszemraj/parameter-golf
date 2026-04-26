@@ -101,6 +101,16 @@ class EvalResult:
     seq_len: int
 
 
+@dataclass(frozen=True)
+class ExactBpbTargetValidation:
+    """Validation-token accounting for exact byte-normalized BPB."""
+
+    total_target_count: int
+    positive_byte_target_count: int
+    zero_byte_target_count: int
+    zero_byte_target_ids: tuple[int, ...]
+
+
 def seed_everything(seed: int) -> None:
     """Seed Python, NumPy, and Torch RNGs.
 
@@ -1260,35 +1270,89 @@ def build_byte_count_lut(
     return total_bytes
 
 
+def tokenizer_control_token_ids(tokenizer_path: str | Path, vocab_size: int) -> tuple[int, ...]:
+    """Return tokenizer control ids allowed to have zero byte length.
+
+    :param str | Path tokenizer_path: SentencePiece tokenizer path.
+    :param int vocab_size: Expected vocabulary size.
+    :raises ValueError: If tokenizer and spec vocab sizes differ.
+    :return tuple[int, ...]: Control-token ids.
+    """
+    import sentencepiece as spm
+
+    sp = spm.SentencePieceProcessor(model_file=str(tokenizer_path))
+    sp_vocab = sp.vocab_size()
+    if sp_vocab != int(vocab_size):
+        raise ValueError(
+            f"tokenizer vocab size mismatch: tokenizer={sp_vocab} spec={int(vocab_size)}"
+        )
+    return tuple(int(tid) for tid in range(sp_vocab) if sp.is_control(tid))
+
+
 def validate_exact_bpb_targets(
     byte_count_lut: torch.Tensor,
     val_tokens: torch.Tensor,
     *,
+    allowed_zero_byte_ids: tuple[int, ...] = (),
     chunk_size: int = 8_000_000,
-) -> None:
-    """Verify validation target ids all have positive byte counts.
+) -> ExactBpbTargetValidation:
+    """Verify exact-BPB target byte accounting is well-defined.
 
     :param torch.Tensor byte_count_lut: Per-token byte-count lookup.
     :param torch.Tensor val_tokens: Flat validation token tensor.
+    :param tuple[int, ...] allowed_zero_byte_ids: Zero-byte ids that represent
+        tokenizer sentinels and should be skipped in byte-normalized BPB.
     :param int chunk_size: Validation target chunk size.
-    :raises ValueError: If any validation target id maps to zero bytes.
+    :raises ValueError: If unexpected zero-byte target ids appear.
+    :return ExactBpbTargetValidation: Validation target accounting.
     """
     if val_tokens.numel() <= 1:
         raise ValueError("validation token stream is empty; exact BPB is undefined")
     lut_cpu = byte_count_lut.detach().cpu()
-    if int(lut_cpu.min().item()) <= 0:
-        zero_ids = (lut_cpu <= 0).nonzero(as_tuple=False).flatten()[:16].tolist()
-        for start in range(1, int(val_tokens.numel()), int(chunk_size)):
-            end = min(int(val_tokens.numel()), start + int(chunk_size))
-            targets = val_tokens[start:end]
-            target_ids = targets.detach().cpu().long()
-            target_byte_counts = lut_cpu[target_ids]
-            if int(target_byte_counts.min().item()) <= 0:
-                bad = target_ids[target_byte_counts <= 0][:16].tolist()
-                raise ValueError(
-                    "validation targets include zero-byte tokenizer ids; "
-                    f"bad_target_ids={bad} zero_byte_ids_sample={zero_ids}"
-                )
+    allowed_zero = {int(tid) for tid in allowed_zero_byte_ids}
+    total_targets = max(0, int(val_tokens.numel()) - 1)
+    if int(lut_cpu.min().item()) > 0:
+        return ExactBpbTargetValidation(
+            total_target_count=total_targets,
+            positive_byte_target_count=total_targets,
+            zero_byte_target_count=0,
+            zero_byte_target_ids=(),
+        )
+
+    zero_target_count = 0
+    positive_target_count = 0
+    observed_zero_ids: set[int] = set()
+    zero_ids = (lut_cpu <= 0).nonzero(as_tuple=False).flatten()[:16].tolist()
+    for start in range(1, int(val_tokens.numel()), int(chunk_size)):
+        end = min(int(val_tokens.numel()), start + int(chunk_size))
+        targets = val_tokens[start:end]
+        target_ids = targets.detach().cpu().long()
+        target_byte_counts = lut_cpu[target_ids]
+        zero_mask = target_byte_counts <= 0
+        zero_target_count += int(zero_mask.sum().item())
+        positive_target_count += int((~zero_mask).sum().item())
+        if bool(zero_mask.any().item()):
+            observed_zero_ids.update(
+                int(tid) for tid in torch.unique(target_ids[zero_mask]).tolist()
+            )
+
+    unexpected_zero_ids = sorted(tid for tid in observed_zero_ids if tid not in allowed_zero)
+    if unexpected_zero_ids:
+        raise ValueError(
+            "validation targets include non-sentinel zero-byte tokenizer ids; "
+            f"bad_target_ids={unexpected_zero_ids[:16]} "
+            f"zero_byte_ids_sample={zero_ids}"
+        )
+    if positive_target_count <= 0:
+        raise ValueError(
+            "validation targets contain no positive-byte tokens; exact BPB is undefined"
+        )
+    return ExactBpbTargetValidation(
+        total_target_count=total_targets,
+        positive_byte_target_count=positive_target_count,
+        zero_byte_target_count=zero_target_count,
+        zero_byte_target_ids=tuple(sorted(observed_zero_ids)),
+    )
 
 
 def compute_training_objective(
@@ -1428,8 +1492,14 @@ def evaluate(
 
             if byte_count_lut is not None:
                 bits = per_token / math.log(2)  # nats → bits, per token
-                total_bits_t += bits.sum()
-                total_bytes_t += byte_count_lut[targets.long()].sum()
+                target_bytes = byte_count_lut[targets.long()]
+                positive_byte_mask = target_bytes > 0
+                if bool(positive_byte_mask.all().item()):
+                    total_bits_t += bits.sum()
+                    total_bytes_t += target_bytes.sum()
+                elif bool(positive_byte_mask.any().item()):
+                    total_bits_t += bits[positive_byte_mask].sum()
+                    total_bytes_t += target_bytes[positive_byte_mask].sum()
             state = core_model.detach_state(state)
 
     total_loss = float(total_loss_t.item())
@@ -2011,6 +2081,7 @@ def build_resolved_config_payload(
     tok_path: Optional[Path],
     tokenizer_sha256: Optional[str],
     byte_count_lut: Optional[torch.Tensor],
+    exact_bpb_target_validation: Optional[ExactBpbTargetValidation],
 ) -> dict[str, Any]:
     """Build the resolved run snapshot.
 
@@ -2092,6 +2163,8 @@ def build_resolved_config_payload(
     :param Optional[Path] tok_path: Tokenizer path.
     :param Optional[str] tokenizer_sha256: Tokenizer file SHA256.
     :param Optional[torch.Tensor] byte_count_lut: Byte-count LUT.
+    :param Optional[ExactBpbTargetValidation] exact_bpb_target_validation:
+        Exact-BPB target accounting.
     :return dict[str, Any]: Resolved configuration payload.
     """
     spec_bytes, gzip_spec_bytes = spec_size_bytes(cfg.spec_path)
@@ -2198,6 +2271,21 @@ def build_resolved_config_payload(
             "autocast": bool(use_autocast),
             "gradient_checkpointing": bool(gradient_checkpointing),
             "exact_val_bpb": byte_count_lut is not None,
+            "exact_bpb_positive_target_count": (
+                None
+                if exact_bpb_target_validation is None
+                else exact_bpb_target_validation.positive_byte_target_count
+            ),
+            "exact_bpb_zero_byte_target_count": (
+                None
+                if exact_bpb_target_validation is None
+                else exact_bpb_target_validation.zero_byte_target_count
+            ),
+            "exact_bpb_zero_byte_target_ids": (
+                []
+                if exact_bpb_target_validation is None
+                else list(exact_bpb_target_validation.zero_byte_target_ids)
+            ),
             "allow_approx_bpb": bool(allow_approx_bpb),
             "scan_backend_requested": scan_backend_requested,
             "scan_backend_active": scan_backend_active,
@@ -2718,6 +2806,7 @@ def main() -> None:
 
     # --- Byte count LUT for competition-exact bpb ---
     byte_count_lut: Optional[torch.Tensor] = None
+    exact_bpb_target_validation: Optional[ExactBpbTargetValidation] = None
     avg_bytes_per_token: Optional[float] = None
     tokenizer_sha256: Optional[str] = None
     tok_path = cfg.tokenizer_path
@@ -2725,19 +2814,32 @@ def main() -> None:
         try:
             tokenizer_sha256 = file_sha256(tok_path)
             byte_count_lut = build_byte_count_lut(tok_path, spec.vocab_size, device)
-            validate_exact_bpb_targets(byte_count_lut, val_tokens)
+            allowed_zero_ids = tokenizer_control_token_ids(tok_path, spec.vocab_size)
+            exact_bpb_target_validation = validate_exact_bpb_targets(
+                byte_count_lut,
+                val_tokens,
+                allowed_zero_byte_ids=allowed_zero_ids,
+            )
             avg_bytes_per_token = float(byte_count_lut.float().mean().item())
-            print(
+            byte_msg = (
                 f"Byte count LUT loaded from {tok_path.name} "
                 f"(avg {avg_bytes_per_token:.2f} bytes/token, sha256={tokenizer_sha256[:12]})"
             )
+            if exact_bpb_target_validation.zero_byte_target_count > 0:
+                byte_msg += (
+                    "; zero-byte validation sentinels skipped for exact BPB: "
+                    f"{exact_bpb_target_validation.zero_byte_target_count:,} "
+                    f"ids={list(exact_bpb_target_validation.zero_byte_target_ids)}"
+                )
+            print(byte_msg)
         except Exception as e:
             if not allow_approx_bpb:
                 raise SystemExit(
                     "exact val_bpb setup failed while building the byte-count LUT. "
                     "The maintained Core/Amplifier path does not silently fall back "
                     "to approximate bpb; fix the tokenizer path or pass "
-                    "--allow-approx-bpb for a deliberate local smoke run."
+                    "--allow-approx-bpb for a deliberate local smoke run. "
+                    f"Underlying error: {e}"
                 ) from e
             print(f"WARNING: could not build byte count LUT: {e} — bpb will be approximate")
     else:
@@ -2825,6 +2927,7 @@ def main() -> None:
         tok_path=tok_path,
         tokenizer_sha256=tokenizer_sha256,
         byte_count_lut=byte_count_lut,
+        exact_bpb_target_validation=exact_bpb_target_validation,
     )
     write_json(resolved_config_path, resolved_config)
     run_metadata = build_run_metadata(
@@ -3249,6 +3352,21 @@ def main() -> None:
         "last_eval_steps": last_eval.get("eval_steps"),
         "last_eval_batch_size": last_eval.get("eval_batch_size"),
         "last_eval_seq_len": last_eval.get("eval_seq_len"),
+        "exact_bpb_positive_target_count": (
+            None
+            if exact_bpb_target_validation is None
+            else exact_bpb_target_validation.positive_byte_target_count
+        ),
+        "exact_bpb_zero_byte_target_count": (
+            None
+            if exact_bpb_target_validation is None
+            else exact_bpb_target_validation.zero_byte_target_count
+        ),
+        "exact_bpb_zero_byte_target_ids": (
+            []
+            if exact_bpb_target_validation is None
+            else list(exact_bpb_target_validation.zero_byte_target_ids)
+        ),
         "repo_code_bytes": int(repo_code_bytes),
         "spec_bytes": spec_bytes,
         "gzip_spec_bytes": gzip_spec_bytes,
@@ -3290,6 +3408,13 @@ def main() -> None:
         )
         summary["eval/coverage_frac_final"] = last_eval.get("eval_coverage_frac")
         summary["eval/full_coverage_final"] = last_eval.get("eval_full_coverage")
+        if exact_bpb_target_validation is not None:
+            summary["eval/exact_bpb_positive_target_count"] = (
+                exact_bpb_target_validation.positive_byte_target_count
+            )
+            summary["eval/exact_bpb_zero_byte_target_count"] = (
+                exact_bpb_target_validation.zero_byte_target_count
+            )
         summary["artifact/code_bytes_final"] = int(repo_code_bytes)
         summary["artifact/spec_bytes_final"] = spec_bytes
         summary["artifact/gzip_spec_bytes_final"] = gzip_spec_bytes
