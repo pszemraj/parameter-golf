@@ -452,7 +452,8 @@ def test_add_trigram_memory_to_spec_counts_top_contexts(tmp_path: Path):
     )
     shard_dir = tmp_path / "shards"
     shard_dir.mkdir()
-    train_tokens.astype(np.uint16).tofile(shard_dir / "fineweb_train_000000.bin")
+    train_tokens[:5].astype(np.uint16).tofile(shard_dir / "fineweb_train_000000.bin")
+    train_tokens[5:].astype(np.uint16).tofile(shard_dir / "fineweb_train_000001.bin")
 
     memory = add_trigram_memory_to_spec(
         spec,
@@ -470,6 +471,19 @@ def test_add_trigram_memory_to_spec_counts_top_contexts(tmp_path: Path):
     assert int(memory.trigram_context_confidence[context].item()) > 0
     assert memory.metadata["trigram_top_k"] == 2
     assert memory.metadata["trigram_max_tokens"] is None
+
+    parallel = add_trigram_memory_to_spec(
+        spec,
+        shard_dir,
+        top_k=2,
+        smoothing=0.25,
+        chunk_size=4,
+        count_workers=2,
+        verbose=False,
+    )
+    assert torch.equal(memory.trigram_top_tokens, parallel.trigram_top_tokens)
+    assert torch.equal(memory.trigram_residual_values, parallel.trigram_residual_values)
+    assert torch.equal(memory.trigram_context_confidence, parallel.trigram_context_confidence)
 
 
 def test_training_token_file_fingerprint_tracks_train_shard_set(tmp_path: Path):

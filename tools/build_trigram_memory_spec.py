@@ -48,6 +48,15 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--max-tokens", type=int, default=None)
     ap.add_argument("--chunk-size", type=int, default=50_000_000)
     ap.add_argument(
+        "--count-workers",
+        type=int,
+        default=int(os.environ.get("TRIGRAM_COUNT_WORKERS", "1")),
+        help=(
+            "Exact worker-local count processes. Each worker needs one dense "
+            "count table, so SP1024 uses about 4.29 GB per worker before reduction."
+        ),
+    )
+    ap.add_argument(
         "--table-cache-root",
         default=os.environ.get("TRIGRAM_MEMORY_TABLE_CACHE_ROOT"),
         help="Optional cache root for reusable trigram memory tensors",
@@ -322,6 +331,7 @@ def main() -> None:
             confidence_count_cap=args.confidence_count_cap,
             max_tokens=args.max_tokens,
             chunk_size=args.chunk_size,
+            count_workers=args.count_workers,
             verbose=True,
         )
         _record_data_fingerprint(memory_spec, data_fingerprint)

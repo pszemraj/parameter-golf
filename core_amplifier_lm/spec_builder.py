@@ -19,6 +19,7 @@ import math
 import multiprocessing as mp
 import os
 import resource
+import tempfile
 import time
 from pathlib import Path
 from typing import Optional, Sequence
@@ -954,70 +955,67 @@ def training_token_file_fingerprint(source: str | Path) -> dict[str, object]:
     }
 
 
-def add_trigram_memory_to_spec(
-    spec: AmplifierSpec,
-    source: str | Path,
-    *,
-    storage_dtype: str = "uint16",
-    top_k: int = 2,
-    smoothing: float = 0.25,
-    residual_clip: float = 8.0,
-    confidence_count_cap: int = 4096,
-    max_tokens: Optional[int] = None,
-    chunk_size: int = 50_000_000,
-    verbose: bool = True,
-) -> AmplifierSpec:
-    """Attach exact dense trigram top-K memory tensors to a spec.
+def _split_contiguous_files(files: list[Path], num_workers: int) -> list[tuple[int, list[Path]]]:
+    """Split files into contiguous worker blocks.
 
-    :param AmplifierSpec spec: Base amplifier spec.
-    :param str | Path source: Training-token source.
-    :param str storage_dtype: On-disk dtype for non-header shards.
-    :param int top_k: Number of next-token residuals to store per context.
-    :param float smoothing: Additive smoothing for trigram log probabilities.
-    :param float residual_clip: Absolute residual-logit clipping bound.
-    :param int confidence_count_cap: Count at which confidence saturates.
-    :param Optional[int] max_tokens: Optional cap for local smoke builds.
-    :param int chunk_size: Counting chunk size in trigram positions.
-    :param bool verbose: Whether to print progress.
-    :return AmplifierSpec: Copy of ``spec`` with trigram memory tensors.
+    :param list[Path] files: Ordered training-token files.
+    :param int num_workers: Desired worker count.
+    :return list[tuple[int, list[Path]]]: ``(start_index, files)`` blocks.
     """
-    vocab_size = int(spec.vocab_size)
-    if vocab_size > np.iinfo(np.int16).max:
-        raise ValueError(f"trigram_top_tokens use int16 storage; got vocab_size={vocab_size}")
-    if top_k <= 0:
-        raise ValueError(f"top_k must be positive, got {top_k}")
-    if top_k >= vocab_size:
-        raise ValueError(f"top_k must be less than vocab_size={vocab_size}, got {top_k}")
-    if residual_clip <= 0:
-        raise ValueError(f"residual_clip must be positive, got {residual_clip}")
-    if confidence_count_cap <= 0:
-        raise ValueError(f"confidence_count_cap must be positive, got {confidence_count_cap}")
+    workers = max(1, min(int(num_workers), len(files)))
+    block_size = (len(files) + workers - 1) // workers
+    blocks: list[tuple[int, list[Path]]] = []
+    for start in range(0, len(files), block_size):
+        block = files[start : start + block_size]
+        if block:
+            blocks.append((start, block))
+    return blocks
 
+
+def _token_file_tail(path: Path, *, storage_dtype: str, count: int = 2) -> np.ndarray:
+    """Load up to ``count`` trailing tokens from a token file.
+
+    :param Path path: Token file.
+    :param str storage_dtype: On-disk dtype for raw token shards.
+    :param int count: Maximum tail length.
+    :return np.ndarray: Tail tokens as int32.
+    """
+    view = _mmap_raw_token_file(path, storage_dtype=storage_dtype)
+    take = min(int(count), int(view.shape[0]))
+    if take <= 0:
+        return np.empty(0, dtype=np.int32)
+    return np.asarray(view[-take:], dtype=np.int32)
+
+
+def _count_trigram_block(args: tuple[int, list[Path], np.ndarray, int, str, int, str, bool]):
+    """Count one contiguous block of token files into a local dense table.
+
+    :param tuple args: Worker arguments.
+    :return dict[str, object]: Worker summary and output path.
+    """
+    (
+        worker_id,
+        files,
+        initial_carry,
+        vocab_size,
+        storage_dtype,
+        chunk_size,
+        out_path,
+        verbose,
+    ) = args
     num_contexts = vocab_size * vocab_size
     counts = np.zeros((num_contexts, vocab_size), dtype=np.uint32)
     flat_counts = counts.reshape(-1)
-    files = _training_token_files(source)
-    carry = np.empty(0, dtype=np.int32)
+    carry = initial_carry.astype(np.int32, copy=True)
     tokens_seen = 0
     triples_seen = 0
     started = time.monotonic()
 
-    if verbose:
-        print(
-            f"Building dense trigram top-{top_k} memory from {len(files)} training files "
-            f"({counts.nbytes / 1e9:.2f} GB count table) ...",
-            flush=True,
-        )
-
     for file_idx, path in enumerate(files):
-        if max_tokens is not None and tokens_seen >= max_tokens:
-            break
         view = _mmap_raw_token_file(path, storage_dtype=storage_dtype)
         take = int(view.shape[0])
-        if max_tokens is not None:
-            take = min(take, int(max_tokens) - tokens_seen)
         if take <= 0:
-            break
+            continue
         tokens = np.asarray(view[:take], dtype=np.int32)
         tokens_seen += int(take)
         if carry.size:
@@ -1039,11 +1037,209 @@ def add_trigram_memory_to_spec(
         if verbose and ((file_idx + 1) % 10 == 0 or file_idx + 1 == len(files)):
             elapsed = time.monotonic() - started
             print(
-                f"  trigram memory counted {file_idx + 1}/{len(files)} files | "
+                f"  trigram worker {worker_id} counted {file_idx + 1}/{len(files)} files | "
                 f"tokens={tokens_seen / 1e9:.2f}B triples={triples_seen / 1e9:.2f}B "
                 f"| {triples_seen / max(elapsed, 1e-6) / 1e6:.1f}M triples/s",
                 flush=True,
             )
+
+    np.save(out_path, counts)
+    return {
+        "worker_id": int(worker_id),
+        "path": str(out_path),
+        "tokens_seen": int(tokens_seen),
+        "triples_seen": int(triples_seen),
+    }
+
+
+def _count_trigram_dense_parallel(
+    files: list[Path],
+    *,
+    vocab_size: int,
+    storage_dtype: str,
+    chunk_size: int,
+    count_workers: int,
+    verbose: bool,
+) -> tuple[np.ndarray, int, int]:
+    """Count dense trigram frequencies with exact worker-local tables.
+
+    Each worker receives a contiguous shard block and writes a private dense
+    count table. The parent reduces those tables after workers finish. This is
+    memory/disk hungry, but exact and race-free.
+
+    :param list[Path] files: Ordered training-token files.
+    :param int vocab_size: Vocabulary size.
+    :param str storage_dtype: On-disk dtype for raw token shards.
+    :param int chunk_size: Counting chunk size in trigram positions.
+    :param int count_workers: Number of worker processes.
+    :param bool verbose: Whether to print progress.
+    :return tuple[np.ndarray, int, int]: Dense counts, token count, triple count.
+    """
+    num_contexts = vocab_size * vocab_size
+    blocks = _split_contiguous_files(files, count_workers)
+    workers = len(blocks)
+    counts = np.zeros((num_contexts, vocab_size), dtype=np.uint32)
+    started = time.monotonic()
+
+    if verbose:
+        per_worker = [len(block) for _, block in blocks]
+        table_gb = counts.nbytes / 1e9
+        print(
+            f"  parallel trigram memory counting: {workers} workers, "
+            f"worker_tables={workers}x{table_gb:.2f} GB, shard_blocks={per_worker}",
+            flush=True,
+        )
+
+    with tempfile.TemporaryDirectory(prefix="trigram_memory_counts_") as tmp:
+        tmpdir = Path(tmp)
+        worker_args = []
+        for worker_id, (start_idx, block) in enumerate(blocks):
+            initial_carry = (
+                _token_file_tail(files[start_idx - 1], storage_dtype=storage_dtype)
+                if start_idx > 0
+                else np.empty(0, dtype=np.int32)
+            )
+            worker_args.append(
+                (
+                    worker_id,
+                    block,
+                    initial_carry,
+                    int(vocab_size),
+                    storage_dtype,
+                    int(chunk_size),
+                    str(tmpdir / f"worker_{worker_id}.npy"),
+                    bool(verbose),
+                )
+            )
+
+        with mp.Pool(workers) as pool:
+            results = pool.map(_count_trigram_block, worker_args)
+
+        tokens_seen = 0
+        triples_seen = 0
+        for result in sorted(results, key=lambda item: int(item["worker_id"])):
+            path = Path(str(result["path"]))
+            part = np.load(path, mmap_mode="r")
+            counts += part
+            tokens_seen += int(result["tokens_seen"])
+            triples_seen += int(result["triples_seen"])
+            if verbose:
+                elapsed = time.monotonic() - started
+                print(
+                    f"  reduced trigram worker {result['worker_id']} | "
+                    f"tokens={tokens_seen / 1e9:.2f}B triples={triples_seen / 1e9:.2f}B "
+                    f"| wall={elapsed:.1f}s",
+                    flush=True,
+                )
+            del part
+
+    return counts, tokens_seen, triples_seen
+
+
+def add_trigram_memory_to_spec(
+    spec: AmplifierSpec,
+    source: str | Path,
+    *,
+    storage_dtype: str = "uint16",
+    top_k: int = 2,
+    smoothing: float = 0.25,
+    residual_clip: float = 8.0,
+    confidence_count_cap: int = 4096,
+    max_tokens: Optional[int] = None,
+    chunk_size: int = 50_000_000,
+    count_workers: int = 1,
+    verbose: bool = True,
+) -> AmplifierSpec:
+    """Attach exact dense trigram top-K memory tensors to a spec.
+
+    :param AmplifierSpec spec: Base amplifier spec.
+    :param str | Path source: Training-token source.
+    :param str storage_dtype: On-disk dtype for non-header shards.
+    :param int top_k: Number of next-token residuals to store per context.
+    :param float smoothing: Additive smoothing for trigram log probabilities.
+    :param float residual_clip: Absolute residual-logit clipping bound.
+    :param int confidence_count_cap: Count at which confidence saturates.
+    :param Optional[int] max_tokens: Optional cap for local smoke builds.
+    :param int chunk_size: Counting chunk size in trigram positions.
+    :param int count_workers: Exact worker-local table count processes. Values
+        above ``1`` are ignored for capped smoke builds.
+    :param bool verbose: Whether to print progress.
+    :return AmplifierSpec: Copy of ``spec`` with trigram memory tensors.
+    """
+    vocab_size = int(spec.vocab_size)
+    if vocab_size > np.iinfo(np.int16).max:
+        raise ValueError(f"trigram_top_tokens use int16 storage; got vocab_size={vocab_size}")
+    if top_k <= 0:
+        raise ValueError(f"top_k must be positive, got {top_k}")
+    if top_k >= vocab_size:
+        raise ValueError(f"top_k must be less than vocab_size={vocab_size}, got {top_k}")
+    if residual_clip <= 0:
+        raise ValueError(f"residual_clip must be positive, got {residual_clip}")
+    if confidence_count_cap <= 0:
+        raise ValueError(f"confidence_count_cap must be positive, got {confidence_count_cap}")
+
+    num_contexts = vocab_size * vocab_size
+    files = _training_token_files(source)
+    started = time.monotonic()
+    table_bytes = num_contexts * vocab_size * np.dtype(np.uint32).itemsize
+
+    if verbose:
+        print(
+            f"Building dense trigram top-{top_k} memory from {len(files)} training files "
+            f"({table_bytes / 1e9:.2f} GB count table) ...",
+            flush=True,
+        )
+
+    if count_workers > 1 and max_tokens is None and len(files) > 1:
+        counts, tokens_seen, triples_seen = _count_trigram_dense_parallel(
+            files,
+            vocab_size=vocab_size,
+            storage_dtype=storage_dtype,
+            chunk_size=chunk_size,
+            count_workers=count_workers,
+            verbose=verbose,
+        )
+    else:
+        counts = np.zeros((num_contexts, vocab_size), dtype=np.uint32)
+        flat_counts = counts.reshape(-1)
+        carry = np.empty(0, dtype=np.int32)
+        tokens_seen = 0
+        triples_seen = 0
+        for file_idx, path in enumerate(files):
+            if max_tokens is not None and tokens_seen >= max_tokens:
+                break
+            view = _mmap_raw_token_file(path, storage_dtype=storage_dtype)
+            take = int(view.shape[0])
+            if max_tokens is not None:
+                take = min(take, int(max_tokens) - tokens_seen)
+            if take <= 0:
+                break
+            tokens = np.asarray(view[:take], dtype=np.int32)
+            tokens_seen += int(take)
+            if carry.size:
+                tokens = np.concatenate([carry, tokens])
+            if tokens.size >= 3:
+                for start in range(0, tokens.size - 2, chunk_size):
+                    end = min(tokens.size, start + chunk_size + 2)
+                    chunk = tokens[start:end]
+                    if chunk.size < 3:
+                        continue
+                    prev = chunk[:-2].astype(np.int64, copy=False)
+                    cur = chunk[1:-1].astype(np.int64, copy=False)
+                    nxt = chunk[2:].astype(np.int64, copy=False)
+                    flat = ((prev * vocab_size + cur) * vocab_size + nxt).astype(np.int64)
+                    unique, counts_in_chunk = np.unique(flat, return_counts=True)
+                    flat_counts[unique] += counts_in_chunk.astype(np.uint32, copy=False)
+                    triples_seen += int(flat.shape[0])
+            carry = tokens[-2:].astype(np.int32, copy=True)
+            if verbose and ((file_idx + 1) % 10 == 0 or file_idx + 1 == len(files)):
+                elapsed = time.monotonic() - started
+                print(
+                    f"  trigram memory counted {file_idx + 1}/{len(files)} files | "
+                    f"tokens={tokens_seen / 1e9:.2f}B triples={triples_seen / 1e9:.2f}B "
+                    f"| {triples_seen / max(elapsed, 1e-6) / 1e6:.1f}M triples/s",
+                    flush=True,
+                )
 
     context_counts = counts.sum(axis=1, dtype=np.uint64)
     top_idx = np.argpartition(counts, kth=vocab_size - top_k, axis=1)[:, -top_k:]
