@@ -291,6 +291,110 @@ def cmd_write_h100_naive_contract_manifest(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_write_local_wallclock_resolver_manifest(args: argparse.Namespace) -> int:
+    """Write the local true-wallclock resolver manifest.
+
+    :param argparse.Namespace args: Parsed CLI arguments.
+    :return int: Shell-style exit code.
+    """
+    manifest = {
+        "run_prefix_base": args.run_prefix_base,
+        "wandb_project": args.wandb_project,
+        "wandb_mode": args.wandb_mode,
+        "archive_output": str(args.archive_output),
+        "command_log": args.command_log,
+        "exit_status": args.exit_status,
+        "matched_logs": args.matched_logs,
+        "completed_log_count": args.completed_log_count,
+        "missing_run_ids": args.missing_run_id,
+        "size_screen": {
+            "config": args.size_screen_config,
+            "output_dir": args.size_screen_output,
+        },
+        "contract": {
+            "ngpu": args.ngpu,
+            "grad_accum_steps": args.grad_accum_steps,
+            "iterations": args.iterations,
+            "train_batch_tokens": args.train_batch_tokens,
+            "train_seq_len": args.train_seq_len,
+            "val_loss_every": args.val_loss_every,
+            "train_log_every": args.train_log_every,
+            "min_val_seqs": args.min_val_seqs,
+            "val_max_seqs": args.val_max_seqs,
+            "val_batch_size": args.val_batch_size,
+            "max_wallclock_seconds": args.max_wallclock_seconds,
+            "compile": args.compile_enabled,
+            "compile_strategy": args.compile_strategy,
+            "gdn_fla_recurrence_mode": args.gdn_fla_recurrence_mode,
+            "weight_decay": args.weight_decay,
+            "torch_logs": args.torch_logs or None,
+            "torch_trace": args.torch_trace or None,
+            "torchinductor_max_autotune": args.torchinductor_max_autotune,
+            "torchinductor_max_autotune_gemm": args.torchinductor_max_autotune_gemm,
+            "distributed_mode": args.distributed_mode,
+            "data_path": args.data_path,
+            "tokenizer_path": args.tokenizer_path,
+            "vocab_size": args.vocab_size,
+        },
+        "provenance": {
+            "git_commit": args.git_commit,
+            "git_branch": args.git_branch,
+            "host_name": args.host_name,
+            "timestamp_utc": args.timestamp_utc,
+        },
+        "runs": [
+            {
+                "label": "exact repo naive baseline local wallclock resolver",
+                "trainer": "train_gpt.py",
+                "mode": "n/a",
+                "run_id": args.gpt_naive_run_id,
+                "data_path": args.data_path,
+                "tokenizer_path": args.tokenizer_path,
+                "vocab_size": args.vocab_size,
+                "num_layers": 9,
+                "model_dim": 512,
+                "num_heads": 8,
+                "num_kv_heads": 4,
+                "mlp_mult": 2,
+            },
+            {
+                "label": "primary HGDN local wallclock resolver",
+                "trainer": "train_gpt_hybrid.py",
+                "mode": "primary",
+                "run_id": args.primary_hgdn_run_id,
+                "config": args.primary_hgdn_config,
+                "gdn_fla_recurrence_mode": args.gdn_fla_recurrence_mode,
+            },
+            {
+                "label": "primary attention-only baseline diagnostic control local wallclock resolver",
+                "trainer": "train_gpt_hybrid.py",
+                "mode": "primary_control",
+                "run_id": args.primary_control_run_id,
+                "config": args.primary_control_config,
+                "gdn_fla_recurrence_mode": args.gdn_fla_recurrence_mode,
+            },
+            {
+                "label": "secondary HGDN local wallclock resolver",
+                "trainer": "train_gpt_hybrid.py",
+                "mode": "secondary",
+                "run_id": args.secondary_hgdn_run_id,
+                "config": args.secondary_hgdn_config,
+                "gdn_fla_recurrence_mode": args.gdn_fla_recurrence_mode,
+            },
+            {
+                "label": "secondary attention-only baseline diagnostic control local wallclock resolver",
+                "trainer": "train_gpt_hybrid.py",
+                "mode": "secondary_control",
+                "run_id": args.secondary_control_run_id,
+                "config": args.secondary_control_config,
+                "gdn_fla_recurrence_mode": args.gdn_fla_recurrence_mode,
+            },
+        ],
+    }
+    write_json(args.output, manifest)
+    return 0
+
+
 def cmd_write_local_recurrence_matrix_manifest(args: argparse.Namespace) -> int:
     """Write the local recurrence implementation matrix manifest.
 
@@ -485,6 +589,66 @@ def build_parser() -> argparse.ArgumentParser:
     h100_naive.add_argument("--host-name", default="")
     h100_naive.add_argument("--timestamp-utc", default="")
     h100_naive.set_defaults(func=cmd_write_h100_naive_contract_manifest)
+
+    local_wallclock = subparsers.add_parser(
+        "write-local-wallclock-resolver-manifest",
+        help="write the local exact-baseline/HGDN true-wallclock resolver manifest",
+    )
+    local_wallclock.add_argument("--output", type=Path, required=True)
+    local_wallclock.add_argument("--run-prefix-base", required=True)
+    local_wallclock.add_argument("--wandb-project", required=True)
+    local_wallclock.add_argument("--wandb-mode", required=True)
+    local_wallclock.add_argument("--archive-output", type=Path, required=True)
+    local_wallclock.add_argument("--exit-status", type=int, required=True)
+    local_wallclock.add_argument("--matched-logs", type=parse_bool_flag, required=True)
+    local_wallclock.add_argument("--completed-log-count", type=int, required=True)
+    local_wallclock.add_argument("--command-log", required=True)
+    local_wallclock.add_argument("--size-screen-config", required=True)
+    local_wallclock.add_argument("--size-screen-output", required=True)
+    local_wallclock.add_argument("--torch-logs", default="")
+    local_wallclock.add_argument("--torch-trace", default="")
+    local_wallclock.add_argument(
+        "--torchinductor-max-autotune", type=int, required=True
+    )
+    local_wallclock.add_argument(
+        "--torchinductor-max-autotune-gemm", type=int, required=True
+    )
+    local_wallclock.add_argument("--ngpu", type=int, required=True)
+    local_wallclock.add_argument("--grad-accum-steps", type=int, required=True)
+    local_wallclock.add_argument("--iterations", type=int, required=True)
+    local_wallclock.add_argument("--train-batch-tokens", type=int, required=True)
+    local_wallclock.add_argument("--train-seq-len", type=int, required=True)
+    local_wallclock.add_argument("--val-loss-every", type=int, required=True)
+    local_wallclock.add_argument("--train-log-every", type=int, required=True)
+    local_wallclock.add_argument("--min-val-seqs", type=int, required=True)
+    local_wallclock.add_argument("--val-max-seqs", type=int, required=True)
+    local_wallclock.add_argument("--val-batch-size", type=int, required=True)
+    local_wallclock.add_argument("--max-wallclock-seconds", type=float, required=True)
+    local_wallclock.add_argument(
+        "--compile-enabled", type=parse_bool_flag, required=True
+    )
+    local_wallclock.add_argument("--compile-strategy", required=True)
+    local_wallclock.add_argument("--distributed-mode", required=True)
+    local_wallclock.add_argument("--gdn-fla-recurrence-mode", required=True)
+    local_wallclock.add_argument("--weight-decay", type=float, required=True)
+    local_wallclock.add_argument("--data-path", required=True)
+    local_wallclock.add_argument("--tokenizer-path", required=True)
+    local_wallclock.add_argument("--vocab-size", type=int, required=True)
+    local_wallclock.add_argument("--gpt-naive-run-id", required=True)
+    local_wallclock.add_argument("--primary-hgdn-config", required=True)
+    local_wallclock.add_argument("--primary-control-config", required=True)
+    local_wallclock.add_argument("--secondary-hgdn-config", required=True)
+    local_wallclock.add_argument("--secondary-control-config", required=True)
+    local_wallclock.add_argument("--primary-hgdn-run-id", required=True)
+    local_wallclock.add_argument("--primary-control-run-id", required=True)
+    local_wallclock.add_argument("--secondary-hgdn-run-id", required=True)
+    local_wallclock.add_argument("--secondary-control-run-id", required=True)
+    local_wallclock.add_argument("--missing-run-id", action="append", default=[])
+    local_wallclock.add_argument("--git-commit", default="")
+    local_wallclock.add_argument("--git-branch", default="")
+    local_wallclock.add_argument("--host-name", default="")
+    local_wallclock.add_argument("--timestamp-utc", default="")
+    local_wallclock.set_defaults(func=cmd_write_local_wallclock_resolver_manifest)
 
     local_recurrence = subparsers.add_parser(
         "write-local-recurrence-matrix-manifest",

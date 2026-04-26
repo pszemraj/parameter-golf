@@ -74,6 +74,7 @@ class Hyperparameters:
     train_batch_tokens = int(os.environ.get("TRAIN_BATCH_TOKENS", 524_288))
     train_seq_len = int(os.environ.get("TRAIN_SEQ_LEN", 1024))
     max_wallclock_seconds = float(os.environ.get("MAX_WALLCLOCK_SECONDS", 600.0))
+    artifact_limit_bytes = int(os.environ.get("ARTIFACT_LIMIT_BYTES", 16_000_000))
     qk_gain_init = float(os.environ.get("QK_GAIN_INIT", 1.5))
 
     # Model shape.
@@ -1554,6 +1555,7 @@ def main() -> None:
         torch.save(base_model.state_dict(), "final_model.pt")
         model_bytes = os.path.getsize("final_model.pt")
         code_bytes = len(code.encode("utf-8"))
+        log0(f"raw_model_bytes:{model_bytes}")
         log0(f"Serialized model: {model_bytes} bytes")
         log0(f"Code size: {code_bytes} bytes")
         log0(f"Total submission size: {model_bytes + code_bytes} bytes")
@@ -1564,19 +1566,39 @@ def main() -> None:
     quant_raw = quant_buf.getvalue()
     quant_blob = zlib.compress(quant_raw, level=9)
     quant_raw_bytes = len(quant_raw)
+    quant_file_bytes = len(quant_blob)
+    code_bytes = len(code.encode("utf-8"))
     if master_process:
         with open("final_model.int8.ptz", "wb") as f:
             f.write(quant_blob)
         quant_file_bytes = os.path.getsize("final_model.int8.ptz")
-        code_bytes = len(code.encode("utf-8"))
         ratio = quant_stats["baseline_tensor_bytes"] / max(
             quant_stats["int8_payload_bytes"], 1
+        )
+        raw_overhead_bytes = quant_raw_bytes - quant_stats["int8_payload_bytes"]
+        payload_to_zlib_ratio = quant_stats["int8_payload_bytes"] / max(
+            quant_file_bytes, 1
+        )
+        raw_quant_to_zlib_ratio = quant_raw_bytes / max(quant_file_bytes, 1)
+        log0(
+            "quant_audit "
+            f"baseline_tensor_bytes:{quant_stats['baseline_tensor_bytes']} "
+            f"int8_payload_bytes:{quant_stats['int8_payload_bytes']} "
+            f"raw_torch_bytes:{quant_raw_bytes} "
+            f"raw_torch_overhead_bytes:{raw_overhead_bytes} "
+            f"baseline_to_payload_ratio:{ratio:.2f}x "
+            f"payload_to_zlib_ratio:{payload_to_zlib_ratio:.2f}x "
+            f"raw_quant_to_zlib_ratio:{raw_quant_to_zlib_ratio:.2f}x"
         )
         log0(
             f"Serialized model int8+zlib: {quant_file_bytes} bytes "
             f"(payload:{quant_stats['int8_payload_bytes']} raw_torch:{quant_raw_bytes} payload_ratio:{ratio:.2f}x)"
         )
         log0(f"Total submission size int8+zlib: {quant_file_bytes + code_bytes} bytes")
+        log0(
+            f"int8_zlib_bytes:{quant_file_bytes} code_bytes:{code_bytes} "
+            f"total:{quant_file_bytes + code_bytes}"
+        )
 
     if distributed:
         dist.barrier()
@@ -1631,6 +1653,22 @@ def main() -> None:
     log0(
         f"final_int8_zlib_roundtrip_exact val_loss:{q_val_loss:.8f} val_bpb:{q_val_bpb:.8f}"
     )
+    if master_process:
+        artifact_bytes = quant_file_bytes + code_bytes
+        artifact_headroom = args.artifact_limit_bytes - artifact_bytes
+        if artifact_headroom < 0:
+            artifact_status = "OVER_LIMIT"
+            artifact_warning = "DISQUALIFIED"
+        elif artifact_headroom > 0:
+            artifact_status = "UNDER_LIMIT"
+            artifact_warning = "NONE"
+        else:
+            artifact_status = "ON_BUDGET"
+            artifact_warning = "NONE"
+        log0(
+            f"artifact_status:{artifact_status} artifact_warning:{artifact_warning} "
+            f"headroom_bytes:{artifact_headroom}"
+        )
 
     if distributed:
         dist.destroy_process_group()

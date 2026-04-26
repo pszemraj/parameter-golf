@@ -6,9 +6,6 @@ paid H100 finalist runs or official-style comparisons.
 
 ## Before Paid H100 Runs
 
-- Make `train_gpt.py` emit analyzer-compatible artifact lines:
-  `int8_zlib_bytes:... code_bytes:... total:...` and
-  `artifact_status:... headroom_bytes:...`.
 - Tighten analyzer size eligibility for config promotion so missing final
   artifact status or missing size-screen status is explicit, not silently legal.
 - Add full provenance to all manifests: `ngpu`, `grad_accum_steps`, data path,

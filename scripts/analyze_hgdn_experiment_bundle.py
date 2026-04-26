@@ -30,7 +30,9 @@ WALLCLOCK_STOP_RE = re.compile(
     rf"stopping_early:\s+wallclock_cap\s+train_time:(?P<time_ms>{NUMBER})ms\s+"
     rf"step:(?P<step>\d+)(?:/(?P<planned>\d+))?"
 )
-MODEL_RE = re.compile(r"model_params:(?P<params>\d+) blocks:(?P<blocks>\d+G\+\d+A)")
+MODEL_RE = re.compile(
+    r"model_params:(?P<params>\d+)(?: blocks:(?P<blocks>\d+G\+\d+A))?"
+)
 MODE_RE = re.compile(r"gdn_fla_recurrence_mode:(?P<mode>[a-z_]+)")
 PERF_RE = re.compile(
     rf"perf_summary ignore_steps:(?P<ignore>\d+) measured_steps:(?P<measured>\d+) "
@@ -204,7 +206,7 @@ def parse_log(path: Path) -> dict[str, Any]:
             wallclock_stop_points.append(point)
         if match := MODEL_RE.search(line):
             params = int(match.group("params"))
-            blocks = match.group("blocks")
+            blocks = match.group("blocks") or ""
         if match := MODE_RE.search(line):
             mode = match.group("mode")
         if match := PERF_RE.search(line):
@@ -337,6 +339,40 @@ def interpolate_bpb_with_status(
     return points[-1]["val_bpb"], "clamped_after"
 
 
+def equal_wallclock_status_is_promotable(
+    status: str, *, wallclock_clean_stop: bool
+) -> bool:
+    """Return whether an equal-wallclock value is valid for promotion.
+
+    :param str status: Interpolation status.
+    :param bool wallclock_clean_stop: Whether the trainer stopped at a wallclock cap.
+    :return bool: True when this value can rank or promote a run.
+    """
+    if status in {"exact_eval", "interpolated", "duplicate_time"}:
+        return True
+    if status == "clamped_after" and wallclock_clean_stop:
+        return True
+    return False
+
+
+def equal_wallclock_ineligible_reason(
+    status: str, *, wallclock_clean_stop: bool
+) -> str:
+    """Explain why an equal-wallclock value is not promotable.
+
+    :param str status: Interpolation status.
+    :param bool wallclock_clean_stop: Whether the trainer stopped at a wallclock cap.
+    :return str: Empty string when promotable, otherwise a short reason.
+    """
+    if equal_wallclock_status_is_promotable(
+        status, wallclock_clean_stop=wallclock_clean_stop
+    ):
+        return ""
+    if status == "clamped_after" and not wallclock_clean_stop:
+        return "fixed_step_ended_before_budget"
+    return status
+
+
 def manifest_entries(manifest: dict[str, Any]) -> list[dict[str, Any]]:
     """Return run entries from any supported manifest shape.
 
@@ -439,6 +475,14 @@ def build_rows(
         )
         row["equal_wallclock_bpb"] = equal_wallclock_bpb
         row["equal_wallclock_bpb_status"] = equal_wallclock_bpb_status
+        row["equal_wallclock_promotable"] = equal_wallclock_status_is_promotable(
+            equal_wallclock_bpb_status,
+            wallclock_clean_stop=bool(row.get("wallclock_clean_stop")),
+        )
+        row["equal_wallclock_ineligible_reason"] = equal_wallclock_ineligible_reason(
+            equal_wallclock_bpb_status,
+            wallclock_clean_stop=bool(row.get("wallclock_clean_stop")),
+        )
         row["speed_budget_bpb"] = row["equal_wallclock_bpb"]
         row["speed_budget_bpb_status"] = equal_wallclock_bpb_status
     assign_ranks(rows)
@@ -455,7 +499,15 @@ def assign_ranks(rows: list[dict[str, Any]]) -> None:
         ("equal_wallclock_bpb", "speed_rank_all"),
     ):
         ranked = sorted(
-            [row for row in rows if row.get(metric) is not None],
+            [
+                row
+                for row in rows
+                if row.get(metric) is not None
+                and (
+                    metric != "equal_wallclock_bpb"
+                    or row.get("equal_wallclock_promotable")
+                )
+            ],
             key=lambda row: (float(row[metric]), row["run_id"]),
         )
         for rank, row in enumerate(ranked, start=1):
@@ -474,11 +526,17 @@ def metric_value(row: dict[str, Any], metric: str) -> tuple[str, float | None]:
     """
     if metric == "auto":
         for key in ("equal_wallclock_bpb", "final_sampled_bpb", "final_roundtrip_bpb"):
+            if key == "equal_wallclock_bpb" and not row.get(
+                "equal_wallclock_promotable"
+            ):
+                continue
             if row.get(key) is not None:
                 return key, float(row[key])
         return "auto", None
     if metric == "speed_budget_bpb":
         metric = "equal_wallclock_bpb"
+    if metric == "equal_wallclock_bpb" and not row.get("equal_wallclock_promotable"):
+        return metric, None
     value = row.get(metric)
     return metric, float(value) if value is not None else None
 
@@ -647,6 +705,8 @@ def write_outputs(
         "speed_budget_ms",
         "equal_wallclock_bpb",
         "equal_wallclock_bpb_status",
+        "equal_wallclock_promotable",
+        "equal_wallclock_ineligible_reason",
         "speed_budget_bpb",
         "speed_budget_bpb_status",
         "final_roundtrip_bpb",
@@ -679,8 +739,8 @@ def write_outputs(
         else "Equal-wallclock budget ms: n/a",
         f"Selection metric: {metric}",
         "",
-        "| Candidate | Mode | Family | Step | ms/step | toks/s | Train loss | BPB | Equal-WC BPB | Roundtrip | Size proxy | Size |",
-        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+        "| Candidate | Mode | Family | Step | ms/step | toks/s | Train loss | BPB | Equal-WC BPB | Equal-WC Status | Roundtrip | Size proxy | Size |",
+        "|---|---|---|---:|---:|---:|---:|---:|---:|---|---:|---:|---|",
     ]
     for row in sorted(rows, key=lambda item: summary_sort_key(item, metric)):
         lines.append(
@@ -696,6 +756,7 @@ def write_outputs(
                     format_optional(row.get("final_train_loss"), digits=4),
                     format_optional(row.get("final_sampled_bpb"), digits=4),
                     format_optional(row.get("equal_wallclock_bpb"), digits=4),
+                    str(row.get("equal_wallclock_bpb_status") or ""),
                     format_optional(row.get("final_roundtrip_bpb"), digits=4),
                     format_int_optional(row.get("size_proxy_bytes")),
                     str(row.get("artifact_status") or row.get("size_status") or ""),
@@ -877,9 +938,9 @@ def print_summary(
     print(f"equal_wallclock_budget_ms:{budget}")
     print(f"selection_metric:{metric}")
     print(
-        "| Candidate | Mode | Family | Step | ms/step | toks/s | Train loss | BPB | Equal-WC BPB | Size proxy | Size |"
+        "| Candidate | Mode | Family | Step | ms/step | toks/s | Train loss | BPB | Equal-WC BPB | Equal-WC Status | Roundtrip | Size proxy | Size |"
     )
-    print("|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|")
+    print("|---|---|---|---:|---:|---:|---:|---:|---:|---|---:|---:|---|")
     for row in sorted(rows, key=lambda item: summary_sort_key(item, metric))[:top]:
         print(
             f"| {row['candidate']} | {row.get('gdn_fla_recurrence_mode') or ''} | "
@@ -890,6 +951,8 @@ def print_summary(
             f"{format_optional(row.get('final_train_loss'), digits=4)} | "
             f"{format_optional(row.get('final_sampled_bpb'), digits=4)} | "
             f"{format_optional(row.get('equal_wallclock_bpb'), digits=4)} | "
+            f"{row.get('equal_wallclock_bpb_status') or ''} | "
+            f"{format_optional(row.get('final_roundtrip_bpb'), digits=4)} | "
             f"{format_int_optional(row.get('size_proxy_bytes'))} | "
             f"{row.get('artifact_status') or row.get('size_status') or ''} |"
         )

@@ -65,13 +65,16 @@ The sparse HGDN helpers live under `scripts/`:
 
 ```bash
 bash scripts/run_local_hgdn_naive_contract_search.sh
+bash scripts/run_local_hgdn_wallclock_resolver.sh
 bash scripts/run_h100_hgdn_naive_contract_round.sh
 ```
 
-The H100 helper runs three legs: exact `train_gpt.py` baseline, config-driven
-sparse HGDN, and the matched attention-only diagnostic control. The attention-only
-control is useful for same-shell diagnosis; it is not a replacement for the exact
-baseline.
+The local wallclock resolver runs the exact `train_gpt.py` baseline, primary and
+secondary HGDN candidates, and their matched attention-only diagnostic controls
+under a true same-time local cap. The H100 helper runs three legs: exact
+`train_gpt.py` baseline, config-driven sparse HGDN, and the matched
+attention-only diagnostic control. The attention-only control is useful for
+same-shell diagnosis; it is not a replacement for the exact baseline.
 
 ## Artifact And Evaluation Rules
 

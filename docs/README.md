@@ -33,11 +33,15 @@ and artifact size?
    [FLA Calibration](#fla-calibration) before reopening architecture search.
 2. Rerun the local sparse exact-contract helper after the implementation matrix.
    Start with the shortlist in [Local Sparse Search](#local-sparse-search).
-3. If the local rerun still supports the primary candidate, run the exact H100
+3. Run the true same-wallclock local resolver in
+   [Wallclock Resolver](#wallclock-resolver). If laptop timing is inconclusive,
+   carry both the primary and secondary commands forward to H100.
+4. If the resolver still supports the primary candidate, run the exact H100
    comparison in [H100 Commands](#h100-commands).
-4. Run the optional quality-ceiling candidate only if the primary result leaves
-   a real quality/speed tradeoff unresolved.
-5. Keep native FLA and recurrence-path timing in the calibration lane described
+5. Run the optional quality-ceiling candidate when the resolver says the local
+   primary/secondary margin is too close or the secondary beats the primary by
+   the configured margin.
+6. Keep native FLA and recurrence-path timing in the calibration lane described
    in [FLA Calibration](#fla-calibration). Run timing jobs sequentially with no
    other active CUDA work.
 
@@ -118,6 +122,43 @@ HGDN_CONFIG=configs/hgdn/naive_contract_l9_d512_mid3_dk48_v1p5_m1p75.toml
 The helper runs three legs: exact `train_gpt.py` baseline, config-driven sparse
 HGDN, and the matched attention-only diagnostic control. It pins `DATA_PATH`,
 `TOKENIZER_PATH`, and `VOCAB_SIZE` for the exact baseline leg.
+
+## Wallclock Resolver
+
+Fixed-step local stages are learning-efficiency screens, not final wallclock
+decisions. The analyzer now marks equal-wallclock values as non-promotable when
+a fixed-step run ended before the comparison budget (`clamped_after`). Use the
+resolver below when deciding whether the laptop evidence is strong enough to
+avoid running both HGDN candidates on H100:
+
+```bash
+USE_WANDB=0 WANDB_MODE=offline \
+RUN_PREFIX_BASE=localhgdn_wallclock1 \
+bash scripts/run_local_hgdn_wallclock_resolver.sh
+```
+
+The resolver runs five legs under the same local wallclock cap: exact
+`train_gpt.py` baseline, primary `m2` HGDN, matched `r0_m2` attention-only
+diagnostic control, secondary OLMo-ish `6G2A`, and matched `r0_m1p25`
+attention-only diagnostic control. Defaults are `MAX_WALLCLOCK_SECONDS=600`,
+`TRAIN_BATCH_TOKENS=65536`, `TRAIN_SEQ_LEN=1024`, `VAL_MAX_SEQS=512`, and
+`GDN_FLA_RECURRENCE_MODE=direct_fused`.
+
+Outputs are written to `local-scratch/<prefix>_bundle/` and archived with
+`py7zr`. The resolver writes:
+
+- `analysis/summary.md` and `analysis/rows.csv`
+- `wallclock_decision.env`
+- `next_h100_primary_command.sh`
+- `next_h100_secondary_command.sh`
+
+Decision defaults are intentionally conservative and use final roundtrip BPB
+from wallclock-stopped runs, matching the compressed-artifact objective. The
+primary must beat its matched attention-only diagnostic control by
+`PRIMARY_CONTROL_MARGIN=0.003` BPB, and the secondary only cleanly displaces the
+primary at `SECONDARY_PRIMARY_MARGIN=0.005` BPB. If any required wallclock
+roundtrip metric is missing or the primary/secondary margin is too close, the
+decision file sets `RUN_SECONDARY_H100=1`.
 
 Local sparse search helper:
 
@@ -300,6 +341,8 @@ conda run -s --name pg python scripts/check_bpb_sanity.py \
   implementation matrix.
 - `scripts/run_local_hgdn_overnight_pipeline.sh`: staged local implementation,
   architecture, and confirmation hierarchy.
+- `scripts/run_local_hgdn_wallclock_resolver.sh`: true same-wallclock local
+  exact-baseline/HGDN resolver before paid H100 work.
 - `scripts/run_h100_hgdn_naive_contract_round.sh`: H100 exact-baseline comparison.
 - `scripts/bundle_hgdn_run.py`: bundle helper.
 - `scripts/bootstrap_challenge_data.sh`: data bootstrap helper.
@@ -313,6 +356,7 @@ bash -n scripts/hgdn_shell_common.sh \
   scripts/run_local_hgdn_naive_contract_search.sh \
   scripts/run_local_hgdn_recurrence_matrix.sh \
   scripts/run_local_hgdn_overnight_pipeline.sh \
+  scripts/run_local_hgdn_wallclock_resolver.sh \
   scripts/run_h100_hgdn_naive_contract_round.sh \
   scripts/bootstrap_challenge_data.sh
 
@@ -321,6 +365,8 @@ conda run -s --name pg python -m py_compile \
   hgdn_fla.py hgdn_runtime_utils.py scripts/hgdn_helper_cli.py \
   scripts/screen_hgdn_arch_sizes.py \
   scripts/analyze_local_naive_contract_bundle.py \
+  scripts/analyze_hgdn_experiment_bundle.py \
+  scripts/resolve_hgdn_wallclock_decision.py \
   scripts/check_bpb_sanity.py scripts/probe_fla_stack.py \
   scripts/bench_fla_recurrence_paths.py \
   scripts/bench_hgdn_full_layer_paths.py
