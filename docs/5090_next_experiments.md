@@ -28,6 +28,33 @@ Interpretation:
   non-transformer budget should go into top-K/context-memory headroom rather
   than schedule microtuning.
 
+## 5090 Performance Read
+
+The current quality leader is not slow because of the trigram sidecar. Local
+CUDA microbenchmarks at the maintained `B=256`, `T=512` contract show the
+dominant cost is the recurrent controller geometry:
+
+| Path | Shape | Synthetic full tok/s | Peak MiB | Trainable params |
+|---|---|---:|---:|---:|
+| current leader | `core_dim=48`, `layers=12`, `exp=10` | `586,729` | `22,726.5` | `839,130` |
+| aligned probe | `core_dim=64`, `layers=8`, `exp=8` | `802,372` | `17,042.7` | `796,182` |
+| aligned probe | `core_dim=128`, `layers=4`, `exp=4` | `1,371,917` | `10,332.0` | `806,418` |
+| aligned probe | `core_dim=128`, `layers=6`, `exp=4` | `964,576` | `14,245.8` | `1,200,916` |
+
+Core-only measurements tell the same story: `core_dim=128`, `layers=4`,
+`exp=4` is about `2.6x` faster per token than the current `48x12x10`
+controller at similar trainable parameter count.
+
+Interpretation:
+
+- the current `48`/`480` shape is CUDA-unfriendly and memory-heavy
+- `torch.compile` is not a quick escape hatch because the current
+  `accelerated-scan` Triton path fails under Inductor tracing
+- this is a controlled GPU-friendly geometry probe, not an arbitrary
+  transformer-style pivot
+- the next metric read should test whether the faster aligned controller keeps
+  or improves fixed-token `val_bpb`
+
 ## Locked Schedule Defaults
 
 The post-confirmation hold-retune screen is complete.
@@ -179,10 +206,37 @@ Practical consequence:
 ## Immediate Next Commands
 
 The top-2 blocks0 trigram sidecar is confirmed under the `1B` contract. The
-next serious question is whether more top-K memory buys enough quality to
-justify the extra artifact bytes.
+performance read makes one bounded geometry probe higher priority than top-K
+headroom, because the current controller shape is both slow and memory-heavy.
 
-Dry run first:
+Optional repeatable benchmark:
+
+```bash
+TORCH_BLAS_PREFER_CUBLASLT=1 conda run -s --name train python tools/benchmark_core_amp_perf.py --mode full --shape current_blocks0_d48_l12_e10:48:12:10 --shape aligned_d128_l4_e4:128:4:4 --batch-size 256 --seq-len 512 --warmup 4 --steps 10
+```
+
+Dry run the aligned top-2 geometry probe first:
+
+```bash
+DRY_RUN=1 RUN_VERSION=v1 SEEDS=1337 bash scripts/run_5090_trigram_aligned_geometry_screen.sh
+```
+
+Then run:
+
+```bash
+RUN_VERSION=v1 SEEDS=1337 bash scripts/run_5090_trigram_aligned_geometry_screen.sh
+```
+
+Promotion rule:
+
+- compare fixed-token `512M` `val_bpb` against the current top-2 seed-`1337`
+  screen (`2.0751715673`)
+- if aligned `128x4x4` is better, or within about `0.015` bpb while retaining
+  the expected large throughput gain, promote it to a `1B` confirmation
+- if it is clearly worse at fixed tokens, keep current `48x12x10` for quality
+  and return to top-K headroom
+
+After the geometry read, the top-K headroom question remains:
 
 ```bash
 DRY_RUN=1 RUN_VERSION=v2 TRIGRAM_TOP_K=4 SEEDS=1337 bash scripts/run_5090_trigram_sidecar_screen.sh
@@ -207,7 +261,8 @@ Promotion rule:
 RUN_VERSION=v2 TRIGRAM_TOP_K=4 SEEDS=1337 bash scripts/run_5090_trigram_confirm1b.sh
 ```
 
-Replay `blocks1` only as a geometry check after the blocks0 top-K decision:
+Replay `blocks1` only as a geometry check after the blocks0 top-K and aligned
+geometry decisions:
 
 ```bash
 RUN_VERSION=v1 SEEDS=1337 RUN_BLOCKS1=1 RUN_BLOCKS0=0 bash scripts/run_5090_trigram_sidecar_screen.sh

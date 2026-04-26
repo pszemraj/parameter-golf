@@ -259,7 +259,8 @@ def apply_affine_scan(
             raise RuntimeError(
                 "scan backend 'assoc_accel' failed via accelerated_scan.scalar. "
                 "The active Core/Amplifier path no longer falls back silently; "
-                "either fix the accelerated scalar install or choose an explicit slower backend."
+                "either fix the accelerated scalar install or choose an explicit slower backend. "
+                f"Original error: {type(exc).__name__}: {exc}"
             ) from exc
 
     raise RuntimeError(f"unsupported affine scan backend {backend!r}")

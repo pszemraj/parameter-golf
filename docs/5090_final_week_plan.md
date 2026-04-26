@@ -91,6 +91,23 @@ Current interpretation:
   architecture work should spend budget on thesis-aligned non-transformer
   capacity rather than replaying the same gate/temporal formulations
 
+Performance interruption:
+
+- the local 5090 bottleneck is the recurrent controller, not data loading or
+  the trigram sidecar
+- synthetic full-step benchmarks at `B=256`, `T=512`, top-2 sidecar:
+  - current `core_dim=48`, `layers=12`, `exp=10`: about `586,729` tok/s
+  - aligned `core_dim=64`, `layers=8`, `exp=8`: about `802,372` tok/s
+  - aligned `core_dim=128`, `layers=4`, `exp=4`: about `1,371,917` tok/s
+- the aligned `128x4x4` controller has similar trainable parameter count to
+  the current leader and still fits the artifact budget with blocks0 + top-2
+  trigram memory
+- `torch.compile` currently fails on the `accelerated-scan` Triton path, so
+  compile remains out of the serious local protocol
+- this makes one bounded GPU-friendly geometry probe in-scope before more
+  top-K headroom, despite the earlier stop rule against arbitrary `core_dim`
+  churn
+
 ## Protocol Invariants
 
 The final-week plan is now explicitly fail-loud on maintained competition-path choices.
@@ -403,6 +420,22 @@ Seed policy:
 
 Next headroom test after top-2 confirmation:
 
+Before increasing top-K, run the bounded aligned-geometry probe:
+
+```bash
+DRY_RUN=1 RUN_VERSION=v1 SEEDS=1337 bash scripts/run_5090_trigram_aligned_geometry_screen.sh
+RUN_VERSION=v1 SEEDS=1337 bash scripts/run_5090_trigram_aligned_geometry_screen.sh
+```
+
+Promotion rule:
+
+- compare against the current top-2 seed-`1337` `512M` screen
+  (`2.0751715673`)
+- promote aligned `128x4x4` if it is better at fixed tokens, or if it is
+  within about `0.015` bpb while preserving the expected large throughput gain
+- if it is clearly worse, keep current `48x12x10` as the quality leader and
+  return to top-K headroom:
+
 ```bash
 RUN_VERSION=v2 TRIGRAM_TOP_K=4 SEEDS=1337 bash scripts/run_5090_trigram_sidecar_screen.sh
 ```
@@ -424,7 +457,7 @@ All three final evals used exact BPB and full validation coverage. Learned
 trigram boost scale converged tightly around `1.17x`, so log-scale-init tuning
 is lower priority than top-K headroom.
 
-Next run:
+Top-K headroom run after the aligned-geometry read:
 
 ```bash
 RUN_VERSION=v2 TRIGRAM_TOP_K=4 SEEDS=1337 bash scripts/run_5090_trigram_sidecar_screen.sh
@@ -505,6 +538,8 @@ Do not spend the final week on:
 
 - more frozen blocks under the already-tested `core_dim=48` setup
 - arbitrary `core_dim` changes that create unfriendly CUDA shapes
+- geometry sweeps beyond the single bounded `128x4x4` probe unless it produces
+  a real metric read
 - larger controller ladders unless a new mechanism wins decisively
 - attention-like ideas
 - token-token mixing
