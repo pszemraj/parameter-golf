@@ -111,6 +111,10 @@ HGDN kernel and layout knobs:
 - `WANDB_WATCH`
 - `WANDB_WATCH_LOG_FREQ`
 
+The `GDN_USE_CUDA_*` fields are archived sidecar-extension controls. They remain
+logged if explicitly set, but active H100 helpers no longer build or parity-test
+`hgdn_cuda_ext` by default.
+
 `GRAD_ACCUM_STEPS` defaults to the matched-contract value derived from
 `WORLD_SIZE`, but may be explicitly overridden for packing and batch-scale
 studies. Keep the logged key the same either way.

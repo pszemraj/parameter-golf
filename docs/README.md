@@ -10,8 +10,10 @@ Branch: `exp/hgdn-final`
 - Removed path: the owned full-block CUDA kernel and core-kernel experiments.
   The live trainer no longer has owned-kernel flags, branches, preflight, or
   tests.
-- Preserved path: `hgdn_cuda/`, `setup_hgdn_cuda.py`, packed QKV projection,
-  packed depthwise QKV conv, and FLA recurrence support.
+- Preserved active path: packed QKV projection, packed depthwise QKV conv, and
+  public-FLA recurrence support. The old `hgdn_cuda_ext` sidecar extension is
+  still present for explicit archaeology but is no longer built or parity-tested
+  by default.
 - GDN dynamics now match the important upstream FLA priors more closely:
   `A_log` and `dt_bias` use timescale-aware initialization, those decay params
   run in a no-weight-decay Adam group, negative eigenvalues stay enabled by
@@ -39,13 +41,13 @@ and artifact size?
 | Decay weight decay | Resolved | `A_log` / `dt_bias` use a separate Adam group with `weight_decay=0.0`. |
 | Recurrence scale | Resolved | Compile-visible and direct custom recurrence paths keep upstream FLA's default `1 / sqrt(head_k_dim)` scale instead of forcing `1.0`. |
 | Negative eigenvalues | Resolved | Custom HGDN defaults `GDN_ALLOW_NEG_EIGVAL=1`; native FLA configs set `FLA_ALLOW_NEG_EIGVAL=true`. |
-| Output norm/gate parameterization | Resolved enough for custom path | Custom HGDN now has learned per-`head_v_dim` `o_norm_weight`; it still uses PyTorch/sidecar norm+SiLU instead of `FusedRMSNormGated` directly. |
+| Output norm/gate parameterization | Resolved enough for custom path | Custom HGDN now has learned per-`head_v_dim` `o_norm_weight`; it uses PyTorch norm+SiLU by default instead of `FusedRMSNormGated` directly. |
 | Output norm epsilon | Documented deviation | Custom HGDN keeps the branch default `eps=1e-6`; native FLA defaults to `1e-5`. Treat `1e-5` as a strict-fidelity ablation, not the active default. |
 | `expand_v=2.0` prior | Added as candidates | Practical sparse search still includes cheaper `1.0`/`1.5` variants, but OLMo-prior `v2` candidates are now first-class configs. |
 | 3:1 GDN:attention prior | Added as candidate | `l8_d512_olmoish_6g2a_v2_m1p25` is the 6G/2A reality check; it is not the default promotion candidate until wallclock evidence supports it. |
 | Native FLA control | Clarified | `train_gpt_fla_control.py` remains pure native GDN calibration, not OLMo Hybrid; an OLMo-ish SP1024 native config exists for dimension/value-width calibration. |
 | Wrapper overhead | Measurable | `scripts/bench_fla_recurrence_paths.py` times wrapper, direct custom recurrence, direct fused FLA semantics, and native `fla.layers.GatedDeltaNet`. |
-| Optional local CUDA extension fallback | Resolved in trainer | Requested `GDN_USE_CUDA_*` paths fail fast if `hgdn_cuda_ext` is absent. |
+| Optional local CUDA extension | Archived / opt-in | Requested `GDN_USE_CUDA_*` paths fail fast if `hgdn_cuda_ext` is absent; H100 helpers no longer build or parity-test the sidecar extension unless explicitly requested. |
 
 ## Local Sparse Search
 
@@ -105,6 +107,10 @@ HGDN_CONFIG=configs/hgdn/naive_contract_l9_d512_mid3_dk48_v1p5_m1p75.toml
 The helper runs three legs: exact `train_gpt.py` baseline, config-driven sparse
 HGDN, and the matched attention-only diagnostic control. It pins `DATA_PATH`,
 `TOKENIZER_PATH`, and `VOCAB_SIZE` for the exact baseline leg.
+
+The archived `hgdn_cuda_ext` sidecar build/parity steps are off by default. For
+sidecar archaeology only, opt in with `BUILD_HGDN_CUDA=1` and
+`RUN_HGDN_CUDA_PARITY=1`.
 
 Local sparse search helper:
 

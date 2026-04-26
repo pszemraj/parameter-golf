@@ -92,8 +92,9 @@ out   = w_out(FusedRMSNormGated(o, g_out).view(B, T, -1))
 ```
 
 The chunked kernel processes sequences in blocks for hardware efficiency. The output is gated with a separate `w_g` projection before the final linear projection back to d_model.
-The custom HGDN path keeps the norm/gate in PyTorch or the optional sidecar
-output op, but includes the learned per-`head_v_dim` norm weight so the
+The custom HGDN path keeps the norm/gate in PyTorch by default, while the
+archived sidecar output op remains opt-in only. It includes the learned
+per-`head_v_dim` norm weight so the
 parameterization matches the important part of `FusedRMSNormGated`.
 For systems ablation, `GDN_FLA_RECURRENCE_MODE=direct_fused` routes raw
 post-conv q/k and raw decay gates into public FLA with
