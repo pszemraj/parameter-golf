@@ -38,6 +38,10 @@ def _write_summary(
     bptt_chunks: int = 1,
     effective_step_tokens: int = 131072,
     full_coverage: bool = False,
+    last_eval_tokens: int | None = None,
+    last_eval_denominator_tokens: int = 62_021_845,
+    exact_bpb_positive_target_count: int = 61_971_846,
+    exact_bpb_zero_byte_target_count: int = 49_999,
     artifact_estimate_bytes: int = 8_000_000,
     artifact_status: str = "LEFT_ON_TABLE",
 ) -> None:
@@ -74,7 +78,15 @@ def _write_summary(
         "best_val_bpb": str(bpb),
         "steady_state_tokens_per_sec": "900000",
         "last_eval_full_coverage": str(full_coverage).lower(),
+        "last_eval_tokens": str(
+            last_eval_tokens
+            if last_eval_tokens is not None
+            else (last_eval_denominator_tokens if full_coverage else 1_048_576)
+        ),
+        "last_eval_coverage_denominator_tokens": str(last_eval_denominator_tokens),
         "exact_val_bpb": "true",
+        "exact_bpb_positive_target_count": str(exact_bpb_positive_target_count),
+        "exact_bpb_zero_byte_target_count": str(exact_bpb_zero_byte_target_count),
         "artifact_estimate_bytes": str(artifact_estimate_bytes),
         "artifact_status": artifact_status,
     }
@@ -191,6 +203,81 @@ def test_k4_planner_combines_bptt_only_when_it_wins(tmp_path: Path) -> None:
     assert "--geometry-bptt-chunks" in commands[0].command
 
 
+def test_confirmation_planner_preserves_k4_long_context_contract(tmp_path: Path) -> None:
+    """K4 context screens should promote without reverting to K2/seq512."""
+    label = "blocks0_d128_l5_i512"
+    _write_summary(
+        tmp_path,
+        label,
+        "geom1_seq2048",
+        bpb=2.017,
+        top_k=4,
+        batch_size=64,
+        seq_len=2048,
+    )
+    args = _args(tmp_path, "confirmations")
+    args.run_version = "geom1_seq2048"
+
+    commands = plan_confirmations(args)
+
+    assert len(commands) == 1
+    command = commands[0].command
+    assert "--trigram-top-k" in command
+    assert "4" in command
+    assert "--geometry-seq-len" in command
+    assert "2048" in command
+    assert "--geometry-batch-size" in command
+    assert "64" in command
+    assert "--geometry-train-label" in command
+    assert "1b_seq2048_k4" in command
+
+
+def test_confirmation_planner_selects_best_context_candidate(tmp_path: Path) -> None:
+    """Context closeout should choose the best K4 screen, not every promoted one."""
+    label = "blocks0_d128_l5_i512"
+    _write_summary(
+        tmp_path,
+        label,
+        "geom1_seq1024",
+        bpb=2.018,
+        top_k=4,
+        batch_size=128,
+        seq_len=1024,
+    )
+    _write_summary(
+        tmp_path,
+        label,
+        "geom1_seq2048",
+        bpb=2.017,
+        top_k=4,
+        batch_size=64,
+        seq_len=2048,
+    )
+    _write_summary(
+        tmp_path,
+        label,
+        "geom1_seq4096",
+        bpb=2.047,
+        top_k=4,
+        batch_size=32,
+        seq_len=4096,
+    )
+    args = _args(tmp_path, "confirmations")
+    args.run_version = "geom1_seq1024"
+    args.candidate_run_version = ["geom1_seq2048", "geom1_seq4096"]
+    args.max_confirmations = 1
+
+    commands = plan_confirmations(args)
+
+    assert len(commands) == 1
+    assert "source=geom1_seq2048" in commands[0].reason
+    assert "--run-version" in commands[0].command
+    assert "geom1_seq2048_confirm" in commands[0].command
+    assert "2048" in commands[0].command
+    assert "geom1_seq4096_confirm" not in commands[0].command
+    assert "1b_seq4096_k4" not in commands[0].command
+
+
 def test_k4_planner_uses_bptt1_when_bptt_gain_is_noise(tmp_path: Path) -> None:
     """Tiny BPTT2 gains should not be compounded into K4."""
     label = "blocks0_d96_l6_i512"
@@ -218,6 +305,27 @@ def test_k4_planner_uses_bptt1_when_bptt_gain_is_noise(tmp_path: Path) -> None:
     assert len(commands) == 1
     assert "--trigram-top-k" in commands[0].command
     assert "--geometry-bptt-chunks" not in commands[0].command
+
+
+def test_stale_full_validation_confirmation_is_rejected(tmp_path: Path) -> None:
+    """Rows from the old replaying full-val path must not satisfy confirmations."""
+    label = "blocks0_d96_l6_i512"
+    _write_summary(
+        tmp_path,
+        label,
+        "geom1_confirm",
+        steps=8192,
+        bpb=2.03,
+        full_coverage=True,
+        last_eval_tokens=62_128_128,
+        last_eval_denominator_tokens=62_021_845,
+    )
+    args = _args(tmp_path, "bptt")
+
+    stage = plan_stage(args)
+
+    assert stage.status == "blocked"
+    assert "confirmation" in stage.reason.lower()
 
 
 def test_k4_planner_ignores_bptt_gain_when_base_screen_invalid(tmp_path: Path) -> None:
@@ -365,6 +473,7 @@ def test_smoke_contract_uses_tiny_steps_and_disables_wandb(tmp_path: Path) -> No
         steps=2,
         bpb=3.0,
         batch_size=2,
+        seq_len=64,
         effective_step_tokens=128,
     )
     args = _args(tmp_path, "confirmations")

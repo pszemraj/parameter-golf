@@ -27,7 +27,6 @@ SCREEN_EFFECTIVE_STEP_TOKENS = 131072
 SCREEN_NUM_BLOCKS = 0
 SCREEN_TRIGRAM_TOP_K = 2
 TIME_MATCHED_STEP_GRANULARITY = 128
-GEOMETRY_SUMMARY_FIELDS = ("core_dim", "core_inner_dim", "recurrent_cells")
 
 
 @dataclass(frozen=True)
@@ -77,6 +76,19 @@ class AnalyzedRow:
         return not self.eligibility_errors
 
 
+@dataclass(frozen=True)
+class ScreenContract:
+    """Expected screen protocol for one analyzer invocation."""
+
+    planned_steps: int
+    effective_step_tokens: int
+    num_blocks: int
+    trigram_top_k: int
+    seq_len: int
+    batch_size: int
+    bptt_chunks: int
+
+
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments.
 
@@ -90,7 +102,68 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--baseline-bpb", type=float, default=DEFAULT_BASELINE_BPB)
     ap.add_argument("--baseline-tok-s", type=float, default=DEFAULT_BASELINE_TOK_S)
     ap.add_argument("--label", action="append", default=None, help="Geometry label to analyze")
+    ap.add_argument("--screen-steps", type=int, default=SCREEN_PLANNED_STEPS)
+    ap.add_argument("--effective-step-tokens", type=int, default=SCREEN_EFFECTIVE_STEP_TOKENS)
+    ap.add_argument("--screen-trigram-top-k", type=int, default=None)
+    ap.add_argument("--seq-len", type=int, default=None)
+    ap.add_argument("--screen-batch-size", type=int, default=None)
+    ap.add_argument("--screen-bptt-chunks", type=int, default=None)
     return ap.parse_args()
+
+
+def infer_seq_len(run_version: str) -> int:
+    """Infer the screen sequence length from a run-version suffix.
+
+    :param str run_version: Run-version suffix.
+    :return int: Inferred sequence length.
+    """
+    match = re.search(r"seq(?P<seq>\d+)", str(run_version))
+    if match is not None:
+        return int(match.group("seq"))
+    return 512
+
+
+def infer_bptt_chunks(run_version: str) -> int:
+    """Infer the BPTT chunk count from a run-version suffix.
+
+    :param str run_version: Run-version suffix.
+    :return int: Inferred BPTT chunk count.
+    """
+    return 2 if "bptt2" in str(run_version) else 1
+
+
+def infer_trigram_top_k(run_version: str) -> int:
+    """Infer the trigram top-K contract from a run-version suffix.
+
+    :param str run_version: Run-version suffix.
+    :return int: Inferred trigram top-K.
+    """
+    run_version = str(run_version)
+    return 4 if ("k4" in run_version or "_seq" in run_version) else SCREEN_TRIGRAM_TOP_K
+
+
+def screen_contract(args: argparse.Namespace) -> ScreenContract:
+    """Resolve the active screen contract from flags and run-version hints.
+
+    :param argparse.Namespace args: Parsed arguments.
+    :return ScreenContract: Expected screen contract.
+    """
+    seq_len = int(args.seq_len or infer_seq_len(str(args.run_version)))
+    bptt_chunks = int(args.screen_bptt_chunks or infer_bptt_chunks(str(args.run_version)))
+    batch_size = args.screen_batch_size
+    if batch_size is None:
+        denom = max(1, seq_len * bptt_chunks)
+        batch_size = max(1, int(args.effective_step_tokens) // denom)
+    top_k = int(args.screen_trigram_top_k or infer_trigram_top_k(str(args.run_version)))
+    return ScreenContract(
+        planned_steps=int(args.screen_steps),
+        effective_step_tokens=int(args.effective_step_tokens),
+        num_blocks=SCREEN_NUM_BLOCKS,
+        trigram_top_k=top_k,
+        seq_len=seq_len,
+        batch_size=int(batch_size),
+        bptt_chunks=bptt_chunks,
+    )
 
 
 def parse_geometry(label: str) -> Geometry:
@@ -147,6 +220,7 @@ def load_summary_rows(
     out: list[dict[str, str]] = []
     for row in rows:
         hydrate_summary_geometry(row)
+        hydrate_partial_metrics(row)
         row_seed = str(row.get("seed", "")).strip()
         run_name = str(row.get("run_name", "")).strip()
         if row_seed == str(seed) or run_name.endswith(f"_s{seed}") or not row_seed:
@@ -189,7 +263,7 @@ def hydrate_summary_geometry(row: dict[str, str]) -> None:
 
     :param dict[str, str] row: Summary row to update in place.
     """
-    if not row or all(row.get(field) for field in GEOMETRY_SUMMARY_FIELDS):
+    if not row:
         return
     run_dir_raw = row.get("run_dir")
     if not run_dir_raw:
@@ -200,20 +274,92 @@ def hydrate_summary_geometry(row: dict[str, str]) -> None:
     try:
         resolved = json.loads(resolved_path.read_text(encoding="utf-8"))
         model = resolved.get("model", {})
+        training = resolved.get("training", {})
         core_dim = int(model["core_dim"])
         core_layers = int(model["core_layers"])
         core_inner_dim = int(core_dim * float(model["core_expansion"]))
     except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
         return
-    row.setdefault("core_dim", str(core_dim))
-    row.setdefault("core_inner_dim", str(core_inner_dim))
-    row.setdefault("recurrent_cells", str(core_layers * core_inner_dim))
-    if not row["core_dim"]:
-        row["core_dim"] = str(core_dim)
-    if not row["core_inner_dim"]:
-        row["core_inner_dim"] = str(core_inner_dim)
-    if not row["recurrent_cells"]:
-        row["recurrent_cells"] = str(core_layers * core_inner_dim)
+
+    def set_if_empty(field: str, value: Any) -> None:
+        """Set a summary field only when it is absent or blank.
+
+        :param str field: Summary field name.
+        :param Any value: Value to stringify into the row.
+        """
+        row.setdefault(field, "")
+        if row[field] == "" and value is not None:
+            row[field] = str(value)
+
+    set_if_empty("core_dim", core_dim)
+    set_if_empty("core_layers", core_layers)
+    set_if_empty("core_inner_dim", core_inner_dim)
+    set_if_empty("recurrent_cells", core_layers * core_inner_dim)
+    set_if_empty("num_blocks", model.get("num_blocks"))
+    set_if_empty("trigram_top_k", model.get("trigram_top_k"))
+    set_if_empty("seq_len", training.get("seq_len"))
+    set_if_empty("batch_size", training.get("batch_size"))
+    set_if_empty("bptt_chunks", training.get("bptt_chunks"))
+    set_if_empty("effective_step_tokens", training.get("effective_step_tokens"))
+    set_if_empty("planned_steps", training.get("num_steps"))
+    set_if_empty("learning_rate", training.get("learning_rate"))
+    set_if_empty("lr_hold_steps", training.get("lr_hold_steps"))
+
+
+def hydrate_partial_metrics(row: dict[str, str]) -> None:
+    """Fill partial/spec-only rows with last observed metrics when available.
+
+    :param dict[str, str] row: Summary row to update in place.
+    """
+    if not row or row.get("status") == "completed":
+        return
+    run_dir_raw = row.get("run_dir")
+    if not run_dir_raw:
+        return
+    metrics_path = Path(run_dir_raw) / "metrics.jsonl"
+    if not metrics_path.exists():
+        return
+    best_bpb: Optional[float] = None
+    best_step: Optional[int] = None
+    last_eval: dict[str, Any] = {}
+    try:
+        with metrics_path.open("r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                payload = json.loads(line)
+                if payload.get("kind") != "eval":
+                    continue
+                bpb = as_float(payload.get("val_bpb"))
+                step = as_int(payload.get("step"))
+                last_eval = payload
+                if bpb is not None and (best_bpb is None or bpb < best_bpb):
+                    best_bpb = bpb
+                    best_step = step
+    except (OSError, json.JSONDecodeError):
+        return
+    if not last_eval:
+        return
+    if row.get("status") == "spec_only":
+        row["status"] = "partial"
+    if best_bpb is not None and not row.get("best_val_bpb"):
+        row["best_val_bpb"] = str(best_bpb)
+    if best_step is not None and not row.get("best_step"):
+        row["best_step"] = str(best_step)
+    if not row.get("last_val_bpb") and last_eval.get("val_bpb") is not None:
+        row["last_val_bpb"] = str(last_eval["val_bpb"])
+    metric_map = {
+        "last_eval_step": "step",
+        "processed_tokens": "processed_tokens",
+        "last_eval_tokens": "eval_tokens",
+        "last_eval_bytes": "eval_bytes",
+        "last_eval_coverage_denominator_tokens": "eval_coverage_denominator_tokens",
+        "last_eval_coverage_frac": "eval_coverage_frac",
+        "last_eval_full_coverage": "eval_full_coverage",
+    }
+    for row_key, metric_key in metric_map.items():
+        if not row.get(row_key) and last_eval.get(metric_key) is not None:
+            row[row_key] = str(last_eval[metric_key])
 
 
 def as_float(value: Any) -> Optional[float]:
@@ -257,24 +403,66 @@ def screen_bpb(row: dict[str, str]) -> Optional[float]:
     return as_float(row.get("last_val_bpb")) or as_float(row.get("best_val_bpb"))
 
 
-def eligibility_errors(geometry: Geometry, row: dict[str, str]) -> tuple[str, ...]:
+def full_eval_accounting_errors(row: dict[str, str]) -> tuple[str, ...]:
+    """Return stale or missing full-validation accounting errors.
+
+    :param dict[str, str] row: Summary row.
+    :return tuple[str, ...]: Full-validation accounting errors.
+    """
+    if str(row.get("last_eval_full_coverage", "")).strip().lower() not in {"1", "true", "yes"}:
+        return ()
+    errors: list[str] = []
+    eval_tokens = as_int(row.get("last_eval_tokens"))
+    denom_tokens = as_int(row.get("last_eval_coverage_denominator_tokens"))
+    if eval_tokens is None or denom_tokens is None:
+        errors.append("missing_full_val_target_accounting")
+    elif eval_tokens != denom_tokens:
+        errors.append("stale_full_val_target_mismatch")
+    if str(row.get("exact_val_bpb", "")).strip().lower() in {"1", "true", "yes"}:
+        positive = as_int(row.get("exact_bpb_positive_target_count"))
+        zero = as_int(row.get("exact_bpb_zero_byte_target_count"))
+        if positive is None or zero is None:
+            errors.append("missing_exact_bpb_target_accounting")
+        elif denom_tokens is not None and positive + zero != denom_tokens:
+            errors.append("exact_bpb_target_count_mismatch")
+    return tuple(errors)
+
+
+def eligibility_errors(
+    geometry: Geometry,
+    row: dict[str, str],
+    contract: Optional[ScreenContract] = None,
+) -> tuple[str, ...]:
     """Return protocol violations that make a row decision-ineligible.
 
     :param Geometry geometry: Geometry parsed from the label.
     :param dict[str, str] row: Summary row.
+    :param Optional[ScreenContract] contract: Expected screen contract.
     :return tuple[str, ...]: Human-readable validation errors.
     """
     if not row:
         return ("missing_summary",)
 
+    contract = contract or ScreenContract(
+        planned_steps=SCREEN_PLANNED_STEPS,
+        effective_step_tokens=SCREEN_EFFECTIVE_STEP_TOKENS,
+        num_blocks=SCREEN_NUM_BLOCKS,
+        trigram_top_k=SCREEN_TRIGRAM_TOP_K,
+        seq_len=512,
+        batch_size=256,
+        bptt_chunks=1,
+    )
     errors: list[str] = []
     if row.get("status") != "completed":
         errors.append("not_completed")
     expected = {
-        "planned_steps": SCREEN_PLANNED_STEPS,
-        "effective_step_tokens": SCREEN_EFFECTIVE_STEP_TOKENS,
-        "num_blocks": SCREEN_NUM_BLOCKS,
-        "trigram_top_k": SCREEN_TRIGRAM_TOP_K,
+        "planned_steps": contract.planned_steps,
+        "effective_step_tokens": contract.effective_step_tokens,
+        "num_blocks": contract.num_blocks,
+        "trigram_top_k": contract.trigram_top_k,
+        "seq_len": contract.seq_len,
+        "batch_size": contract.batch_size,
+        "bptt_chunks": contract.bptt_chunks,
         "core_dim": geometry.core_dim,
         "core_layers": geometry.layers,
         "core_inner_dim": geometry.inner_dim,
@@ -284,6 +472,7 @@ def eligibility_errors(geometry: Geometry, row: dict[str, str]) -> tuple[str, ..
         actual = as_int(row.get(field))
         if actual != expected_value:
             errors.append(f"{field}!={expected_value}")
+    errors.extend(full_eval_accounting_errors(row))
     return tuple(errors)
 
 
@@ -362,30 +551,69 @@ def estimated_time_matched_steps(
     )
 
 
-def confirmation_command(geometry: Geometry, *, run_version: str, seed: str) -> str:
+def confirmation_train_label(contract: ScreenContract) -> str:
+    """Return the confirmation train-label for a screen contract.
+
+    :param ScreenContract contract: Expected screen contract.
+    :return str: Train-label suffix.
+    """
+    parts = ["1b"]
+    if contract.seq_len != 512:
+        parts.append(f"seq{contract.seq_len}")
+    if contract.bptt_chunks != 1:
+        parts.append(f"bptt{contract.bptt_chunks}")
+    if contract.trigram_top_k != 2:
+        parts.append(f"k{contract.trigram_top_k}")
+    return "_".join(parts)
+
+
+def confirmation_command(
+    geometry: Geometry,
+    *,
+    run_version: str,
+    seed: str,
+    contract: Optional[ScreenContract] = None,
+) -> str:
     """Build the next confirmation command for a promoted row.
 
     :param Geometry geometry: Geometry to confirm.
     :param str run_version: Source run version.
     :param str seed: Seed string.
+    :param Optional[ScreenContract] contract: Screen contract to preserve.
     :return str: Shell command.
     """
-    return (
-        "bash scripts/run_5090_trigram_aligned_geometry_screen.sh "
-        f"--run-version {run_version}_confirm "
-        f"--seeds {seed} "
-        f"--geometry-label {geometry.label} "
-        f"--geometry-core-dim {geometry.core_dim} "
-        f"--geometry-core-layers {geometry.layers} "
-        f"--geometry-core-inner-dim {geometry.inner_dim} "
-        "--num-steps 8192 "
-        "--lr-hold-steps 7000 "
-        "--full-val-final "
-        "--val-every 512 "
-        "--log-every 128 "
-        "--log-state-every 512 "
-        "--save-every 4096"
+    contract = contract or ScreenContract(
+        planned_steps=SCREEN_PLANNED_STEPS,
+        effective_step_tokens=SCREEN_EFFECTIVE_STEP_TOKENS,
+        num_blocks=SCREEN_NUM_BLOCKS,
+        trigram_top_k=SCREEN_TRIGRAM_TOP_K,
+        seq_len=512,
+        batch_size=256,
+        bptt_chunks=1,
     )
+    parts = [
+        "bash scripts/run_5090_trigram_aligned_geometry_screen.sh",
+        f"--run-version {run_version}_confirm",
+        f"--seeds {seed}",
+        f"--geometry-label {geometry.label}",
+        f"--geometry-core-dim {geometry.core_dim}",
+        f"--geometry-core-layers {geometry.layers}",
+        f"--geometry-core-inner-dim {geometry.inner_dim}",
+        "--num-steps 8192",
+        "--lr-hold-steps 7000",
+        f"--trigram-top-k {contract.trigram_top_k}",
+        f"--geometry-seq-len {contract.seq_len}",
+        f"--geometry-batch-size {contract.batch_size}",
+        f"--geometry-bptt-chunks {contract.bptt_chunks}",
+        f"--target-effective-step-tokens {contract.effective_step_tokens}",
+        f"--geometry-train-label {confirmation_train_label(contract)}",
+        "--full-val-final",
+        "--val-every 512",
+        "--log-every 128",
+        "--log-state-every 512",
+        "--save-every 4096",
+    ]
+    return " ".join(parts)
 
 
 def format_optional(value: Optional[float], *, digits: int = 6) -> str:
@@ -413,6 +641,7 @@ def main() -> None:
     """Analyze completed or pending geometry rows."""
     args = parse_args()
     repo_root = args.repo_root.resolve()
+    contract = screen_contract(args)
     labels = tuple(args.label or DEFAULT_LABELS)
     geometries = [parse_geometry(label) for label in labels]
     benchmark = load_benchmark(args.benchmark)
@@ -423,7 +652,7 @@ def main() -> None:
         summary = load_summary_row(
             repo_root, geometry, run_version=args.run_version, seed=args.seed
         )
-        errors = eligibility_errors(geometry, summary)
+        errors = eligibility_errors(geometry, summary, contract)
         valid_screen_row = not errors
         bpb = screen_bpb(summary)
         delta = None if bpb is None else bpb - args.baseline_bpb
@@ -454,6 +683,12 @@ def main() -> None:
     print(f"- seed: `{args.seed}`")
     print(f"- baseline_bpb: `{args.baseline_bpb}`")
     print(f"- baseline_tok_s: `{args.baseline_tok_s}`")
+    print(
+        "- screen_contract: "
+        f"`steps={contract.planned_steps} eff_tokens={contract.effective_step_tokens} "
+        f"k={contract.trigram_top_k} seq={contract.seq_len} "
+        f"batch={contract.batch_size} bptt={contract.bptt_chunks}`"
+    )
     if baseline_bench is not None:
         print(f"- benchmark_baseline: `current_d48_l12_i480` `{baseline_bench}` tok/s")
     if args.benchmark:
@@ -493,7 +728,14 @@ def main() -> None:
         print()
         for geometry, verdict in promoted:
             print(f"# {geometry.label}: {verdict}")
-            print(confirmation_command(geometry, run_version=args.run_version, seed=args.seed))
+            print(
+                confirmation_command(
+                    geometry,
+                    run_version=args.run_version,
+                    seed=args.seed,
+                    contract=contract,
+                )
+            )
             print()
     else:
         print("No geometry row currently clears the automatic promotion thresholds.")

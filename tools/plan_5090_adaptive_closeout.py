@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import shlex
 import sys
@@ -25,12 +26,16 @@ from tools.analyze_5090_geometry_frontier import (  # noqa: E402
     Geometry,
     as_float,
     as_int,
+    confirmation_train_label,
     decision,
     estimated_time_matched_steps,
+    eligibility_errors,
+    full_eval_accounting_errors,
     load_benchmark,
     load_summary_row,
     parse_geometry,
     screen_bpb,
+    screen_contract,
     speed_ratio,
 )
 
@@ -76,6 +81,14 @@ class StagePlan:
     commands: list[PlannedCommand]
 
 
+@dataclass(frozen=True)
+class ConfirmationCandidate:
+    """One promoted screen row plus the run-version contract it came from."""
+
+    row: AnalyzedRow
+    args: argparse.Namespace
+
+
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     """Parse command-line arguments.
 
@@ -86,6 +99,12 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     ap.add_argument("--repo-root", type=Path, default=REPO_ROOT)
     ap.add_argument("--stage", choices=("confirmations", "bptt", "k4"), required=True)
     ap.add_argument("--run-version", default="geom1")
+    ap.add_argument(
+        "--candidate-run-version",
+        action="append",
+        default=None,
+        help="Additional screen run-version to compare for confirmation selection.",
+    )
     ap.add_argument("--seed", default="1337")
     ap.add_argument("--benchmark", type=Path, default=None)
     ap.add_argument("--baseline-bpb", type=float, default=DEFAULT_BASELINE_BPB)
@@ -117,7 +136,9 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     )
     ap.add_argument("--variant-steps", type=int, default=BPTT_STEPS)
     ap.add_argument("--variant-hold-steps", type=int, default=BPTT_HOLD_STEPS)
+    ap.add_argument("--screen-trigram-top-k", type=int, default=None)
     ap.add_argument("--screen-batch-size", type=int, default=None)
+    ap.add_argument("--screen-bptt-chunks", type=int, default=None)
     ap.add_argument("--bptt-batch-size", type=int, default=DEFAULT_BPTT_BATCH_SIZE)
     ap.add_argument("--bptt-chunks", type=int, default=DEFAULT_BPTT_CHUNKS)
     ap.add_argument("--seq-len", type=int, default=None)
@@ -208,6 +229,50 @@ def analyze_geometry_rows(args: argparse.Namespace) -> list[AnalyzedRow]:
     return rows
 
 
+def candidate_run_versions(args: argparse.Namespace) -> tuple[str, ...]:
+    """Return source run-versions to compare for confirmation planning.
+
+    :param argparse.Namespace args: Parsed arguments.
+    :return tuple[str, ...]: Ordered unique run-version suffixes.
+    """
+    raw = [str(args.run_version)]
+    raw.extend(str(item) for item in (args.candidate_run_version or ()))
+    out: list[str] = []
+    for item in raw:
+        if item not in out:
+            out.append(item)
+    return tuple(out)
+
+
+def args_for_run_version(args: argparse.Namespace, run_version: str) -> argparse.Namespace:
+    """Return an args copy with a different source run-version.
+
+    :param argparse.Namespace args: Base parsed arguments.
+    :param str run_version: Source run-version.
+    :return argparse.Namespace: Copied arguments.
+    """
+    out = copy.copy(args)
+    out.run_version = str(run_version)
+    return out
+
+
+def promoted_confirmation_candidates(args: argparse.Namespace) -> list[ConfirmationCandidate]:
+    """Return promoted rows across all requested source run-versions.
+
+    :param argparse.Namespace args: Parsed arguments.
+    :return list[ConfirmationCandidate]: Promoted confirmation candidates.
+    """
+    candidates: list[ConfirmationCandidate] = []
+    for run_version in candidate_run_versions(args):
+        local_args = args_for_run_version(args, run_version)
+        candidates.extend(
+            ConfirmationCandidate(row=row, args=local_args)
+            for row in analyze_geometry_rows(local_args)
+            if row.is_valid_screen_row and row.verdict.startswith("promote")
+        )
+    return candidates
+
+
 def screen_eligibility_errors(
     geometry: Geometry,
     row: dict[str, str],
@@ -220,29 +285,7 @@ def screen_eligibility_errors(
     :param argparse.Namespace args: Parsed arguments.
     :return tuple[str, ...]: Human-readable validation errors.
     """
-    if not row:
-        return ("missing_summary",)
-
-    errors: list[str] = []
-    if row.get("status") != "completed":
-        errors.append("not_completed")
-    expected = {
-        "planned_steps": int(args.screen_steps),
-        "effective_step_tokens": int(args.effective_step_tokens),
-        "num_blocks": 0,
-        "trigram_top_k": SCREEN_TRIGRAM_TOP_K,
-        "core_dim": geometry.core_dim,
-        "core_layers": geometry.layers,
-        "core_inner_dim": geometry.inner_dim,
-        "recurrent_cells": geometry.recurrent_cells,
-    }
-    if args.screen_batch_size is not None:
-        expected["batch_size"] = int(args.screen_batch_size)
-    for field, expected_value in expected.items():
-        actual = as_int(row.get(field))
-        if actual != expected_value:
-            errors.append(f"{field}!={expected_value}")
-    return tuple(errors)
+    return eligibility_errors(geometry, row, screen_contract(args))
 
 
 def row_is_completed(row: dict[str, str]) -> bool:
@@ -285,7 +328,7 @@ def expected_screen_batch_size(args: argparse.Namespace) -> int:
     :param argparse.Namespace args: Parsed arguments.
     :return int: Expected batch size.
     """
-    return int(args.screen_batch_size or DEFAULT_BATCH_SIZE)
+    return int(screen_contract(args).batch_size)
 
 
 def expected_seq_len(args: argparse.Namespace) -> int:
@@ -294,11 +337,38 @@ def expected_seq_len(args: argparse.Namespace) -> int:
     :param argparse.Namespace args: Parsed arguments.
     :return int: Expected sequence length.
     """
-    return int(args.seq_len or DEFAULT_SEQ_LEN)
+    return int(screen_contract(args).seq_len)
+
+
+def expected_screen_bptt_chunks(args: argparse.Namespace) -> int:
+    """Return expected screen/confirmation BPTT chunks.
+
+    :param argparse.Namespace args: Parsed arguments.
+    :return int: Expected BPTT chunks.
+    """
+    return int(screen_contract(args).bptt_chunks)
+
+
+def expected_screen_trigram_top_k(args: argparse.Namespace) -> int:
+    """Return expected screen/confirmation trigram top-K.
+
+    :param argparse.Namespace args: Parsed arguments.
+    :return int: Expected trigram top-K.
+    """
+    return int(screen_contract(args).trigram_top_k)
+
+
+def full_val_accounting_is_valid(row: dict[str, str]) -> bool:
+    """Return whether a full-validation row has trustworthy accounting.
+
+    :param dict[str, str] row: Summary row.
+    :return bool: ``True`` when no stale full-validation accounting is present.
+    """
+    return not full_eval_accounting_errors(row)
 
 
 def valid_confirmation_row(row: dict[str, str], args: argparse.Namespace) -> bool:
-    """Return whether a row is a completed 1B K2 geometry confirmation.
+    """Return whether a row is a completed 1B geometry confirmation.
 
     :param dict[str, str] row: Summary row.
     :param argparse.Namespace args: Parsed arguments.
@@ -309,10 +379,10 @@ def valid_confirmation_row(row: dict[str, str], args: argparse.Namespace) -> boo
         and as_int(row.get("planned_steps")) == int(args.confirm_steps)
         and as_int(row.get("effective_step_tokens")) == int(args.effective_step_tokens)
         and as_int(row.get("num_blocks")) == 0
-        and as_int(row.get("trigram_top_k")) == 2
+        and as_int(row.get("trigram_top_k")) == expected_screen_trigram_top_k(args)
         and as_int(row.get("batch_size")) == expected_screen_batch_size(args)
         and as_int(row.get("seq_len")) == expected_seq_len(args)
-        and as_int(row.get("bptt_chunks")) == 1
+        and as_int(row.get("bptt_chunks")) == expected_screen_bptt_chunks(args)
         and as_int(row.get("lr_hold_steps")) == int(args.confirm_hold_steps)
         and row_float_matches(row, "learning_rate", DEFAULT_LEARNING_RATE)
         and row_bool(row, "exact_val_bpb")
@@ -320,8 +390,11 @@ def valid_confirmation_row(row: dict[str, str], args: argparse.Namespace) -> boo
     )
     if not valid:
         return False
-    if bool(args.confirm_full_val_final) and not row_bool(row, "last_eval_full_coverage"):
-        return False
+    if bool(args.confirm_full_val_final):
+        if not row_bool(row, "last_eval_full_coverage"):
+            return False
+        if not full_val_accounting_is_valid(row):
+            return False
     return True
 
 
@@ -484,8 +557,9 @@ def shared_command_kwargs(args: argparse.Namespace) -> dict[str, object]:
     :param argparse.Namespace args: Parsed arguments.
     :return dict[str, object]: Keyword arguments for ``geometry_command``.
     """
+    contract = screen_contract(args)
     return {
-        "seq_len": args.seq_len,
+        "seq_len": contract.seq_len,
         "target_effective_step_tokens": int(args.effective_step_tokens),
         "val_steps": args.val_steps,
         "count_workers": args.count_workers,
@@ -502,33 +576,36 @@ def plan_confirmations(args: argparse.Namespace) -> list[PlannedCommand]:
     :param argparse.Namespace args: Parsed arguments.
     :return list[PlannedCommand]: Planned confirmation commands.
     """
-    candidates = [
-        row
-        for row in analyze_geometry_rows(args)
-        if row.is_valid_screen_row and row.verdict.startswith("promote")
-    ]
+    candidates = promoted_confirmation_candidates(args)
     candidates.sort(
-        key=lambda row: (
-            0 if row.verdict == "promote_1b" else 1,
-            screen_bpb(row.summary) if screen_bpb(row.summary) is not None else float("inf"),
-            -(row.speed_ratio or 0.0),
+        key=lambda candidate: (
+            0 if candidate.row.verdict == "promote_1b" else 1,
+            (
+                screen_bpb(candidate.row.summary)
+                if screen_bpb(candidate.row.summary) is not None
+                else float("inf")
+            ),
+            -(candidate.row.speed_ratio or 0.0),
         )
     )
 
     out: list[PlannedCommand] = []
-    for row in candidates:
+    for candidate in candidates:
+        row = candidate.row
+        local_args = candidate.args
+        contract = screen_contract(local_args)
         geometry = row.geometry
         existing = load_summary_row(
-            args.repo_root.resolve(),
+            local_args.repo_root.resolve(),
             geometry,
-            run_version=confirmation_run_version(args),
-            seed=str(args.seed),
+            run_version=confirmation_run_version(local_args),
+            seed=str(local_args.seed),
         )
-        if valid_confirmation_row(existing, args):
+        if valid_confirmation_row(existing, local_args):
             continue
         bpb = screen_bpb(row.summary)
         reason = (
-            f"{row.verdict}; screen_bpb={bpb:.10f}; "
+            f"source={local_args.run_version}; {row.verdict}; screen_bpb={bpb:.10f}; "
             f"delta={row.delta_bpb:.6f}; speed_ratio={(row.speed_ratio or 0.0):.3f}"
         )
         out.append(
@@ -538,23 +615,28 @@ def plan_confirmations(args: argparse.Namespace) -> list[PlannedCommand]:
                 reason=reason,
                 command=geometry_command(
                     geometry.label,
-                    run_version=confirmation_run_version(args),
-                    seed=str(args.seed),
-                    num_steps=int(args.confirm_steps),
-                    hold_steps=int(args.confirm_hold_steps),
-                    trigram_top_k=2,
-                    full_val_final=bool(args.confirm_full_val_final),
+                    run_version=confirmation_run_version(local_args),
+                    seed=str(local_args.seed),
+                    num_steps=int(local_args.confirm_steps),
+                    hold_steps=int(local_args.confirm_hold_steps),
+                    trigram_top_k=contract.trigram_top_k,
+                    full_val_final=bool(local_args.confirm_full_val_final),
                     val_every=512,
                     log_every=128,
                     log_state_every=512,
                     save_every=4096,
-                    batch_size=args.screen_batch_size,
-                    train_label="smoke_confirm" if bool(args.smoke_test) else None,
-                    **shared_command_kwargs(args),
+                    batch_size=contract.batch_size,
+                    bptt_chunks=contract.bptt_chunks,
+                    train_label=(
+                        "smoke_confirm"
+                        if bool(local_args.smoke_test)
+                        else confirmation_train_label(contract)
+                    ),
+                    **shared_command_kwargs(local_args),
                 ),
             )
         )
-        if len(out) >= max(0, int(args.max_confirmations)):
+        if len(out) >= max(0, int(local_args.max_confirmations)):
             break
     return out
 
@@ -570,11 +652,7 @@ def plan_confirmations_stage(args: argparse.Namespace) -> StagePlan:
         return StagePlan("commands", f"{len(commands)} confirmation command(s) selected", commands)
     if completed_confirmations(args):
         return StagePlan("already_complete", "selected confirmations already completed", [])
-    promoted = [
-        row
-        for row in analyze_geometry_rows(args)
-        if row.is_valid_screen_row and row.verdict.startswith("promote")
-    ]
+    promoted = promoted_confirmation_candidates(args)
     if promoted:
         return StagePlan("already_complete", "promoted rows already have valid confirmations", [])
     return StagePlan(

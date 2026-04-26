@@ -38,6 +38,9 @@ def _summary_row(label: str, **overrides: str) -> dict[str, str]:
         "effective_step_tokens": str(SCREEN_EFFECTIVE_STEP_TOKENS),
         "num_blocks": str(SCREEN_NUM_BLOCKS),
         "trigram_top_k": str(SCREEN_TRIGRAM_TOP_K),
+        "seq_len": "512",
+        "batch_size": "256",
+        "bptt_chunks": "1",
         "core_dim": str(geometry.core_dim),
         "core_layers": str(geometry.layers),
         "core_inner_dim": str(geometry.inner_dim),
@@ -92,6 +95,7 @@ def test_invalid_or_incomplete_rows_are_pending_even_with_good_bpb():
     errors = eligibility_errors(geometry, row)
 
     assert "not_completed" in errors
+    assert "seq_len" not in ",".join(errors)
     assert decision(-0.1, 2.5, valid_screen_row=not errors) == "pending"
     assert estimated_time_matched_steps(row, 2.5, valid_screen_row=not errors) is None
 
@@ -217,3 +221,48 @@ def test_cli_prints_confirmation_only_for_valid_completed_screen_rows(tmp_path: 
         in result.stdout
     )
     assert "not_completed" in result.stdout
+
+
+def test_cli_auto_infers_k4_long_context_contract(tmp_path: Path):
+    label = "blocks0_d128_l5_i512"
+    summary_dir = (
+        tmp_path / "experiments" / "5090_architecture" / f"{label}_trigram_seed1337_geom1_seq2048"
+    )
+    summary_dir.mkdir(parents=True)
+    row = _summary_row(
+        label,
+        trigram_top_k="4",
+        seq_len="2048",
+        batch_size="64",
+        bptt_chunks="1",
+        last_val_bpb="2.017",
+    )
+    with (summary_dir / "summary.tsv").open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=SUMMARY_FIELDS, delimiter="\t")
+        writer.writeheader()
+        writer.writerow({field: row.get(field, "") for field in SUMMARY_FIELDS})
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(PKG_ROOT / "tools" / "analyze_5090_geometry_frontier.py"),
+            "--repo-root",
+            str(tmp_path),
+            "--run-version",
+            "geom1_seq2048",
+            "--label",
+            label,
+        ],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    assert (
+        "screen_contract: `steps=4096 eff_tokens=131072 k=4 seq=2048 batch=64 bptt=1`"
+        in result.stdout
+    )
+    assert "| blocks0_d128_l5_i512 | 2560 | completed | 2.0170000000" in result.stdout
+    assert "--trigram-top-k 4" in result.stdout
+    assert "--geometry-seq-len 2048" in result.stdout
+    assert "--geometry-batch-size 64" in result.stdout
