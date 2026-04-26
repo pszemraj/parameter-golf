@@ -18,6 +18,7 @@ from tools.plan_5090_adaptive_closeout import (
     plan_bptt,
     plan_confirmations,
     plan_k4,
+    plan_stage,
 )
 
 
@@ -33,10 +34,12 @@ def _write_summary(
     bpb: float = 2.0,
     top_k: int = 2,
     batch_size: int = 256,
+    seq_len: int = 512,
     bptt_chunks: int = 1,
     effective_step_tokens: int = 131072,
     full_coverage: bool = False,
     artifact_estimate_bytes: int = 8_000_000,
+    artifact_status: str = "LEFT_ON_TABLE",
 ) -> None:
     """Write one summary TSV row for planner tests."""
     geometry_parts = label.split("_")
@@ -61,15 +64,19 @@ def _write_summary(
         "trigram_top_k": str(top_k),
         "num_blocks": "0",
         "batch_size": str(batch_size),
+        "seq_len": str(seq_len),
         "bptt_chunks": str(bptt_chunks),
         "effective_step_tokens": str(effective_step_tokens),
         "planned_steps": str(steps),
+        "learning_rate": "0.0035",
+        "lr_hold_steps": "7000" if steps == 8192 else "3500",
         "last_val_bpb": str(bpb),
         "best_val_bpb": str(bpb),
         "steady_state_tokens_per_sec": "900000",
         "last_eval_full_coverage": str(full_coverage).lower(),
         "exact_val_bpb": "true",
         "artifact_estimate_bytes": str(artifact_estimate_bytes),
+        "artifact_status": artifact_status,
     }
     with (summary_dir / "summary.tsv").open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=SUMMARY_FIELDS, delimiter="\t")
@@ -228,6 +235,54 @@ def test_k4_planner_waits_for_completed_bptt_read(tmp_path: Path) -> None:
     args = _args(tmp_path, "k4")
 
     assert plan_k4(args) == []
+
+
+def test_k4_stage_reports_blocked_without_bptt_read(tmp_path: Path) -> None:
+    """A missing BPTT prerequisite should be a blocked stage, not success."""
+    label = "blocks0_d96_l6_i512"
+    _write_summary(tmp_path, label, "geom1", bpb=2.06)
+    _write_summary(
+        tmp_path,
+        label,
+        "geom1_confirm",
+        steps=8192,
+        bpb=2.03,
+        full_coverage=True,
+    )
+    args = _args(tmp_path, "k4")
+
+    stage = plan_stage(args)
+
+    assert stage.status == "blocked"
+    assert stage.commands == []
+    assert "BPTT" in stage.reason
+
+
+def test_bptt_stage_reports_already_complete(tmp_path: Path) -> None:
+    """Completed BPTT should be a distinct no-op, not a blocked stage."""
+    label = "blocks0_d96_l6_i512"
+    _write_summary(
+        tmp_path,
+        label,
+        "geom1_confirm",
+        steps=8192,
+        bpb=2.03,
+        full_coverage=True,
+    )
+    _write_summary(
+        tmp_path,
+        label,
+        "geom1_bptt2",
+        bpb=2.02,
+        batch_size=DEFAULT_BPTT_BATCH_SIZE,
+        bptt_chunks=DEFAULT_BPTT_CHUNKS,
+    )
+    args = _args(tmp_path, "bptt")
+
+    stage = plan_stage(args)
+
+    assert stage.status == "already_complete"
+    assert stage.commands == []
 
 
 def test_geometry_command_uses_flag_protocol() -> None:

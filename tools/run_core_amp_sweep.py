@@ -204,17 +204,160 @@ def ensure_data_path(
     return str(out_path)
 
 
-def run_complete(run_dir: Path, planned_steps: int) -> bool:
+def _contract_value(payload: dict[str, object], dotted_key: str) -> object:
+    """Return a dotted-path value from a nested dict.
+
+    :param dict[str, object] payload: Payload to inspect.
+    :param str dotted_key: Dotted key path.
+    :return object: Found value, or ``None`` when absent.
+    """
+    cur: object = payload
+    for part in dotted_key.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            return None
+        cur = cur[part]
+    return cur
+
+
+def _contract_values_match(actual: object, expected: object) -> bool:
+    """Compare resolved-contract values with numeric tolerance.
+
+    :param object actual: Actual value.
+    :param object expected: Expected value.
+    :return bool: ``True`` when values match.
+    """
+    if isinstance(expected, float):
+        try:
+            return abs(float(actual) - expected) <= 1e-9
+        except (TypeError, ValueError):
+            return False
+    if isinstance(expected, int) and not isinstance(expected, bool):
+        try:
+            return int(actual) == expected
+        except (TypeError, ValueError):
+            return False
+    if isinstance(expected, bool):
+        return bool(actual) is expected
+    if isinstance(expected, list):
+        return list(actual) == expected if isinstance(actual, list) else False
+    return str(actual) == str(expected)
+
+
+def controller_expected_contract(
+    *,
+    spec: object,
+    shared_model: dict[str, object],
+    data_path: str,
+    storage_dtype: str,
+    seed: str,
+    phase: str,
+    batch_size: int,
+    seq_len: int,
+    grad_accum: int,
+    effective_step_tokens: int,
+    warmup_steps: int,
+    train_defaults: dict[str, str],
+    full_val_final: bool,
+    gradient_checkpointing: bool,
+    scan_backend: str,
+) -> dict[str, object]:
+    """Build the resolved-config contract required for skip-done reuse.
+
+    :param ControllerSpec spec: Planned controller run spec.
+    :param dict[str, object] shared_model: Shared model config section.
+    :param str data_path: Training data path.
+    :param str storage_dtype: Token storage dtype.
+    :param str seed: Random seed.
+    :param str phase: Run phase.
+    :param int batch_size: Resolved batch size.
+    :param int seq_len: Resolved sequence length.
+    :param int grad_accum: Gradient accumulation steps.
+    :param int effective_step_tokens: Effective optimizer-step token count.
+    :param int warmup_steps: Warmup step count.
+    :param dict[str, str] train_defaults: Resolved training defaults.
+    :param bool full_val_final: Whether final eval must cover validation once.
+    :param bool gradient_checkpointing: Expected gradient-checkpointing flag.
+    :param str scan_backend: Requested scan backend.
+    :return dict[str, object]: Dotted resolved-config contract.
+    """
+    contract: dict[str, object] = {
+        "run_name": spec.name,
+        "phase": phase,
+        "seed": int(seed),
+        "model.core_layers": int(spec.core_layers),
+        "model.core_expansion": float(spec.core_expansion),
+        "model.residual_core": bool(spec.residual_core),
+        "model.residual_core_init": float(spec.residual_core_init),
+        "model.trigram_memory": str(
+            shared_model.get("trigram_memory", env("TRIGRAM_MEMORY", "none"))
+        ),
+        "training.seq_len": int(seq_len),
+        "training.batch_size": int(batch_size),
+        "training.grad_accum": int(grad_accum),
+        "training.effective_step_tokens": int(effective_step_tokens),
+        "training.carry_chunks": int(spec.carry_chunks),
+        "training.bptt_chunks": int(spec.bptt_chunks),
+        "training.num_steps": int(spec.num_steps),
+        "training.learning_rate": float(spec.learning_rate),
+        "training.min_lr": float(spec.min_lr),
+        "training.warmup_steps": int(warmup_steps),
+        "training.lr_hold_steps": int(spec.lr_hold_steps),
+        "training.weight_decay": float(train_defaults["WEIGHT_DECAY"]),
+        "training.hard_loss_gamma": float(train_defaults["HARD_LOSS_GAMMA"]),
+        "training.hard_loss_cap": float(train_defaults["HARD_LOSS_CAP"]),
+        "training.val_every": int(train_defaults["VAL_EVERY"]),
+        "training.val_steps": int(train_defaults["VAL_STEPS"]),
+        "training.full_val_final": bool(full_val_final),
+        "training.log_every": int(train_defaults["LOG_EVERY"]),
+        "training.log_state_every": int(train_defaults["LOG_STATE_EVERY"]),
+        "training.save_every": int(train_defaults["SAVE_EVERY"]),
+        "training.gradient_checkpointing": bool(gradient_checkpointing),
+        "runtime.scan_backend_requested": scan_backend,
+        "runtime.exact_val_bpb": True,
+        "data.source": str(data_path),
+        "data.storage_dtype": str(storage_dtype),
+    }
+    for key in ("core_dim", "num_blocks", "trigram_top_k"):
+        if key in shared_model and shared_model[key] is not None:
+            contract[f"model.{key}"] = int(shared_model[key])
+    return contract
+
+
+def run_complete(
+    run_dir: Path,
+    planned_steps: int,
+    *,
+    expected_contract: Optional[dict[str, object]] = None,
+) -> bool:
     """Return whether a run directory contains a completed run at the expected step.
 
     :param Path run_dir: Candidate run directory.
     :param int planned_steps: Required terminal step count.
+    :param Optional[dict[str, object]] expected_contract: Optional dotted-key
+        resolved-config contract to verify before skipping.
     :return bool: ``True`` when the run finished the planned contract.
     """
     results = read_json(run_dir / "run_results.json")
-    return bool(results.get("completed")) and int(results.get("final_step", -1)) >= int(
+    if not bool(results.get("completed")) or int(results.get("final_step", -1)) < int(
         planned_steps
-    )
+    ):
+        return False
+    if not expected_contract:
+        return True
+    resolved = read_json(run_dir / "resolved_config.json")
+    mismatches: list[str] = []
+    for key, expected in expected_contract.items():
+        actual = _contract_value(resolved, key)
+        if not _contract_values_match(actual, expected):
+            mismatches.append(f"{key}: actual={actual!r} expected={expected!r}")
+    if mismatches:
+        print(
+            f"Completed run exists but contract changed; not skipping {run_dir.name}:\n  - "
+            + "\n  - ".join(mismatches),
+            flush=True,
+        )
+        return False
+    return True
 
 
 def rebuild_summaries(model_root: Path, title: str) -> None:
@@ -793,6 +936,8 @@ def run_controller_sweep(repo_root: Path) -> None:
             raise SystemExit(f"shared spec init failed with exit {rc}")
     else:
         print(f"Using existing shared spec: {shared_spec_dir}")
+    shared_config = read_json(shared_spec_dir / "config.json")
+    shared_model = shared_config.get("model", {}) if isinstance(shared_config, dict) else {}
 
     for spec in specs:
         if run_filter and run_filter not in spec.name:
@@ -814,7 +959,28 @@ def run_controller_sweep(repo_root: Path) -> None:
             if resolved_spec.warmup_steps is not None
             else int(train_defaults["WARMUP_STEPS"])
         )
-        if skip_done and run_complete(run_dir, resolved_spec.num_steps):
+        expected_contract = controller_expected_contract(
+            spec=resolved_spec,
+            shared_model=shared_model if isinstance(shared_model, dict) else {},
+            data_path=data_path,
+            storage_dtype=env("STORAGE_DTYPE", "uint16"),
+            seed=env("SEED", "1337"),
+            phase=core_amp_phase,
+            batch_size=batch_size,
+            seq_len=seq_len,
+            grad_accum=grad_accum,
+            effective_step_tokens=effective_step_tokens,
+            warmup_steps=warmup_steps,
+            train_defaults=train_defaults,
+            full_val_final=env_bool("FULL_VAL_FINAL", False),
+            gradient_checkpointing=gradient_checkpointing,
+            scan_backend=env("SCAN_BACKEND", "auto"),
+        )
+        if skip_done and run_complete(
+            run_dir,
+            resolved_spec.num_steps,
+            expected_contract=expected_contract,
+        ):
             print(f"Skipping completed run: {spec.name}")
             continue
 

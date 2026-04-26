@@ -8,8 +8,10 @@ from train_core_amplifier import (
     EvalResult,
     SequentialStreamBatcher,
     eval_payload_fields,
+    file_sha256,
     format_eval_coverage,
     full_validation_steps,
+    validate_exact_bpb_targets,
 )
 from train_core_amplifier import _format_debug_vector
 
@@ -54,6 +56,26 @@ def test_full_validation_batcher_covers_each_target_once():
         seen.extend(batch[:, 1:].flatten().tolist())
 
     assert sorted(seen) == list(range(1, tokens.numel()))
+
+
+def test_exact_bpb_target_validation_rejects_zero_byte_targets():
+    """Exact BPB should fail if validation targets include zero-byte token ids."""
+    byte_count_lut = torch.tensor([0, 1, 2], dtype=torch.int32)
+    val_tokens = torch.tensor([1, 2, 0, 1], dtype=torch.long)
+
+    try:
+        validate_exact_bpb_targets(byte_count_lut, val_tokens)
+    except ValueError as exc:
+        assert "zero-byte" in str(exc)
+    else:
+        raise AssertionError("expected zero-byte validation target failure")
+
+
+def test_file_sha256_hashes_file_contents(tmp_path):
+    path = tmp_path / "tokenizer.model"
+    path.write_bytes(b"abc")
+
+    assert file_sha256(path) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
 
 
 def test_eval_payload_fields_are_explicit():

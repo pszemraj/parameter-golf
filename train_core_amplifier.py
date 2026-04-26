@@ -329,6 +329,23 @@ def fingerprint_tokens(tokens: np.ndarray, *, max_tokens: int = 1_000_000) -> st
     return digest.hexdigest()
 
 
+def file_sha256(path: str | Path, *, chunk_size: int = 1024 * 1024) -> str:
+    """Hash a file by SHA256.
+
+    :param str | Path path: File to hash.
+    :param int chunk_size: Read chunk size.
+    :return str: Hex SHA256 digest.
+    """
+    h = hashlib.sha256()
+    with Path(path).open("rb") as f:
+        while True:
+            chunk = f.read(chunk_size)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def get_device(force: Optional[str] = None) -> tuple[torch.device, str, torch.dtype]:
     """Select the runtime device and default AMP dtype.
 
@@ -1133,7 +1150,11 @@ def build_byte_count_lut(
 
     sp = spm.SentencePieceProcessor(model_file=str(tokenizer_path))
     sp_vocab = sp.vocab_size()
-    table_size = max(sp_vocab, vocab_size)
+    if sp_vocab != int(vocab_size):
+        raise ValueError(
+            f"tokenizer vocab size mismatch: tokenizer={sp_vocab} spec={int(vocab_size)}"
+        )
+    table_size = int(vocab_size)
     byte_counts = np.zeros(table_size, dtype=np.int16)
     has_leading_space = np.zeros(table_size, dtype=np.bool_)
 
@@ -1154,6 +1175,37 @@ def build_byte_count_lut(
     # Total bytes per token = base_bytes + has_leading_space (the space is 1 extra byte)
     total_bytes = byte_counts_t.to(torch.int32) + has_space_t.to(torch.int32)
     return total_bytes
+
+
+def validate_exact_bpb_targets(
+    byte_count_lut: torch.Tensor,
+    val_tokens: torch.Tensor,
+    *,
+    chunk_size: int = 8_000_000,
+) -> None:
+    """Verify validation target ids all have positive byte counts.
+
+    :param torch.Tensor byte_count_lut: Per-token byte-count lookup.
+    :param torch.Tensor val_tokens: Flat validation token tensor.
+    :param int chunk_size: Validation target chunk size.
+    :raises ValueError: If any validation target id maps to zero bytes.
+    """
+    if val_tokens.numel() <= 1:
+        raise ValueError("validation token stream is empty; exact BPB is undefined")
+    lut_cpu = byte_count_lut.detach().cpu()
+    if int(lut_cpu.min().item()) <= 0:
+        zero_ids = (lut_cpu <= 0).nonzero(as_tuple=False).flatten()[:16].tolist()
+        for start in range(1, int(val_tokens.numel()), int(chunk_size)):
+            end = min(int(val_tokens.numel()), start + int(chunk_size))
+            targets = val_tokens[start:end]
+            target_ids = targets.detach().cpu().long()
+            target_byte_counts = lut_cpu[target_ids]
+            if int(target_byte_counts.min().item()) <= 0:
+                bad = target_ids[target_byte_counts <= 0][:16].tolist()
+                raise ValueError(
+                    "validation targets include zero-byte tokenizer ids; "
+                    f"bad_target_ids={bad} zero_byte_ids_sample={zero_ids}"
+                )
 
 
 def compute_training_objective(
@@ -1874,6 +1926,7 @@ def build_resolved_config_payload(
     wandb_watch_log_freq: int,
     wandb_mode: Optional[str],
     tok_path: Optional[Path],
+    tokenizer_sha256: Optional[str],
     byte_count_lut: Optional[torch.Tensor],
 ) -> dict[str, Any]:
     """Build the resolved run snapshot.
@@ -1954,6 +2007,7 @@ def build_resolved_config_payload(
     :param int wandb_watch_log_freq: W&B watch log frequency.
     :param Optional[str] wandb_mode: W&B mode.
     :param Optional[Path] tok_path: Tokenizer path.
+    :param Optional[str] tokenizer_sha256: Tokenizer file SHA256.
     :param Optional[torch.Tensor] byte_count_lut: Byte-count LUT.
     :return dict[str, Any]: Resolved configuration payload.
     """
@@ -2077,6 +2131,7 @@ def build_resolved_config_payload(
             },
         },
         "tokenizer_path": None if tok_path is None else str(tok_path),
+        "tokenizer_sha256": tokenizer_sha256,
         "spec": {
             "summary": spec.summary(),
             "spec_path": str(cfg.spec_path),
@@ -2575,14 +2630,17 @@ def main() -> None:
     # --- Byte count LUT for competition-exact bpb ---
     byte_count_lut: Optional[torch.Tensor] = None
     avg_bytes_per_token: Optional[float] = None
+    tokenizer_sha256: Optional[str] = None
     tok_path = cfg.tokenizer_path
     if tok_path is not None:
         try:
+            tokenizer_sha256 = file_sha256(tok_path)
             byte_count_lut = build_byte_count_lut(tok_path, spec.vocab_size, device)
+            validate_exact_bpb_targets(byte_count_lut, val_tokens)
             avg_bytes_per_token = float(byte_count_lut.float().mean().item())
             print(
                 f"Byte count LUT loaded from {tok_path.name} "
-                f"(avg {avg_bytes_per_token:.2f} bytes/token)"
+                f"(avg {avg_bytes_per_token:.2f} bytes/token, sha256={tokenizer_sha256[:12]})"
             )
         except Exception as e:
             if not allow_approx_bpb:
@@ -2676,6 +2734,7 @@ def main() -> None:
         wandb_watch_log_freq=wandb_watch_log_freq,
         wandb_mode=wandb_mode,
         tok_path=tok_path,
+        tokenizer_sha256=tokenizer_sha256,
         byte_count_lut=byte_count_lut,
     )
     write_json(resolved_config_path, resolved_config)
@@ -2975,11 +3034,12 @@ def main() -> None:
                 )
             model.train()
 
-        if save_every > 0 and step > 0 and step % save_every == 0:
-            ckpt_path = model_dir / f"checkpoint_{step}.pt"
+        completed_steps = step + 1
+        if save_every > 0 and completed_steps > 0 and completed_steps % save_every == 0:
+            ckpt_path = model_dir / f"checkpoint_{completed_steps}.pt"
             torch.save(
                 {
-                    "step": step,
+                    "step": completed_steps,
                     "model": trainable_state_dict(model),
                     "optimizer": optimizer.state_dict(),
                 },

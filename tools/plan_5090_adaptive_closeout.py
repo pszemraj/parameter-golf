@@ -42,6 +42,9 @@ BPTT_HOLD_STEPS = 3500
 DEFAULT_BPTT_BATCH_SIZE = 128
 DEFAULT_BPTT_CHUNKS = 2
 DEFAULT_BPTT_IMPROVEMENT_BPB = 0.005
+DEFAULT_LEARNING_RATE = 0.0035
+DEFAULT_BATCH_SIZE = 256
+DEFAULT_SEQ_LEN = 512
 SCREEN_PLANNED_STEPS = 4096
 SCREEN_TRIGRAM_TOP_K = 2
 
@@ -62,6 +65,15 @@ class PlannedCommand:
         :return str: Command suitable for a generated shell script.
         """
         return shlex.join(self.command)
+
+
+@dataclass(frozen=True)
+class StagePlan:
+    """Adaptive stage status plus commands."""
+
+    status: str
+    reason: str
+    commands: list[PlannedCommand]
 
 
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
@@ -252,6 +264,24 @@ def row_bool(row: dict[str, str], field: str) -> bool:
     return str(row.get(field, "")).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def expected_screen_batch_size(args: argparse.Namespace) -> int:
+    """Return expected BPTT1 screen/confirmation batch size.
+
+    :param argparse.Namespace args: Parsed arguments.
+    :return int: Expected batch size.
+    """
+    return int(args.screen_batch_size or DEFAULT_BATCH_SIZE)
+
+
+def expected_seq_len(args: argparse.Namespace) -> int:
+    """Return expected sequence length.
+
+    :param argparse.Namespace args: Parsed arguments.
+    :return int: Expected sequence length.
+    """
+    return int(args.seq_len or DEFAULT_SEQ_LEN)
+
+
 def valid_confirmation_row(row: dict[str, str], args: argparse.Namespace) -> bool:
     """Return whether a row is a completed 1B K2 geometry confirmation.
 
@@ -265,7 +295,13 @@ def valid_confirmation_row(row: dict[str, str], args: argparse.Namespace) -> boo
         and as_int(row.get("effective_step_tokens")) == int(args.effective_step_tokens)
         and as_int(row.get("num_blocks")) == 0
         and as_int(row.get("trigram_top_k")) == 2
+        and as_int(row.get("batch_size")) == expected_screen_batch_size(args)
+        and as_int(row.get("seq_len")) == expected_seq_len(args)
+        and as_int(row.get("bptt_chunks")) == 1
+        and as_int(row.get("lr_hold_steps")) == int(args.confirm_hold_steps)
+        and as_float(row.get("learning_rate")) == DEFAULT_LEARNING_RATE
         and row_bool(row, "exact_val_bpb")
+        and row.get("artifact_status") != "OVER_LIMIT"
     )
     if not valid:
         return False
@@ -298,6 +334,16 @@ def valid_screen_variant_row(
     if as_int(row.get("effective_step_tokens")) != int(args.effective_step_tokens):
         return False
     if as_int(row.get("num_blocks")) != 0 or as_int(row.get("trigram_top_k")) != int(top_k):
+        return False
+    if as_int(row.get("seq_len")) != expected_seq_len(args):
+        return False
+    if as_int(row.get("lr_hold_steps")) != int(args.variant_hold_steps):
+        return False
+    if as_float(row.get("learning_rate")) != DEFAULT_LEARNING_RATE:
+        return False
+    if not row_bool(row, "exact_val_bpb"):
+        return False
+    if row.get("artifact_status") == "OVER_LIMIT":
         return False
     if batch_size is not None and as_int(row.get("batch_size")) != int(batch_size):
         return False
@@ -498,6 +544,31 @@ def plan_confirmations(args: argparse.Namespace) -> list[PlannedCommand]:
     return out
 
 
+def plan_confirmations_stage(args: argparse.Namespace) -> StagePlan:
+    """Plan confirmation commands and classify empty plans.
+
+    :param argparse.Namespace args: Parsed arguments.
+    :return StagePlan: Stage status and planned commands.
+    """
+    commands = plan_confirmations(args)
+    if commands:
+        return StagePlan("commands", f"{len(commands)} confirmation command(s) selected", commands)
+    if completed_confirmations(args):
+        return StagePlan("already_complete", "selected confirmations already completed", [])
+    promoted = [
+        row
+        for row in analyze_geometry_rows(args)
+        if row.is_valid_screen_row and row.verdict.startswith("promote")
+    ]
+    if promoted:
+        return StagePlan("already_complete", "promoted rows already have valid confirmations", [])
+    return StagePlan(
+        "blocked",
+        "no promoted completed geometry screen rows are available for confirmation",
+        [],
+    )
+
+
 def completed_confirmations(args: argparse.Namespace) -> list[tuple[str, dict[str, str]]]:
     """Return completed K2 geometry confirmations.
 
@@ -571,6 +642,36 @@ def plan_bptt(args: argparse.Namespace) -> list[PlannedCommand]:
             ),
         )
     ]
+
+
+def plan_bptt_stage(args: argparse.Namespace) -> StagePlan:
+    """Plan the BPTT stage and classify empty plans.
+
+    :param argparse.Namespace args: Parsed arguments.
+    :return StagePlan: Stage status and planned commands.
+    """
+    confirmations = completed_confirmations(args)
+    if not confirmations:
+        return StagePlan("blocked", "no valid completed confirmation is available for BPTT", [])
+    commands = plan_bptt(args)
+    if commands:
+        return StagePlan("commands", "BPTT command selected", commands)
+    label, _row = confirmations[0]
+    existing = load_summary_row(
+        args.repo_root.resolve(),
+        parse_geometry(label),
+        run_version=bptt_run_version(args),
+        seed=str(args.seed),
+    )
+    if valid_screen_variant_row(
+        existing,
+        args,
+        top_k=2,
+        batch_size=int(args.bptt_batch_size),
+        bptt_chunks=int(args.bptt_chunks),
+    ):
+        return StagePlan("already_complete", f"BPTT screen already completed for {label}", [])
+    return StagePlan("blocked", f"BPTT prerequisites are inconsistent for {label}", [])
 
 
 def bptt_selected_for_k4(
@@ -693,37 +794,104 @@ def plan_k4(args: argparse.Namespace) -> list[PlannedCommand]:
     ]
 
 
+def plan_k4_stage(args: argparse.Namespace) -> StagePlan:
+    """Plan the K4 stage and classify empty plans.
+
+    :param argparse.Namespace args: Parsed arguments.
+    :return StagePlan: Stage status and planned commands.
+    """
+    confirmations = completed_confirmations(args)
+    if not confirmations:
+        return StagePlan("blocked", "no valid completed confirmation is available for K4", [])
+    label, _confirm_row = confirmations[0]
+    bptt_row = load_summary_row(
+        args.repo_root.resolve(),
+        parse_geometry(label),
+        run_version=bptt_run_version(args),
+        seed=str(args.seed),
+    )
+    if not valid_screen_variant_row(
+        bptt_row,
+        args,
+        top_k=2,
+        batch_size=int(args.bptt_batch_size),
+        bptt_chunks=int(args.bptt_chunks),
+    ):
+        return StagePlan("blocked", f"K4 requires a completed BPTT read for {label}", [])
+
+    commands = plan_k4(args)
+    if commands:
+        return StagePlan("commands", "K4 command selected", commands)
+
+    use_bptt, _reason = bptt_selected_for_k4(args, label)
+    existing = load_summary_row(
+        args.repo_root.resolve(),
+        parse_geometry(label),
+        run_version=k4_run_version(args, use_bptt=use_bptt),
+        seed=str(args.seed),
+    )
+    if valid_screen_variant_row(
+        existing,
+        args,
+        top_k=4,
+        batch_size=int(args.bptt_batch_size) if use_bptt else args.screen_batch_size,
+        bptt_chunks=int(args.bptt_chunks) if use_bptt else None,
+    ):
+        return StagePlan("already_complete", f"K4 screen already completed for {label}", [])
+    return StagePlan("blocked", f"K4 prerequisites are inconsistent for {label}", [])
+
+
+def plan_stage(args: argparse.Namespace) -> StagePlan:
+    """Plan and classify the requested adaptive stage.
+
+    :param argparse.Namespace args: Parsed arguments.
+    :return StagePlan: Stage status and planned commands.
+    """
+    if args.stage == "confirmations":
+        return plan_confirmations_stage(args)
+    if args.stage == "bptt":
+        return plan_bptt_stage(args)
+    if args.stage == "k4":
+        return plan_k4_stage(args)
+    raise ValueError(f"unknown stage: {args.stage}")
+
+
 def plan_commands(args: argparse.Namespace) -> list[PlannedCommand]:
     """Plan commands for the requested stage.
 
     :param argparse.Namespace args: Parsed arguments.
     :return list[PlannedCommand]: Planned commands.
     """
-    if args.stage == "confirmations":
-        return plan_confirmations(args)
-    if args.stage == "bptt":
-        return plan_bptt(args)
-    if args.stage == "k4":
-        return plan_k4(args)
-    raise ValueError(f"unknown stage: {args.stage}")
+    return plan_stage(args).commands
 
 
-def write_shell_script(path: Path, commands: list[PlannedCommand], *, repo_root: Path) -> None:
+def write_shell_script(
+    path: Path,
+    commands: list[PlannedCommand],
+    *,
+    repo_root: Path,
+    status: str = "commands",
+    reason: str = "",
+) -> None:
     """Write planned commands to a shell script.
 
     :param Path path: Output script path.
     :param list[PlannedCommand] commands: Planned commands.
     :param Path repo_root: Repository root for relative launcher commands.
+    :param str status: Stage status.
+    :param str reason: Stage-status reason.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
         "#!/usr/bin/env bash",
         "set -euo pipefail",
         f"cd {shlex.quote(str(repo_root.resolve()))}",
+        f"# adaptive_status={status}",
+        f"# adaptive_reason={reason}",
         "",
     ]
     if not commands:
-        lines.append("# No commands selected by the adaptive planner.")
+        lines.append(f"# No commands selected by the adaptive planner: {status}.")
     for item in commands:
         lines.append(f"# stage={item.stage} label={item.label}")
         lines.append(f"# reason={item.reason}")
@@ -733,14 +901,19 @@ def write_shell_script(path: Path, commands: list[PlannedCommand], *, repo_root:
     path.chmod(0o755)
 
 
-def emit(commands: list[PlannedCommand], *, mode: str) -> None:
+def emit(stage_plan: StagePlan, *, mode: str) -> None:
     """Print planned commands.
 
-    :param list[PlannedCommand] commands: Planned commands.
+    :param StagePlan stage_plan: Planned stage payload.
     :param str mode: Output mode.
     """
+    commands = stage_plan.commands
     if mode == "json":
-        payload = [asdict(item) | {"shell": item.shell} for item in commands]
+        payload = {
+            "status": stage_plan.status,
+            "reason": stage_plan.reason,
+            "commands": [asdict(item) | {"shell": item.shell} for item in commands],
+        }
         print(json.dumps(payload, indent=2, sort_keys=True))
         return
     if mode == "shell":
@@ -749,8 +922,12 @@ def emit(commands: list[PlannedCommand], *, mode: str) -> None:
         return
 
     if not commands:
-        print("No commands selected by the adaptive planner.")
+        print(f"Stage status: {stage_plan.status}")
+        print(f"Reason: {stage_plan.reason}")
         return
+    print(f"Stage status: {stage_plan.status}")
+    print(f"Reason: {stage_plan.reason}")
+    print()
     print("| stage | label | reason | command |")
     print("| --- | --- | --- | --- |")
     for item in commands:
@@ -767,10 +944,18 @@ def emit(commands: list[PlannedCommand], *, mode: str) -> None:
 def main() -> None:
     """Plan the requested adaptive stage."""
     args = parse_args()
-    commands = plan_commands(args)
+    stage_plan = plan_stage(args)
     if args.write_script is not None:
-        write_shell_script(args.write_script, commands, repo_root=args.repo_root)
-    emit(commands, mode=str(args.emit))
+        write_shell_script(
+            args.write_script,
+            stage_plan.commands,
+            repo_root=args.repo_root,
+            status=stage_plan.status,
+            reason=stage_plan.reason,
+        )
+    emit(stage_plan, mode=str(args.emit))
+    if stage_plan.status == "blocked":
+        raise SystemExit(2)
 
 
 if __name__ == "__main__":

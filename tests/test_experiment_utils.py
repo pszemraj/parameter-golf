@@ -25,6 +25,7 @@ from tools.run_core_amp_sweep import (
     controller_spec_max_tokens_default,
     parse_controller_specs,
     resolve_step_token_contract,
+    run_complete,
     structure_preset_defaults,
 )
 
@@ -137,6 +138,31 @@ def test_resolve_step_token_contract_supports_fixed_effective_tokens(monkeypatch
     assert grad_accum == 2
     assert local_step_tokens == 65536
     assert effective_step_tokens == 131072
+
+
+def test_run_complete_rejects_completed_run_with_contract_mismatch(tmp_path: Path):
+    run_dir = tmp_path / "run_a"
+    run_dir.mkdir()
+    _write_json(run_dir / "run_results.json", {"completed": True, "final_step": 100})
+    _write_json(
+        run_dir / "resolved_config.json",
+        {
+            "run_name": "run_a",
+            "training": {"num_steps": 100, "trigram_top_k": 2},
+            "model": {"trigram_top_k": 2},
+        },
+    )
+
+    assert run_complete(
+        run_dir,
+        100,
+        expected_contract={"run_name": "run_a", "model.trigram_top_k": 2},
+    )
+    assert not run_complete(
+        run_dir,
+        100,
+        expected_contract={"run_name": "run_a", "model.trigram_top_k": 4},
+    )
 
 
 def test_summarize_run_dir_reads_structured_artifacts(tmp_path: Path):
