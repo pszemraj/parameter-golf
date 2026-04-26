@@ -176,10 +176,10 @@ def _run_fla_chunk_gated_delta_rule(
     g: Tensor,
     beta: Tensor,
 ) -> Tensor:
-    """Run the owned HGDN gated-delta recurrence and return only the output.
+    """Run the compile-visible HGDN gated-delta recurrence.
 
-    This keeps the recurrence behind one compile-visible operator boundary while
-    bypassing upstream FLA Python dispatch and backend-registry locks.
+    This keeps the recurrence behind one compile-visible operator boundary and
+    delegates kernel execution to the installed public FLA op.
 
     :param Tensor q: Query tensor shaped ``(batch, seq, heads, head_k)``.
     :param Tensor k: Key tensor shaped ``(batch, seq, heads, head_k)``.
