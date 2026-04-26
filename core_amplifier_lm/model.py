@@ -1643,9 +1643,9 @@ class CoreAmplifierLM(nn.Module):
         self._branch_temporal_lag_mix_runtime: Optional[torch.Tensor] = None
         self._branch_temporal_ema_decay_runtime: Optional[torch.Tensor] = None
         self._last_residual_token_gate: Optional[torch.Tensor] = None
-        self._last_residual_gate_mean: Optional[float] = None
-        self._last_residual_gate_std: Optional[float] = None
-        self._last_router_entropy: Optional[float] = None
+        self._last_residual_gate_mean: Optional[torch.Tensor] = None
+        self._last_residual_gate_std: Optional[torch.Tensor] = None
+        self._last_router_entropy: Optional[torch.Tensor] = None
 
     def _use_gradient_checkpointing(self) -> bool:
         """Return whether gradient checkpointing is active.
@@ -2115,11 +2115,8 @@ class CoreAmplifierLM(nn.Module):
         )
         router_logits = self.branch_router(features)
         router = torch.softmax(router_logits, dim=-1)
-        self._last_router_entropy = float(
-            (-(router.clamp_min(1e-8) * router.clamp_min(1e-8).log()).sum(dim=-1).mean())
-            .detach()
-            .cpu()
-            .item()
+        self._last_router_entropy = (
+            -(router.clamp_min(1e-8) * router.clamp_min(1e-8).log()).sum(dim=-1).mean().detach()
         )
         return branches * (router * float(self.num_branches)).to(branches.dtype)[..., None]
 
@@ -2151,8 +2148,8 @@ class CoreAmplifierLM(nn.Module):
         gate = gate.to(dtype=residual_logits.dtype)
         gate_flat = gate.squeeze(-1)
         self._last_residual_token_gate = gate_flat.detach()
-        self._last_residual_gate_mean = float(gate_flat.mean().detach().cpu().item())
-        self._last_residual_gate_std = float(gate_flat.std(unbiased=False).detach().cpu().item())
+        self._last_residual_gate_mean = gate_flat.mean().detach()
+        self._last_residual_gate_std = gate_flat.std(unbiased=False).detach()
         return residual_logits * gate
 
     def _expand_branches(
@@ -2477,11 +2474,11 @@ class CoreAmplifierLM(nn.Module):
         """
         metrics: dict[str, float] = {}
         if self._last_residual_gate_mean is not None:
-            metrics["residual_gate_mean"] = float(self._last_residual_gate_mean)
+            metrics["residual_gate_mean"] = float(self._last_residual_gate_mean.cpu().item())
         if self._last_residual_gate_std is not None:
-            metrics["residual_gate_std"] = float(self._last_residual_gate_std)
+            metrics["residual_gate_std"] = float(self._last_residual_gate_std.cpu().item())
         if self._last_router_entropy is not None:
-            metrics["router_entropy"] = float(self._last_router_entropy)
+            metrics["router_entropy"] = float(self._last_router_entropy.cpu().item())
         return metrics
 
     @torch.no_grad()
