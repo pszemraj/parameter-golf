@@ -33,6 +33,7 @@ def _write_summary(
     top_k: int = 2,
     batch_size: int = 256,
     bptt_chunks: int = 1,
+    effective_step_tokens: int = 131072,
     full_coverage: bool = False,
     artifact_estimate_bytes: int = 8_000_000,
 ) -> None:
@@ -60,7 +61,7 @@ def _write_summary(
         "num_blocks": "0",
         "batch_size": str(batch_size),
         "bptt_chunks": str(bptt_chunks),
-        "effective_step_tokens": "131072",
+        "effective_step_tokens": str(effective_step_tokens),
         "planned_steps": str(steps),
         "last_val_bpb": str(bpb),
         "best_val_bpb": str(bpb),
@@ -217,3 +218,42 @@ def test_geometry_command_uses_flag_protocol() -> None:
     assert command[:2] == ["bash", "scripts/run_5090_trigram_aligned_geometry_screen.sh"]
     assert "--run-version" in command
     assert "RUN_VERSION=" not in " ".join(command)
+
+
+def test_smoke_contract_uses_tiny_steps_and_disables_wandb(tmp_path: Path) -> None:
+    """Smoke planning should use the explicit tiny contract, not serious defaults."""
+    _write_summary(
+        tmp_path,
+        "blocks0_d96_l6_i512",
+        "smoke_adaptive",
+        steps=2,
+        bpb=3.0,
+        batch_size=2,
+        effective_step_tokens=128,
+    )
+    args = _args(tmp_path, "confirmations")
+    args.run_version = "smoke_adaptive"
+    args.baseline_bpb = 99.0
+    args.screen_steps = 2
+    args.effective_step_tokens = 128
+    args.confirm_steps = 3
+    args.confirm_hold_steps = 1
+    args.confirm_full_val_final = False
+    args.screen_batch_size = 2
+    args.seq_len = 64
+    args.val_steps = 1
+    args.trigram_max_tokens = 200_000
+    args.data_max_tokens = 131_072
+    args.no_wandb = True
+    args.smoke_test = True
+
+    commands = plan_confirmations(args)
+
+    assert len(commands) == 1
+    command = commands[0].command
+    assert "--num-steps" in command
+    assert "3" in command
+    assert "--target-effective-step-tokens" in command
+    assert "128" in command
+    assert "--no-wandb" in command
+    assert "--smoke-test" in command

@@ -25,6 +25,7 @@ SEEDS="${SEEDS:-1337}"
 SKIP_DONE="${SKIP_DONE:-1}"
 RUN_BLOCKS0="${RUN_BLOCKS0:-1}"
 DRY_RUN="${DRY_RUN:-0}"
+SMOKE_TEST="${SMOKE_TEST:-0}"
 
 LEARNING_RATE="${LEARNING_RATE:-0.0035}"
 
@@ -56,8 +57,10 @@ TRIGRAM_COUNT_WORKERS="${TRIGRAM_COUNT_WORKERS:-1}"
 TRIGRAM_MEMORY_SPEC_CACHE_ROOT="${TRIGRAM_MEMORY_SPEC_CACHE_ROOT:-${COREAMP_SPEC_CACHE_ROOT}}"
 TRIGRAM_MEMORY_TABLE_CACHE_ROOT="${TRIGRAM_MEMORY_TABLE_CACHE_ROOT:-${COREAMP_SPEC_CACHE_ROOT}/trigram_memory_tables}"
 REBUILD_TRIGRAM_MEMORY_TABLE_CACHE="${REBUILD_TRIGRAM_MEMORY_TABLE_CACHE:-0}"
+TRIGRAM_MAX_TOKENS="${TRIGRAM_MAX_TOKENS:-}"
 
 TARGET_EFFECTIVE_STEP_TOKENS="${TARGET_EFFECTIVE_STEP_TOKENS:-131072}"
+DATA_MAX_TOKENS="${DATA_MAX_TOKENS:-}"
 DATA_PATH="${DATA_PATH:-${REPO_ROOT}/data/datasets/fineweb10B_sp1024}"
 STORAGE_DTYPE="${STORAGE_DTYPE:-uint16}"
 LR_SCHEDULE="${LR_SCHEDULE:-cosine}"
@@ -111,8 +114,11 @@ Options:
   --num-steps VALUE
   --lr-hold-steps VALUE
   --trigram-top-k VALUE
+  --trigram-max-tokens VALUE
+  --data-max-tokens VALUE
   --count-workers VALUE
   --full-val-final | --no-full-val-final
+  --smoke-test
   --dry-run
 EOF
 }
@@ -145,11 +151,13 @@ parse_args() {
       --trigram-memory) TRIGRAM_MEMORY="$2"; shift 2 ;;
       --trigram-log-scale-init) TRIGRAM_LOG_SCALE_INIT="$2"; shift 2 ;;
       --trigram-top-k) TRIGRAM_TOP_K="$2"; shift 2 ;;
+      --trigram-max-tokens) TRIGRAM_MAX_TOKENS="$2"; shift 2 ;;
       --trigram-residual-clip) TRIGRAM_RESIDUAL_CLIP="$2"; shift 2 ;;
       --trigram-confidence-count-cap) TRIGRAM_CONFIDENCE_COUNT_CAP="$2"; shift 2 ;;
       --trigram-chunk-size) TRIGRAM_CHUNK_SIZE="$2"; shift 2 ;;
       --trigram-count-workers|--count-workers) TRIGRAM_COUNT_WORKERS="$2"; shift 2 ;;
       --target-effective-step-tokens) TARGET_EFFECTIVE_STEP_TOKENS="$2"; shift 2 ;;
+      --data-max-tokens) DATA_MAX_TOKENS="$2"; shift 2 ;;
       --data-path) DATA_PATH="$2"; shift 2 ;;
       --storage-dtype) STORAGE_DTYPE="$2"; shift 2 ;;
       --lr-schedule) LR_SCHEDULE="$2"; shift 2 ;;
@@ -181,6 +189,7 @@ parse_args() {
       --wandb-watch) WANDB_WATCH="$2"; shift 2 ;;
       --wandb-watch-log-freq) WANDB_WATCH_LOG_FREQ="$2"; shift 2 ;;
       --scan-backend) SCAN_BACKEND="$2"; shift 2 ;;
+      --smoke-test) SMOKE_TEST=1; shift ;;
       --base-bigram-delta) BASE_BIGRAM_DELTA="$2"; shift 2 ;;
       --residual-readout-delta-rank) RESIDUAL_READOUT_DELTA_RANK="$2"; shift 2 ;;
       --residual-readout-delta-init-std) RESIDUAL_READOUT_DELTA_INIT_STD="$2"; shift 2 ;;
@@ -192,6 +201,11 @@ parse_args() {
 }
 
 parse_args "$@"
+
+if [[ "${SMOKE_TEST}" == "1" ]]; then
+  export ALLOW_DEGRADED_5090_SERIOUS=1
+  WANDB=0
+fi
 
 if [[ -z "${GEOMETRY_CORE_EXPANSION:-}" ]]; then
   GEOMETRY_CORE_EXPANSION="$(
@@ -235,6 +249,9 @@ LEARNING_RATE_TAG="$(pg_5090_lr_slug "${LEARNING_RATE}")"
 pg_5090_require_serious_launcher_defaults "$(basename "$0")"
 if [[ "${ALLOW_DEGRADED_5090_SERIOUS:-0}" != "1" && -n "${TRIGRAM_MAX_TOKENS:-}" ]]; then
   pg_5090_fail "$(basename "$0")" "TRIGRAM_MAX_TOKENS must be unset for serious runs"
+fi
+if [[ "${ALLOW_DEGRADED_5090_SERIOUS:-0}" != "1" && -n "${DATA_MAX_TOKENS:-}" ]]; then
+  pg_5090_fail "$(basename "$0")" "DATA_MAX_TOKENS must be unset for serious runs"
 fi
 
 slugify() {
@@ -378,10 +395,12 @@ val_every=${VAL_EVERY} val_steps=${VAL_STEPS} log_every=${LOG_EVERY} log_state_e
 train_frac=${TRAIN_FRAC} mmap=${MMAP} autocast=${AUTOCAST} tokens_on_device=${TOKENS_ON_DEVICE}
 num_steps=${GEOMETRY_NUM_STEPS} lr_hold_steps=${GEOMETRY_LR_HOLD_STEPS} carry_chunks=${GEOMETRY_CARRY_CHUNKS} bptt_chunks=${GEOMETRY_BPTT_CHUNKS}
 batch_size=${GEOMETRY_BATCH_SIZE} seq_len=${GEOMETRY_SEQ_LEN} target_effective_step_tokens=${TARGET_EFFECTIVE_STEP_TOKENS}
+data_max_tokens=${DATA_MAX_TOKENS:-}
 coreamp_spec_cache_root=${COREAMP_SPEC_CACHE_ROOT}
 trigram_memory_spec_cache_root=${TRIGRAM_MEMORY_SPEC_CACHE_ROOT}
 trigram_memory_table_cache_root=${TRIGRAM_MEMORY_TABLE_CACHE_ROOT}
 scan_backend=${SCAN_BACKEND} wandb_project=${WANDB_PROJECT} cublaslt=${TORCH_BLAS_PREFER_CUBLASLT} py_unbuffered=${PYTHONUNBUFFERED}
+smoke_test=${SMOKE_TEST}
 EOF
   if [[ "${DRY_RUN:-0}" == "1" ]]; then
     echo "dry_run=1"
@@ -447,6 +466,9 @@ EOF
     --core-amp-phase "5090_trigram_aligned_geometry_screen"
     --run-spec "${run_specs}"
   )
+  if [[ -n "${DATA_MAX_TOKENS:-}" ]]; then
+    sweep_cmd+=(--data-max-tokens "${DATA_MAX_TOKENS}")
+  fi
   pg_5090_append_bool_flag "$(basename "$0")" sweep_cmd "compile" "${COMPILE}"
   pg_5090_append_bool_flag "$(basename "$0")" sweep_cmd "gradient-checkpointing" "${GRADIENT_CHECKPOINTING}"
   pg_5090_append_bool_flag "$(basename "$0")" sweep_cmd "full-val-final" "${FULL_VAL_FINAL}"

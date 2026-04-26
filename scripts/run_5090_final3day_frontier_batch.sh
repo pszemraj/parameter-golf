@@ -12,6 +12,22 @@ export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
 TRIGRAM_TOP_K="${TRIGRAM_TOP_K:-2}"
 TRIGRAM_COUNT_WORKERS="${TRIGRAM_COUNT_WORKERS:-1}"
 DRY_RUN="${DRY_RUN:-0}"
+SMOKE_TEST="${SMOKE_TEST:-0}"
+GEOMETRY_SPECS="${GEOMETRY_SPECS:-}"
+GEOMETRY_NUM_STEPS="${GEOMETRY_NUM_STEPS:-}"
+GEOMETRY_LR_HOLD_STEPS="${GEOMETRY_LR_HOLD_STEPS:-}"
+GEOMETRY_BATCH_SIZE="${GEOMETRY_BATCH_SIZE:-}"
+GEOMETRY_SEQ_LEN="${GEOMETRY_SEQ_LEN:-}"
+TARGET_EFFECTIVE_STEP_TOKENS="${TARGET_EFFECTIVE_STEP_TOKENS:-}"
+VAL_EVERY="${VAL_EVERY:-}"
+VAL_STEPS="${VAL_STEPS:-}"
+LOG_EVERY="${LOG_EVERY:-}"
+LOG_STATE_EVERY="${LOG_STATE_EVERY:-}"
+SAVE_EVERY="${SAVE_EVERY:-}"
+TRIGRAM_MAX_TOKENS="${TRIGRAM_MAX_TOKENS:-}"
+DATA_MAX_TOKENS="${DATA_MAX_TOKENS:-}"
+GEOMETRY_TRAIN_LABEL="${GEOMETRY_TRAIN_LABEL:-}"
+WANDB="${WANDB:-}"
 
 RUN_BENCHMARK="${RUN_BENCHMARK:-1}"
 RUN_GEOMETRY_SCREEN="${RUN_GEOMETRY_SCREEN:-1}"
@@ -35,6 +51,22 @@ Options:
   --benchmark-json VALUE
   --benchmark-steps VALUE
   --benchmark-warmup VALUE
+  --geometry-specs VALUE
+  --num-steps VALUE
+  --lr-hold-steps VALUE
+  --batch-size VALUE
+  --seq-len VALUE
+  --target-effective-step-tokens VALUE
+  --val-every VALUE
+  --val-steps VALUE
+  --log-every VALUE
+  --log-state-every VALUE
+  --save-every VALUE
+  --trigram-max-tokens VALUE
+  --data-max-tokens VALUE
+  --geometry-train-label VALUE
+  --no-wandb
+  --smoke-test
   --dry-run
 EOF
 }
@@ -63,6 +95,22 @@ while [[ $# -gt 0 ]]; do
     --benchmark-json) BENCHMARK_JSON="$2"; shift 2 ;;
     --benchmark-steps) BENCHMARK_STEPS="$2"; shift 2 ;;
     --benchmark-warmup) BENCHMARK_WARMUP="$2"; shift 2 ;;
+    --geometry-specs) GEOMETRY_SPECS="$2"; shift 2 ;;
+    --num-steps|--geometry-num-steps) GEOMETRY_NUM_STEPS="$2"; shift 2 ;;
+    --lr-hold-steps|--geometry-lr-hold-steps) GEOMETRY_LR_HOLD_STEPS="$2"; shift 2 ;;
+    --batch-size|--geometry-batch-size) GEOMETRY_BATCH_SIZE="$2"; shift 2 ;;
+    --seq-len|--geometry-seq-len) GEOMETRY_SEQ_LEN="$2"; shift 2 ;;
+    --target-effective-step-tokens) TARGET_EFFECTIVE_STEP_TOKENS="$2"; shift 2 ;;
+    --val-every) VAL_EVERY="$2"; shift 2 ;;
+    --val-steps) VAL_STEPS="$2"; shift 2 ;;
+    --log-every) LOG_EVERY="$2"; shift 2 ;;
+    --log-state-every) LOG_STATE_EVERY="$2"; shift 2 ;;
+    --save-every) SAVE_EVERY="$2"; shift 2 ;;
+    --trigram-max-tokens) TRIGRAM_MAX_TOKENS="$2"; shift 2 ;;
+    --data-max-tokens) DATA_MAX_TOKENS="$2"; shift 2 ;;
+    --geometry-train-label) GEOMETRY_TRAIN_LABEL="$2"; shift 2 ;;
+    --no-wandb) WANDB=0; shift ;;
+    --smoke-test) SMOKE_TEST=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -96,6 +144,33 @@ geometry_matrix_cmd=(
   --trigram-top-k "${TRIGRAM_TOP_K}"
   --count-workers "${TRIGRAM_COUNT_WORKERS}"
 )
+append_if_set() {
+  local flag="$1"
+  local value="$2"
+  if [[ -n "${value:-}" ]]; then
+    geometry_matrix_cmd+=("${flag}" "${value}")
+  fi
+}
+append_if_set "--geometry-specs" "${GEOMETRY_SPECS}"
+append_if_set "--num-steps" "${GEOMETRY_NUM_STEPS}"
+append_if_set "--lr-hold-steps" "${GEOMETRY_LR_HOLD_STEPS}"
+append_if_set "--batch-size" "${GEOMETRY_BATCH_SIZE}"
+append_if_set "--seq-len" "${GEOMETRY_SEQ_LEN}"
+append_if_set "--target-effective-step-tokens" "${TARGET_EFFECTIVE_STEP_TOKENS}"
+append_if_set "--val-every" "${VAL_EVERY}"
+append_if_set "--val-steps" "${VAL_STEPS}"
+append_if_set "--log-every" "${LOG_EVERY}"
+append_if_set "--log-state-every" "${LOG_STATE_EVERY}"
+append_if_set "--save-every" "${SAVE_EVERY}"
+append_if_set "--trigram-max-tokens" "${TRIGRAM_MAX_TOKENS}"
+append_if_set "--data-max-tokens" "${DATA_MAX_TOKENS}"
+append_if_set "--geometry-train-label" "${GEOMETRY_TRAIN_LABEL}"
+if [[ "${WANDB:-}" == "0" ]]; then
+  geometry_matrix_cmd+=(--no-wandb)
+fi
+if [[ "${SMOKE_TEST}" == "1" ]]; then
+  geometry_matrix_cmd+=(--smoke-test)
+fi
 if [[ "${DRY_RUN}" == "1" ]]; then
   geometry_matrix_cmd+=(--dry-run)
 fi
@@ -121,6 +196,7 @@ seeds=${SEEDS}
 trigram_top_k=${TRIGRAM_TOP_K}
 run_benchmark=${RUN_BENCHMARK}
 run_geometry_screen=${RUN_GEOMETRY_SCREEN}
+smoke_test=${SMOKE_TEST}
 log_dir=${LOG_DIR}
 benchmark_json=${BENCHMARK_JSON}
 stop_after=stage1_geometry_screen

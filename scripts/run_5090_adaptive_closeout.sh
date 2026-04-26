@@ -17,6 +17,29 @@ DRY_RUN="0"
 RUN_ID="$(date +%Y%m%d_%H%M%S)"
 LOG_DIR="${REPO_ROOT}/logs/5090_adaptive_closeout/${RUN_ID}"
 BENCHMARK_JSON=""
+SMOKE_TEST="0"
+RUN_VERSION_SET="0"
+FRONTIER_BATCH_ID_SET="0"
+LOG_DIR_SET="0"
+RUN_BENCHMARK_SET="0"
+BASELINE_BPB=""
+SMOKE_GEOMETRY_SPECS="blocks0_d96_l6_i512 96 6 512"
+SMOKE_SCREEN_STEPS="2"
+SMOKE_CONFIRM_STEPS="3"
+SMOKE_VARIANT_STEPS="2"
+SMOKE_HOLD_STEPS="1"
+SMOKE_BATCH_SIZE="2"
+SMOKE_BPTT_BATCH_SIZE="1"
+SMOKE_BPTT_CHUNKS="2"
+SMOKE_SEQ_LEN="64"
+SMOKE_EFFECTIVE_STEP_TOKENS="128"
+SMOKE_VAL_EVERY="1"
+SMOKE_VAL_STEPS="1"
+SMOKE_LOG_EVERY="1"
+SMOKE_LOG_STATE_EVERY="0"
+SMOKE_SAVE_EVERY="0"
+SMOKE_TRIGRAM_MAX_TOKENS="200000"
+SMOKE_DATA_MAX_TOKENS="131072"
 
 usage() {
   cat <<EOF
@@ -36,31 +59,35 @@ Options:
   --count-workers VALUE        trigram count workers for any cache miss
   --max-confirmations VALUE    default: 2
   --stop-after VALUE           frontier|confirm|bptt|k4, default: k4
+  --baseline-bpb VALUE
   --run-benchmark | --no-run-benchmark
   --run-id VALUE
   --log-dir PATH
+  --smoke-test                 tiny local execution, W&B disabled
   --dry-run
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --run-version) RUN_VERSION="$2"; shift 2 ;;
+    --run-version) RUN_VERSION="$2"; RUN_VERSION_SET="1"; shift 2 ;;
     --seed) SEED="$2"; shift 2 ;;
-    --frontier-batch-id) FRONTIER_BATCH_ID="$2"; shift 2 ;;
+    --frontier-batch-id) FRONTIER_BATCH_ID="$2"; FRONTIER_BATCH_ID_SET="1"; shift 2 ;;
     --benchmark-json) BENCHMARK_JSON="$2"; shift 2 ;;
     --trigram-top-k) TRIGRAM_TOP_K="$2"; shift 2 ;;
     --trigram-count-workers|--count-workers) TRIGRAM_COUNT_WORKERS="$2"; shift 2 ;;
     --max-confirmations) MAX_CONFIRMATIONS="$2"; shift 2 ;;
     --stop-after) STOP_AFTER="$2"; shift 2 ;;
-    --run-benchmark) RUN_BENCHMARK="1"; shift ;;
-    --no-run-benchmark) RUN_BENCHMARK="0"; shift ;;
+    --baseline-bpb) BASELINE_BPB="$2"; shift 2 ;;
+    --run-benchmark) RUN_BENCHMARK="1"; RUN_BENCHMARK_SET="1"; shift ;;
+    --no-run-benchmark) RUN_BENCHMARK="0"; RUN_BENCHMARK_SET="1"; shift ;;
     --run-id)
       RUN_ID="$2"
       LOG_DIR="${REPO_ROOT}/logs/5090_adaptive_closeout/${RUN_ID}"
       shift 2
       ;;
-    --log-dir) LOG_DIR="$2"; shift 2 ;;
+    --log-dir) LOG_DIR="$2"; LOG_DIR_SET="1"; shift 2 ;;
+    --smoke-test) SMOKE_TEST="1"; shift ;;
     --dry-run) DRY_RUN="1"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -75,6 +102,26 @@ esac
 if [[ "${TRIGRAM_TOP_K}" != "2" ]]; then
   echo "Adaptive closeout frontier must start from trigram top-K=2, got ${TRIGRAM_TOP_K}" >&2
   exit 2
+fi
+
+if [[ "${SMOKE_TEST}" == "1" ]]; then
+  export ALLOW_DEGRADED_5090_SERIOUS=1
+  export WANDB=0
+  if [[ "${RUN_VERSION_SET}" == "0" ]]; then
+    RUN_VERSION="smoke_adaptive_${RUN_ID}"
+  fi
+  if [[ "${FRONTIER_BATCH_ID_SET}" == "0" ]]; then
+    FRONTIER_BATCH_ID="${RUN_VERSION}"
+  fi
+  if [[ "${LOG_DIR_SET}" == "0" ]]; then
+    LOG_DIR="${REPO_ROOT}/logs/5090_adaptive_closeout/${RUN_ID}"
+  fi
+  if [[ -z "${BASELINE_BPB}" ]]; then
+    BASELINE_BPB="99.0"
+  fi
+  if [[ "${RUN_BENCHMARK_SET}" == "0" ]]; then
+    RUN_BENCHMARK="0"
+  fi
 fi
 
 if [[ -z "${BENCHMARK_JSON}" ]]; then
@@ -130,7 +177,7 @@ write_plan() {
   local stage="$1"
   local out_script="${LOG_DIR}/${stage}.sh"
   local out_md="${LOG_DIR}/${stage}.md"
-  run_logged "plan_${stage}" \
+  local plan_cmd=(
     "${PYTHON_BIN}" "${REPO_ROOT}/tools/plan_5090_adaptive_closeout.py" \
       --stage "${stage}" \
       --run-version "${RUN_VERSION}" \
@@ -139,6 +186,31 @@ write_plan() {
       --max-confirmations "${MAX_CONFIRMATIONS}" \
       --write-script "${out_script}" \
       --emit markdown
+  )
+  if [[ -n "${BASELINE_BPB}" ]]; then
+    plan_cmd+=(--baseline-bpb "${BASELINE_BPB}")
+  fi
+  if [[ "${SMOKE_TEST}" == "1" ]]; then
+    plan_cmd+=(
+      --smoke-test
+      --no-wandb
+      --screen-steps "${SMOKE_SCREEN_STEPS}"
+      --effective-step-tokens "${SMOKE_EFFECTIVE_STEP_TOKENS}"
+      --confirm-steps "${SMOKE_CONFIRM_STEPS}"
+      --confirm-hold-steps "${SMOKE_HOLD_STEPS}"
+      --no-confirm-full-val-final
+      --variant-steps "${SMOKE_VARIANT_STEPS}"
+      --variant-hold-steps "${SMOKE_HOLD_STEPS}"
+      --screen-batch-size "${SMOKE_BATCH_SIZE}"
+      --bptt-batch-size "${SMOKE_BPTT_BATCH_SIZE}"
+      --bptt-chunks "${SMOKE_BPTT_CHUNKS}"
+      --seq-len "${SMOKE_SEQ_LEN}"
+      --val-steps "${SMOKE_VAL_STEPS}"
+      --trigram-max-tokens "${SMOKE_TRIGRAM_MAX_TOKENS}"
+      --data-max-tokens "${SMOKE_DATA_MAX_TOKENS}"
+    )
+  fi
+  run_logged "plan_${stage}" "${plan_cmd[@]}"
   cp "${LOG_DIR}/plan_${stage}.log" "${out_md}"
   PLAN_SCRIPT="${out_script}"
 }
@@ -175,6 +247,7 @@ count_workers=${TRIGRAM_COUNT_WORKERS}
 log_dir=${LOG_DIR}
 cublaslt=${TORCH_BLAS_PREFER_CUBLASLT}
 dry_run=${DRY_RUN}
+smoke_test=${SMOKE_TEST}
 EOF
 
 if should_run_stage frontier; then
@@ -191,6 +264,26 @@ if should_run_stage frontier; then
     frontier_cmd+=(--run-benchmark)
   else
     frontier_cmd+=(--no-run-benchmark)
+  fi
+  if [[ "${SMOKE_TEST}" == "1" ]]; then
+    frontier_cmd+=(
+      --smoke-test
+      --geometry-specs "${SMOKE_GEOMETRY_SPECS}"
+      --num-steps "${SMOKE_SCREEN_STEPS}"
+      --lr-hold-steps "${SMOKE_HOLD_STEPS}"
+      --batch-size "${SMOKE_BATCH_SIZE}"
+      --seq-len "${SMOKE_SEQ_LEN}"
+      --target-effective-step-tokens "${SMOKE_EFFECTIVE_STEP_TOKENS}"
+      --val-every "${SMOKE_VAL_EVERY}"
+      --val-steps "${SMOKE_VAL_STEPS}"
+      --log-every "${SMOKE_LOG_EVERY}"
+      --log-state-every "${SMOKE_LOG_STATE_EVERY}"
+      --save-every "${SMOKE_SAVE_EVERY}"
+      --trigram-max-tokens "${SMOKE_TRIGRAM_MAX_TOKENS}"
+      --data-max-tokens "${SMOKE_DATA_MAX_TOKENS}"
+      --geometry-train-label smoke_screen
+      --no-wandb
+    )
   fi
   if [[ "${DRY_RUN}" == "1" ]]; then
     frontier_cmd+=(--dry-run)

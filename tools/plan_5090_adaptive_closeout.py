@@ -22,10 +22,10 @@ from tools.analyze_5090_geometry_frontier import (  # noqa: E402
     DEFAULT_LABELS,
     SCREEN_EFFECTIVE_STEP_TOKENS,
     AnalyzedRow,
+    Geometry,
     as_float,
     as_int,
     decision,
-    eligibility_errors,
     estimated_time_matched_steps,
     load_benchmark,
     load_summary_row,
@@ -41,6 +41,8 @@ BPTT_STEPS = 4096
 BPTT_HOLD_STEPS = 3500
 DEFAULT_BPTT_BATCH_SIZE = 128
 DEFAULT_BPTT_CHUNKS = 2
+SCREEN_PLANNED_STEPS = 4096
+SCREEN_TRIGRAM_TOP_K = 2
 
 
 @dataclass(frozen=True)
@@ -82,6 +84,27 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     ap.add_argument("--k4-run-version", default=None)
     ap.add_argument("--k4-bptt-run-version", default=None)
     ap.add_argument("--bptt-improvement-bpb", type=float, default=0.0)
+    ap.add_argument("--screen-steps", type=int, default=SCREEN_PLANNED_STEPS)
+    ap.add_argument("--effective-step-tokens", type=int, default=SCREEN_EFFECTIVE_STEP_TOKENS)
+    ap.add_argument("--confirm-steps", type=int, default=CONFIRM_STEPS)
+    ap.add_argument("--confirm-hold-steps", type=int, default=CONFIRM_HOLD_STEPS)
+    ap.add_argument(
+        "--confirm-full-val-final",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Require and emit a full final validation for confirmation rows.",
+    )
+    ap.add_argument("--variant-steps", type=int, default=BPTT_STEPS)
+    ap.add_argument("--variant-hold-steps", type=int, default=BPTT_HOLD_STEPS)
+    ap.add_argument("--screen-batch-size", type=int, default=None)
+    ap.add_argument("--bptt-batch-size", type=int, default=DEFAULT_BPTT_BATCH_SIZE)
+    ap.add_argument("--bptt-chunks", type=int, default=DEFAULT_BPTT_CHUNKS)
+    ap.add_argument("--seq-len", type=int, default=None)
+    ap.add_argument("--val-steps", type=int, default=None)
+    ap.add_argument("--trigram-max-tokens", type=int, default=None)
+    ap.add_argument("--data-max-tokens", type=int, default=None)
+    ap.add_argument("--no-wandb", action="store_true")
+    ap.add_argument("--smoke-test", action="store_true")
     ap.add_argument("--write-script", type=Path, default=None)
     ap.add_argument("--emit", choices=("markdown", "json", "shell"), default="markdown")
     return ap.parse_args(argv)
@@ -135,7 +158,7 @@ def analyze_geometry_rows(args: argparse.Namespace) -> list[AnalyzedRow]:
             run_version=args.run_version,
             seed=str(args.seed),
         )
-        errors = eligibility_errors(geometry, summary)
+        errors = screen_eligibility_errors(geometry, summary, args)
         bpb = screen_bpb(summary)
         delta = None if bpb is None else bpb - float(args.baseline_bpb)
         ratio = speed_ratio(
@@ -163,6 +186,43 @@ def analyze_geometry_rows(args: argparse.Namespace) -> list[AnalyzedRow]:
     return rows
 
 
+def screen_eligibility_errors(
+    geometry: Geometry,
+    row: dict[str, str],
+    args: argparse.Namespace,
+) -> tuple[str, ...]:
+    """Return protocol violations for the active screen contract.
+
+    :param Geometry geometry: Parsed geometry.
+    :param dict[str, str] row: Summary row.
+    :param argparse.Namespace args: Parsed arguments.
+    :return tuple[str, ...]: Human-readable validation errors.
+    """
+    if not row:
+        return ("missing_summary",)
+
+    errors: list[str] = []
+    if row.get("status") != "completed":
+        errors.append("not_completed")
+    expected = {
+        "planned_steps": int(args.screen_steps),
+        "effective_step_tokens": int(args.effective_step_tokens),
+        "num_blocks": 0,
+        "trigram_top_k": SCREEN_TRIGRAM_TOP_K,
+        "core_dim": geometry.core_dim,
+        "core_layers": geometry.layers,
+        "core_inner_dim": geometry.inner_dim,
+        "recurrent_cells": geometry.recurrent_cells,
+    }
+    if args.screen_batch_size is not None:
+        expected["batch_size"] = int(args.screen_batch_size)
+    for field, expected_value in expected.items():
+        actual = as_int(row.get(field))
+        if actual != expected_value:
+            errors.append(f"{field}!={expected_value}")
+    return tuple(errors)
+
+
 def row_is_completed(row: dict[str, str]) -> bool:
     """Return whether a summary row is completed.
 
@@ -182,25 +242,31 @@ def row_bool(row: dict[str, str], field: str) -> bool:
     return str(row.get(field, "")).strip().lower() in {"1", "true", "yes", "on"}
 
 
-def valid_confirmation_row(row: dict[str, str]) -> bool:
+def valid_confirmation_row(row: dict[str, str], args: argparse.Namespace) -> bool:
     """Return whether a row is a completed 1B K2 geometry confirmation.
 
     :param dict[str, str] row: Summary row.
+    :param argparse.Namespace args: Parsed arguments.
     :return bool: ``True`` when the confirmation contract is satisfied.
     """
-    return (
+    valid = (
         row_is_completed(row)
-        and as_int(row.get("planned_steps")) == CONFIRM_STEPS
-        and as_int(row.get("effective_step_tokens")) == SCREEN_EFFECTIVE_STEP_TOKENS
+        and as_int(row.get("planned_steps")) == int(args.confirm_steps)
+        and as_int(row.get("effective_step_tokens")) == int(args.effective_step_tokens)
         and as_int(row.get("num_blocks")) == 0
         and as_int(row.get("trigram_top_k")) == 2
-        and row_bool(row, "last_eval_full_coverage")
         and row_bool(row, "exact_val_bpb")
     )
+    if not valid:
+        return False
+    if bool(args.confirm_full_val_final) and not row_bool(row, "last_eval_full_coverage"):
+        return False
+    return True
 
 
 def valid_screen_variant_row(
     row: dict[str, str],
+    args: argparse.Namespace,
     *,
     top_k: int,
     batch_size: Optional[int] = None,
@@ -209,6 +275,7 @@ def valid_screen_variant_row(
     """Return whether a row is a completed 512M screen variant.
 
     :param dict[str, str] row: Summary row.
+    :param argparse.Namespace args: Parsed arguments.
     :param int top_k: Expected trigram top-K.
     :param Optional[int] batch_size: Optional expected batch size.
     :param Optional[int] bptt_chunks: Optional expected BPTT chunks.
@@ -216,9 +283,9 @@ def valid_screen_variant_row(
     """
     if not row_is_completed(row):
         return False
-    if as_int(row.get("planned_steps")) != BPTT_STEPS:
+    if as_int(row.get("planned_steps")) != int(args.variant_steps):
         return False
-    if as_int(row.get("effective_step_tokens")) != SCREEN_EFFECTIVE_STEP_TOKENS:
+    if as_int(row.get("effective_step_tokens")) != int(args.effective_step_tokens):
         return False
     if as_int(row.get("num_blocks")) != 0 or as_int(row.get("trigram_top_k")) != int(top_k):
         return False
@@ -245,6 +312,13 @@ def geometry_command(
     batch_size: Optional[int] = None,
     bptt_chunks: Optional[int] = None,
     train_label: Optional[str] = None,
+    seq_len: Optional[int] = None,
+    target_effective_step_tokens: Optional[int] = None,
+    val_steps: Optional[int] = None,
+    trigram_max_tokens: Optional[int] = None,
+    data_max_tokens: Optional[int] = None,
+    no_wandb: bool = False,
+    smoke_test: bool = False,
 ) -> list[str]:
     """Build an aligned-geometry launcher command.
 
@@ -262,6 +336,13 @@ def geometry_command(
     :param Optional[int] batch_size: Optional batch-size override.
     :param Optional[int] bptt_chunks: Optional BPTT chunk override.
     :param Optional[str] train_label: Optional train-label override for W&B/run names.
+    :param Optional[int] seq_len: Optional sequence-length override.
+    :param Optional[int] target_effective_step_tokens: Optional effective token contract.
+    :param Optional[int] val_steps: Optional sampled validation steps.
+    :param Optional[int] trigram_max_tokens: Optional trigram count cap.
+    :param Optional[int] data_max_tokens: Optional train-data token cap.
+    :param bool no_wandb: Whether to disable W&B.
+    :param bool smoke_test: Whether to mark the launcher as smoke/debug.
     :return list[str]: Command argv.
     """
     geometry = parse_geometry(label)
@@ -305,7 +386,38 @@ def geometry_command(
         cmd.extend(["--geometry-bptt-chunks", str(bptt_chunks)])
     if train_label is not None:
         cmd.extend(["--geometry-train-label", train_label])
+    if seq_len is not None:
+        cmd.extend(["--geometry-seq-len", str(seq_len)])
+    if target_effective_step_tokens is not None:
+        cmd.extend(["--target-effective-step-tokens", str(target_effective_step_tokens)])
+    if val_steps is not None:
+        cmd.extend(["--val-steps", str(val_steps)])
+    if trigram_max_tokens is not None:
+        cmd.extend(["--trigram-max-tokens", str(trigram_max_tokens)])
+    if data_max_tokens is not None:
+        cmd.extend(["--data-max-tokens", str(data_max_tokens)])
+    if no_wandb:
+        cmd.append("--no-wandb")
+    if smoke_test:
+        cmd.append("--smoke-test")
     return cmd
+
+
+def shared_command_kwargs(args: argparse.Namespace) -> dict[str, object]:
+    """Return launcher kwargs shared by all adaptive stages.
+
+    :param argparse.Namespace args: Parsed arguments.
+    :return dict[str, object]: Keyword arguments for ``geometry_command``.
+    """
+    return {
+        "seq_len": args.seq_len,
+        "target_effective_step_tokens": int(args.effective_step_tokens),
+        "val_steps": args.val_steps,
+        "trigram_max_tokens": args.trigram_max_tokens,
+        "data_max_tokens": args.data_max_tokens,
+        "no_wandb": bool(args.no_wandb),
+        "smoke_test": bool(args.smoke_test),
+    }
 
 
 def plan_confirmations(args: argparse.Namespace) -> list[PlannedCommand]:
@@ -336,7 +448,7 @@ def plan_confirmations(args: argparse.Namespace) -> list[PlannedCommand]:
             run_version=confirmation_run_version(args),
             seed=str(args.seed),
         )
-        if valid_confirmation_row(existing):
+        if valid_confirmation_row(existing, args):
             continue
         bpb = screen_bpb(row.summary)
         reason = (
@@ -352,14 +464,17 @@ def plan_confirmations(args: argparse.Namespace) -> list[PlannedCommand]:
                     geometry.label,
                     run_version=confirmation_run_version(args),
                     seed=str(args.seed),
-                    num_steps=CONFIRM_STEPS,
-                    hold_steps=CONFIRM_HOLD_STEPS,
+                    num_steps=int(args.confirm_steps),
+                    hold_steps=int(args.confirm_hold_steps),
                     trigram_top_k=2,
-                    full_val_final=True,
+                    full_val_final=bool(args.confirm_full_val_final),
                     val_every=512,
                     log_every=128,
                     log_state_every=512,
                     save_every=4096,
+                    batch_size=args.screen_batch_size,
+                    train_label="smoke_confirm" if bool(args.smoke_test) else None,
+                    **shared_command_kwargs(args),
                 ),
             )
         )
@@ -383,7 +498,7 @@ def completed_confirmations(args: argparse.Namespace) -> list[tuple[str, dict[st
             run_version=confirmation_run_version(args),
             seed=str(args.seed),
         )
-        if valid_confirmation_row(row):
+        if valid_confirmation_row(row, args):
             out.append((label, row))
     out.sort(key=lambda item: screen_bpb(item[1]) or float("inf"))
     return out
@@ -407,9 +522,10 @@ def plan_bptt(args: argparse.Namespace) -> list[PlannedCommand]:
     )
     if valid_screen_variant_row(
         existing,
+        args,
         top_k=2,
-        batch_size=DEFAULT_BPTT_BATCH_SIZE,
-        bptt_chunks=DEFAULT_BPTT_CHUNKS,
+        batch_size=int(args.bptt_batch_size),
+        bptt_chunks=int(args.bptt_chunks),
     ):
         return []
     reason = (
@@ -425,17 +541,18 @@ def plan_bptt(args: argparse.Namespace) -> list[PlannedCommand]:
                 label,
                 run_version=bptt_run_version(args),
                 seed=str(args.seed),
-                num_steps=BPTT_STEPS,
-                hold_steps=BPTT_HOLD_STEPS,
+                num_steps=int(args.variant_steps),
+                hold_steps=int(args.variant_hold_steps),
                 trigram_top_k=2,
                 full_val_final=False,
                 val_every=256,
                 log_every=64,
                 log_state_every=256,
                 save_every=2048,
-                batch_size=DEFAULT_BPTT_BATCH_SIZE,
-                bptt_chunks=DEFAULT_BPTT_CHUNKS,
-                train_label="512m_bptt2",
+                batch_size=int(args.bptt_batch_size),
+                bptt_chunks=int(args.bptt_chunks),
+                train_label="smoke_bptt2" if bool(args.smoke_test) else "512m_bptt2",
+                **shared_command_kwargs(args),
             ),
         )
     ]
@@ -466,9 +583,10 @@ def bptt_selected_for_k4(
     )
     if not valid_screen_variant_row(
         bptt_row,
+        args,
         top_k=2,
-        batch_size=DEFAULT_BPTT_BATCH_SIZE,
-        bptt_chunks=DEFAULT_BPTT_CHUNKS,
+        batch_size=int(args.bptt_batch_size),
+        bptt_chunks=int(args.bptt_chunks),
     ):
         return False, "no completed BPTT2 screen"
     base_bpb = screen_bpb(base_row)
@@ -499,9 +617,10 @@ def plan_k4(args: argparse.Namespace) -> list[PlannedCommand]:
     )
     if not valid_screen_variant_row(
         bptt_row,
+        args,
         top_k=2,
-        batch_size=DEFAULT_BPTT_BATCH_SIZE,
-        bptt_chunks=DEFAULT_BPTT_CHUNKS,
+        batch_size=int(args.bptt_batch_size),
+        bptt_chunks=int(args.bptt_chunks),
     ):
         return []
     use_bptt, bptt_reason = bptt_selected_for_k4(args, label)
@@ -514,20 +633,21 @@ def plan_k4(args: argparse.Namespace) -> list[PlannedCommand]:
     )
     if valid_screen_variant_row(
         existing,
+        args,
         top_k=4,
-        batch_size=DEFAULT_BPTT_BATCH_SIZE if use_bptt else None,
-        bptt_chunks=DEFAULT_BPTT_CHUNKS if use_bptt else None,
+        batch_size=int(args.bptt_batch_size) if use_bptt else args.screen_batch_size,
+        bptt_chunks=int(args.bptt_chunks) if use_bptt else None,
     ):
         return []
 
-    extra_kwargs = {}
-    train_label = "512m_k4"
+    extra_kwargs = {"batch_size": args.screen_batch_size}
+    train_label = "smoke_k4" if bool(args.smoke_test) else "512m_k4"
     if use_bptt:
         extra_kwargs = {
-            "batch_size": DEFAULT_BPTT_BATCH_SIZE,
-            "bptt_chunks": DEFAULT_BPTT_CHUNKS,
+            "batch_size": int(args.bptt_batch_size),
+            "bptt_chunks": int(args.bptt_chunks),
         }
-        train_label = "512m_bptt2_k4"
+        train_label = "smoke_bptt2_k4" if bool(args.smoke_test) else "512m_bptt2_k4"
 
     reason = (
         "best completed geometry confirmation; "
@@ -542,8 +662,8 @@ def plan_k4(args: argparse.Namespace) -> list[PlannedCommand]:
                 label,
                 run_version=run_version,
                 seed=str(args.seed),
-                num_steps=BPTT_STEPS,
-                hold_steps=BPTT_HOLD_STEPS,
+                num_steps=int(args.variant_steps),
+                hold_steps=int(args.variant_hold_steps),
                 trigram_top_k=4,
                 full_val_final=False,
                 val_every=256,
@@ -552,6 +672,7 @@ def plan_k4(args: argparse.Namespace) -> list[PlannedCommand]:
                 save_every=2048,
                 train_label=train_label,
                 **extra_kwargs,
+                **shared_command_kwargs(args),
             ),
         )
     ]

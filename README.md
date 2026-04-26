@@ -77,6 +77,17 @@ bash scripts/run_5090_adaptive_closeout.sh \
   --stop-after k4
 ```
 
+Tiny local smoke:
+
+```bash
+bash scripts/run_5090_adaptive_closeout.sh \
+  --smoke-test \
+  --run-id smoke_check \
+  --no-run-benchmark \
+  --stop-after k4 \
+  --count-workers 1
+```
+
 ## Guardrails
 
 Maintained 5090 runs are expected to keep:
