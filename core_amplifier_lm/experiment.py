@@ -23,6 +23,8 @@ from typing import Any, Iterable, Optional
 
 import torch
 
+from .config import trigram_memory_config_value
+
 SUMMARY_FIELDS = [
     "run_name",
     "status",
@@ -38,7 +40,7 @@ SUMMARY_FIELDS = [
     "residual_token_gate_mode",
     "branch_router_mode",
     "base_bigram_delta",
-    "trigram_sidecar",
+    "trigram_memory",
     "trigram_top_k",
     "residual_readout_delta_rank",
     "residual_readout_delta_init_std",
@@ -670,7 +672,7 @@ def summarize_run_dir(run_dir: str | Path) -> dict[str, str]:
         "residual_token_gate_mode": _stringify(model.get("residual_token_gate_mode")),
         "branch_router_mode": _stringify(model.get("branch_router_mode")),
         "base_bigram_delta": _stringify(model.get("base_bigram_delta")),
-        "trigram_sidecar": _stringify(model.get("trigram_sidecar")),
+        "trigram_memory": _stringify(trigram_memory_config_value(model)),
         "trigram_top_k": _stringify(model.get("trigram_top_k")),
         "residual_readout_delta_rank": _stringify(model.get("residual_readout_delta_rank")),
         "residual_readout_delta_init_std": _stringify(model.get("residual_readout_delta_init_std")),

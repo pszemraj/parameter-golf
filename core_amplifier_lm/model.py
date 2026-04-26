@@ -137,8 +137,8 @@ def _normalize_base_bigram_delta_mode(mode: bool | str) -> str:
     return normalized
 
 
-def _normalize_trigram_sidecar_mode(mode: bool | str) -> str:
-    """Normalize the frozen trigram sidecar mode.
+def _normalize_trigram_memory_mode(mode: bool | str) -> str:
+    """Normalize the frozen trigram memory mode.
 
     :param bool | str mode: Requested mode.
     :return str: ``none`` or ``frozen``.
@@ -151,7 +151,7 @@ def _normalize_trigram_sidecar_mode(mode: bool | str) -> str:
     if normalized in {"1", "true", "on", "full"}:
         normalized = "frozen"
     if normalized not in {"none", "frozen"}:
-        raise ValueError(f"trigram_sidecar must be one of {{'none', 'frozen'}}, got {mode!r}")
+        raise ValueError(f"trigram_memory must be one of {{'none', 'frozen'}}, got {mode!r}")
     return normalized
 
 
@@ -1373,7 +1373,7 @@ class CoreAmplifierLM(nn.Module):
         residual_token_gate_mode: str = "none",
         branch_router_mode: str = "none",
         base_bigram_delta: bool | str = "none",
-        trigram_sidecar: bool | str = "none",
+        trigram_memory: bool | str = "none",
         trigram_log_scale_init: float = 0.0,
         residual_readout_delta_rank: int = 0,
         residual_readout_delta_init_std: float = 0.02,
@@ -1398,7 +1398,7 @@ class CoreAmplifierLM(nn.Module):
         :param bool | str base_bigram_delta: Optional trainable current-token
             base-logit correction mode. ``"full"`` enables a zero-initialized
             ``vocab x vocab`` lookup delta; ``"none"`` disables it.
-        :param bool | str trigram_sidecar: Optional frozen trigram sidecar
+        :param bool | str trigram_memory: Optional frozen trigram memory
             mode. ``"frozen"`` enables sparse residual boosts from literal
             ``(x[t-1], x[t])`` contexts stored in the spec.
         :param float trigram_log_scale_init: Initial log scale applied to the
@@ -1422,7 +1422,7 @@ class CoreAmplifierLM(nn.Module):
         )
         self.branch_router_mode = _normalize_branch_router_mode(branch_router_mode)
         self.base_bigram_delta_mode = _normalize_base_bigram_delta_mode(base_bigram_delta)
-        self.trigram_sidecar_mode = _normalize_trigram_sidecar_mode(trigram_sidecar)
+        self.trigram_memory_mode = _normalize_trigram_memory_mode(trigram_memory)
         self.trigram_log_scale_init = float(trigram_log_scale_init)
         self.residual_readout_delta_rank = _normalize_nonnegative_int(
             residual_readout_delta_rank,
@@ -1486,13 +1486,13 @@ class CoreAmplifierLM(nn.Module):
             None if spec.readout_out_proj is None else spec.readout_out_proj.clone(),
             persistent=True,
         )
-        if self.trigram_sidecar_mode != "none" and (
+        if self.trigram_memory_mode != "none" and (
             spec.trigram_top_tokens is None
             or spec.trigram_residual_values is None
             or spec.trigram_context_confidence is None
         ):
             raise ValueError(
-                "trigram_sidecar='frozen' requires trigram_top_tokens, "
+                "trigram_memory='frozen' requires trigram_top_tokens, "
                 "trigram_residual_values, and trigram_context_confidence in spec.pt"
             )
         self.register_buffer(
@@ -1583,7 +1583,7 @@ class CoreAmplifierLM(nn.Module):
         else:
             self.base_bigram_delta = None
             self.base_bigram_delta_log_scale = None
-        if self.trigram_sidecar_mode == "frozen":
+        if self.trigram_memory_mode == "frozen":
             self.trigram_log_scale = nn.Parameter(torch.tensor(self.trigram_log_scale_init))
         else:
             self.trigram_log_scale = None
@@ -1788,7 +1788,7 @@ class CoreAmplifierLM(nn.Module):
             or (self.readout_in_proj is not None and self._readout_in_proj_runtime is None)
             or (self.readout_out_proj is not None and self._readout_out_proj_runtime is None)
             or (
-                self.trigram_sidecar_mode != "none"
+                self.trigram_memory_mode != "none"
                 and (
                     self._trigram_top_tokens_runtime is None
                     or self._trigram_residual_values_runtime is None
@@ -1819,20 +1819,20 @@ class CoreAmplifierLM(nn.Module):
             core_state = core_state.to(device)
         token_device = device or core_state.device
         if self.branch_temporal_mode == "current":
-            if self.trigram_sidecar_mode == "none":
+            if self.trigram_memory_mode == "none":
                 return core_state
             prev_token = torch.zeros(batch_size, dtype=torch.long, device=token_device)
             prev_valid = torch.zeros(batch_size, dtype=torch.bool, device=token_device)
             return core_state, prev_token, prev_valid
         if self.branch_temporal_mode in {"lagged", "hybrid"}:
             history = core_state.new_zeros(batch_size, self.max_branch_lag, self.core_dim)
-            if self.trigram_sidecar_mode == "none":
+            if self.trigram_memory_mode == "none":
                 return core_state, history
             prev_token = torch.zeros(batch_size, dtype=torch.long, device=token_device)
             prev_valid = torch.zeros(batch_size, dtype=torch.bool, device=token_device)
             return core_state, history, prev_token, prev_valid
         ema_state = core_state.new_zeros(batch_size, self.num_branches, self.core_dim)
-        if self.trigram_sidecar_mode == "none":
+        if self.trigram_memory_mode == "none":
             return core_state, ema_state
         prev_token = torch.zeros(batch_size, dtype=torch.long, device=token_device)
         prev_valid = torch.zeros(batch_size, dtype=torch.bool, device=token_device)
@@ -1881,7 +1881,7 @@ class CoreAmplifierLM(nn.Module):
         if self.branch_temporal_mode == "current":
             if isinstance(state, tuple):
                 core_state = state[0]
-                if self.trigram_sidecar_mode != "none" and len(state) >= 3:
+                if self.trigram_memory_mode != "none" and len(state) >= 3:
                     prev_token = state[-2]
                     prev_valid = state[-1]
             else:
@@ -1898,7 +1898,7 @@ class CoreAmplifierLM(nn.Module):
         if isinstance(state, tuple):
             core_state = state[0]
             history = state[1]
-            if self.trigram_sidecar_mode != "none" and len(state) >= 4:
+            if self.trigram_memory_mode != "none" and len(state) >= 4:
                 prev_token = state[-2]
                 prev_valid = state[-1]
         else:
@@ -1942,7 +1942,7 @@ class CoreAmplifierLM(nn.Module):
         :param torch.device device: Target device.
         :return tuple[Optional[torch.Tensor], Optional[torch.Tensor]]: Normalized carry tensors.
         """
-        if self.trigram_sidecar_mode == "none":
+        if self.trigram_memory_mode == "none":
             return None, None
         if prev_token is None:
             prev_token = torch.zeros(batch_size, dtype=torch.long, device=device)
@@ -1969,7 +1969,7 @@ class CoreAmplifierLM(nn.Module):
         :param Optional[torch.Tensor] prev_valid: Previous-token validity.
         :return BranchTemporalState: Packed model state.
         """
-        if self.trigram_sidecar_mode == "none":
+        if self.trigram_memory_mode == "none":
             return core_state if history is None else (core_state, history)
         assert prev_token is not None and prev_valid is not None
         if history is None:
@@ -2039,7 +2039,7 @@ class CoreAmplifierLM(nn.Module):
         context = prev_inside * int(self.vocab_size) + input_ids.long()
         return context, valid
 
-    def _trigram_sidecar_logits(
+    def _trigram_memory_logits(
         self,
         input_ids: torch.Tensor,
         prev_token: Optional[torch.Tensor],
@@ -2047,7 +2047,7 @@ class CoreAmplifierLM(nn.Module):
         *,
         dtype: torch.dtype,
     ) -> torch.Tensor:
-        """Build dense sparse-boost logits from the frozen trigram sidecar.
+        """Build dense sparse-boost logits from the frozen trigram memory.
 
         :param torch.Tensor input_ids: Current token ids.
         :param Optional[torch.Tensor] prev_token: Carried previous tokens.
@@ -2425,8 +2425,8 @@ class CoreAmplifierLM(nn.Module):
                 dtype=residual_logits.dtype,
             )
             base_logits = base_logits + base_delta_scale * base_delta
-        if self.trigram_sidecar_mode != "none":
-            base_logits = base_logits + self._trigram_sidecar_logits(
+        if self.trigram_memory_mode != "none":
+            base_logits = base_logits + self._trigram_memory_logits(
                 input_ids,
                 prev_token,
                 prev_valid,
@@ -2442,7 +2442,7 @@ class CoreAmplifierLM(nn.Module):
         )
         next_prev_token: Optional[torch.Tensor] = None
         next_prev_valid: Optional[torch.Tensor] = None
-        if self.trigram_sidecar_mode != "none":
+        if self.trigram_memory_mode != "none":
             next_prev_token = input_ids[:, -1].detach().long()
             next_prev_valid = torch.ones(batch_size, dtype=torch.bool, device=input_ids.device)
         next_state = self._pack_state(

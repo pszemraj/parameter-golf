@@ -16,7 +16,7 @@ import torch
 from core_amplifier_lm import (
     AmplifierSpec,
     DEFAULTS,
-    add_trigram_sidecar_to_spec,
+    add_trigram_memory_to_spec,
     build_amplifier_spec,
     build_spec_optimized,
     load_tokens_int32,
@@ -353,8 +353,8 @@ def test_base_bigram_delta_is_initially_neutral_and_trainable():
     assert grad.abs().sum().item() > 0
 
 
-def test_trigram_sidecar_applies_literal_context_boost_and_carries_state():
-    """Frozen trigram sidecar should use actual prior-token context."""
+def test_trigram_memory_applies_literal_context_boost_and_carries_state():
+    """Frozen trigram memory should use actual prior-token context."""
     rng = np.random.default_rng(SEED)
     tokens = rng.integers(0, VOCAB, size=20_000, dtype=np.int64)
     base_spec = build_amplifier_spec(
@@ -397,7 +397,7 @@ def test_trigram_sidecar_applies_literal_context_boost_and_carries_state():
     candidate = CoreAmplifierLM(
         spec,
         core_layers=1,
-        trigram_sidecar="frozen",
+        trigram_memory="frozen",
         amplifier_dtype=torch.float32,
     )
     candidate.load_state_dict(reference.state_dict(), strict=False)
@@ -419,8 +419,8 @@ def test_trigram_sidecar_applies_literal_context_boost_and_carries_state():
     assert torch.allclose(cand_logits, stepwise, atol=1e-4, rtol=1e-4)
 
 
-def test_trigram_sidecar_requires_spec_tensors():
-    """Enabling trigram mode without sidecar tensors should fail loudly."""
+def test_trigram_memory_requires_spec_tensors():
+    """Enabling trigram mode without memory tensors should fail loudly."""
     rng = np.random.default_rng(SEED)
     tokens = rng.integers(0, VOCAB, size=20_000, dtype=np.int64)
     spec = build_amplifier_spec(
@@ -433,12 +433,12 @@ def test_trigram_sidecar_requires_spec_tensors():
     )
     from core_amplifier_lm import CoreAmplifierLM
 
-    with pytest.raises(ValueError, match="trigram_sidecar"):
-        CoreAmplifierLM(spec, trigram_sidecar="frozen")
+    with pytest.raises(ValueError, match="trigram_memory"):
+        CoreAmplifierLM(spec, trigram_memory="frozen")
 
 
-def test_add_trigram_sidecar_to_spec_counts_top_contexts(tmp_path: Path):
-    """Sidecar builder should recover top next tokens for literal contexts."""
+def test_add_trigram_memory_to_spec_counts_top_contexts(tmp_path: Path):
+    """Trigram memory builder should recover top next tokens for literal contexts."""
     vocab = 16
     train_tokens = np.array([1, 2, 3, 1, 2, 3, 1, 2, 4, 5, 6, 7], dtype=np.int64)
     spec = build_amplifier_spec(
@@ -453,7 +453,7 @@ def test_add_trigram_sidecar_to_spec_counts_top_contexts(tmp_path: Path):
     shard_dir.mkdir()
     train_tokens.astype(np.uint16).tofile(shard_dir / "fineweb_train_000000.bin")
 
-    sidecar = add_trigram_sidecar_to_spec(
+    memory = add_trigram_memory_to_spec(
         spec,
         shard_dir,
         top_k=2,
@@ -461,13 +461,13 @@ def test_add_trigram_sidecar_to_spec_counts_top_contexts(tmp_path: Path):
         chunk_size=4,
         verbose=False,
     )
-    assert sidecar.trigram_top_tokens is not None
-    assert sidecar.trigram_residual_values is not None
-    assert sidecar.trigram_context_confidence is not None
+    assert memory.trigram_top_tokens is not None
+    assert memory.trigram_residual_values is not None
+    assert memory.trigram_context_confidence is not None
     context = 1 * vocab + 2
-    assert int(sidecar.trigram_top_tokens[context, 0].item()) == 3
-    assert int(sidecar.trigram_context_confidence[context].item()) > 0
-    assert sidecar.metadata["trigram_top_k"] == 2
+    assert int(memory.trigram_top_tokens[context, 0].item()) == 3
+    assert int(memory.trigram_context_confidence[context].item()) > 0
+    assert memory.metadata["trigram_top_k"] == 2
 
 
 def test_residual_token_gate_is_initially_neutral():
@@ -969,7 +969,7 @@ def test_record_defaults_match_recommended_run():
     assert model["branch_temporal_lag_scale"] == 1.0
     assert model["residual_token_gate_mode"] == "none"
     assert model["branch_router_mode"] == "none"
-    assert model["trigram_sidecar"] == "none"
+    assert model["trigram_memory"] == "none"
     assert train["batch_size"] == 256
     assert train["carry_chunks"] == 16
     assert train["bptt_chunks"] == 2
@@ -1674,7 +1674,7 @@ def test_training_script_architecture_modes_roundtrip():
                 "core_base",
                 "--branch-router-mode",
                 "softmax",
-                "--trigram-sidecar",
+                "--trigram-memory",
                 "none",
                 "--scan-backend",
                 "assoc",
@@ -1717,7 +1717,7 @@ def test_training_script_architecture_modes_roundtrip():
         assert resolved["model"]["branch_temporal_mode"] == "ema_hybrid"
         assert resolved["model"]["residual_token_gate_mode"] == "core_base"
         assert resolved["model"]["branch_router_mode"] == "softmax"
-        assert resolved["model"]["trigram_sidecar"] == "none"
+        assert resolved["model"]["trigram_memory"] == "none"
         assert resolved["runtime"]["scan_backend_requested"] == "assoc"
         assert resolved["runtime"]["scan_backend_active"] == "assoc"
 

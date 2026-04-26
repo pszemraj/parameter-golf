@@ -102,8 +102,8 @@ def main() -> None:
         env("RESIDUAL_CORE_INIT", _to_env_default(model_defaults["residual_core_init"])),
         "--base-bigram-delta",
         env("BASE_BIGRAM_DELTA", _to_env_default(model_defaults["base_bigram_delta"])),
-        "--trigram-sidecar",
-        env("TRIGRAM_SIDECAR", _to_env_default(model_defaults["trigram_sidecar"])),
+        "--trigram-memory",
+        env("TRIGRAM_MEMORY", _to_env_default(model_defaults["trigram_memory"])),
         "--trigram-log-scale-init",
         env(
             "TRIGRAM_LOG_SCALE_INIT",
@@ -172,8 +172,8 @@ def main() -> None:
         env("RESIDUAL_CORE_INIT", _to_env_default(model_defaults["residual_core_init"])),
         "--base-bigram-delta",
         env("BASE_BIGRAM_DELTA", _to_env_default(model_defaults["base_bigram_delta"])),
-        "--trigram-sidecar",
-        env("TRIGRAM_SIDECAR", _to_env_default(model_defaults["trigram_sidecar"])),
+        "--trigram-memory",
+        env("TRIGRAM_MEMORY", _to_env_default(model_defaults["trigram_memory"])),
         "--trigram-log-scale-init",
         env(
             "TRIGRAM_LOG_SCALE_INIT",

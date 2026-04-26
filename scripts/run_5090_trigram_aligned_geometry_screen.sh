@@ -79,14 +79,15 @@ if [[ -z "${GEOMETRY_TRAIN_LABEL:-}" ]]; then
 fi
 export GEOMETRY_TRAIN_LABEL
 
-export TRIGRAM_SIDECAR="${TRIGRAM_SIDECAR:-frozen}"
+export TRIGRAM_MEMORY="${TRIGRAM_MEMORY:-frozen}"
 export TRIGRAM_LOG_SCALE_INIT="${TRIGRAM_LOG_SCALE_INIT:-0.0}"
 export TRIGRAM_TOP_K="${TRIGRAM_TOP_K:-2}"
 export TRIGRAM_RESIDUAL_CLIP="${TRIGRAM_RESIDUAL_CLIP:-8.0}"
 export TRIGRAM_CONFIDENCE_COUNT_CAP="${TRIGRAM_CONFIDENCE_COUNT_CAP:-4096}"
 export TRIGRAM_CHUNK_SIZE="${TRIGRAM_CHUNK_SIZE:-50000000}"
-export TRIGRAM_SPEC_CACHE_ROOT="${TRIGRAM_SPEC_CACHE_ROOT:-${COREAMP_SPEC_CACHE_ROOT}}"
-export TRIGRAM_TABLE_CACHE_ROOT="${TRIGRAM_TABLE_CACHE_ROOT:-${COREAMP_SPEC_CACHE_ROOT}/trigram_tables}"
+export TRIGRAM_MEMORY_SPEC_CACHE_ROOT="${TRIGRAM_MEMORY_SPEC_CACHE_ROOT:-${COREAMP_SPEC_CACHE_ROOT}}"
+export TRIGRAM_MEMORY_TABLE_CACHE_ROOT="${TRIGRAM_MEMORY_TABLE_CACHE_ROOT:-${COREAMP_SPEC_CACHE_ROOT}/trigram_memory_tables}"
+export REBUILD_TRIGRAM_MEMORY_TABLE_CACHE="${REBUILD_TRIGRAM_MEMORY_TABLE_CACHE:-0}"
 
 export TARGET_EFFECTIVE_STEP_TOKENS="${TARGET_EFFECTIVE_STEP_TOKENS:-131072}"
 export DATA_PATH="${DATA_PATH:-${REPO_ROOT}/data/datasets/fineweb10B_sp1024}"
@@ -153,7 +154,7 @@ ensure_shared_spec() {
     --residual-token-gate-mode none
     --branch-router-mode none
     --base-bigram-delta none
-    --trigram-sidecar none
+    --trigram-memory none
     --scan-backend auto
   )
   if [[ "${DRY_RUN:-0}" == "1" ]]; then
@@ -165,22 +166,22 @@ ensure_shared_spec() {
   "${cmd[@]}"
 }
 
-resolve_trigram_spec_dir() {
+resolve_trigram_memory_spec_dir() {
   local source_spec_dir="$1"
   local family="$2"
   if [[ "${DRY_RUN:-0}" == "1" && ! -f "${source_spec_dir}/spec.pt" ]]; then
-    printf '%s/trigram_specs/%s_k%s_dryrun' \
-      "${TRIGRAM_SPEC_CACHE_ROOT}" \
+    printf '%s/trigram_memory_specs/%s_k%s_dryrun' \
+      "${TRIGRAM_MEMORY_SPEC_CACHE_ROOT}" \
       "$(slugify "${family}")" \
       "${TRIGRAM_TOP_K}"
     return 0
   fi
   local cmd=(
-    "${PYTHON_BIN}" "${REPO_ROOT}/tools/trigram_sidecar_cache_path.py"
+    "${PYTHON_BIN}" "${REPO_ROOT}/tools/trigram_memory_spec_path.py"
     "${source_spec_dir}"
     --data "${DATA_PATH}"
     --family "${family}"
-    --cache-root "${TRIGRAM_SPEC_CACHE_ROOT}"
+    --cache-root "${TRIGRAM_MEMORY_SPEC_CACHE_ROOT}"
     --storage-dtype "${STORAGE_DTYPE}"
     --top-k "${TRIGRAM_TOP_K}"
     --smoothing 0.25
@@ -194,17 +195,17 @@ resolve_trigram_spec_dir() {
   "${cmd[@]}"
 }
 
-ensure_trigram_spec() {
+ensure_trigram_memory_spec() {
   local source_spec_dir="$1"
   local out_spec_dir="$2"
-  if [[ "${REBUILD_TRIGRAM_SIDECAR:-0}" != "1" && -f "${out_spec_dir}/spec.pt" && -f "${out_spec_dir}/config.json" ]]; then
-    echo "Using cached trigram sidecar spec: ${out_spec_dir}"
+  if [[ "${REBUILD_TRIGRAM_MEMORY:-0}" != "1" && -f "${out_spec_dir}/spec.pt" && -f "${out_spec_dir}/config.json" ]]; then
+    echo "Using cached trigram memory spec: ${out_spec_dir}"
     return 0
   fi
 
-  echo "Building dense trigram top-${TRIGRAM_TOP_K} sidecar from full training shards ..."
+  echo "Building dense trigram top-${TRIGRAM_TOP_K} memory spec from full training shards ..."
   local cmd=(
-    "${PYTHON_BIN}" "${REPO_ROOT}/tools/build_trigram_sidecar.py"
+    "${PYTHON_BIN}" "${REPO_ROOT}/tools/build_trigram_memory_spec.py"
     "${source_spec_dir}"
     "${out_spec_dir}"
     --data "${DATA_PATH}"
@@ -214,12 +215,12 @@ ensure_trigram_spec() {
     --residual-clip "${TRIGRAM_RESIDUAL_CLIP}"
     --confidence-count-cap "${TRIGRAM_CONFIDENCE_COUNT_CAP}"
     --chunk-size "${TRIGRAM_CHUNK_SIZE}"
-    --table-cache-root "${TRIGRAM_TABLE_CACHE_ROOT}"
+    --table-cache-root "${TRIGRAM_MEMORY_TABLE_CACHE_ROOT}"
   )
-  if [[ "${REBUILD_TRIGRAM_SIDECAR:-0}" == "1" ]]; then
+  if [[ "${REBUILD_TRIGRAM_MEMORY:-0}" == "1" ]]; then
     cmd+=(--force)
   fi
-  if [[ "${REBUILD_TRIGRAM_TABLE_CACHE:-0}" == "1" ]]; then
+  if [[ "${REBUILD_TRIGRAM_MEMORY_TABLE_CACHE}" == "1" ]]; then
     cmd+=(--rebuild-table-cache)
   fi
   if [[ -n "${TRIGRAM_MAX_TOKENS:-}" ]]; then
@@ -243,14 +244,14 @@ seeds=${SEEDS}
 run_version=${RUN_VERSION}
 geometry_core_dim=${GEOMETRY_CORE_DIM} layers=${GEOMETRY_CORE_LAYERS} inner_dim=${GEOMETRY_CORE_INNER_DIM_RESOLVED} expansion=${GEOMETRY_CORE_EXPANSION} blocks=${GEOMETRY_NUM_BLOCKS}
 geometry_branch_lags=${GEOMETRY_BRANCH_LAGS}
-trigram_sidecar=${TRIGRAM_SIDECAR} top_k=${TRIGRAM_TOP_K} log_scale_init=${TRIGRAM_LOG_SCALE_INIT}
+trigram_memory=${TRIGRAM_MEMORY} top_k=${TRIGRAM_TOP_K} log_scale_init=${TRIGRAM_LOG_SCALE_INIT}
 learning_rate=${LEARNING_RATE}
 compile=${COMPILE} gradient_checkpointing=${GRADIENT_CHECKPOINTING} skip_done=${SKIP_DONE}
 num_steps=${GEOMETRY_NUM_STEPS} lr_hold_steps=${GEOMETRY_LR_HOLD_STEPS} carry_chunks=${GEOMETRY_CARRY_CHUNKS} bptt_chunks=${GEOMETRY_BPTT_CHUNKS}
 batch_size=${GEOMETRY_BATCH_SIZE} seq_len=${GEOMETRY_SEQ_LEN} target_effective_step_tokens=${TARGET_EFFECTIVE_STEP_TOKENS}
 coreamp_spec_cache_root=${COREAMP_SPEC_CACHE_ROOT}
-trigram_spec_cache_root=${TRIGRAM_SPEC_CACHE_ROOT}
-trigram_table_cache_root=${TRIGRAM_TABLE_CACHE_ROOT}
+trigram_memory_spec_cache_root=${TRIGRAM_MEMORY_SPEC_CACHE_ROOT}
+trigram_memory_table_cache_root=${TRIGRAM_MEMORY_TABLE_CACHE_ROOT}
 scan_backend=${SCAN_BACKEND} wandb_project=${WANDB_PROJECT} cublaslt=${TORCH_BLAS_PREFER_CUBLASLT} py_unbuffered=${PYTHONUNBUFFERED}
 EOF
   if [[ "${DRY_RUN:-0}" == "1" ]]; then
@@ -263,9 +264,9 @@ run_blocks0_seed() {
   local source_spec_dir
   source_spec_dir="$(shared_spec_dir)"
   ensure_shared_spec "${source_spec_dir}"
-  local sidecar_spec_dir
-  sidecar_spec_dir="$(resolve_trigram_spec_dir "${source_spec_dir}" "${GEOMETRY_LABEL}")"
-  ensure_trigram_spec "${source_spec_dir}" "${sidecar_spec_dir}"
+  local memory_spec_dir
+  memory_spec_dir="$(resolve_trigram_memory_spec_dir "${source_spec_dir}" "${GEOMETRY_LABEL}")"
+  ensure_trigram_memory_spec "${source_spec_dir}" "${memory_spec_dir}"
 
   local model_root="${REPO_ROOT}/experiments/5090_architecture/${GEOMETRY_LABEL}_trigram_seed${seed}_${RUN_VERSION}"
   local run_name="${GEOMETRY_LABEL}_trigramk${TRIGRAM_TOP_K}_${LEARNING_RATE_TAG}_h${GEOMETRY_LR_HOLD_STEPS}_${GEOMETRY_TRAIN_LABEL}_s${seed}"
@@ -278,7 +279,7 @@ EOF
   echo "[blocks0_aligned] seed=${seed} trigram_top_k=${TRIGRAM_TOP_K} lr=${LEARNING_RATE} inner_dim=${GEOMETRY_CORE_INNER_DIM_RESOLVED} model_root=${model_root}"
   env \
     SEED="${seed}" \
-    SHARED_SPEC_DIR="${sidecar_spec_dir}" \
+    SHARED_SPEC_DIR="${memory_spec_dir}" \
     MODEL_ROOT="${model_root}" \
     CORE_DIM="${GEOMETRY_CORE_DIM}" \
     CORE_LAYERS="${GEOMETRY_CORE_LAYERS}" \
@@ -288,7 +289,7 @@ EOF
     NUM_BLOCKS="${GEOMETRY_NUM_BLOCKS}" \
     BRANCH_LAGS="${GEOMETRY_BRANCH_LAGS}" \
     WANDB_GROUP="${GEOMETRY_LABEL}_trigram512m_${RUN_VERSION}" \
-    WANDB_TAGS="core_amp,5090,architecture,trigram_sidecar,aligned_geometry,screening,${LEARNING_RATE_TAG}" \
+    WANDB_TAGS="core_amp,5090,architecture,trigram_memory,aligned_geometry,screening,${LEARNING_RATE_TAG}" \
     CORE_AMP_PHASE="5090_trigram_aligned_geometry_screen" \
     RUN_SPECS="${run_specs}" \
     "${PYTHON_BIN}" "${REPO_ROOT}/tools/run_core_amp_sweep.py" controller

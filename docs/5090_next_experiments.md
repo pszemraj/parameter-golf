@@ -30,7 +30,7 @@ Interpretation:
 
 ## 5090 Performance Read
 
-The current quality leader is not slow because of the trigram sidecar. Local
+The current quality leader is not slow because of the trigram memory. Local
 CUDA microbenchmarks at the maintained `B=256`, `T=512` contract show the
 dominant cost is the recurrent controller geometry:
 
@@ -86,9 +86,9 @@ Working defaults now:
   - `1` shard
   - `62,021,846` tokens
   - used only for eval/full-val evidence, not frozen statistics
-- Trigram sidecar specs are cached outside the repo under
-  `${TRIGRAM_SPEC_CACHE_ROOT:-~/.cache/experiments/param-golf-coreamp}` and are
-  keyed by the source spec hash plus sidecar parameters, so compatible ablations
+- Trigram memory specs are cached outside the repo under
+  `${TRIGRAM_MEMORY_SPEC_CACHE_ROOT:-~/.cache/experiments/param-golf-coreamp}` and are
+  keyed by the source spec hash plus memory parameters, so compatible ablations
   reuse the same full-data build.
 - `512M` is the default serious screening budget.
 - `1B` is the confirmation budget for finalists.
@@ -183,11 +183,11 @@ Completed so far in the final-week lane:
     - treat the ranking as close enough that new architecture probes should
       screen both, not only the current mean leader
 
-- gate/LR sidecar:
+- gate/LR follow-up:
   - completed `blocks1 gate=base lr=3.5e-3` seed `1337`
   - result: `2.2575790952`, slower than the matching no-gate safe-lane point
   - decision:
-    - stop this sidecar
+    - stop this lane
     - do not spend more queue time on the existing tokenwise gate formulation
 
 ## Plan Delta From The No-Fallback Audit
@@ -209,7 +209,7 @@ Practical consequence:
 
 ## Immediate Next Commands
 
-The top-2 blocks0 trigram sidecar is confirmed under the `1B` contract. The
+The top-2 blocks0 trigram memory is confirmed under the `1B` contract. The
 performance read makes the reviewer-aligned geometry frontier higher priority
 than top-K headroom, because the current controller shape is both slow and
 memory-heavy.
@@ -251,13 +251,13 @@ Promotion rule:
 After the geometry read, the top-K headroom question remains:
 
 ```bash
-DRY_RUN=1 RUN_VERSION=v2 TRIGRAM_TOP_K=4 SEEDS=1337 bash scripts/run_5090_trigram_sidecar_screen.sh
+DRY_RUN=1 RUN_VERSION=v2 TRIGRAM_TOP_K=4 SEEDS=1337 bash scripts/run_5090_trigram_memory_screen.sh
 ```
 
 Then run:
 
 ```bash
-RUN_VERSION=v2 TRIGRAM_TOP_K=4 SEEDS=1337 bash scripts/run_5090_trigram_sidecar_screen.sh
+RUN_VERSION=v2 TRIGRAM_TOP_K=4 SEEDS=1337 bash scripts/run_5090_trigram_memory_screen.sh
 ```
 
 Promotion rule:
@@ -277,7 +277,7 @@ Replay `blocks1` only as a geometry check after the blocks0 top-K and aligned
 geometry decisions:
 
 ```bash
-RUN_VERSION=v1 SEEDS=1337 RUN_BLOCKS1=1 RUN_BLOCKS0=0 bash scripts/run_5090_trigram_sidecar_screen.sh
+RUN_VERSION=v1 SEEDS=1337 RUN_BLOCKS1=1 RUN_BLOCKS0=0 bash scripts/run_5090_trigram_memory_screen.sh
 ```
 
 Use diagnostics on completed or partial runs before adding secondary adapters:
@@ -286,12 +286,12 @@ Use diagnostics on completed or partial runs before adding secondary adapters:
 conda run -s --name train python tools/analyze_core_amp_run.py /path/to/run_dir --checkpoint /path/to/run_dir/final.pt --steps 64 --batch-size 64 --device cuda
 ```
 
-The old `gate x lr` sidecar is no longer recommended.
+The old `gate x lr` follow-up is no longer recommended.
 The base-bigram delta and readout-delta scripts remain available, but they are
 now secondary to the trigram memory probe.
 
 Readout-delta is still available, but it is a secondary adapter lane. Use it
-only after the trigram sidecar read is understood:
+only after the trigram memory read is understood:
 
 ```bash
 RUN_VERSION=v1 SEEDS=1337 RANKS="128 256" bash scripts/run_5090_readout_delta_screen.sh
@@ -315,7 +315,7 @@ That means the next architecture order is now:
    remains comfortably under cap)
 5. base-bigram delta or readout-delta only as secondary calibration/capacity
    checks
-6. optional score-first adaptive n-gram cache only after the static sidecar is
+6. optional score-first adaptive n-gram cache only after the static memory is
    validated and compliance is documented
 
 Current practical interpretation:
@@ -325,7 +325,7 @@ Current practical interpretation:
 - the existing gate cross-term did not survive at `lr=3.5e-3`
 - current lag operators are not evidence against temporal structure because
   they do not expose literal high-order context identity
-- top-2 trigram sidecar is now the strongest non-transformer use of artifact
+- top-2 trigram memory is now the strongest non-transformer use of artifact
   budget, but controller geometry is the immediate bottleneck to resolve before
   spending more runs on K4/K8
 

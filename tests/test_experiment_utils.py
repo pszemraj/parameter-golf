@@ -157,7 +157,7 @@ def test_summarize_run_dir_reads_structured_artifacts(tmp_path: Path):
                 "residual_token_gate_mode": "base",
                 "branch_router_mode": "softmax",
                 "base_bigram_delta": "full",
-                "trigram_sidecar": "frozen",
+                "trigram_memory": "frozen",
                 "trigram_top_k": 2,
                 "residual_readout_delta_rank": 128,
                 "residual_readout_delta_init_std": 0.02,
@@ -254,7 +254,7 @@ def test_summarize_run_dir_reads_structured_artifacts(tmp_path: Path):
     assert row["residual_token_gate_mode"] == "base"
     assert row["branch_router_mode"] == "softmax"
     assert row["base_bigram_delta"] == "full"
-    assert row["trigram_sidecar"] == "frozen"
+    assert row["trigram_memory"] == "frozen"
     assert row["trigram_top_k"] == "2"
     assert row["residual_readout_delta_rank"] == "128"
     assert row["residual_readout_delta_init_std"] == "0.02"

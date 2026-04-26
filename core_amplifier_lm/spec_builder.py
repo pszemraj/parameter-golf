@@ -919,7 +919,7 @@ def _training_token_files(source: str | Path) -> list[Path]:
     return [p]
 
 
-def add_trigram_sidecar_to_spec(
+def add_trigram_memory_to_spec(
     spec: AmplifierSpec,
     source: str | Path,
     *,
@@ -932,7 +932,7 @@ def add_trigram_sidecar_to_spec(
     chunk_size: int = 50_000_000,
     verbose: bool = True,
 ) -> AmplifierSpec:
-    """Attach an exact dense trigram top-K sidecar to a spec.
+    """Attach exact dense trigram top-K memory tensors to a spec.
 
     :param AmplifierSpec spec: Base amplifier spec.
     :param str | Path source: Training-token source.
@@ -944,7 +944,7 @@ def add_trigram_sidecar_to_spec(
     :param Optional[int] max_tokens: Optional cap for local smoke builds.
     :param int chunk_size: Counting chunk size in trigram positions.
     :param bool verbose: Whether to print progress.
-    :return AmplifierSpec: Copy of ``spec`` with trigram sidecar tensors.
+    :return AmplifierSpec: Copy of ``spec`` with trigram memory tensors.
     """
     vocab_size = int(spec.vocab_size)
     if vocab_size > np.iinfo(np.int16).max:
@@ -969,7 +969,7 @@ def add_trigram_sidecar_to_spec(
 
     if verbose:
         print(
-            f"Building dense trigram top-{top_k} sidecar from {len(files)} training files "
+            f"Building dense trigram top-{top_k} memory from {len(files)} training files "
             f"({counts.nbytes / 1e9:.2f} GB count table) ...",
             flush=True,
         )
@@ -1004,7 +1004,7 @@ def add_trigram_sidecar_to_spec(
         if verbose and ((file_idx + 1) % 10 == 0 or file_idx + 1 == len(files)):
             elapsed = time.monotonic() - started
             print(
-                f"  trigram sidecar counted {file_idx + 1}/{len(files)} files | "
+                f"  trigram memory counted {file_idx + 1}/{len(files)} files | "
                 f"tokens={tokens_seen / 1e9:.2f}B triples={triples_seen / 1e9:.2f}B "
                 f"| {triples_seen / max(elapsed, 1e-6) / 1e6:.1f}M triples/s",
                 flush=True,
@@ -1035,7 +1035,7 @@ def add_trigram_sidecar_to_spec(
     metadata = dict(spec.metadata)
     metadata.update(
         {
-            "trigram_sidecar": "dense_topk_residual",
+            "trigram_memory": "dense_topk_residual",
             "trigram_top_k": int(top_k),
             "trigram_tokens_seen": int(tokens_seen),
             "trigram_triples_seen": int(triples_seen),
@@ -1067,7 +1067,7 @@ def add_trigram_sidecar_to_spec(
 
 __all__ = [
     "SPEC_STRATEGIES",
-    "add_trigram_sidecar_to_spec",
+    "add_trigram_memory_to_spec",
     "build_spec_optimized",
     "count_all",
     "load_tokens_int32",

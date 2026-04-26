@@ -256,7 +256,7 @@ def make_synthetic_spec(
     :param int core_dim: Core width.
     :param tuple[int, ...] branch_lags: Branch lags.
     :param int num_blocks: Synthetic frozen amplifier block count.
-    :param int trigram_top_k: Synthetic sidecar top-K, or ``0`` for none.
+    :param int trigram_top_k: Synthetic trigram-memory top-K, or ``0`` for none.
     :return AmplifierSpec: Synthetic spec.
     """
     generator = torch.Generator(device="cpu").manual_seed(1234 + core_dim + trigram_top_k)
@@ -350,7 +350,7 @@ def benchmark_full(
     :param int vocab_size: Vocabulary size.
     :param tuple[int, ...] branch_lags: Branch lags.
     :param int num_blocks: Frozen amplifier block count.
-    :param int trigram_top_k: Sidecar top-K, or ``0`` for none.
+    :param int trigram_top_k: Trigram-memory top-K, or ``0`` for none.
     :param bool compile_enabled: Whether to use ``torch.compile``.
     :return PerfResult: Benchmark row.
     """
@@ -373,7 +373,7 @@ def benchmark_full(
         branch_temporal_mode="current",
         residual_token_gate_mode="none",
         branch_router_mode="none",
-        trigram_sidecar="frozen" if trigram_top_k > 0 else "none",
+        trigram_memory="frozen" if trigram_top_k > 0 else "none",
         trigram_log_scale_init=0.0,
         scan_backend="auto",
     ).to(device)

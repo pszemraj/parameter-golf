@@ -601,7 +601,7 @@ def update_controller_config(
     cfg.model["residual_token_gate_mode"] = env("RESIDUAL_TOKEN_GATE_MODE", "none")
     cfg.model["branch_router_mode"] = env("BRANCH_ROUTER_MODE", "none")
     cfg.model["base_bigram_delta"] = env("BASE_BIGRAM_DELTA", "none")
-    cfg.model["trigram_sidecar"] = env("TRIGRAM_SIDECAR", "none")
+    cfg.model["trigram_memory"] = env("TRIGRAM_MEMORY", "none")
     cfg.model["trigram_log_scale_init"] = float(env("TRIGRAM_LOG_SCALE_INIT", "0.0"))
     cfg.model["residual_readout_delta_rank"] = int(env("RESIDUAL_READOUT_DELTA_RANK", "0"))
     cfg.model["residual_readout_delta_init_std"] = float(
@@ -740,8 +740,8 @@ def run_controller_sweep(repo_root: Path) -> None:
         env("BRANCH_ROUTER_MODE", "none"),
         "--base-bigram-delta",
         env("BASE_BIGRAM_DELTA", "none"),
-        "--trigram-sidecar",
-        env("TRIGRAM_SIDECAR", "none"),
+        "--trigram-memory",
+        env("TRIGRAM_MEMORY", "none"),
         "--trigram-log-scale-init",
         env("TRIGRAM_LOG_SCALE_INIT", "0.0"),
         "--residual-readout-delta-rank",
@@ -897,8 +897,8 @@ def run_controller_sweep(repo_root: Path) -> None:
             env("BRANCH_ROUTER_MODE", "none"),
             "--base-bigram-delta",
             env("BASE_BIGRAM_DELTA", "none"),
-            "--trigram-sidecar",
-            env("TRIGRAM_SIDECAR", "none"),
+            "--trigram-memory",
+            env("TRIGRAM_MEMORY", "none"),
             "--trigram-log-scale-init",
             env("TRIGRAM_LOG_SCALE_INIT", "0.0"),
             "--residual-readout-delta-rank",
@@ -1060,8 +1060,8 @@ def run_structure_sweep(repo_root: Path) -> None:
             env("BRANCH_ROUTER_MODE", "none"),
             "--base-bigram-delta",
             env("BASE_BIGRAM_DELTA", "none"),
-            "--trigram-sidecar",
-            env("TRIGRAM_SIDECAR", "none"),
+            "--trigram-memory",
+            env("TRIGRAM_MEMORY", "none"),
             "--trigram-log-scale-init",
             env("TRIGRAM_LOG_SCALE_INIT", "0.0"),
             "--residual-readout-delta-rank",
@@ -1111,7 +1111,7 @@ def run_structure_sweep(repo_root: Path) -> None:
             cfg.meta["run_name"] = spec.name
             cfg.meta["phase"] = env("CORE_AMP_PHASE", "5090_structure_screening")
             cfg.model["base_bigram_delta"] = env("BASE_BIGRAM_DELTA", "none")
-            cfg.model["trigram_sidecar"] = env("TRIGRAM_SIDECAR", "none")
+            cfg.model["trigram_memory"] = env("TRIGRAM_MEMORY", "none")
             cfg.model["trigram_log_scale_init"] = float(env("TRIGRAM_LOG_SCALE_INIT", "0.0"))
             cfg.model["residual_readout_delta_rank"] = int(env("RESIDUAL_READOUT_DELTA_RANK", "0"))
             cfg.model["residual_readout_delta_init_std"] = float(
@@ -1187,8 +1187,8 @@ def run_structure_sweep(repo_root: Path) -> None:
             env("BRANCH_ROUTER_MODE", "none"),
             "--base-bigram-delta",
             env("BASE_BIGRAM_DELTA", "none"),
-            "--trigram-sidecar",
-            env("TRIGRAM_SIDECAR", "none"),
+            "--trigram-memory",
+            env("TRIGRAM_MEMORY", "none"),
             "--trigram-log-scale-init",
             env("TRIGRAM_LOG_SCALE_INIT", "0.0"),
             "--residual-readout-delta-rank",

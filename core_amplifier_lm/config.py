@@ -28,7 +28,20 @@ import json
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
+
+
+LEGACY_TRIGRAM_MEMORY_KEY = "trigram_sidecar"
+
+
+def trigram_memory_config_value(model: Mapping[str, Any], default: Any = None) -> Any:
+    """Return the canonical trigram memory setting from a model config.
+
+    :param Mapping[str, Any] model: Model config mapping.
+    :param Any default: Default value when no trigram memory setting exists.
+    :return Any: Resolved trigram memory setting.
+    """
+    return model.get("trigram_memory", model.get(LEGACY_TRIGRAM_MEMORY_KEY, default))
 
 
 # Defaults for everything. One source of truth.
@@ -42,7 +55,7 @@ DEFAULTS = {
         "residual_token_gate_mode": "none",
         "branch_router_mode": "none",
         "base_bigram_delta": "none",
-        "trigram_sidecar": "none",
+        "trigram_memory": "none",
         "trigram_log_scale_init": 0.0,
         "residual_readout_delta_rank": 0,
         "residual_readout_delta_init_std": 0.02,
@@ -106,7 +119,7 @@ _ARG_MAP: dict[str, tuple[str, str]] = {
     "residual_token_gate_mode": ("model", "residual_token_gate_mode"),
     "branch_router_mode": ("model", "branch_router_mode"),
     "base_bigram_delta": ("model", "base_bigram_delta"),
-    "trigram_sidecar": ("model", "trigram_sidecar"),
+    "trigram_memory": ("model", "trigram_memory"),
     "trigram_log_scale_init": ("model", "trigram_log_scale_init"),
     "residual_readout_delta_rank": ("model", "residual_readout_delta_rank"),
     "residual_readout_delta_init_std": ("model", "residual_readout_delta_init_std"),
@@ -334,6 +347,11 @@ class ModelConfig:
         # Merge with defaults for any missing keys
         merged = _deep_copy(DEFAULTS)
         _deep_update(merged, data)
+        old_model = data.get("model", {}) if isinstance(data, dict) else {}
+        # Keep old run analysis readable without using the pre-rename key in new
+        # configs.
+        if "trigram_memory" not in old_model and LEGACY_TRIGRAM_MEMORY_KEY in old_model:
+            merged["model"]["trigram_memory"] = old_model[LEGACY_TRIGRAM_MEMORY_KEY]
         return cls(p, merged)
 
     @classmethod

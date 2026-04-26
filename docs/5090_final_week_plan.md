@@ -62,14 +62,14 @@ Fixed screening contract:
 Frozen spec/statistics coverage:
 
 - train shards: `195`
-- train tokens used for specs/sidecars: `19,473,201,340`
+- train tokens used for specs/trigram memories: `19,473,201,340`
 - validation shards: `1`
 - validation tokens: `62,021,846`
 - validation tokens are not used for frozen statistics
 
-Trigram sidecar specs are cached under
-`${TRIGRAM_SPEC_CACHE_ROOT:-~/.cache/experiments/param-golf-coreamp}` and keyed
-by source `spec.pt` hash plus sidecar parameters. Compatible ablations reuse
+Trigram memory specs are cached under
+`${TRIGRAM_MEMORY_SPEC_CACHE_ROOT:-~/.cache/experiments/param-golf-coreamp}` and keyed
+by source `spec.pt` hash plus memory parameters. Compatible ablations reuse
 the same full-data top-K build instead of rebuilding inside each experiment
 root.
 
@@ -85,7 +85,7 @@ Primary reps:
 Current interpretation:
 
 - the tuned safe-lane finalists are now the incumbent local choices
-- the `gate=base x lr=3.5e-3` sidecar was negative on `blocks1` seed `1337`
+- the `gate=base x lr=3.5e-3` follow-up lane was negative on `blocks1` seed `1337`
   and should be stopped
 - both finalists leave more than 11 MB of artifact budget unused, so the next
   architecture work should spend budget on thesis-aligned non-transformer
@@ -94,8 +94,8 @@ Current interpretation:
 Performance interruption:
 
 - the local 5090 bottleneck is the recurrent controller, not data loading or
-  the trigram sidecar
-- synthetic full-step benchmarks at `B=256`, `T=512`, top-2 sidecar:
+  the trigram memory
+- synthetic full-step benchmarks at `B=256`, `T=512`, top-2 memory:
   - current `core_dim=48`, `layers=12`, `exp=10`: about `586,729` tok/s
   - aligned `core_dim=64`, `layers=8`, `exp=8`: about `802,372` tok/s
   - aligned `core_dim=128`, `layers=4`, `exp=4`: about `1,371,917` tok/s
@@ -215,7 +215,7 @@ Current status:
   - use `gate=none` for the primary temporal lane
 - `blocks0_resid12_e10`:
   - `gate=base` cleared the promotion bar
-  - keep it alive as a sidecar aggressive-lane result
+  - keep it alive as an aggressive-lane follow-up result
 
 ### 3. Aggressive lane: EMA temporal taps
 
@@ -338,18 +338,18 @@ bash scripts/run_5090_post_temporal_queue.sh
 ```
 
 The cleaned `v2` run completed for seeds `1337 2027 3141`. The optional
-`gate x lr` sidecar no longer has promotion value after the completed
+`gate x lr` follow-up no longer has promotion value after the completed
 `blocks1` seed-`1337` result:
 
 - `blocks1_resid10_e12_gate_base_lr0035_h3500_512m_s1337`: `2.2575790952`
 - matching no-gate safe-lane screen was better and faster
 
-### 6. Pivot lane: dense trigram sidecar
+### 6. Pivot lane: dense trigram memory
 
 Script:
 
 ```bash
-bash scripts/run_5090_trigram_sidecar_screen.sh
+bash scripts/run_5090_trigram_memory_screen.sh
 ```
 
 Default contract:
@@ -361,8 +361,8 @@ Default contract:
 - `4096` steps / `512M` planned tokens
 - `learning_rate=3.5e-3`
 - frozen shared specs from the cleaned finalist families
-- sidecar:
-  - `trigram_sidecar=frozen`
+- trigram memory:
+  - `trigram_memory=frozen`
   - `TRIGRAM_TOP_K=2`
   - `(x[t-1], x[t]) -> top-K residual logits over the frozen bigram base`
 - `base_bigram_delta=none`
@@ -375,12 +375,12 @@ Why this is in-scope:
 - it stays non-transformer: no attention, no learned token-token mixing
 - it directly tests whether the current branch is missing memory rather than
   controller capacity
-- the previous token is part of recurrent chunk state, so sidecar lookup is
+- the previous token is part of recurrent chunk state, so memory lookup is
   causal and consistent between full forward, chunked training, and `step()`
 
 Promotion rule:
 
-- compare to the matching no-sidecar `512M` safe-lane point
+- compare to the matching no-memory `512M` safe-lane point
 - `>= 0.05` bpb gain on seed `1337`: continue immediately
 - `< 0.02` bpb gain: stop the Core/Amplifier leaderboard-record attempt and
   package as non-record research unless diagnostics show an obvious bug
@@ -390,12 +390,12 @@ Promotion rule:
 Current read:
 
 - `blocks0_resid12_e10_trigramk2_lr0035_h3500_512m_s1337`: `2.0751715673`
-- matching no-sidecar `blocks0_resid12_e10_lr0035_h3500_512m_s1337`:
+- matching no-memory `blocks0_resid12_e10_lr0035_h3500_512m_s1337`:
   `2.2529073228`
 - sampled gain: about `0.1777` bpb
 - final-checkpoint diagnostic on `2.1M` validation tokens:
   - full gain over frozen bigram base: about `0.4171` bpb
-  - disabling only the trigram sidecar costs about `0.2648` bpb
+  - disabling only the trigram memory costs about `0.2648` bpb
 - artifact estimate: `7,333,039` bytes, leaving `8,666,961` bytes headroom
 
 The continuation bar is cleared. Use the dedicated confirmation launcher:
@@ -413,7 +413,7 @@ Default confirmation contract:
 - `8192` steps / `1B` planned tokens
 - `lr_hold_steps=7000`
 - `FULL_VAL_FINAL=1`
-- sidecar defaults remain `TRIGRAM_TOP_K=2`, `trigram_sidecar=frozen`
+- trigram memory defaults remain `TRIGRAM_TOP_K=2`, `trigram_memory=frozen`
 
 Seed policy:
 
@@ -448,7 +448,7 @@ Promotion rule:
   return to top-K headroom:
 
 ```bash
-RUN_VERSION=v2 TRIGRAM_TOP_K=4 SEEDS=1337 bash scripts/run_5090_trigram_sidecar_screen.sh
+RUN_VERSION=v2 TRIGRAM_TOP_K=4 SEEDS=1337 bash scripts/run_5090_trigram_memory_screen.sh
 ```
 
 Only consider `K=8` if `K=4` improves and the measured artifact estimate still
@@ -471,7 +471,7 @@ is lower priority than top-K headroom.
 Top-K headroom run after the aligned-geometry read:
 
 ```bash
-RUN_VERSION=v2 TRIGRAM_TOP_K=4 SEEDS=1337 bash scripts/run_5090_trigram_sidecar_screen.sh
+RUN_VERSION=v2 TRIGRAM_TOP_K=4 SEEDS=1337 bash scripts/run_5090_trigram_memory_screen.sh
 ```
 
 Promotion rule:
@@ -492,7 +492,7 @@ bash scripts/run_5090_base_delta_screen.sh
 
 This remains implemented, but it is now secondary. It trains a current-token
 bigram correction and does not add literal high-order context identity. Use it
-only if the trigram sidecar shows promise and diagnostics suggest calibration
+only if the trigram memory shows promise and diagnostics suggest calibration
 rather than memory is the remaining bottleneck.
 
 ### 8. Secondary lane: residual readout delta
@@ -518,10 +518,10 @@ Default contract:
 - frozen shared specs from the cleaned finalist families
 - all serious-run protocol invariants still apply
 
-Use this only after the trigram sidecar result is understood, or when
+Use this only after the trigram memory result is understood, or when
 diagnostics specifically show the frozen residual readout dictionary is the
 bottleneck. It is still zero-init and non-transformer, but it adds per-token
-matmuls, so it has a higher speed bar than lookup sidecars.
+matmuls, so it has a higher speed bar than lookup memory.
 
 Diagnostic command for completed or partial runs:
 
@@ -536,7 +536,7 @@ Stop adding complexity and keep the cleaned finalists if any of the following ha
 - the gate lane is flat
 - the EMA lane is flat
 - the router lane fails its first-pass bar
-- the trigram sidecar gives `< 0.02` bpb on the first serious `blocks0` screen
+- the trigram memory gives `< 0.02` bpb on the first serious `blocks0` screen
 - the readout-delta lane is flat after diagnostics show no hard-token-bucket
   improvement
 

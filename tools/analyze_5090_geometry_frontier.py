@@ -290,7 +290,7 @@ def main() -> None:
         print()
         print("If all rows are completed and killed, return to K4 headroom on the current leader:")
         print(
-            "RUN_VERSION=v2 TRIGRAM_TOP_K=4 SEEDS=1337 bash scripts/run_5090_trigram_sidecar_screen.sh"
+            "RUN_VERSION=v2 TRIGRAM_TOP_K=4 SEEDS=1337 bash scripts/run_5090_trigram_memory_screen.sh"
         )
 
 

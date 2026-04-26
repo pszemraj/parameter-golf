@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a dense SP1024 trigram top-K sidecar spec."""
+"""Build a dense SP1024 trigram top-K memory spec."""
 
 # ruff: noqa: E402
 
@@ -20,7 +20,7 @@ if str(REPO_ROOT) not in sys.path:
 
 import torch
 
-from core_amplifier_lm import AmplifierSpec, add_trigram_sidecar_to_spec
+from core_amplifier_lm import AmplifierSpec, add_trigram_memory_to_spec
 
 
 def parse_args() -> argparse.Namespace:
@@ -45,8 +45,8 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--chunk-size", type=int, default=50_000_000)
     ap.add_argument(
         "--table-cache-root",
-        default=os.environ.get("TRIGRAM_TABLE_CACHE_ROOT"),
-        help="Optional cache root for reusable trigram sidecar tensors",
+        default=os.environ.get("TRIGRAM_MEMORY_TABLE_CACHE_ROOT"),
+        help="Optional cache root for reusable trigram memory tensors",
     )
     ap.add_argument(
         "--rebuild-table-cache",
@@ -131,7 +131,7 @@ def _table_cache_path(
         "max_tokens": max_tokens,
     }
     scope = "full" if max_tokens is None else f"max{int(max_tokens)}"
-    name = f"trigram_table_k{int(top_k)}_{scope}_{_cache_key(payload)}.pt"
+    name = f"trigram_memory_table_k{int(top_k)}_{scope}_{_cache_key(payload)}.pt"
     return Path(cache_root).expanduser().resolve() / name
 
 
@@ -140,7 +140,7 @@ def _spec_with_trigram_table(spec: AmplifierSpec, table: dict[str, Any]) -> Ampl
 
     :param AmplifierSpec spec: Base spec.
     :param dict[str, Any] table: Cached trigram table payload.
-    :return AmplifierSpec: Spec with sidecar tensors attached.
+    :return AmplifierSpec: Spec with memory tensors attached.
     """
     metadata = dict(spec.metadata)
     metadata.update(dict(table["metadata"]))
@@ -165,7 +165,7 @@ def _spec_with_trigram_table(spec: AmplifierSpec, table: dict[str, Any]) -> Ampl
 
 
 def _table_from_spec(spec: AmplifierSpec) -> dict[str, Any]:
-    """Extract a reusable trigram table payload from a sidecar spec.
+    """Extract a reusable trigram table payload from a memory spec.
 
     :param AmplifierSpec spec: Spec containing trigram tensors.
     :return dict[str, Any]: Cache payload.
@@ -175,7 +175,7 @@ def _table_from_spec(spec: AmplifierSpec) -> dict[str, Any]:
         or spec.trigram_residual_values is None
         or spec.trigram_context_confidence is None
     ):
-        raise ValueError("spec does not contain trigram sidecar tensors")
+        raise ValueError("spec does not contain trigram memory tensors")
     metadata = {
         key: value for key, value in spec.metadata.items() if str(key).startswith("trigram_")
     }
@@ -188,7 +188,7 @@ def _table_from_spec(spec: AmplifierSpec) -> dict[str, Any]:
 
 
 def main() -> None:
-    """Build and write the trigram sidecar spec."""
+    """Build and write the trigram memory spec."""
     args = parse_args()
     source_dir = Path(args.source_spec_dir).expanduser().resolve()
     out_dir = Path(args.out_spec_dir).expanduser().resolve()
@@ -200,10 +200,10 @@ def main() -> None:
     if out_spec.exists() and not args.force:
         existing = AmplifierSpec.load(out_spec)
         if existing.trigram_top_tokens is not None:
-            print(f"Existing trigram sidecar spec found: {out_spec}")
+            print(f"Existing trigram memory spec found: {out_spec}")
             print(existing.summary())
             return
-        raise SystemExit(f"{out_spec} exists but has no trigram sidecar; pass --force")
+        raise SystemExit(f"{out_spec} exists but has no trigram memory; pass --force")
 
     base_spec = AmplifierSpec.load(source_spec)
     table_cache_path = None
@@ -222,10 +222,15 @@ def main() -> None:
         )
         if table_cache_path.exists() and not args.rebuild_table_cache:
             table_payload = torch.load(table_cache_path, map_location="cpu", weights_only=False)
-            print(f"Loaded cached trigram sidecar table: {table_cache_path}")
+            print(f"Loaded cached trigram memory table: {table_cache_path}")
+        elif args.rebuild_table_cache:
+            print(f"Rebuilding trigram memory table cache: {table_cache_path}")
+        else:
+            print(f"Trigram memory table cache miss: {table_cache_path}")
+            print("The counted table will be cached there after the full pass completes.")
 
     if table_payload is None:
-        sidecar_spec = add_trigram_sidecar_to_spec(
+        memory_spec = add_trigram_memory_to_spec(
             base_spec,
             args.data,
             storage_dtype=args.storage_dtype,
@@ -237,18 +242,18 @@ def main() -> None:
             chunk_size=args.chunk_size,
             verbose=True,
         )
-        table_payload = _table_from_spec(sidecar_spec)
+        table_payload = _table_from_spec(memory_spec)
         if table_cache_path is not None:
             table_cache_path.parent.mkdir(parents=True, exist_ok=True)
             torch.save(table_payload, table_cache_path)
-            print(f"Cached trigram sidecar table: {table_cache_path}")
+            print(f"Cached trigram memory table: {table_cache_path}")
     else:
-        sidecar_spec = _spec_with_trigram_table(base_spec, table_payload)
+        memory_spec = _spec_with_trigram_table(base_spec, table_payload)
 
     _copy_model_dir_metadata(source_dir, out_dir)
-    sidecar_spec.save(out_spec)
-    print(f"Wrote trigram sidecar spec: {out_spec}")
-    print(sidecar_spec.summary())
+    memory_spec.save(out_spec)
+    print(f"Wrote trigram memory spec: {out_spec}")
+    print(memory_spec.summary())
 
 
 if __name__ == "__main__":

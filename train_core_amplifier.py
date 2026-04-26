@@ -1491,7 +1491,7 @@ def parse_args() -> argparse.Namespace:
         choices=["none", "softmax"],
     )
     parser.add_argument("--base-bigram-delta", type=str, default=None, choices=["none", "full"])
-    parser.add_argument("--trigram-sidecar", type=str, default=None, choices=["none", "frozen"])
+    parser.add_argument("--trigram-memory", type=str, default=None, choices=["none", "frozen"])
     parser.add_argument("--trigram-log-scale-init", type=float, default=None)
     parser.add_argument("--residual-readout-delta-rank", type=int, default=None)
     parser.add_argument("--residual-readout-delta-init-std", type=float, default=None)
@@ -1731,7 +1731,7 @@ def build_resolved_config_payload(
     residual_token_gate_mode: str,
     branch_router_mode: str,
     base_bigram_delta: str,
-    trigram_sidecar: str,
+    trigram_memory: str,
     trigram_log_scale_init: float,
     residual_readout_delta_rank: int,
     residual_readout_delta_init_std: float,
@@ -1809,7 +1809,7 @@ def build_resolved_config_payload(
     :param str residual_token_gate_mode: Tokenwise residual gating mode.
     :param str branch_router_mode: Per-token branch router mode.
     :param str base_bigram_delta: Trainable base-bigram delta mode.
-    :param str trigram_sidecar: Frozen trigram sidecar mode.
+    :param str trigram_memory: Frozen trigram memory mode.
     :param float trigram_log_scale_init: Initial trigram boost log scale.
     :param int residual_readout_delta_rank: Low-rank trainable residual
         readout correction rank.
@@ -1868,7 +1868,7 @@ def build_resolved_config_payload(
             "residual_token_gate_mode": residual_token_gate_mode,
             "branch_router_mode": branch_router_mode,
             "base_bigram_delta": base_bigram_delta,
-            "trigram_sidecar": trigram_sidecar,
+            "trigram_memory": trigram_memory,
             "trigram_log_scale_init": float(trigram_log_scale_init),
             "trigram_top_k": spec.metadata.get("trigram_top_k"),
             "trigram_residual_scale": spec.metadata.get("trigram_residual_scale"),
@@ -2034,7 +2034,7 @@ def main() -> None:
     repo_root = Path(__file__).resolve().parent
 
     from core_amplifier_lm import AmplifierSpec, CoreAmplifierLM, ModelConfig
-    from core_amplifier_lm.config import DEFAULTS
+    from core_amplifier_lm.config import DEFAULTS, trigram_memory_config_value
 
     # --- Load config ---
     model_dir = Path(args.model_dir)
@@ -2160,11 +2160,11 @@ def main() -> None:
             md.get("base_bigram_delta", "none"),
         )
     )
-    trigram_sidecar = str(
+    trigram_memory = str(
         _resolve(
-            args.trigram_sidecar,
-            m.get("trigram_sidecar"),
-            md.get("trigram_sidecar", "none"),
+            args.trigram_memory,
+            trigram_memory_config_value(m),
+            trigram_memory_config_value(md, "none"),
         )
     )
     trigram_log_scale_init = float(
@@ -2230,7 +2230,7 @@ def main() -> None:
         f"residual_token_gate_mode={residual_token_gate_mode} "
         f"branch_router_mode={branch_router_mode} "
         f"base_bigram_delta={base_bigram_delta} "
-        f"trigram_sidecar={trigram_sidecar} "
+        f"trigram_memory={trigram_memory} "
         f"residual_readout_delta_rank={residual_readout_delta_rank} "
         f"scan_backend={scan_backend} "
         f"bptt_chunks={bptt_chunks} carry_chunks={carry_chunks} "
@@ -2367,7 +2367,7 @@ def main() -> None:
         residual_token_gate_mode=residual_token_gate_mode,
         branch_router_mode=branch_router_mode,
         base_bigram_delta=base_bigram_delta,
-        trigram_sidecar=trigram_sidecar,
+        trigram_memory=trigram_memory,
         trigram_log_scale_init=trigram_log_scale_init,
         residual_readout_delta_rank=residual_readout_delta_rank,
         residual_readout_delta_init_std=residual_readout_delta_init_std,
@@ -2515,7 +2515,7 @@ def main() -> None:
         residual_token_gate_mode=residual_token_gate_mode,
         branch_router_mode=branch_router_mode,
         base_bigram_delta=base_bigram_delta,
-        trigram_sidecar=trigram_sidecar,
+        trigram_memory=trigram_memory,
         trigram_log_scale_init=trigram_log_scale_init,
         residual_readout_delta_rank=residual_readout_delta_rank,
         residual_readout_delta_init_std=residual_readout_delta_init_std,

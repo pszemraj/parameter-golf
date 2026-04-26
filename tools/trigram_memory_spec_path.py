@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Resolve the deterministic cache directory for a trigram sidecar spec."""
+"""Resolve the deterministic cache directory for a trigram memory spec."""
 
 from __future__ import annotations
 
@@ -94,7 +94,7 @@ def main() -> None:
         f"clip{float(args.residual_clip):g}_cap{int(args.confidence_count_cap)}_"
         f"{token_scope}_{source_digest[:12]}_{_cache_key(payload)}"
     )
-    out = cache_root / "trigram_specs" / dirname
+    out = cache_root / "trigram_memory_specs" / dirname
     if args.mkdir:
         out.mkdir(parents=True, exist_ok=True)
     print(out)

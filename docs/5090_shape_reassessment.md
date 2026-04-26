@@ -42,7 +42,7 @@ must be measured as one point on a frontier.
 
 ## Completed Shape Evidence
 
-Local synthetic full-step benchmarks use blocks0 + top-2 trigram sidecar at
+Local synthetic full-step benchmarks use blocks0 + top-2 trigram memory at
 `B=256`, `T=512`, no `torch.compile`, and `scan_backend=assoc_accel`.
 
 | Shape | Intent | Trainable params | tok/s | Peak MiB |
@@ -77,7 +77,7 @@ High-impact:
     treated as an abstract scalar
 - Structure ranking:
   - `blocks0` beating heavier frozen blocks remains plausible
-  - at `core_dim=96+`, blocks0 should remain the default with top-K sidecars
+  - at `core_dim=96+`, blocks0 should remain the default with top-K memory tensors
   - if blocks return, test them through `d64` or reduced branch count first
 - Schedule and LR:
   - `h3500/h7000` and `lr=3.5e-3` were tuned on the old geometry
@@ -98,7 +98,7 @@ Lower-impact:
 
 ## Three-Day Frontier Batch
 
-Use top-2 trigram sidecar first. Do not test K=4 until shape is no longer the
+Use top-2 trigram memory first. Do not test K=4 until shape is no longer the
 dominant unknown.
 
 Run the staged batch:
@@ -173,22 +173,22 @@ TARGET_EFFECTIVE_STEP_TOKENS=131072
 Only after geometry and BPTT are read should top-K headroom run:
 
 ```bash
-RUN_VERSION=v2 TRIGRAM_TOP_K=4 SEEDS=1337 bash scripts/run_5090_trigram_sidecar_screen.sh
+RUN_VERSION=v2 TRIGRAM_TOP_K=4 SEEDS=1337 bash scripts/run_5090_trigram_memory_screen.sh
 ```
 
 If the winning geometry is not the old `48x12x10`, run K4 through
 `scripts/run_5090_trigram_aligned_geometry_screen.sh` with that geometry
-instead of the legacy sidecar launcher.
+instead of the legacy memory launcher.
 
 ## Cache Policy
 
-Trigram sidecar specs are materialized per frozen spec because the final
-`spec.pt` must contain the sidecar tensors.
+Trigram memory specs are materialized per frozen spec because the final
+`spec.pt` must contain the memory tensors.
 
 The expensive counted table is cached separately under:
 
 ```text
-${TRIGRAM_TABLE_CACHE_ROOT:-~/.cache/experiments/param-golf-coreamp/trigram_tables}
+${TRIGRAM_MEMORY_TABLE_CACHE_ROOT:-~/.cache/experiments/param-golf-coreamp/trigram_memory_tables}
 ```
 
 The key uses:

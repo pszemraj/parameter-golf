@@ -20,7 +20,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from core_amplifier_lm import AmplifierSpec, CoreAmplifierLM, ModelConfig
+from core_amplifier_lm import (
+    AmplifierSpec,
+    CoreAmplifierLM,
+    ModelConfig,
+    trigram_memory_config_value,
+)
 from train_core_amplifier import (
     SequentialStreamBatcher,
     _list_train_val_shards,
@@ -218,21 +223,21 @@ def _zero_readout_delta(model: CoreAmplifierLM) -> Iterator[bool]:
 
 
 @contextmanager
-def _disable_trigram_sidecar(model: CoreAmplifierLM) -> Iterator[bool]:
-    """Temporarily disable the optional frozen trigram sidecar.
+def _disable_trigram_memory(model: CoreAmplifierLM) -> Iterator[bool]:
+    """Temporarily disable the optional frozen trigram memory.
 
     :param CoreAmplifierLM model: Model to modify in-place and restore.
-    :return Iterator[bool]: Whether a trigram sidecar was active.
+    :return Iterator[bool]: Whether a trigram memory was active.
     """
-    old_mode = getattr(model, "trigram_sidecar_mode", "none")
+    old_mode = getattr(model, "trigram_memory_mode", "none")
     if old_mode == "none":
         yield False
         return
-    model.trigram_sidecar_mode = "none"
+    model.trigram_memory_mode = "none"
     try:
         yield True
     finally:
-        model.trigram_sidecar_mode = old_mode
+        model.trigram_memory_mode = old_mode
 
 
 def _bucket_rows(
@@ -334,12 +339,12 @@ def _write_markdown(path: Path, payload: dict[str, Any]) -> None:
                 f"| base_bigram_delta_gain_bpb | {_format_float(losses.get('base_bigram_delta_gain_bpb'))} |",
             ]
         )
-    if "no_trigram_sidecar_loss" in losses:
+    if "no_trigram_memory_loss" in losses:
         lines.extend(
             [
-                f"| no_trigram_sidecar_loss | {_format_float(losses['no_trigram_sidecar_loss'])} |",
-                f"| trigram_sidecar_gain_nats | {_format_float(losses['trigram_sidecar_gain_nats'])} |",
-                f"| trigram_sidecar_gain_bpb | {_format_float(losses.get('trigram_sidecar_gain_bpb'))} |",
+                f"| no_trigram_memory_loss | {_format_float(losses['no_trigram_memory_loss'])} |",
+                f"| trigram_memory_gain_nats | {_format_float(losses['trigram_memory_gain_nats'])} |",
+                f"| trigram_memory_gain_bpb | {_format_float(losses.get('trigram_memory_gain_bpb'))} |",
             ]
         )
     lines.extend(
@@ -423,7 +428,7 @@ def main() -> None:
         residual_token_gate_mode=str(model_cfg.get("residual_token_gate_mode", "none")),
         branch_router_mode=str(model_cfg.get("branch_router_mode", "none")),
         base_bigram_delta=str(model_cfg.get("base_bigram_delta", "none")),
-        trigram_sidecar=str(model_cfg.get("trigram_sidecar", "none")),
+        trigram_memory=str(trigram_memory_config_value(model_cfg, "none")),
         trigram_log_scale_init=float(model_cfg.get("trigram_log_scale_init", 0.0)),
         residual_readout_delta_rank=int(model_cfg.get("residual_readout_delta_rank", 0)),
         residual_readout_delta_init_std=float(
@@ -522,7 +527,7 @@ def main() -> None:
                         no_base_delta_logits, _ = model(inputs, state=state_in, return_state=True)
                     else:
                         no_base_delta_logits = None
-                with _disable_trigram_sidecar(model) as had_trigram:
+                with _disable_trigram_memory(model) as had_trigram:
                     if had_trigram:
                         no_trigram_logits, _ = model(inputs, state=state_in, return_state=True)
                     else:
@@ -589,11 +594,11 @@ def main() -> None:
             else None
         )
     if no_trigram_losses is not None:
-        losses["no_trigram_sidecar_loss"] = no_trigram_loss_sum / max(1, total_tokens)
-        losses["trigram_sidecar_gain_nats"] = (no_trigram_loss_sum - full_loss_sum) / max(
+        losses["no_trigram_memory_loss"] = no_trigram_loss_sum / max(1, total_tokens)
+        losses["trigram_memory_gain_nats"] = (no_trigram_loss_sum - full_loss_sum) / max(
             1, total_tokens
         )
-        losses["trigram_sidecar_gain_bpb"] = (
+        losses["trigram_memory_gain_bpb"] = (
             ((no_trigram_loss_sum - full_loss_sum) / math.log(2)) / total_bytes
             if total_bytes > 0
             else None
@@ -611,7 +616,7 @@ def main() -> None:
             "residual_token_gate_mode": str(model_cfg.get("residual_token_gate_mode", "none")),
             "branch_router_mode": str(model_cfg.get("branch_router_mode", "none")),
             "base_bigram_delta": str(model_cfg.get("base_bigram_delta", "none")),
-            "trigram_sidecar": str(model_cfg.get("trigram_sidecar", "none")),
+            "trigram_memory": str(trigram_memory_config_value(model_cfg, "none")),
             "residual_readout_delta_rank": int(model_cfg.get("residual_readout_delta_rank", 0)),
             "trainable_parameters": int(model.trainable_parameters),
         },
