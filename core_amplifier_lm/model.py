@@ -2039,21 +2039,20 @@ class CoreAmplifierLM(nn.Module):
         context = prev_inside * int(self.vocab_size) + input_ids.long()
         return context, valid
 
-    def _trigram_memory_logits(
+    def _add_trigram_memory_logits_(
         self,
+        logits: torch.Tensor,
         input_ids: torch.Tensor,
         prev_token: Optional[torch.Tensor],
         prev_valid: Optional[torch.Tensor],
-        *,
-        dtype: torch.dtype,
-    ) -> torch.Tensor:
-        """Build dense sparse-boost logits from the frozen trigram memory.
+    ) -> None:
+        """Add frozen trigram-memory sparse boosts into an existing logits tensor.
 
+        :param torch.Tensor logits: Dense logits ``[batch, time, vocab]`` to
+            update in-place.
         :param torch.Tensor input_ids: Current token ids.
         :param Optional[torch.Tensor] prev_token: Carried previous tokens.
         :param Optional[torch.Tensor] prev_valid: Previous-token validity mask.
-        :param torch.dtype dtype: Output dtype.
-        :return torch.Tensor: Dense logit boost ``[batch, time, vocab]``.
         """
         self._ensure_runtime_buffers()
         assert self._trigram_top_tokens_runtime is not None
@@ -2067,9 +2066,7 @@ class CoreAmplifierLM(nn.Module):
         residuals = residuals * confidence.unsqueeze(-1) * valid.float().unsqueeze(-1)
         assert self.trigram_log_scale is not None
         residuals = residuals * torch.exp(self.trigram_log_scale.float())
-        out = input_ids.new_zeros((*input_ids.shape, self.vocab_size), dtype=torch.float32)
-        out.scatter_add_(-1, top_tokens, residuals)
-        return out.to(dtype=dtype)
+        logits.scatter_add_(-1, top_tokens, residuals.to(dtype=logits.dtype))
 
     def _controller_condition_features(
         self,
@@ -2426,11 +2423,11 @@ class CoreAmplifierLM(nn.Module):
             )
             base_logits = base_logits + base_delta_scale * base_delta
         if self.trigram_memory_mode != "none":
-            base_logits = base_logits + self._trigram_memory_logits(
+            self._add_trigram_memory_logits_(
+                base_logits,
                 input_ids,
                 prev_token,
                 prev_valid,
-                dtype=residual_logits.dtype,
             )
         logits = (
             base_logits
