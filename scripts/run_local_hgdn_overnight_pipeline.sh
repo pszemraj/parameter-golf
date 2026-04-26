@@ -48,26 +48,24 @@ vocab_size="${VOCAB_SIZE:-1024}"
 run_stage0="${RUN_STAGE0:-1}"
 run_stage1="${RUN_STAGE1:-1}"
 run_stage2="${RUN_STAGE2:-1}"
+run_stage3="${RUN_STAGE3:-1}"
 recurrence_iterations="${RECURRENCE_ITERATIONS:-500}"
 screen_iterations="${SCREEN_ITERATIONS:-300}"
 confirm_iterations="${CONFIRM_ITERATIONS:-500}"
+secondary_iterations="${SECONDARY_ITERATIONS:-${confirm_iterations}}"
 screen_perf_skip_final_eval="${SCREEN_PERF_SKIP_FINAL_EVAL:-1}"
 confirm_perf_skip_final_eval="${CONFIRM_PERF_SKIP_FINAL_EVAL:-0}"
+secondary_perf_skip_final_eval="${SECONDARY_PERF_SKIP_FINAL_EVAL:-${confirm_perf_skip_final_eval}}"
 confirm_top_hgdn="${CONFIRM_TOP_HGDN:-2}"
 recurrence_selection_metric="${RECURRENCE_SELECTION_METRIC:-final_step_ms}"
 search_selection_metric="${SEARCH_SELECTION_METRIC:-auto}"
+secondary_force="${SECONDARY_FORCE:-0}"
 
 default_screen_configs=(
     "configs/hgdn/naive_contract_l8_d512_mid2_dk48_m2.toml"
     "configs/hgdn/naive_contract_l8_d512_mid2_dk48_v2_m1p5.toml"
-    "configs/hgdn/naive_contract_l8_d512_mid3_dk48_m1p75.toml"
-    "configs/hgdn/naive_contract_l8_d512_olmoish_6g2a_v2_m1p25.toml"
-    "configs/hgdn/naive_contract_l9_d512_mid3_dk48_v1p5_m1p75.toml"
-    "configs/hgdn/naive_contract_l8_d512_r0_m1p25.toml"
     "configs/hgdn/naive_contract_l8_d512_r0_m1p5.toml"
-    "configs/hgdn/naive_contract_l8_d512_r0_m1p75.toml"
     "configs/hgdn/naive_contract_l8_d512_r0_m2.toml"
-    "configs/hgdn/naive_contract_l9_d512_r0_m1p75.toml"
 )
 
 join_by_comma() {
@@ -76,6 +74,7 @@ join_by_comma() {
 }
 
 screen_candidate_configs="${SCREEN_CANDIDATE_CONFIGS:-$(join_by_comma "${default_screen_configs[@]}")}"
+secondary_candidate_configs="${SECONDARY_CANDIDATE_CONFIGS:-configs/hgdn/naive_contract_l8_d512_olmoish_6g2a_v2_m1p25.toml,configs/hgdn/naive_contract_l8_d512_r0_m1p25.toml}"
 
 hgdn_ensure_python_module "${python_bin}" py7zr py7zr
 
@@ -102,8 +101,11 @@ check_bool_flag() {
 check_bool_flag RUN_STAGE0 "${run_stage0}"
 check_bool_flag RUN_STAGE1 "${run_stage1}"
 check_bool_flag RUN_STAGE2 "${run_stage2}"
+check_bool_flag RUN_STAGE3 "${run_stage3}"
 check_bool_flag SCREEN_PERF_SKIP_FINAL_EVAL "${screen_perf_skip_final_eval}"
 check_bool_flag CONFIRM_PERF_SKIP_FINAL_EVAL "${confirm_perf_skip_final_eval}"
+check_bool_flag SECONDARY_PERF_SKIP_FINAL_EVAL "${secondary_perf_skip_final_eval}"
+check_bool_flag SECONDARY_FORCE "${secondary_force}"
 
 if (( screen_perf_skip_final_eval == 1 && screen_iterations % val_loss_every != 0 )); then
     echo "SCREEN_ITERATIONS must be divisible by VAL_LOSS_EVERY when SCREEN_PERF_SKIP_FINAL_EVAL=1." >&2
@@ -112,6 +114,11 @@ fi
 
 if (( recurrence_iterations % val_loss_every != 0 )); then
     echo "RECURRENCE_ITERATIONS should be divisible by VAL_LOSS_EVERY for clean promotion." >&2
+    exit 1
+fi
+
+if (( secondary_perf_skip_final_eval == 1 && secondary_iterations % val_loss_every != 0 )); then
+    echo "SECONDARY_ITERATIONS must be divisible by VAL_LOSS_EVERY when SECONDARY_PERF_SKIP_FINAL_EVAL=1." >&2
     exit 1
 fi
 
@@ -171,10 +178,13 @@ write_plan() {
         echo "recurrence_iterations=${recurrence_iterations}"
         echo "screen_iterations=${screen_iterations}"
         echo "confirm_iterations=${confirm_iterations}"
+        echo "secondary_iterations=${secondary_iterations}"
         echo "confirm_top_hgdn=${confirm_top_hgdn}"
         echo "recurrence_selection_metric=${recurrence_selection_metric}"
         echo "search_selection_metric=${search_selection_metric}"
         echo "screen_candidate_configs=${screen_candidate_configs}"
+        echo "secondary_candidate_configs=${secondary_candidate_configs}"
+        echo "secondary_force=${secondary_force}"
     } >"${pipeline_dir}/pipeline_plan.env"
 }
 
@@ -186,10 +196,13 @@ print_plan() {
     echo "run_stage0=${run_stage0} recurrence_iterations=${recurrence_iterations}"
     echo "run_stage1=${run_stage1} screen_iterations=${screen_iterations}"
     echo "run_stage2=${run_stage2} confirm_iterations=${confirm_iterations}"
+    echo "run_stage3=${run_stage3} secondary_iterations=${secondary_iterations}"
     echo "screen_candidate_configs=${screen_candidate_configs}"
+    echo "secondary_candidate_configs=${secondary_candidate_configs}"
     echo "confirm_top_hgdn=${confirm_top_hgdn}"
     echo "recurrence_selection_metric=${recurrence_selection_metric}"
     echo "search_selection_metric=${search_selection_metric}"
+    echo "secondary_force=${secondary_force}"
     echo "data_path=${data_path}"
     echo "tokenizer_path=${tokenizer_path}"
     echo "vocab_size=${vocab_size}"
@@ -197,6 +210,7 @@ print_plan() {
     echo "  stage0: recurrence mode matrix on v2_m1p5"
     echo "  stage1: bounded candidate/control screen using the selected recurrence mode"
     echo "  stage2: longer confirmation for top HGDN configs plus matched controls"
+    echo "  stage3: conditional OLMo-ish 6G/2A sanity check when the primary beats control"
     echo "No H100 job is launched; the final H100 command is written for review."
 }
 
@@ -342,9 +356,10 @@ analyze_stage() {
 
 write_h100_next_command() {
     local decision_env="$1"
+    local output_name="${2:-next_h100_command.sh}"
     # shellcheck disable=SC1090
     source "${decision_env}"
-    local h100_command="${pipeline_dir}/next_h100_command.sh"
+    local h100_command="${pipeline_dir}/${output_name}"
     {
         echo "#!/bin/bash"
         echo "set -euo pipefail"
@@ -365,6 +380,18 @@ write_h100_next_command() {
     } >"${h100_command}"
     chmod +x "${h100_command}"
     echo "wrote ${h100_command}"
+}
+
+write_stage3_skip() {
+    local reason="$1"
+    local skip_env="${pipeline_dir}/stage3_skipped.env"
+    {
+        echo "# Generated by scripts/run_local_hgdn_overnight_pipeline.sh"
+        printf 'STAGE3_SKIPPED=%q\n' "1"
+        printf 'STAGE3_SKIP_REASON=%q\n' "${reason}"
+        printf 'SECONDARY_CANDIDATE_CONFIGS=%q\n' "${secondary_candidate_configs}"
+    } >"${skip_env}"
+    echo "stage3_skipped=${reason}"
 }
 
 build_pipeline_bundle() {
@@ -433,6 +460,33 @@ main() {
             "${search_selection_metric}" \
             "${pipeline_dir}/stage2_decision.env"
         write_h100_next_command "${pipeline_dir}/stage2_decision.env"
+    fi
+
+    if [[ "${run_stage3}" == "1" ]]; then
+        local stage2_decision="${pipeline_dir}/stage2_decision.env"
+        if [[ ! -f "${stage2_decision}" ]]; then
+            write_stage3_skip "missing_stage2_decision"
+        else
+            # shellcheck disable=SC1090
+            source "${stage2_decision}"
+            if [[ "${secondary_force}" != "1" && "${SELECTED_BEATS_CONTROL:-0}" != "1" ]]; then
+                write_stage3_skip "primary_did_not_beat_matched_control"
+            else
+                run_search_stage \
+                    "stage3_secondary_sanity" \
+                    "${run_prefix_base}_s3_secondary" \
+                    "${secondary_iterations}" \
+                    "${secondary_perf_skip_final_eval}" \
+                    "${selected_mode}" \
+                    "${secondary_candidate_configs}" \
+                    "config" \
+                    "${search_selection_metric}" \
+                    "${pipeline_dir}/stage3_decision.env"
+                write_h100_next_command \
+                    "${pipeline_dir}/stage3_decision.env" \
+                    "next_h100_secondary_command.sh"
+            fi
+        fi
     fi
 }
 

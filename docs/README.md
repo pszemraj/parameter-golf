@@ -188,6 +188,12 @@ Wrapper/direct/native timing ablation:
 conda run -s --name pg python scripts/bench_fla_recurrence_paths.py --iters 20
 ```
 
+Full-layer custom-vs-native timing calibration:
+
+```bash
+conda run -s --name pg python scripts/bench_hgdn_full_layer_paths.py --iters 20
+```
+
 Run this benchmark by itself. Timings are invalid if other tests, training jobs,
 or CUDA benchmarks are active in background terminals.
 
@@ -226,11 +232,14 @@ For an unattended local hierarchy, use the overnight pipeline. It runs:
 1. the recurrence implementation matrix,
 2. a bounded architecture/control screen using the selected recurrence mode,
 3. a longer confirmation pass for the top HGDN configs plus their matched
-   attention-only diagnostic controls.
+   attention-only diagnostic controls,
+4. a conditional OLMo-ish 6G/2A sanity check only when the confirmed primary
+   HGDN beats its matched attention-only diagnostic control.
 
 It analyzes each bundle with `scripts/analyze_hgdn_experiment_bundle.py`, writes
 stage decision files under `local-scratch/<prefix>_pipeline`, and writes the
-next H100 command for review instead of launching paid H100 work.
+next H100 command for review instead of launching paid H100 work. The secondary
+stage writes `next_h100_secondary_command.sh` when it runs.
 
 ```bash
 USE_WANDB=0 WANDB_MODE=offline \
@@ -242,7 +251,10 @@ bash scripts/run_local_hgdn_overnight_pipeline.sh
 The default screen is deliberately small. Override it with
 `SCREEN_CANDIDATE_CONFIGS=path1.toml,path2.toml,...` when you want a different
 shortlist; the underlying local search helper also accepts `CANDIDATE_CONFIGS`
-for bounded one-off batches.
+for bounded one-off batches. Override the gated secondary check with
+`SECONDARY_CANDIDATE_CONFIGS=path1.toml,path2.toml,...`, or set
+`SECONDARY_FORCE=1` when you intentionally want the OLMo-ish sanity check even
+if the primary candidate does not beat its matched control.
 
 ## Analysis And Sanity Tools
 
@@ -254,6 +266,8 @@ for bounded one-off batches.
 - `scripts/bench_fla_recurrence_paths.py`: wrapper versus direct public FLA
   recurrence timing, upstream-style direct fused FLA semantics timing, plus
   native `fla.layers.GatedDeltaNet` timing.
+- `scripts/bench_hgdn_full_layer_paths.py`: full custom HGDN GDN layer timing
+  under each recurrence mode versus native `fla.layers.GatedDeltaNet`.
 - `scripts/screen_hgdn_arch_sizes.py`: artifact-size screen for active configs.
 
 Example BPB sanity check:
@@ -295,7 +309,8 @@ conda run -s --name pg python -m py_compile \
   scripts/screen_hgdn_arch_sizes.py \
   scripts/analyze_local_naive_contract_bundle.py \
   scripts/check_bpb_sanity.py scripts/probe_fla_stack.py \
-  scripts/bench_fla_recurrence_paths.py
+  scripts/bench_fla_recurrence_paths.py \
+  scripts/bench_hgdn_full_layer_paths.py
 
 conda run -s --name pg ruff check --fix
 conda run -s --name pg ruff format

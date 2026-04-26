@@ -40,6 +40,9 @@ ARTIFACT_RE = re.compile(
     r"artifact_status:(?P<status>[A-Z_]+) "
     r"artifact_warning:(?P<warning>\S+) headroom_bytes:(?P<headroom>-?\d+)"
 )
+ARTIFACT_SIZE_RE = re.compile(
+    r"int8_zlib_bytes:(?P<int8>\d+) code_bytes:(?P<code>\d+) total:(?P<total>\d+)"
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -160,6 +163,9 @@ def parse_log(path: Path) -> dict[str, Any]:
     artifact_status = ""
     artifact_warning = ""
     artifact_headroom_bytes: int | None = None
+    artifact_int8_zlib_bytes: int | None = None
+    artifact_code_bytes: int | None = None
+    artifact_total_bytes: int | None = None
 
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
         if match := STEP_RE.search(line):
@@ -197,6 +203,10 @@ def parse_log(path: Path) -> dict[str, Any]:
             artifact_status = match.group("status")
             artifact_warning = match.group("warning")
             artifact_headroom_bytes = int(match.group("headroom"))
+        if match := ARTIFACT_SIZE_RE.search(line):
+            artifact_int8_zlib_bytes = int(match.group("int8"))
+            artifact_code_bytes = int(match.group("code"))
+            artifact_total_bytes = int(match.group("total"))
 
     final_train = train_points[-1] if train_points else {}
     final_eval = eval_points[-1] if eval_points else {}
@@ -228,6 +238,9 @@ def parse_log(path: Path) -> dict[str, Any]:
         "artifact_status": artifact_status,
         "artifact_warning": artifact_warning,
         "artifact_headroom_bytes": artifact_headroom_bytes,
+        "artifact_int8_zlib_bytes": artifact_int8_zlib_bytes,
+        "artifact_code_bytes": artifact_code_bytes,
+        "artifact_total_bytes": artifact_total_bytes,
         "log_recurrence_mode": mode,
         "eval_points": eval_points,
     }
@@ -309,8 +322,21 @@ def build_rows(
         row["family"] = infer_family(config, row.get("blocks", ""), row["trainer"])
         size_row = size_rows.get(row["candidate"], {})
         row["size_status"] = size_row.get("artifact_status")
+        row["size_total_init_bytes"] = (
+            int(size_row["total_init_bytes"])
+            if size_row.get("total_init_bytes")
+            else None
+        )
+        row["size_int8_zlib_init_bytes"] = (
+            int(size_row["int8_zlib_init_bytes"])
+            if size_row.get("int8_zlib_init_bytes")
+            else None
+        )
         row["size_headroom_bytes"] = (
             int(size_row["headroom_bytes"]) if size_row.get("headroom_bytes") else None
+        )
+        row["size_proxy_bytes"] = row.get("artifact_total_bytes") or row.get(
+            "size_total_init_bytes"
         )
         if row.get("perf_tokens_per_s") is not None:
             row["tokens_per_s"] = row["perf_tokens_per_s"]
@@ -539,6 +565,12 @@ def write_outputs(
         "final_sampled_bpb",
         "speed_budget_bpb",
         "final_roundtrip_bpb",
+        "size_proxy_bytes",
+        "size_total_init_bytes",
+        "size_int8_zlib_init_bytes",
+        "artifact_total_bytes",
+        "artifact_int8_zlib_bytes",
+        "artifact_code_bytes",
         "fixed_step_rank_all",
         "speed_rank_all",
         "fixed_step_rank_hgdn",
@@ -562,8 +594,8 @@ def write_outputs(
         else "Speed budget ms: n/a",
         f"Selection metric: {metric}",
         "",
-        "| Candidate | Mode | Family | Step | ms/step | toks/s | BPB | Speed BPB | Roundtrip | Size |",
-        "|---|---|---|---:|---:|---:|---:|---:|---:|---|",
+        "| Candidate | Mode | Family | Step | ms/step | toks/s | Train loss | BPB | Speed BPB | Roundtrip | Size proxy | Size |",
+        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for row in sorted(rows, key=lambda item: summary_sort_key(item, metric)):
         lines.append(
@@ -576,9 +608,11 @@ def write_outputs(
                     f"{row.get('final_step', 0)}/{row.get('planned_step', 0)}",
                     format_optional(row.get("final_step_ms"), digits=2),
                     format_optional(row.get("tokens_per_s"), digits=1),
+                    format_optional(row.get("final_train_loss"), digits=4),
                     format_optional(row.get("final_sampled_bpb"), digits=4),
                     format_optional(row.get("speed_budget_bpb"), digits=4),
                     format_optional(row.get("final_roundtrip_bpb"), digits=4),
+                    format_int_optional(row.get("size_proxy_bytes")),
                     str(row.get("artifact_status") or row.get("size_status") or ""),
                 ]
             )
@@ -595,6 +629,15 @@ def format_optional(value: Any, *, digits: int) -> str:
     :return str: Formatted value or empty string.
     """
     return "" if value is None else f"{float(value):.{digits}f}"
+
+
+def format_int_optional(value: Any) -> str:
+    """Format an optional integer with separators.
+
+    :param Any value: Value.
+    :return str: Formatted value or empty string.
+    """
+    return "" if value is None else f"{int(value):,}"
 
 
 def shell_assign(name: str, value: str) -> str:
@@ -647,6 +690,23 @@ def write_decision_env(
             else []
         )
         selected_control_config = matched_control_config(str(winner.get("config", "")))
+        control_metric_score: float | None = None
+        control_delta: float | None = None
+        beats_control = False
+        if selected_control_config:
+            for row in rows:
+                if (
+                    row.get("config") == selected_control_config
+                    and row.get("completed")
+                    and is_legal_size(row)
+                ):
+                    _control_metric_name, control_metric_score = metric_value(
+                        row, metric_name
+                    )
+                    break
+        if metric_score is not None and control_metric_score is not None:
+            control_delta = control_metric_score - metric_score
+            beats_control = control_delta > 0.0
         confirm_configs = unique_preserve_order(top_configs + controls)
         decision.update(
             {
@@ -660,6 +720,9 @@ def write_decision_env(
                 "selected_control_config": selected_control_config,
                 "selected_metric": metric_name,
                 "selected_metric_value": metric_score,
+                "selected_control_metric_value": control_metric_score,
+                "selected_control_delta": control_delta,
+                "selected_beats_control": beats_control,
                 "selected_top_configs": top_configs,
                 "selected_confirm_configs": confirm_configs,
             }
@@ -684,6 +747,22 @@ def write_decision_env(
                     ""
                     if decision["selected_metric_value"] is None
                     else str(decision["selected_metric_value"]),
+                ),
+                shell_assign(
+                    "SELECTED_CONTROL_METRIC_VALUE",
+                    ""
+                    if decision["selected_control_metric_value"] is None
+                    else str(decision["selected_control_metric_value"]),
+                ),
+                shell_assign(
+                    "SELECTED_CONTROL_DELTA",
+                    ""
+                    if decision["selected_control_delta"] is None
+                    else str(decision["selected_control_delta"]),
+                ),
+                shell_assign(
+                    "SELECTED_BEATS_CONTROL",
+                    "1" if decision["selected_beats_control"] else "0",
                 ),
                 shell_assign("SELECTED_TOP_CONFIGS_CSV", ",".join(top_configs)),
                 shell_assign("SELECTED_CONFIRM_CONFIGS_CSV", ",".join(confirm_configs)),
@@ -713,9 +792,9 @@ def print_summary(
     print(f"speed_budget_ms:{budget}")
     print(f"selection_metric:{metric}")
     print(
-        "| Candidate | Mode | Family | Step | ms/step | toks/s | BPB | Speed BPB | Size |"
+        "| Candidate | Mode | Family | Step | ms/step | toks/s | Train loss | BPB | Speed BPB | Size proxy | Size |"
     )
-    print("|---|---|---|---:|---:|---:|---:|---:|---|")
+    print("|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|")
     for row in sorted(rows, key=lambda item: summary_sort_key(item, metric))[:top]:
         print(
             f"| {row['candidate']} | {row.get('gdn_fla_recurrence_mode') or ''} | "
@@ -723,8 +802,10 @@ def print_summary(
             f"{row.get('final_step', 0)}/{row.get('planned_step', 0)} | "
             f"{format_optional(row.get('final_step_ms'), digits=2)} | "
             f"{format_optional(row.get('tokens_per_s'), digits=1)} | "
+            f"{format_optional(row.get('final_train_loss'), digits=4)} | "
             f"{format_optional(row.get('final_sampled_bpb'), digits=4)} | "
             f"{format_optional(row.get('speed_budget_bpb'), digits=4)} | "
+            f"{format_int_optional(row.get('size_proxy_bytes'))} | "
             f"{row.get('artifact_status') or row.get('size_status') or ''} |"
         )
 
