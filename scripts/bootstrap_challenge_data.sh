@@ -22,7 +22,7 @@ Modes:
     - full validation split
 
   h100
-    Download enough shards for the current 1xH100 HGDN fixed2k runs without
+    Download enough shards for current bounded HGDN exact-contract runs without
     immediately pulling the much larger default cache:
     - variant: sp1024
     - train shards: 12
