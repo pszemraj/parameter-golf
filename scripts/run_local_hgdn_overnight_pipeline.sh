@@ -41,6 +41,9 @@ distributed_mode="${DISTRIBUTED_MODE:-parallel_muon}"
 weight_decay="${WEIGHT_DECAY:-0}"
 torchinductor_max_autotune="${TORCHINDUCTOR_MAX_AUTOTUNE:-0}"
 torchinductor_max_autotune_gemm="${TORCHINDUCTOR_MAX_AUTOTUNE_GEMM:-0}"
+data_path="${DATA_PATH:-$HGDN_REPO_ROOT/data/datasets/fineweb10B_sp1024}"
+tokenizer_path="${TOKENIZER_PATH:-$HGDN_REPO_ROOT/data/tokenizers/fineweb_1024_bpe.model}"
+vocab_size="${VOCAB_SIZE:-1024}"
 
 run_stage0="${RUN_STAGE0:-1}"
 run_stage1="${RUN_STAGE1:-1}"
@@ -160,6 +163,9 @@ write_plan() {
         echo "compile=${compile}"
         echo "compile_strategy=${compile_strategy}"
         echo "distributed_mode=${distributed_mode}"
+        echo "data_path=${data_path}"
+        echo "tokenizer_path=${tokenizer_path}"
+        echo "vocab_size=${vocab_size}"
         echo "recurrence_iterations=${recurrence_iterations}"
         echo "screen_iterations=${screen_iterations}"
         echo "confirm_iterations=${confirm_iterations}"
@@ -178,6 +184,9 @@ print_plan() {
     echo "run_stage2=${run_stage2} confirm_iterations=${confirm_iterations}"
     echo "screen_candidate_configs=${screen_candidate_configs}"
     echo "confirm_top_hgdn=${confirm_top_hgdn}"
+    echo "data_path=${data_path}"
+    echo "tokenizer_path=${tokenizer_path}"
+    echo "vocab_size=${vocab_size}"
     echo "gates:"
     echo "  stage0: recurrence mode matrix on v2_m1p5"
     echo "  stage1: bounded candidate/control screen using the selected recurrence mode"
@@ -187,6 +196,13 @@ print_plan() {
 
 run_recurrence_stage() {
     local stage_prefix="${run_prefix_base}_s0_recur"
+    local diagnostic_env=()
+    if [[ -n "${torch_logs}" ]]; then
+        diagnostic_env+=("TORCH_LOGS=${torch_logs}")
+    fi
+    if [[ -n "${torch_trace}" ]]; then
+        diagnostic_env+=("TORCH_TRACE=${torch_trace}")
+    fi
     echo
     echo ">>> stage0 recurrence implementation matrix"
     check_cuda_jobs
@@ -201,10 +217,12 @@ run_recurrence_stage() {
         BUNDLE_STAGE_DIR="$(stage_bundle_dir "${stage_prefix}")" \
         ARCHIVE_OUTPUT="$(stage_archive "${stage_prefix}")" \
         COMMAND_LOG="$(stage_command_log "${stage_prefix}")" \
-        TORCH_LOGS="${torch_logs}" \
-        TORCH_TRACE="${torch_trace}" \
+        "${diagnostic_env[@]}" \
         TORCHINDUCTOR_MAX_AUTOTUNE="${torchinductor_max_autotune}" \
         TORCHINDUCTOR_MAX_AUTOTUNE_GEMM="${torchinductor_max_autotune_gemm}" \
+        DATA_PATH="${data_path}" \
+        TOKENIZER_PATH="${tokenizer_path}" \
+        VOCAB_SIZE="${vocab_size}" \
         ALLOW_EXISTING_LOGS="${allow_existing_logs}" \
         CHECK_CUDA_IDLE=0 \
         NGPU="${ngpu}" \
@@ -237,6 +255,13 @@ run_search_stage() {
     local candidate_configs="$6"
     local decision_kind="$7"
     local decision_env="$8"
+    local diagnostic_env=()
+    if [[ -n "${torch_logs}" ]]; then
+        diagnostic_env+=("TORCH_LOGS=${torch_logs}")
+    fi
+    if [[ -n "${torch_trace}" ]]; then
+        diagnostic_env+=("TORCH_TRACE=${torch_trace}")
+    fi
 
     echo
     echo ">>> ${stage_name}"
@@ -256,10 +281,12 @@ run_search_stage() {
         ARCHIVE_OUTPUT="$(stage_archive "${stage_prefix}")" \
         COMMAND_LOG="$(stage_command_log "${stage_prefix}")" \
         SIZE_SCREEN_OUTPUT="local-scratch/${stage_prefix}_size_screen" \
-        TORCH_LOGS="${torch_logs}" \
-        TORCH_TRACE="${torch_trace}" \
+        "${diagnostic_env[@]}" \
         TORCHINDUCTOR_MAX_AUTOTUNE="${torchinductor_max_autotune}" \
         TORCHINDUCTOR_MAX_AUTOTUNE_GEMM="${torchinductor_max_autotune_gemm}" \
+        DATA_PATH="${data_path}" \
+        TOKENIZER_PATH="${tokenizer_path}" \
+        VOCAB_SIZE="${vocab_size}" \
         ALLOW_EXISTING_LOGS="${allow_existing_logs}" \
         CANDIDATE_CONFIGS="${candidate_configs}" \
         GDN_FLA_RECURRENCE_MODE="${selected_mode}" \

@@ -45,6 +45,9 @@ distributed_mode="${DISTRIBUTED_MODE:-parallel_muon}"
 weight_decay="${WEIGHT_DECAY:-0}"
 perf_skip_final_eval="${PERF_SKIP_FINAL_EVAL:-0}"
 grad_accum_steps_override="${GRAD_ACCUM_STEPS:-}"
+data_path="${DATA_PATH:-$HGDN_REPO_ROOT/data/datasets/fineweb10B_sp1024}"
+tokenizer_path="${TOKENIZER_PATH:-$HGDN_REPO_ROOT/data/tokenizers/fineweb_1024_bpe.model}"
+vocab_size="${VOCAB_SIZE:-1024}"
 bundle_written=0
 
 hgdn_config="${HGDN_CONFIG:-configs/hgdn/naive_contract_l8_d512_mid2_dk48_v2_m1p5.toml}"
@@ -191,6 +194,9 @@ append_train_command() {
         "COMPILE_STRATEGY=${compile_strategy}" \
         "DISTRIBUTED_MODE=${distributed_mode}" \
         "RUN_ID=${run_id}" \
+        "DATA_PATH=${data_path}" \
+        "TOKENIZER_PATH=${tokenizer_path}" \
+        "VOCAB_SIZE=${vocab_size}" \
         "GRAD_ACCUM_STEPS=${grad_accum_steps}" \
         "ITERATIONS=${iterations}" \
         "MAX_WALLCLOCK_SECONDS=${max_wallclock_seconds}" \
@@ -267,6 +273,9 @@ print_plan() {
     echo "allow_active_cuda_jobs=${allow_active_cuda_jobs}"
     echo "allow_existing_logs=${allow_existing_logs}"
     echo "max_wallclock_seconds=${max_wallclock_seconds}"
+    echo "data_path=${data_path}"
+    echo "tokenizer_path=${tokenizer_path}"
+    echo "vocab_size=${vocab_size}"
     echo "hgdn_config=${hgdn_config}"
     echo "attn_config=${attn_config}"
     echo "archive_output=${archive_output}"
@@ -306,6 +315,9 @@ run_batch() {
             "COMPILE_STRATEGY=${compile_strategy}" \
             "DISTRIBUTED_MODE=${distributed_mode}" \
             "RUN_ID=${run_id}" \
+            "DATA_PATH=${data_path}" \
+            "TOKENIZER_PATH=${tokenizer_path}" \
+            "VOCAB_SIZE=${vocab_size}" \
             "GRAD_ACCUM_STEPS=${grad_accum_steps}" \
             "ITERATIONS=${iterations}" \
             "MAX_WALLCLOCK_SECONDS=${max_wallclock_seconds}" \
