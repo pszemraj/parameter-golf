@@ -66,9 +66,9 @@ The sparse HGDN helpers live under `scripts/`:
 ```bash
 bash scripts/run_local_hgdn_naive_contract_search.sh
 conda run -s --name pg python scripts/run_local_hgdn_adaptive_pipeline.py --use-wandb 0
-conda run -s --name pg python scripts/run_local_hgdn_wallclock_resolver.py --run-plan primary
+conda run -s --name pg python scripts/run_local_hgdn_wallclock_resolver.py --stage2-decision-json <adaptive-pipeline>/stage2_decision.json --run-plan primary
 conda run -s --name pg python scripts/run_local_hgdn_batch_ladder.py
-bash scripts/run_h100_hgdn_naive_contract_round.sh
+conda run -s --name pg python scripts/run_h100_hgdn_naive_contract_round.py --hgdn-config <reviewed-config>
 ```
 
 The local wallclock resolver runs the exact `train_gpt.py` baseline, primary and

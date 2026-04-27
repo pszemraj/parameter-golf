@@ -172,6 +172,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--screen-selection-metric", default="auto")
     parser.add_argument("--confirm-selection-metric", default="final_roundtrip_bpb")
     parser.add_argument("--secondary-selection-metric", default=None)
+    parser.add_argument(
+        "--secondary-gdn-fla-recurrence-mode",
+        default="direct_fused",
+        help=(
+            "Recurrence mode for the OLMo-ish secondary stage. Use 'selected' "
+            "to reuse the stage0-selected primary mode."
+        ),
+    )
     parser.add_argument("--secondary-force", type=parse_bool_flag, default=False)
     parser.add_argument(
         "--screen-candidate-configs",
@@ -228,6 +236,12 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit(
             f"Unsupported --gdn-fla-recurrence-mode {args.gdn_fla_recurrence_mode!r}; "
             f"expected one of {', '.join(RECURRENCE_MODES)}"
+        )
+    if args.secondary_gdn_fla_recurrence_mode not in (*RECURRENCE_MODES, "selected"):
+        raise SystemExit(
+            "Unsupported --secondary-gdn-fla-recurrence-mode "
+            f"{args.secondary_gdn_fla_recurrence_mode!r}; expected selected or one of "
+            f"{', '.join(RECURRENCE_MODES)}"
         )
     if (
         args.screen_perf_skip_final_eval
@@ -488,6 +502,7 @@ def write_plan(args: argparse.Namespace, runtime: RuntimePlan) -> None:
             "screen_selection_metric": args.screen_selection_metric,
             "confirm_selection_metric": args.confirm_selection_metric,
             "secondary_selection_metric": runtime.secondary_selection_metric,
+            "secondary_gdn_fla_recurrence_mode": args.secondary_gdn_fla_recurrence_mode,
             "screen_candidate_configs": csv_items(args.screen_candidate_configs),
             "secondary_candidate_configs": csv_items(args.secondary_candidate_configs),
             "secondary_force": args.secondary_force,
@@ -525,6 +540,7 @@ def print_plan(args: argparse.Namespace, runtime: RuntimePlan) -> None:
     print(f"screen_selection_metric={args.screen_selection_metric}")
     print(f"confirm_selection_metric={args.confirm_selection_metric}")
     print(f"secondary_selection_metric={runtime.secondary_selection_metric}")
+    print(f"secondary_gdn_fla_recurrence_mode={args.secondary_gdn_fla_recurrence_mode}")
     print(f"secondary_force={int(args.secondary_force)}")
     print(f"data_path={args.data_path}")
     print(f"tokenizer_path={args.tokenizer_path}")
@@ -780,6 +796,11 @@ def run_pipeline(args: argparse.Namespace, runtime: RuntimePlan) -> None:
                     args.secondary_candidate_configs,
                 )
             else:
+                secondary_mode = (
+                    selected_mode
+                    if args.secondary_gdn_fla_recurrence_mode == "selected"
+                    else args.secondary_gdn_fla_recurrence_mode
+                )
                 run_search_stage(
                     args,
                     runtime,
@@ -787,7 +808,7 @@ def run_pipeline(args: argparse.Namespace, runtime: RuntimePlan) -> None:
                     stage_prefix=f"{args.run_prefix_base}_s3_secondary",
                     iterations=runtime.secondary_iterations,
                     perf_skip_final_eval=runtime.secondary_perf_skip_final_eval,
-                    selected_mode=selected_mode,
+                    selected_mode=secondary_mode,
                     candidate_configs=args.secondary_candidate_configs,
                     decision_kind="config",
                     metric=runtime.secondary_selection_metric,

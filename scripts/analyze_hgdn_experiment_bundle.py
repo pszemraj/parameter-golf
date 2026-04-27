@@ -573,13 +573,14 @@ def metric_value(row: dict[str, Any], metric: str) -> tuple[str, float | None]:
 
 
 def is_legal_size(row: dict[str, Any]) -> bool:
-    """Return whether a row is not known to exceed the artifact cap.
+    """Return whether a row has known legal artifact size.
 
     :param dict[str, Any] row: Analyzer row.
-    :return bool: True when legal or unknown.
+    :return bool: True when the final artifact or size screen is known legal.
     """
-    statuses = [row.get("artifact_status"), row.get("size_status")]
-    return "OVER_LIMIT" not in statuses
+    legal = {"UNDER_LIMIT", "ON_BUDGET"}
+    statuses = {row.get("artifact_status"), row.get("size_status")}
+    return bool(statuses & legal)
 
 
 def eligible_rows(

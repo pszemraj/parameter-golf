@@ -6,11 +6,9 @@ paid H100 finalist runs or official-style comparisons.
 
 ## Before Paid H100 Runs
 
-- Tighten analyzer size eligibility for config promotion so missing final
-  artifact status or missing size-screen status is explicit, not silently legal.
-- Add full provenance to all manifests: `ngpu`, `grad_accum_steps`, data path,
-  tokenizer path, vocab size, and artifact checksums/sizes when final artifacts
-  are produced.
+- Add artifact checksums/sizes to manifests when final artifacts are produced.
+  Current runner manifests already include `ngpu`, `grad_accum_steps`, data path,
+  tokenizer path, vocab size, and final log artifact status.
 
 ## Before Broad Local Sweeps
 

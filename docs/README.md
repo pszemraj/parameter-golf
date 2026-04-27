@@ -36,8 +36,8 @@ and artifact size?
 3. Run the true same-wallclock local resolver in
    [Wallclock Resolver](#wallclock-resolver). If laptop timing is inconclusive,
    manually review both the primary and secondary candidates for H100.
-4. If the resolver still supports the primary candidate, run the exact H100
-   comparison in [H100 Commands](#h100-commands).
+4. If the resolver still supports the primary candidate, manually review the
+   exact H100 comparison command in [H100 Commands](#h100-commands).
 5. Run the optional quality-ceiling candidate when the resolver says the local
    primary/secondary margin is too close or the secondary beats the primary by
    the configured margin.
@@ -94,34 +94,28 @@ matched attention-only diagnostic control, and two new OLMo-prior checks:
 
 The local helper includes both OLMo-prior configs plus matched attention-only
 diagnostic controls for `mlp1.5` and `mlp1.25`; the H100 helper can infer those
-controls when `ATTN_CONFIG` is not set.
+controls when `--attn-config` is not set.
 
 ## H100 Commands
 
-Primary exact-baseline comparison:
+Use the H100 helper only after a post-fix wallclock resolver has selected a
+primary. Do not copy stale fixed config examples into paid runs; pass the
+reviewed config from `wallclock_decision.json` / `stage2_decision.json`.
 
 ```bash
-USE_WANDB=0 WANDB_MODE=offline \
-ATTN_USE_FLASH_ATTN3=1 \
-DISTRIBUTED_MODE=parallel_muon \
-MUON_DISTRIBUTED_MODE=packed_allreduce \
-GDN_W_G_OPTIMIZER=matrix \
-HGDN_CONFIG=configs/hgdn/naive_contract_l8_d512_mid2_dk48_m2.toml \
-ATTN_CONFIG=configs/hgdn/naive_contract_l8_d512_r0_m2.toml \
-WANDB_WATCH=none \
-RUN_PREFIX_BASE=h100naive_sparse_primary \
-bash scripts/run_h100_hgdn_naive_contract_round.sh
-```
-
-Optional quality-ceiling substitution:
-
-```bash
-HGDN_CONFIG=configs/hgdn/naive_contract_l9_d512_mid3_dk48_v1p5_m1p75.toml
+conda run -s --name pg python scripts/run_h100_hgdn_naive_contract_round.py \
+  --run-prefix-base h100naive_reviewed_primary \
+  --hgdn-config <stage2-or-wallclock-selected-config> \
+  --attn-config <matched-attention-only-control> \
+  --use-wandb 0 \
+  --wandb-mode offline \
+  --wandb-watch none
 ```
 
 The helper runs three legs: exact `train_gpt.py` baseline, config-driven sparse
-HGDN, and the matched attention-only diagnostic control. It pins `DATA_PATH`,
-`TOKENIZER_PATH`, and `VOCAB_SIZE` for the exact baseline leg.
+HGDN, and the matched attention-only diagnostic control. It pins
+`GRAD_ACCUM_STEPS`, `DATA_PATH`, `TOKENIZER_PATH`, `VOCAB_SIZE`, and
+`PERF_SKIP_FINAL_EVAL=0` through its argparse-owned launch contract.
 
 ## Wallclock Resolver
 
@@ -134,16 +128,17 @@ avoid running both HGDN candidates on H100:
 ```bash
 conda run -s --name pg python scripts/run_local_hgdn_wallclock_resolver.py \
   --run-prefix-base localhgdn_wallclock1 \
+  --stage2-decision-json local-scratch/<adaptive-prefix>_pipeline/stage2_decision.json \
   --use-wandb 0 \
   --wandb-mode offline \
   --run-plan primary
 ```
 
 The resolver runs five legs under the same local wallclock cap: exact
-`train_gpt.py` baseline, primary `m2` HGDN, matched `r0_m2` attention-only
-diagnostic control, secondary OLMo-ish `6G2A`, and matched `r0_m1p25`
-attention-only diagnostic control. The default `--run-plan primary` runs only
-the exact baseline, primary HGDN, and matched primary control; use
+`train_gpt.py` baseline, the stage2-selected primary HGDN, its matched
+attention-only diagnostic control, secondary OLMo-ish `6G2A`, and matched
+`r0_m1p25` attention-only diagnostic control. The default `--run-plan primary`
+runs only the exact baseline, primary HGDN, and matched primary control; use
 `--run-plan full` for all five legs or `--run-plan secondary` for the secondary
 pair. Defaults are `--max-wallclock-seconds 600`, `--train-batch-tokens 65536`,
 `--train-seq-len 1024`, and `--val-max-seqs 512`. The primary and secondary
@@ -376,7 +371,7 @@ conda run -s --name pg python scripts/check_bpb_sanity.py \
   exact-baseline/HGDN resolver before paid H100 work.
 - `scripts/run_local_hgdn_batch_ladder.py`: local batch-size/VRAM throughput
   probe for shortlisted configs.
-- `scripts/run_h100_hgdn_naive_contract_round.sh`: H100 exact-baseline comparison.
+- `scripts/run_h100_hgdn_naive_contract_round.py`: H100 exact-baseline comparison.
 - `scripts/bundle_hgdn_run.py`: bundle helper.
 - `scripts/bootstrap_challenge_data.sh`: data bootstrap helper.
 
@@ -388,7 +383,6 @@ Run these checks before handing off a branch or run bundle:
 bash -n scripts/hgdn_shell_common.sh \
   scripts/run_local_hgdn_naive_contract_search.sh \
   scripts/run_local_hgdn_recurrence_matrix.sh \
-  scripts/run_h100_hgdn_naive_contract_round.sh \
   scripts/bootstrap_challenge_data.sh
 
 conda run -s --name pg python -m py_compile \
@@ -402,6 +396,7 @@ conda run -s --name pg python -m py_compile \
   scripts/run_local_hgdn_adaptive_pipeline.py \
   scripts/run_local_hgdn_wallclock_resolver.py \
   scripts/run_local_hgdn_batch_ladder.py \
+  scripts/run_h100_hgdn_naive_contract_round.py \
   scripts/check_bpb_sanity.py scripts/probe_fla_stack.py \
   scripts/bench_fla_recurrence_paths.py \
   scripts/bench_hgdn_full_layer_paths.py

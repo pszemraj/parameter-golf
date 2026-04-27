@@ -69,6 +69,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--wandb-watch", default="none")
     parser.add_argument("--wandb-watch-log-freq", type=int, default=25)
     parser.add_argument("--run-prefix-base", default="localhgdn_wallclock1")
+    parser.add_argument(
+        "--stage2-decision-json",
+        type=Path,
+        default=None,
+        help="Adaptive pipeline stage2_decision.json to use as the primary pair.",
+    )
     parser.add_argument("--bundle-stage-dir", type=Path, default=None)
     parser.add_argument("--archive-output", type=Path, default=None)
     parser.add_argument("--command-log", type=Path, default=None)
@@ -119,12 +125,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--primary-hgdn-config",
         type=Path,
-        default=Path("configs/hgdn/naive_contract_l8_d512_mid2_dk48_m2.toml"),
+        default=None,
     )
     parser.add_argument(
         "--primary-control-config",
         type=Path,
-        default=Path("configs/hgdn/naive_contract_l8_d512_r0_m2.toml"),
+        default=None,
     )
     parser.add_argument(
         "--secondary-hgdn-config",
@@ -179,6 +185,37 @@ def recurrence_modes(args: argparse.Namespace) -> dict[str, str]:
     return modes
 
 
+def apply_stage2_decision(args: argparse.Namespace) -> None:
+    """Apply adaptive stage2 primary selection to resolver arguments.
+
+    :param argparse.Namespace args: Parsed arguments.
+    :raises SystemExit: If the decision JSON is malformed.
+    """
+    if args.stage2_decision_json is None:
+        return
+    decision_path = args.stage2_decision_json
+    if not decision_path.is_file():
+        raise SystemExit(f"--stage2-decision-json not found: {decision_path}")
+    decision = json.loads(decision_path.read_text(encoding="utf-8"))
+    selected_config = decision.get("selected_config")
+    selected_control_config = decision.get("selected_control_config")
+    selected_mode = decision.get("selected_gdn_fla_recurrence_mode")
+    if not selected_config:
+        raise SystemExit(f"{decision_path} is missing selected_config")
+    if not selected_control_config:
+        raise SystemExit(f"{decision_path} is missing selected_control_config")
+    if selected_mode and selected_mode not in RECURRENCE_MODES:
+        raise SystemExit(
+            f"{decision_path} has unsupported selected_gdn_fla_recurrence_mode: "
+            f"{selected_mode!r}"
+        )
+    args.primary_hgdn_config = Path(str(selected_config))
+    args.primary_control_config = Path(str(selected_control_config))
+    if selected_mode:
+        args.primary_gdn_fla_recurrence_mode = str(selected_mode)
+        args.primary_control_gdn_fla_recurrence_mode = str(selected_mode)
+
+
 def resolve_run_keys(run_plan: str) -> list[str]:
     """Resolve a run-plan string into ordered run keys.
 
@@ -219,75 +256,87 @@ def resolve_run_keys(run_plan: str) -> list[str]:
     return out
 
 
-def run_specs(args: argparse.Namespace, modes: dict[str, str]) -> dict[str, RunSpec]:
-    """Build all known resolver run specs.
+def required_path(value: Path | None, name: str) -> Path:
+    """Return a required path argument or fail.
+
+    :param Path | None value: Parsed path value.
+    :param str name: Argument name.
+    :raises SystemExit: If the value is missing.
+    :return Path: Required path.
+    """
+    if value is None:
+        raise SystemExit(f"{name} is required for the selected --run-plan")
+    return value
+
+
+def run_specs(
+    args: argparse.Namespace, modes: dict[str, str], selected_keys: list[str]
+) -> dict[str, RunSpec]:
+    """Build selected resolver run specs.
 
     :param argparse.Namespace args: Parsed arguments.
     :param dict[str, str] modes: Resolved recurrence modes.
+    :param list[str] selected_keys: Selected run keys.
     :return dict[str, RunSpec]: Run specs by key.
     """
     wallclock_tag = format_seconds(args.max_wallclock_seconds)
     prefix = args.run_prefix_base
-    exact_run_id = (
-        args.gpt_naive_run_id
-        or f"{prefix}_gpt_naive_baseline_seq{args.train_seq_len}_wall{wallclock_tag}"
-    )
-    primary_hgdn_run_id = (
-        args.primary_hgdn_run_id
-        or f"{prefix}_primary_hgdn_{args.primary_hgdn_config.stem}_seq{args.train_seq_len}_wall{wallclock_tag}"
-    )
-    primary_control_run_id = (
-        args.primary_control_run_id
-        or f"{prefix}_primary_control_{args.primary_control_config.stem}_seq{args.train_seq_len}_wall{wallclock_tag}"
-    )
-    secondary_hgdn_run_id = (
-        args.secondary_hgdn_run_id
-        or f"{prefix}_secondary_hgdn_{args.secondary_hgdn_config.stem}_seq{args.train_seq_len}_wall{wallclock_tag}"
-    )
-    secondary_control_run_id = (
-        args.secondary_control_run_id
-        or f"{prefix}_secondary_control_{args.secondary_control_config.stem}_seq{args.train_seq_len}_wall{wallclock_tag}"
-    )
-    return {
-        "exact": RunSpec(
+    specs: dict[str, RunSpec] = {}
+    if "exact" in selected_keys:
+        specs["exact"] = RunSpec(
             key="exact",
             label="exact repo naive baseline local wallclock resolver",
             trainer="train_gpt.py",
-            run_id=exact_run_id,
-        ),
-        "primary_hgdn": RunSpec(
+            run_id=args.gpt_naive_run_id
+            or f"{prefix}_gpt_naive_baseline_seq{args.train_seq_len}_wall{wallclock_tag}",
+        )
+    if "primary_hgdn" in selected_keys:
+        primary_hgdn_config = required_path(
+            args.primary_hgdn_config, "--primary-hgdn-config"
+        )
+        specs["primary_hgdn"] = RunSpec(
             key="primary_hgdn",
             label="primary HGDN local wallclock resolver",
             trainer="train_gpt_hybrid.py",
-            run_id=primary_hgdn_run_id,
-            config=args.primary_hgdn_config,
+            run_id=args.primary_hgdn_run_id
+            or f"{prefix}_primary_hgdn_{primary_hgdn_config.stem}_seq{args.train_seq_len}_wall{wallclock_tag}",
+            config=primary_hgdn_config,
             recurrence_mode=modes["primary_hgdn"],
-        ),
-        "primary_control": RunSpec(
+        )
+    if "primary_control" in selected_keys:
+        primary_control_config = required_path(
+            args.primary_control_config, "--primary-control-config"
+        )
+        specs["primary_control"] = RunSpec(
             key="primary_control",
             label="primary attention-only baseline diagnostic control local wallclock resolver",
             trainer="train_gpt_hybrid.py",
-            run_id=primary_control_run_id,
-            config=args.primary_control_config,
+            run_id=args.primary_control_run_id
+            or f"{prefix}_primary_control_{primary_control_config.stem}_seq{args.train_seq_len}_wall{wallclock_tag}",
+            config=primary_control_config,
             recurrence_mode=modes["primary_control"],
-        ),
-        "secondary_hgdn": RunSpec(
+        )
+    if "secondary_hgdn" in selected_keys:
+        specs["secondary_hgdn"] = RunSpec(
             key="secondary_hgdn",
             label="secondary HGDN local wallclock resolver",
             trainer="train_gpt_hybrid.py",
-            run_id=secondary_hgdn_run_id,
+            run_id=args.secondary_hgdn_run_id
+            or f"{prefix}_secondary_hgdn_{args.secondary_hgdn_config.stem}_seq{args.train_seq_len}_wall{wallclock_tag}",
             config=args.secondary_hgdn_config,
             recurrence_mode=modes["secondary_hgdn"],
-        ),
-        "secondary_control": RunSpec(
+        )
+    if "secondary_control" in selected_keys:
+        specs["secondary_control"] = RunSpec(
             key="secondary_control",
             label="secondary attention-only baseline diagnostic control local wallclock resolver",
             trainer="train_gpt_hybrid.py",
-            run_id=secondary_control_run_id,
+            run_id=args.secondary_control_run_id
+            or f"{prefix}_secondary_control_{args.secondary_control_config.stem}_seq{args.train_seq_len}_wall{wallclock_tag}",
             config=args.secondary_control_config,
             recurrence_mode=modes["secondary_control"],
-        ),
-    }
+        )
+    return specs
 
 
 def training_env(
@@ -407,6 +456,7 @@ def print_plan(
     print()
     print(">>> Local HGDN true-wallclock resolver")
     print(f"run_prefix_base={args.run_prefix_base}")
+    print(f"stage2_decision_json={args.stage2_decision_json or '<unset>'}")
     print(f"run_plan={args.run_plan}")
     print(f"selected_run_keys={','.join(spec.key for spec in selected_specs)}")
     print(f"iterations={args.iterations}  # safety cap")
@@ -767,9 +817,9 @@ def analyze_bundle(
             "--output-json",
             str(args.bundle_stage_dir / "wallclock_decision.json"),
             "--primary-config",
-            str(args.primary_hgdn_config),
+            str(args.primary_hgdn_config or ""),
             "--primary-control-config",
-            str(args.primary_control_config),
+            str(args.primary_control_config or ""),
             "--secondary-config",
             str(args.secondary_hgdn_config),
             "--secondary-control-config",
@@ -813,13 +863,14 @@ def main() -> int:
     os.chdir(REPO_ROOT)
     args = parse_args()
     finalize_paths(args)
+    apply_stage2_decision(args)
     if args.max_wallclock_seconds <= 0:
         raise SystemExit("--max-wallclock-seconds must be > 0 for wallclock resolver")
     ensure_py7zr_available()
 
-    modes = recurrence_modes(args)
     selected_keys = resolve_run_keys(args.run_plan)
-    specs_by_key = run_specs(args, modes)
+    modes = recurrence_modes(args)
+    specs_by_key = run_specs(args, modes, selected_keys)
     selected_specs = [specs_by_key[key] for key in selected_keys]
     grad_accum_steps = resolve_grad_accum_steps(args.ngpu, args.grad_accum_steps)
     val_batch_size = resolve_val_batch_size(
