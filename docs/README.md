@@ -66,17 +66,12 @@ The external GDN/OLMo design notes are in [REFERENCE.md](REFERENCE.md).
 
 ## Local Sparse Search
 
-Completed bundle: `local-scratch/localnaivehgdn_sparse3_bundle`.
+Completed historical bundle: `local-scratch/localnaivehgdn_sparse3_bundle`.
 
-Analyze it with:
-
-```bash
-conda run -s --name pg python scripts/analyze_local_naive_contract_bundle.py --top 20
-```
-
-The completed sparse3 bundle predates the decay-init/no-WD/output-norm fix, so
-it should be treated as pre-fix evidence. It still identifies useful shapes,
-but exact promotion should rerun the shortlist under the corrected GDN dynamics.
+The completed sparse3 bundle predates the decay-init/no-WD/output-norm and
+short-conv optimizer fixes, so it should be treated as pre-fix evidence. It
+still identifies useful shapes, but exact promotion should rerun the shortlist
+through the adaptive pipeline under the corrected GDN dynamics.
 
 Pre-fix promotion call:
 
@@ -338,7 +333,6 @@ the common human-facing sequence-count form and resolve it to
 
 ## Analysis And Sanity Tools
 
-- `scripts/analyze_local_naive_contract_bundle.py`: local sparse bundle ranking.
 - `scripts/analyze_hgdn_experiment_bundle.py`: generic bundle analyzer and
   promotion-decision writer for staged pipelines.
 - `scripts/check_bpb_sanity.py`: nats/BPB/implied bytes-per-token checks.
@@ -390,7 +384,6 @@ conda run -s --name pg python -m py_compile \
   hgdn_fla.py hgdn_runtime_utils.py scripts/hgdn_helper_cli.py \
   scripts/hgdn_local_runner.py \
   scripts/screen_hgdn_arch_sizes.py \
-  scripts/analyze_local_naive_contract_bundle.py \
   scripts/analyze_hgdn_experiment_bundle.py \
   scripts/resolve_hgdn_wallclock_decision.py \
   scripts/run_local_hgdn_adaptive_pipeline.py \

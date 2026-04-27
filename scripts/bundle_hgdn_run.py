@@ -74,18 +74,6 @@ def copy_required(src: Path, stage_root: Path) -> str:
     return str(relative)
 
 
-def copy_optional(src: Path, stage_root: Path) -> str | None:
-    """Copy one optional path into the stage tree if it exists.
-
-    :param Path src: Source file to copy when present.
-    :param Path stage_root: Bundle staging root.
-    :return str | None: Relative stored path or ``None`` when absent.
-    """
-    if not src.exists():
-        return None
-    return copy_required(src, stage_root)
-
-
 def write_text(path: Path, text: str) -> None:
     """Write one UTF-8 text file.
 
