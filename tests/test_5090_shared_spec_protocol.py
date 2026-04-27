@@ -118,5 +118,9 @@ def test_aligned_launcher_dry_run_keeps_spec_rebuild_at_launcher_layer() -> None
     assert "--trigram-top-k 6" in result.stdout
     assert "--trigram-count-workers 4" in result.stdout
     assert "+ REBUILD_SHARED=0 " in result.stdout
+    downstream = result.stdout.split("run_core_amp_sweep.py controller", 1)[1]
+    assert "blocks0_d128_l5_i512_trigram_1b_seq2048_bptt2_k6\\ 5\\ 4.0" in downstream
+    assert "blocks0_d128_l5_i512_trigramk6_lr0035" not in downstream
+    assert "_s1337" not in downstream
     assert "--no-rebuild-shared" in result.stdout
-    assert "--rebuild-shared" not in result.stdout.split("run_core_amp_sweep.py controller", 1)[1]
+    assert "--rebuild-shared" not in downstream

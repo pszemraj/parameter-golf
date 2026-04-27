@@ -503,7 +503,12 @@ run_blocks0_seed() {
   preflight_artifact_budget "${source_spec_dir}"
 
   local model_root="${REPO_ROOT}/experiments/5090_architecture/${GEOMETRY_LABEL}_trigram_seed${seed}_${RUN_VERSION}"
-  local run_name="${GEOMETRY_LABEL}_trigramk${TRIGRAM_TOP_K}_${LEARNING_RATE_TAG}_h${GEOMETRY_LR_HOLD_STEPS}_${GEOMETRY_TRAIN_LABEL}_s${seed}"
+  local run_label="${GEOMETRY_TRAIN_LABEL}"
+  if [[ "${run_label}" != *"k${TRIGRAM_TOP_K}"* ]]; then
+    run_label="${run_label}_k${TRIGRAM_TOP_K}"
+  fi
+  local run_name
+  run_name="$(slugify "${GEOMETRY_LABEL}_trigram_${run_label}")"
   local run_specs
   read -r -d '' run_specs <<EOF || true
 ${run_name} ${GEOMETRY_CORE_LAYERS} ${GEOMETRY_CORE_EXPANSION} ${GEOMETRY_CARRY_CHUNKS} ${GEOMETRY_BPTT_CHUNKS} 1 -3.0 ${LEARNING_RATE} ${GEOMETRY_LR_WARMUP_STEPS} ${GEOMETRY_LR_HOLD_STEPS} ${GEOMETRY_MIN_LR} ${GEOMETRY_NUM_STEPS} ${GEOMETRY_BATCH_SIZE} ${GEOMETRY_SEQ_LEN}
