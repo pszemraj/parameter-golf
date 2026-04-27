@@ -242,7 +242,12 @@ def load_summary_rows(
 
 
 def load_summary_row(
-    repo_root: Path, geometry: Geometry, *, run_version: str, seed: str
+    repo_root: Path,
+    geometry: Geometry,
+    *,
+    run_version: str,
+    seed: str,
+    contract: Optional[ScreenContract] = None,
 ) -> dict[str, str]:
     """Load the unique seed-matching summary row for a geometry run.
 
@@ -250,12 +255,17 @@ def load_summary_row(
     :param Geometry geometry: Geometry to inspect.
     :param str run_version: Run version suffix.
     :param str seed: Seed string.
+    :param Optional[ScreenContract] contract: Optional exact run contract.
     :return dict[str, str]: Summary row, or an empty dict when missing.
     :raises SystemExit: If multiple matching rows make the run ambiguous.
     """
     rows = load_summary_rows(repo_root, geometry, run_version=run_version, seed=seed)
     if not rows:
         return {}
+    if contract is not None:
+        rows = [row for row in rows if row_matches_contract(geometry, row, contract)]
+        if not rows:
+            return {}
     if len(rows) == 1:
         return rows[0]
     completed = [row for row in rows if row.get("status") == "completed"]
@@ -265,6 +275,36 @@ def load_summary_row(
     raise SystemExit(
         f"ambiguous summary rows for {geometry.label} seed={seed} run_version={run_version}: "
         f"{names}"
+    )
+
+
+def row_matches_contract(
+    geometry: Geometry,
+    row: dict[str, str],
+    contract: ScreenContract,
+) -> bool:
+    """Return whether a summary row matches the exact shape/training contract.
+
+    :param Geometry geometry: Expected geometry.
+    :param dict[str, str] row: Summary row.
+    :param ScreenContract contract: Expected contract.
+    :return bool: ``True`` when all contract fields match.
+    """
+    expected = {
+        "planned_steps": contract.planned_steps,
+        "effective_step_tokens": contract.effective_step_tokens,
+        "num_blocks": contract.num_blocks,
+        "trigram_top_k": contract.trigram_top_k,
+        "seq_len": contract.seq_len,
+        "batch_size": contract.batch_size,
+        "bptt_chunks": contract.bptt_chunks,
+        "core_dim": geometry.core_dim,
+        "core_layers": geometry.layers,
+        "core_inner_dim": geometry.inner_dim,
+        "recurrent_cells": geometry.recurrent_cells,
+    }
+    return all(
+        as_int(row.get(field)) == expected_value for field, expected_value in expected.items()
     )
 
 
@@ -693,7 +733,11 @@ def main() -> None:
     rows: list[AnalyzedRow] = []
     for geometry in geometries:
         summary = load_summary_row(
-            repo_root, geometry, run_version=args.run_version, seed=args.seed
+            repo_root,
+            geometry,
+            run_version=args.run_version,
+            seed=args.seed,
+            contract=contract,
         )
         errors = eligibility_errors(geometry, summary, contract)
         valid_screen_row = not errors
@@ -787,19 +831,26 @@ def main() -> None:
     ]
     print()
     if promoted:
-        print("## Next Commands")
-        print()
-        for geometry, verdict in promoted:
-            print(f"# {geometry.label}: {verdict}")
-            print(
-                confirmation_command(
-                    geometry,
-                    run_version=args.run_version,
-                    seed=args.seed,
-                    contract=contract,
-                )
-            )
+        if decision_grade:
+            print("## Decision-Grade Winners")
             print()
+            for geometry, verdict in promoted:
+                print(f"- `{geometry.label}`: `{verdict}`")
+            print()
+        else:
+            print("## Next Commands")
+            print()
+            for geometry, verdict in promoted:
+                print(f"# {geometry.label}: {verdict}")
+                print(
+                    confirmation_command(
+                        geometry,
+                        run_version=args.run_version,
+                        seed=args.seed,
+                        contract=contract,
+                    )
+                )
+                print()
     else:
         print("No geometry row currently clears the automatic promotion thresholds.")
         print()

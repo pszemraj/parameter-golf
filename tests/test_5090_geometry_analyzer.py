@@ -14,6 +14,7 @@ from tools.analyze_5090_geometry_frontier import (
     SCREEN_NUM_BLOCKS,
     SCREEN_PLANNED_STEPS,
     SCREEN_TRIGRAM_TOP_K,
+    ScreenContract,
     decision,
     eligibility_errors,
     estimated_time_matched_steps,
@@ -144,6 +145,60 @@ def test_summary_loader_rejects_ambiguous_seed_rows(tmp_path: Path):
         assert "ambiguous summary rows" in str(exc)
     else:
         raise AssertionError("expected ambiguous summary rows to fail loudly")
+
+
+def test_summary_loader_selects_exact_contract_from_mixed_rows(tmp_path: Path):
+    """A 512M probe and 1B decision row may share one summary TSV."""
+    label = "blocks0_d128_l5_i512"
+    geometry = parse_geometry(label)
+    summary_dir = tmp_path / "experiments" / "5090_architecture" / f"{label}_trigram_seed1337_geom1"
+    summary_dir.mkdir(parents=True)
+    probe = _summary_row(
+        label,
+        run_name=f"{label}_probe_s1337",
+        planned_steps="4096",
+        lr_hold_steps="3500",
+        trigram_top_k="4",
+        seq_len="2048",
+        batch_size="32",
+        bptt_chunks="2",
+        last_val_bpb="2.03",
+    )
+    decision_row = _summary_row(
+        label,
+        run_name=f"{label}_decision_s1337",
+        planned_steps="8192",
+        lr_hold_steps="7000",
+        trigram_top_k="4",
+        seq_len="2048",
+        batch_size="32",
+        bptt_chunks="2",
+        last_val_bpb="1.97",
+    )
+    with (summary_dir / "summary.tsv").open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=SUMMARY_FIELDS, delimiter="\t")
+        writer.writeheader()
+        writer.writerow({field: probe.get(field, "") for field in SUMMARY_FIELDS})
+        writer.writerow({field: decision_row.get(field, "") for field in SUMMARY_FIELDS})
+
+    selected = load_summary_row(
+        tmp_path,
+        geometry,
+        run_version="geom1",
+        seed="1337",
+        contract=ScreenContract(
+            planned_steps=8192,
+            effective_step_tokens=SCREEN_EFFECTIVE_STEP_TOKENS,
+            num_blocks=SCREEN_NUM_BLOCKS,
+            trigram_top_k=4,
+            seq_len=2048,
+            batch_size=32,
+            bptt_chunks=2,
+        ),
+    )
+
+    assert selected["run_name"] == f"{label}_decision_s1337"
+    assert selected["last_val_bpb"] == "1.97"
 
 
 def test_benchmark_ratio_prefers_current_d48_l12_i480_and_rounds_steps():
@@ -279,3 +334,62 @@ def test_cli_auto_infers_k4_long_context_contract(tmp_path: Path):
     assert "--trigram-top-k 4" in result.stdout
     assert "--geometry-seq-len 2048" in result.stdout
     assert "--geometry-batch-size 64" in result.stdout
+
+
+def test_cli_decision_grade_rows_do_not_emit_reconfirmation(tmp_path: Path):
+    """A completed decision-grade row should be reported, not re-confirmed."""
+    label = "blocks0_d128_l5_i512"
+    summary_dir = (
+        tmp_path
+        / "experiments"
+        / "5090_architecture"
+        / f"{label}_trigram_seed1337_geom1_seq2048_bptt2"
+    )
+    summary_dir.mkdir(parents=True)
+    row = _summary_row(
+        label,
+        planned_steps="8192",
+        trigram_top_k="4",
+        seq_len="2048",
+        batch_size="32",
+        bptt_chunks="2",
+        last_eval_tokens="62021845",
+        last_eval_coverage_denominator_tokens="62021845",
+        last_eval_full_coverage="true",
+        last_val_bpb="1.972",
+    )
+    with (summary_dir / "summary.tsv").open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=SUMMARY_FIELDS, delimiter="\t")
+        writer.writeheader()
+        writer.writerow({field: row.get(field, "") for field in SUMMARY_FIELDS})
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(PKG_ROOT / "tools" / "analyze_5090_geometry_frontier.py"),
+            "--repo-root",
+            str(tmp_path),
+            "--run-version",
+            "geom1_seq2048_bptt2",
+            "--label",
+            label,
+            "--screen-steps",
+            "8192",
+            "--screen-trigram-top-k",
+            "4",
+            "--seq-len",
+            "2048",
+            "--screen-batch-size",
+            "32",
+            "--screen-bptt-chunks",
+            "2",
+            "--baseline-bpb",
+            "1.973",
+        ],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    assert "## Decision-Grade Winners" in result.stdout
+    assert "geom1_seq2048_bptt2_confirm" not in result.stdout

@@ -263,6 +263,7 @@ def analyze_geometry_rows(args: argparse.Namespace) -> list[AnalyzedRow]:
             geometry,
             run_version=args.run_version,
             seed=str(args.seed),
+            contract=contract,
         )
         errors = screen_eligibility_errors(geometry, summary, args)
         bpb = screen_bpb(summary)
@@ -502,6 +503,24 @@ def valid_confirmation_row(row: dict[str, str], args: argparse.Namespace) -> boo
     return True
 
 
+def confirmation_contract(args: argparse.Namespace) -> ScreenContract:
+    """Return the exact contract for a confirmation row.
+
+    :param argparse.Namespace args: Parsed arguments.
+    :return ScreenContract: Confirmation contract.
+    """
+    contract = screen_contract(args)
+    return ScreenContract(
+        planned_steps=int(args.confirm_steps),
+        effective_step_tokens=contract.effective_step_tokens,
+        num_blocks=contract.num_blocks,
+        trigram_top_k=contract.trigram_top_k,
+        seq_len=contract.seq_len,
+        batch_size=contract.batch_size,
+        bptt_chunks=contract.bptt_chunks,
+    )
+
+
 def valid_screen_variant_row(
     row: dict[str, str],
     args: argparse.Namespace,
@@ -547,6 +566,33 @@ def valid_screen_variant_row(
         if not full_val_accounting_is_valid(row):
             return False
     return True
+
+
+def variant_contract(
+    args: argparse.Namespace,
+    *,
+    top_k: int,
+    batch_size: Optional[int] = None,
+    bptt_chunks: Optional[int] = None,
+) -> ScreenContract:
+    """Return the exact contract for an adaptive variant row.
+
+    :param argparse.Namespace args: Parsed arguments.
+    :param int top_k: Expected trigram top-K.
+    :param Optional[int] batch_size: Optional batch-size override.
+    :param Optional[int] bptt_chunks: Optional BPTT chunk override.
+    :return ScreenContract: Variant contract.
+    """
+    contract = screen_contract(args)
+    return ScreenContract(
+        planned_steps=variant_steps(args),
+        effective_step_tokens=contract.effective_step_tokens,
+        num_blocks=contract.num_blocks,
+        trigram_top_k=int(top_k),
+        seq_len=contract.seq_len,
+        batch_size=int(batch_size if batch_size is not None else contract.batch_size),
+        bptt_chunks=int(bptt_chunks if bptt_chunks is not None else contract.bptt_chunks),
+    )
 
 
 def geometry_command(
@@ -735,6 +781,7 @@ def plan_confirmations(args: argparse.Namespace) -> list[PlannedCommand]:
             geometry,
             run_version=confirmation_run_version(local_args),
             seed=str(local_args.seed),
+            contract=confirmation_contract(local_args),
         )
         if valid_confirmation_row(existing, local_args):
             continue
@@ -811,6 +858,7 @@ def completed_confirmations(args: argparse.Namespace) -> list[tuple[str, dict[st
             geometry,
             run_version=confirmation_run_version(args),
             seed=str(args.seed),
+            contract=confirmation_contract(args),
         )
         if valid_confirmation_row(row, args):
             out.append((label, row))
@@ -834,6 +882,12 @@ def plan_bptt(args: argparse.Namespace) -> list[PlannedCommand]:
         parse_geometry(label),
         run_version=bptt_run_version(args),
         seed=str(args.seed),
+        contract=variant_contract(
+            args,
+            top_k=contract.trigram_top_k,
+            batch_size=expected_bptt_batch_size(args),
+            bptt_chunks=int(args.bptt_chunks),
+        ),
     )
     if valid_screen_variant_row(
         existing,
@@ -907,6 +961,12 @@ def plan_bptt_stage(args: argparse.Namespace) -> StagePlan:
         parse_geometry(label),
         run_version=bptt_run_version(args),
         seed=str(args.seed),
+        contract=variant_contract(
+            args,
+            top_k=expected_screen_trigram_top_k(args),
+            batch_size=expected_bptt_batch_size(args),
+            bptt_chunks=int(args.bptt_chunks),
+        ),
     )
     if valid_screen_variant_row(
         existing,
@@ -935,6 +995,7 @@ def bptt_selected_for_k4(
         geometry,
         run_version=args.run_version,
         seed=str(args.seed),
+        contract=screen_contract(args),
     )
     base_errors = screen_eligibility_errors(geometry, base_row, args)
     if base_errors:
@@ -944,6 +1005,12 @@ def bptt_selected_for_k4(
         geometry,
         run_version=bptt_run_version(args),
         seed=str(args.seed),
+        contract=variant_contract(
+            args,
+            top_k=2,
+            batch_size=expected_bptt_batch_size(args),
+            bptt_chunks=int(args.bptt_chunks),
+        ),
     )
     if not valid_screen_variant_row(
         bptt_row,
@@ -978,6 +1045,12 @@ def plan_k4(args: argparse.Namespace) -> list[PlannedCommand]:
         parse_geometry(label),
         run_version=bptt_run_version(args),
         seed=str(args.seed),
+        contract=variant_contract(
+            args,
+            top_k=2,
+            batch_size=expected_bptt_batch_size(args),
+            bptt_chunks=int(args.bptt_chunks),
+        ),
     )
     if not valid_screen_variant_row(
         bptt_row,
@@ -994,6 +1067,14 @@ def plan_k4(args: argparse.Namespace) -> list[PlannedCommand]:
         parse_geometry(label),
         run_version=run_version,
         seed=str(args.seed),
+        contract=variant_contract(
+            args,
+            top_k=4,
+            batch_size=expected_bptt_batch_size(args)
+            if use_bptt
+            else expected_screen_batch_size(args),
+            bptt_chunks=int(args.bptt_chunks) if use_bptt else expected_screen_bptt_chunks(args),
+        ),
     )
     if valid_screen_variant_row(
         existing,
@@ -1089,6 +1170,12 @@ def plan_k4_stage(args: argparse.Namespace) -> StagePlan:
         parse_geometry(label),
         run_version=bptt_run_version(args),
         seed=str(args.seed),
+        contract=variant_contract(
+            args,
+            top_k=2,
+            batch_size=expected_bptt_batch_size(args),
+            bptt_chunks=int(args.bptt_chunks),
+        ),
     )
     if not valid_screen_variant_row(
         bptt_row,
@@ -1109,6 +1196,14 @@ def plan_k4_stage(args: argparse.Namespace) -> StagePlan:
         parse_geometry(label),
         run_version=k4_run_version(args, use_bptt=use_bptt),
         seed=str(args.seed),
+        contract=variant_contract(
+            args,
+            top_k=4,
+            batch_size=expected_bptt_batch_size(args)
+            if use_bptt
+            else expected_screen_batch_size(args),
+            bptt_chunks=int(args.bptt_chunks) if use_bptt else expected_screen_bptt_chunks(args),
+        ),
     )
     if valid_screen_variant_row(
         existing,
@@ -1496,6 +1591,7 @@ def plan_gated_followup_stage(args: argparse.Namespace) -> StagePlan:
         geometry,
         run_version=required_stage_value(args, "gate_evidence_run_version"),
         seed=str(args.seed),
+        contract=confirmation_contract(evidence_args),
     )
     if not valid_confirmation_row(evidence_row, evidence_args):
         return StagePlan(
@@ -1535,6 +1631,12 @@ def plan_gated_followup_stage(args: argparse.Namespace) -> StagePlan:
         geometry,
         run_version=required_stage_value(args, "gate_followup_run_version"),
         seed=str(args.seed),
+        contract=variant_contract(
+            followup_args,
+            top_k=expected_screen_trigram_top_k(followup_args),
+            batch_size=expected_screen_batch_size(followup_args),
+            bptt_chunks=expected_screen_bptt_chunks(followup_args),
+        ),
     )
     if valid_gated_followup_row(existing, followup_args):
         return StagePlan(
