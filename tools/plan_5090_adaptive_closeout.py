@@ -234,6 +234,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     ap.add_argument("--seq-len", type=int, default=None)
     ap.add_argument("--val-steps", type=int, default=None)
     ap.add_argument("--count-workers", type=int, default=None)
+    ap.add_argument("--spec-max-tokens", type=int, default=None)
     ap.add_argument("--trigram-max-tokens", type=int, default=None)
     ap.add_argument("--data-max-tokens", type=int, default=None)
     ap.add_argument("--no-wandb", action="store_true")
@@ -682,6 +683,7 @@ def geometry_command(
     target_effective_step_tokens: Optional[int] = None,
     val_steps: Optional[int] = None,
     count_workers: Optional[int] = None,
+    spec_max_tokens: Optional[int] = None,
     trigram_max_tokens: Optional[int] = None,
     data_max_tokens: Optional[int] = None,
     no_wandb: bool = False,
@@ -708,6 +710,7 @@ def geometry_command(
     :param Optional[int] target_effective_step_tokens: Optional effective token contract.
     :param Optional[int] val_steps: Optional sampled validation steps.
     :param Optional[int] count_workers: Optional trigram count worker override.
+    :param Optional[int] spec_max_tokens: Optional base spec-build token cap.
     :param Optional[int] trigram_max_tokens: Optional trigram count cap.
     :param Optional[int] data_max_tokens: Optional train-data token cap.
     :param bool no_wandb: Whether to disable W&B.
@@ -764,6 +767,8 @@ def geometry_command(
         cmd.extend(["--val-steps", str(val_steps)])
     if count_workers is not None:
         cmd.extend(["--count-workers", str(count_workers)])
+    if spec_max_tokens is not None:
+        cmd.extend(["--spec-max-tokens", str(spec_max_tokens)])
     if trigram_max_tokens is not None:
         cmd.extend(["--trigram-max-tokens", str(trigram_max_tokens)])
     if data_max_tokens is not None:
@@ -789,6 +794,7 @@ def shared_command_kwargs(args: argparse.Namespace) -> dict[str, object]:
         "target_effective_step_tokens": int(args.effective_step_tokens),
         "val_steps": args.val_steps,
         "count_workers": args.count_workers,
+        "spec_max_tokens": args.spec_max_tokens,
         "trigram_max_tokens": args.trigram_max_tokens,
         "data_max_tokens": args.data_max_tokens,
         "no_wandb": bool(args.no_wandb),
@@ -805,6 +811,7 @@ def shared_passthrough_kwargs(args: argparse.Namespace) -> dict[str, object]:
     return {
         "val_steps": args.val_steps,
         "count_workers": args.count_workers,
+        "spec_max_tokens": args.spec_max_tokens,
         "trigram_max_tokens": args.trigram_max_tokens,
         "data_max_tokens": args.data_max_tokens,
         "no_wandb": bool(args.no_wandb),
@@ -1642,6 +1649,7 @@ def finalist_command(args: argparse.Namespace, *, seed: str) -> PlannedCommand:
             target_effective_step_tokens=contract.effective_step_tokens,
             val_steps=args.val_steps,
             count_workers=args.count_workers,
+            spec_max_tokens=args.spec_max_tokens,
             trigram_max_tokens=args.trigram_max_tokens,
             data_max_tokens=args.data_max_tokens,
             no_wandb=bool(args.no_wandb),

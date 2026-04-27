@@ -682,6 +682,7 @@ def test_finalist_preflight_emits_preflight_only_command(tmp_path: Path) -> None
     args.finalist_bptt_chunks = 2
     args.finalist_train_label = "preflight_seq2048_bptt2_k7"
     args.finalist_preflight_only = True
+    args.spec_max_tokens = 200_000
 
     stage = plan_stage(args)
 
@@ -689,6 +690,8 @@ def test_finalist_preflight_emits_preflight_only_command(tmp_path: Path) -> None
     assert len(stage.commands) == 1
     command = stage.commands[0].command
     assert "--preflight-only" in command
+    assert "--spec-max-tokens" in command
+    assert "200000" in command
     assert "--trigram-top-k" in command
     assert "7" in command
     assert "--seeds" in command

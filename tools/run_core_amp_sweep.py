@@ -1793,6 +1793,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--trigram-count-workers", type=int, help="Frozen trigram counting workers.")
     ap.add_argument("--trigram-table-cache-root", help="Frozen trigram tensor-table cache root.")
     ap.add_argument("--trigram-max-tokens", type=int, help="Frozen trigram smoke/debug token cap.")
+    ap.add_argument("--spec-max-tokens", type=int, help="Base spec smoke/debug token cap.")
     ap.add_argument(
         "--rebuild-trigram-table-cache",
         action=argparse.BooleanOptionalAction,
@@ -1949,6 +1950,7 @@ def apply_cli_overrides(args: argparse.Namespace) -> None:
     set_if("TRIGRAM_COUNT_WORKERS", args.trigram_count_workers)
     set_if("TRIGRAM_TABLE_CACHE_ROOT", args.trigram_table_cache_root)
     set_if("TRIGRAM_MAX_TOKENS", args.trigram_max_tokens)
+    set_if("SPEC_MAX_TOKENS", args.spec_max_tokens)
     set_if("RESIDUAL_READOUT_DELTA_RANK", args.residual_readout_delta_rank)
     set_if("RESIDUAL_READOUT_DELTA_INIT_STD", args.residual_readout_delta_init_std)
     set_if("SCAN_BACKEND", args.scan_backend)

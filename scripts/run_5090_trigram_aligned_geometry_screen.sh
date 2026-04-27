@@ -58,6 +58,7 @@ TRIGRAM_COUNT_WORKERS="${TRIGRAM_COUNT_WORKERS:-1}"
 TRIGRAM_MEMORY_TABLE_CACHE_ROOT="${TRIGRAM_MEMORY_TABLE_CACHE_ROOT:-${COREAMP_SPEC_CACHE_ROOT}/trigram_memory_tables}"
 REBUILD_TRIGRAM_MEMORY_TABLE_CACHE="${REBUILD_TRIGRAM_MEMORY_TABLE_CACHE:-0}"
 TRIGRAM_MAX_TOKENS="${TRIGRAM_MAX_TOKENS:-}"
+SPEC_MAX_TOKENS="${SPEC_MAX_TOKENS:-}"
 ARTIFACT_PREFLIGHT="${ARTIFACT_PREFLIGHT:-1}"
 PREFLIGHT_TRAINABLE_PAYLOAD_BYTES="${PREFLIGHT_TRAINABLE_PAYLOAD_BYTES:-2000000}"
 PREFLIGHT_ONLY="${PREFLIGHT_ONLY:-0}"
@@ -123,6 +124,7 @@ Options:
   --min-lr VALUE
   --trigram-top-k VALUE
   --trigram-max-tokens VALUE
+  --spec-max-tokens VALUE
   --data-max-tokens VALUE
   --count-workers VALUE
   --rebuild-shared | --no-rebuild-shared
@@ -164,6 +166,7 @@ parse_args() {
       --trigram-log-scale-init) TRIGRAM_LOG_SCALE_INIT="$2"; shift 2 ;;
       --trigram-top-k) TRIGRAM_TOP_K="$2"; shift 2 ;;
       --trigram-max-tokens) TRIGRAM_MAX_TOKENS="$2"; shift 2 ;;
+      --spec-max-tokens) SPEC_MAX_TOKENS="$2"; shift 2 ;;
       --trigram-residual-clip) TRIGRAM_RESIDUAL_CLIP="$2"; shift 2 ;;
       --trigram-confidence-count-cap) TRIGRAM_CONFIDENCE_COUNT_CAP="$2"; shift 2 ;;
       --trigram-chunk-size) TRIGRAM_CHUNK_SIZE="$2"; shift 2 ;;
@@ -267,6 +270,9 @@ pg_5090_require_serious_launcher_defaults "$(basename "$0")"
 if [[ "${ALLOW_DEGRADED_5090_SERIOUS:-0}" != "1" && -n "${TRIGRAM_MAX_TOKENS:-}" ]]; then
   pg_5090_fail "$(basename "$0")" "TRIGRAM_MAX_TOKENS must be unset for serious runs"
 fi
+if [[ "${ALLOW_DEGRADED_5090_SERIOUS:-0}" != "1" && -n "${SPEC_MAX_TOKENS:-}" ]]; then
+  pg_5090_fail "$(basename "$0")" "SPEC_MAX_TOKENS must be unset for serious runs"
+fi
 if [[ "${ALLOW_DEGRADED_5090_SERIOUS:-0}" != "1" && -n "${DATA_MAX_TOKENS:-}" ]]; then
   pg_5090_fail "$(basename "$0")" "DATA_MAX_TOKENS must be unset for serious runs"
 fi
@@ -283,8 +289,8 @@ shared_spec_dir() {
   local label
   local token_scope
   token_scope="full"
-  if [[ -n "${TRIGRAM_MAX_TOKENS:-}" ]]; then
-    token_scope="max${TRIGRAM_MAX_TOKENS}"
+  if [[ -n "${SPEC_MAX_TOKENS:-}" || -n "${TRIGRAM_MAX_TOKENS:-}" ]]; then
+    token_scope="spec${SPEC_MAX_TOKENS:-full}_trigram${TRIGRAM_MAX_TOKENS:-full}"
   fi
   label="$(slugify "${GEOMETRY_LABEL}_branches_${GEOMETRY_BRANCH_LAGS}_blocks${GEOMETRY_NUM_BLOCKS}_${TRIGRAM_MEMORY}_trigramk${TRIGRAM_TOP_K}_clip${TRIGRAM_RESIDUAL_CLIP}_cap${TRIGRAM_CONFIDENCE_COUNT_CAP}_${token_scope}")"
   printf '%s/shared_specs/%s' "${COREAMP_SPEC_CACHE_ROOT}" "${label}"
@@ -311,6 +317,7 @@ shared_spec_manifest() {
   SPEC_TRIGRAM_CONFIDENCE_COUNT_CAP="${TRIGRAM_CONFIDENCE_COUNT_CAP}" \
   SPEC_TRIGRAM_CHUNK_SIZE="${TRIGRAM_CHUNK_SIZE}" \
   SPEC_TRIGRAM_MAX_TOKENS="${TRIGRAM_MAX_TOKENS:-}" \
+  SPEC_MAX_TOKENS="${SPEC_MAX_TOKENS:-}" \
   SPEC_TRIGRAM_TABLE_CACHE_ROOT="${TRIGRAM_MEMORY_TABLE_CACHE_ROOT}" \
   SPEC_SCAN_BACKEND="${SCAN_BACKEND}" \
   "${PYTHON_BIN}" - <<'PY'
@@ -356,6 +363,7 @@ expected = {
     "trigram_confidence_count_cap": int(os.environ["SPEC_TRIGRAM_CONFIDENCE_COUNT_CAP"]),
     "trigram_chunk_size": int(os.environ["SPEC_TRIGRAM_CHUNK_SIZE"]),
     "trigram_max_tokens": os.environ["SPEC_TRIGRAM_MAX_TOKENS"],
+    "spec_max_tokens": os.environ["SPEC_MAX_TOKENS"],
     "trigram_table_cache_root": str(
         Path(os.environ["SPEC_TRIGRAM_TABLE_CACHE_ROOT"]).expanduser().resolve()
     ),
@@ -437,6 +445,9 @@ ensure_shared_spec() {
   if [[ -n "${TRIGRAM_MAX_TOKENS:-}" ]]; then
     cmd+=(--trigram-max-tokens "${TRIGRAM_MAX_TOKENS}")
   fi
+  if [[ -n "${SPEC_MAX_TOKENS:-}" ]]; then
+    cmd+=(--max-tokens "${SPEC_MAX_TOKENS}")
+  fi
   if [[ "${DRY_RUN:-0}" == "1" ]]; then
     printf '+'
     printf ' %q' "${cmd[@]}"
@@ -478,6 +489,7 @@ geometry_core_dim=${GEOMETRY_CORE_DIM} layers=${GEOMETRY_CORE_LAYERS} inner_dim=
 geometry_branch_lags=${GEOMETRY_BRANCH_LAGS}
 trigram_memory=${TRIGRAM_MEMORY} top_k=${TRIGRAM_TOP_K} log_scale_init=${TRIGRAM_LOG_SCALE_INIT} count_workers=${TRIGRAM_COUNT_WORKERS}
 rebuild_shared=${REBUILD_SHARED} rebuild_trigram_memory_table_cache=${REBUILD_TRIGRAM_MEMORY_TABLE_CACHE}
+spec_max_tokens=${SPEC_MAX_TOKENS:-}
 artifact_preflight=${ARTIFACT_PREFLIGHT} preflight_trainable_payload_bytes=${PREFLIGHT_TRAINABLE_PAYLOAD_BYTES}
 preflight_only=${PREFLIGHT_ONLY}
 learning_rate=${LEARNING_RATE}
@@ -577,6 +589,9 @@ EOF
   )
   if [[ -n "${DATA_MAX_TOKENS:-}" ]]; then
     sweep_cmd+=(--data-max-tokens "${DATA_MAX_TOKENS}")
+  fi
+  if [[ -n "${SPEC_MAX_TOKENS:-}" ]]; then
+    sweep_cmd+=(--spec-max-tokens "${SPEC_MAX_TOKENS}")
   fi
   pg_5090_append_bool_flag "$(basename "$0")" sweep_cmd "compile" "${COMPILE}"
   pg_5090_append_bool_flag "$(basename "$0")" sweep_cmd "gradient-checkpointing" "${GRADIENT_CHECKPOINTING}"

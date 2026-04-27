@@ -38,6 +38,7 @@ Useful planner options:
   --finalist-train-label VALUE
   --finalist-preflight-only
   --count-workers VALUE
+  --spec-max-tokens VALUE
 EOF
 }
 

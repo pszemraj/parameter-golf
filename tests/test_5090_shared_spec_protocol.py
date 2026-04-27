@@ -103,8 +103,11 @@ def test_aligned_launcher_dry_run_keeps_spec_rebuild_at_launcher_layer() -> None
             "6",
             "--count-workers",
             "4",
+            "--spec-max-tokens",
+            "200000",
             "--full-val-final",
             "--rebuild-shared",
+            "--smoke-test",
             "--dry-run",
         ],
         cwd=PKG_ROOT,
@@ -117,6 +120,7 @@ def test_aligned_launcher_dry_run_keeps_spec_rebuild_at_launcher_layer() -> None
     assert "--suppress-config-summary" in result.stdout
     assert "--trigram-top-k 6" in result.stdout
     assert "--trigram-count-workers 4" in result.stdout
+    assert "--max-tokens 200000" in result.stdout
     assert "+ REBUILD_SHARED=0 " in result.stdout
     downstream = result.stdout.split("run_core_amp_sweep.py controller", 1)[1]
     assert "blocks0_d128_l5_i512_trigram_1b_seq2048_bptt2_k6\\ 5\\ 4.0" in downstream
