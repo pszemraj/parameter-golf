@@ -37,6 +37,18 @@ Completed full-validation reads:
 K6 beats K4 `seq2048` BPTT2 by about `0.0149` BPB and leaves about `2.20 MB`
 artifact headroom. K6 is the active local finalist unless K7 fits and improves.
 
+Completed K6 finalist stability rows:
+
+| Seed | Full-val BPB | Artifact bytes | Artifact status |
+|---:|---:|---:|---|
+| `1337` | `1.9572908661` | `13,798,090` | `LEFT_ON_TABLE` |
+| `2027` | `1.9551450488` | `13,816,234` | `LEFT_ON_TABLE` |
+| `3141` | `1.9546511147` | `13,816,463` | `LEFT_ON_TABLE` |
+
+Mean BPB is `1.9556956765`; stdev is `0.0014033763`. All three rows
+completed step `8192`, used exact BPB and full validation coverage, and prove
+the explicit validation shard in `resolved_config.json`.
+
 ## Protocol
 
 Serious maintained 5090 runs require:
@@ -128,12 +140,15 @@ bash scripts/run_5090_finalist_closeout.sh \
   --finalist-hold-steps 7000 \
   --finalist-train-label preflight_seq2048_bptt2_k7 \
   --finalist-preflight-only \
+  --preflight-trainable-payload-bytes 1267367 \
   --count-workers 4
 ```
 
-Train K7 only if preflight stays under the artifact cap with enough headroom for
-code growth and trainable payload. Do not run K8 before K7 proves both artifact
-viability and a real quality gain.
+The payload value is the largest observed K6 `trainable_int8_zlib_bytes` among
+the stability rows. Preflight writes durable evidence as `artifact_preflight.json`
+beside the prepared shared spec. Train K7 only if preflight stays under the
+artifact cap with enough headroom for code growth and trainable payload. Do not
+run K8 before K7 proves both artifact viability and a real quality gain.
 
 Optional context probe:
 
@@ -174,6 +189,31 @@ Do not spend remaining time on:
 - arbitrary geometry sweeps beyond the completed `d128_l5_i512` result
 - larger frozen block stacks
 - attention-like machinery
+
+## Packaging Readiness
+
+Artifact accounting is total submission bytes:
+
+```text
+artifact_estimate_bytes = code bytes + gzip(spec.pt) + int8 trainable payload
+```
+
+Before final submission, assemble a non-record record folder with:
+
+- `README.md` summarizing the Core/Amplifier idea and evidence table
+- `submission.json` with artifact/eval metadata
+- final train log(s) and exact run contract
+- runnable `train_gpt.py` plus required local dependencies
+- final `spec.pt` and trainable int8 payload under the 16 MB total limit
+
+Smoke the record folder on H100 with one visible GPU:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python train_gpt.py
+```
+
+The goal is reproducibility and honest non-record evidence, not a late DDP or
+transformer-style rewrite.
 
 ## Diagnostics
 

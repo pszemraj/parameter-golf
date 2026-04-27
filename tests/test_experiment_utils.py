@@ -45,6 +45,24 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
     )
 
 
+def _evidence_results(**overrides: object) -> dict[str, object]:
+    """Return a completed evidence-grade run_results payload for tests."""
+    payload: dict[str, object] = {
+        "completed": True,
+        "final_step": 100,
+        "artifact_status": "LEFT_ON_TABLE",
+        "artifact_estimate_bytes": 8_000_000,
+        "exact_val_bpb": True,
+        "last_eval_full_coverage": True,
+        "last_eval_tokens": 62_021_845,
+        "last_eval_coverage_denominator_tokens": 62_021_845,
+        "exact_bpb_positive_target_count": 61_971_846,
+        "exact_bpb_zero_byte_target_count": 49_999,
+    }
+    payload.update(overrides)
+    return payload
+
+
 def test_compute_steady_state_tokens_per_sec_prefers_post_compile_rows():
     rows = [
         {"kind": "train", "step": 0, "tokens_per_sec": 100.0},
@@ -175,13 +193,14 @@ def test_resolve_step_token_contract_supports_fixed_effective_tokens(monkeypatch
 def test_run_complete_rejects_completed_run_with_contract_mismatch(tmp_path: Path):
     run_dir = tmp_path / "run_a"
     run_dir.mkdir()
-    _write_json(run_dir / "run_results.json", {"completed": True, "final_step": 100})
+    _write_json(run_dir / "run_results.json", _evidence_results())
     _write_json(
         run_dir / "resolved_config.json",
         {
             "run_name": "run_a",
             "training": {"num_steps": 100, "trigram_top_k": 2},
             "model": {"trigram_top_k": 2},
+            "data": {"validation_source": "explicit_val_shard"},
         },
     )
 
@@ -202,11 +221,15 @@ def test_run_complete_rejects_full_val_run_without_full_coverage(tmp_path: Path)
     run_dir.mkdir()
     _write_json(
         run_dir / "run_results.json",
-        {"completed": True, "final_step": 100, "last_eval_full_coverage": False},
+        _evidence_results(last_eval_full_coverage=False),
     )
     _write_json(
         run_dir / "resolved_config.json",
-        {"run_name": "run_full_val", "training": {"num_steps": 100, "full_val_final": True}},
+        {
+            "run_name": "run_full_val",
+            "training": {"num_steps": 100, "full_val_final": True},
+            "data": {"validation_source": "explicit_val_shard"},
+        },
     )
 
     assert not run_complete(run_dir, 100)
@@ -215,6 +238,52 @@ def test_run_complete_rejects_full_val_run_without_full_coverage(tmp_path: Path)
         100,
         expected_contract={"run_name": "run_full_val", "training.full_val_final": True},
     )
+
+
+def test_run_complete_rejects_completed_run_without_artifact_evidence(tmp_path: Path):
+    run_dir = tmp_path / "run_no_artifact"
+    run_dir.mkdir()
+    _write_json(
+        run_dir / "run_results.json",
+        _evidence_results(artifact_status="", artifact_estimate_bytes=0),
+    )
+    _write_json(
+        run_dir / "resolved_config.json",
+        {"run_name": "run_no_artifact", "data": {"validation_source": "explicit_val_shard"}},
+    )
+
+    assert not run_complete(run_dir, 100)
+
+
+def test_run_complete_rejects_stale_full_val_accounting(tmp_path: Path):
+    run_dir = tmp_path / "run_stale_full_val"
+    run_dir.mkdir()
+    _write_json(
+        run_dir / "run_results.json",
+        _evidence_results(last_eval_tokens=1_048_576),
+    )
+    _write_json(
+        run_dir / "resolved_config.json",
+        {
+            "run_name": "run_stale_full_val",
+            "training": {"full_val_final": True},
+            "data": {"validation_source": "explicit_val_shard"},
+        },
+    )
+
+    assert not run_complete(run_dir, 100)
+
+
+def test_run_complete_rejects_non_explicit_validation_source(tmp_path: Path):
+    run_dir = tmp_path / "run_fallback_val"
+    run_dir.mkdir()
+    _write_json(run_dir / "run_results.json", _evidence_results())
+    _write_json(
+        run_dir / "resolved_config.json",
+        {"run_name": "run_fallback_val", "data": {"validation_source": "train_split_fallback"}},
+    )
+
+    assert not run_complete(run_dir, 100)
 
 
 def test_summarize_run_dir_reads_structured_artifacts(tmp_path: Path):
@@ -266,7 +335,7 @@ def test_summarize_run_dir_reads_structured_artifacts(tmp_path: Path):
                 "planned_train_tokens": 50331648,
                 "gradient_checkpointing": True,
             },
-            "data": {"source": "/tmp/data.bin"},
+            "data": {"source": "/tmp/data.bin", "validation_source": "explicit_val_shard"},
             "runtime": {
                 "gradient_checkpointing": True,
                 "exact_val_bpb": True,
@@ -348,6 +417,7 @@ def test_summarize_run_dir_reads_structured_artifacts(tmp_path: Path):
     assert row["residual_readout_delta_init_std"] == "0.02"
     assert row["scan_backend"] == "assoc"
     assert row["gradient_checkpointing"] == "true"
+    assert row["validation_source"] == "explicit_val_shard"
     assert row["repo_code_bytes"] == "654321"
     assert row["local_step_tokens"] == "262144"
     assert row["effective_step_tokens"] == "262144"

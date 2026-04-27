@@ -239,6 +239,12 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Prepare the shared spec and run artifact preflight without training.",
     )
+    ap.add_argument(
+        "--preflight-trainable-payload-bytes",
+        type=int,
+        default=None,
+        help="Trainable payload byte estimate used by artifact preflight-only commands.",
+    )
     ap.add_argument("--seq-len", type=int, default=None)
     ap.add_argument("--val-steps", type=int, default=None)
     ap.add_argument("--count-workers", type=int, default=None)
@@ -463,6 +469,15 @@ def artifact_is_valid(row: dict[str, str], *, limit: int = ARTIFACT_LIMIT_BYTES)
     return nbytes is not None and 0 < nbytes <= int(limit)
 
 
+def validation_source_is_valid(row: dict[str, str]) -> bool:
+    """Return whether a summary row used the explicit validation shard.
+
+    :param dict[str, str] row: Summary row.
+    :return bool: ``True`` when the validation source is evidence-grade.
+    """
+    return str(row.get("validation_source", "")).strip() == "explicit_val_shard"
+
+
 def expected_screen_batch_size(args: argparse.Namespace) -> int:
     """Return expected BPTT1 screen/confirmation batch size.
 
@@ -564,6 +579,7 @@ def valid_confirmation_row(row: dict[str, str], args: argparse.Namespace) -> boo
         and row_float_matches(row, "learning_rate", DEFAULT_LEARNING_RATE)
         and row_bool(row, "exact_val_bpb")
         and artifact_is_valid(row)
+        and validation_source_is_valid(row)
     )
     if not valid:
         return False
@@ -626,6 +642,8 @@ def valid_screen_variant_row(
     if not row_float_matches(row, "learning_rate", DEFAULT_LEARNING_RATE):
         return False
     if not row_bool(row, "exact_val_bpb"):
+        return False
+    if not validation_source_is_valid(row):
         return False
     if row.get("artifact_status") == "OVER_LIMIT":
         return False
@@ -697,6 +715,7 @@ def geometry_command(
     no_wandb: bool = False,
     smoke_test: bool = False,
     preflight_only: bool = False,
+    preflight_trainable_payload_bytes: Optional[int] = None,
 ) -> list[str]:
     """Build an aligned-geometry launcher command.
 
@@ -724,6 +743,8 @@ def geometry_command(
     :param bool no_wandb: Whether to disable W&B.
     :param bool smoke_test: Whether to mark the launcher as smoke/debug.
     :param bool preflight_only: Whether to stop after shared-spec artifact preflight.
+    :param Optional[int] preflight_trainable_payload_bytes: Optional trainable
+        payload byte estimate for artifact preflight.
     :return list[str]: Command argv.
     """
     geometry = parse_geometry(label)
@@ -783,6 +804,13 @@ def geometry_command(
         cmd.extend(["--data-max-tokens", str(data_max_tokens)])
     if preflight_only:
         cmd.append("--preflight-only")
+    if preflight_trainable_payload_bytes is not None:
+        cmd.extend(
+            [
+                "--preflight-trainable-payload-bytes",
+                str(preflight_trainable_payload_bytes),
+            ]
+        )
     if no_wandb:
         cmd.append("--no-wandb")
     if smoke_test:
@@ -1610,6 +1638,8 @@ def valid_finalist_row(
         return False
     if not row_bool(row, "exact_val_bpb"):
         return False
+    if not validation_source_is_valid(row):
+        return False
     if not artifact_is_valid(row):
         return False
     if full_val_final:
@@ -1663,6 +1693,7 @@ def finalist_command(args: argparse.Namespace, *, seed: str) -> PlannedCommand:
             no_wandb=bool(args.no_wandb),
             smoke_test=bool(args.smoke_test),
             preflight_only=bool(args.finalist_preflight_only),
+            preflight_trainable_payload_bytes=args.preflight_trainable_payload_bytes,
         ),
     )
 

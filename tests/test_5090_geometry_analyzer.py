@@ -114,6 +114,10 @@ def test_seq_run_version_does_not_imply_k4():
     """Sequence-length naming should not silently define trigram top-K."""
     assert infer_trigram_top_k("geom1_seq2048") == SCREEN_TRIGRAM_TOP_K
     assert infer_trigram_top_k("geom1_seq2048_k4") == 4
+    assert infer_trigram_top_k("geom1_seq2048_bptt2_k6") == 6
+    assert infer_trigram_top_k("geom1-k7-preflight") == 7
+    assert infer_trigram_top_k("geom1_k10") == 10
+    assert infer_trigram_top_k("geom1_topk6") == SCREEN_TRIGRAM_TOP_K
 
 
 def test_effective_token_batch_contract_must_divide_evenly():

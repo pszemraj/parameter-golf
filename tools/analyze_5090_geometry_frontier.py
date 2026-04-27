@@ -143,10 +143,9 @@ def infer_trigram_top_k(run_version: str) -> int:
     :return int: Inferred trigram top-K.
     """
     run_version = str(run_version).lower()
-    if "k4" in run_version:
-        return 4
-    if "k2" in run_version:
-        return 2
+    matches = re.findall(r"(?:^|[_-])k(\d+)(?:$|[_-])", run_version)
+    if matches:
+        return int(matches[-1])
     return SCREEN_TRIGRAM_TOP_K
 
 
@@ -375,6 +374,7 @@ def hydrate_summary_geometry(row: dict[str, str]) -> None:
         resolved = json.loads(resolved_path.read_text(encoding="utf-8"))
         model = resolved.get("model", {})
         training = resolved.get("training", {})
+        data = resolved.get("data", {})
         core_dim = int(model["core_dim"])
         core_layers = int(model["core_layers"])
         core_inner_dim = int(core_dim * float(model["core_expansion"]))
@@ -404,6 +404,7 @@ def hydrate_summary_geometry(row: dict[str, str]) -> None:
     set_if_empty("planned_steps", training.get("num_steps"))
     set_if_empty("learning_rate", training.get("learning_rate"))
     set_if_empty("lr_hold_steps", training.get("lr_hold_steps"))
+    set_if_empty("validation_source", data.get("validation_source"))
 
 
 def hydrate_partial_metrics(row: dict[str, str]) -> None:

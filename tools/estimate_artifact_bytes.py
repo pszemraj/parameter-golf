@@ -6,7 +6,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -114,6 +116,15 @@ def main() -> None:
         action="store_true",
         help="Exit nonzero if the estimated artifact exceeds the 16 MB limit.",
     )
+    ap.add_argument(
+        "--json-out",
+        type=Path,
+        default=None,
+        help="Optional path for a durable JSON artifact estimate.",
+    )
+    ap.add_argument("--label", default=None, help="Optional geometry/model label for JSON output.")
+    ap.add_argument("--run-version", default=None, help="Optional run-version for JSON output.")
+    ap.add_argument("--trigram-top-k", type=int, default=None, help="Optional trigram top-K.")
     args = ap.parse_args()
 
     model_dir = Path(args.model_dir).resolve()
@@ -165,6 +176,31 @@ def main() -> None:
     print(f"artifact estimate = code + gzip(spec.pt) + int8 trainable: {estimate:,}")
     print(f"artifact headroom: {headroom:,}")
     print(f"artifact status: {status}")
+    if args.json_out is not None:
+        payload = {
+            "label": args.label,
+            "run_version": args.run_version,
+            "trigram_top_k": args.trigram_top_k,
+            "shared_spec_dir": str(model_dir),
+            "record_dir": str(code_root),
+            "code_mode": args.code_mode,
+            "spec_summary": spec.summary(),
+            "raw_fixed_buffer_bytes": int(spec.fixed_nbytes),
+            "fixed_buffer_bytes": buf_bytes,
+            "spec_bytes": int(spec_bytes),
+            "gzip_spec_bytes": int(spec_gzip_bytes),
+            "repo_code_bytes": int(code_total),
+            "preflight_trainable_payload_bytes": (
+                None if trainable_payload_bytes is None else int(trainable_payload_bytes)
+            ),
+            "artifact_estimate_bytes": None if estimate is None else int(estimate),
+            "artifact_headroom_bytes": None if headroom is None else int(headroom),
+            "artifact_status": status,
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        }
+        args.json_out.parent.mkdir(parents=True, exist_ok=True)
+        args.json_out.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        print(f"artifact JSON: {args.json_out}")
     if args.fail_over_limit and status == "OVER_LIMIT":
         raise SystemExit(2)
 

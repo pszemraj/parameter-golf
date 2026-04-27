@@ -477,10 +477,15 @@ preflight_artifact_budget() {
   if [[ "${ARTIFACT_PREFLIGHT}" != "1" ]]; then
     return 0
   fi
+  local json_out="${spec_dir}/artifact_preflight.json"
   local cmd=(
     "${PYTHON_BIN}" "${REPO_ROOT}/tools/estimate_artifact_bytes.py" "${spec_dir}"
     --assume-trainable-payload-bytes "${PREFLIGHT_TRAINABLE_PAYLOAD_BYTES}"
     --fail-over-limit
+    --json-out "${json_out}"
+    --label "${GEOMETRY_LABEL}"
+    --run-version "${RUN_VERSION}"
+    --trigram-top-k "${TRIGRAM_TOP_K}"
   )
   echo "Preflight artifact budget check: ${spec_dir}"
   if [[ "${DRY_RUN:-0}" == "1" ]]; then

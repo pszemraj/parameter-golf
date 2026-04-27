@@ -46,6 +46,7 @@ def _write_summary(
     exact_bpb_zero_byte_target_count: int = 49_999,
     artifact_estimate_bytes: int = 8_000_000,
     artifact_status: str = "LEFT_ON_TABLE",
+    validation_source: str = "explicit_val_shard",
 ) -> None:
     """Write one summary TSV row for planner tests."""
     geometry_parts = label.split("_")
@@ -91,6 +92,7 @@ def _write_summary(
         "exact_bpb_zero_byte_target_count": str(exact_bpb_zero_byte_target_count),
         "artifact_estimate_bytes": str(artifact_estimate_bytes),
         "artifact_status": artifact_status,
+        "validation_source": validation_source,
     }
     with (summary_dir / "summary.tsv").open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=SUMMARY_FIELDS, delimiter="\t")
@@ -688,6 +690,38 @@ def test_finalist_stage_reports_already_complete(tmp_path: Path) -> None:
     assert stage.commands == []
 
 
+def test_finalist_stage_reruns_when_validation_source_is_not_explicit(tmp_path: Path) -> None:
+    """Finalist rows must prove they used the explicit validation shard."""
+    label = "blocks0_d128_l5_i512"
+    _write_summary(
+        tmp_path,
+        label,
+        "geom1_seq2048_bptt2_k6_final",
+        seed="1337",
+        steps=8192,
+        bpb=1.957,
+        top_k=6,
+        batch_size=32,
+        seq_len=2048,
+        bptt_chunks=2,
+        full_coverage=True,
+        validation_source="train_split_fallback",
+    )
+    args = _args(tmp_path, "finalist")
+    args.label = [label]
+    args.finalist_run_version = "geom1_seq2048_bptt2_k6_final"
+    args.finalist_seeds = "1337"
+    args.finalist_trigram_top_k = 6
+    args.finalist_seq_len = 2048
+    args.finalist_batch_size = 32
+    args.finalist_bptt_chunks = 2
+
+    stage = plan_stage(args)
+
+    assert stage.status == "commands"
+    assert len(stage.commands) == 1
+
+
 def test_finalist_preflight_emits_preflight_only_command(tmp_path: Path) -> None:
     """Artifact boundary probes should stop after shared-spec preflight."""
     label = "blocks0_d128_l5_i512"
@@ -701,6 +735,7 @@ def test_finalist_preflight_emits_preflight_only_command(tmp_path: Path) -> None
     args.finalist_bptt_chunks = 2
     args.finalist_train_label = "preflight_seq2048_bptt2_k7"
     args.finalist_preflight_only = True
+    args.preflight_trainable_payload_bytes = 1_267_367
     args.spec_max_tokens = 200_000
 
     stage = plan_stage(args)
@@ -713,6 +748,8 @@ def test_finalist_preflight_emits_preflight_only_command(tmp_path: Path) -> None
     assert "200000" in command
     assert "--trigram-top-k" in command
     assert "7" in command
+    assert "--preflight-trainable-payload-bytes" in command
+    assert "1267367" in command
     assert "--seeds" in command
     assert "1337" in command
 

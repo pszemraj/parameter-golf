@@ -25,12 +25,15 @@ if str(REPO_ROOT) not in sys.path:
 
 from core_amplifier_lm import ModelConfig
 from core_amplifier_lm.experiment import (
+    ARTIFACT_LIMIT_BYTES,
     collect_summary_rows,
     read_json,
     shell_join,
     write_summary_markdown,
     write_summary_tsv,
 )
+
+ARTIFACT_OK_STATUSES = {"LEFT_ON_TABLE", "UNDER_LIMIT", "EXACT_LIMIT"}
 
 
 def env(name: str, default: str) -> str:
@@ -76,6 +79,31 @@ def env_optional_int(*names: str) -> Optional[int]:
             continue
         return int(raw)
     return None
+
+
+def parse_optional_int(value: object) -> Optional[int]:
+    """Parse an optional integer value.
+
+    :param object value: Value to parse.
+    :return Optional[int]: Parsed integer or ``None`` when absent/invalid.
+    """
+    if value is None or value == "":
+        return None
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_bool(value: object) -> bool:
+    """Parse common boolean encodings.
+
+    :param object value: Value to parse.
+    :return bool: Parsed boolean.
+    """
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def append_command(path: Path, cmd: list[str]) -> None:
@@ -390,6 +418,74 @@ def controller_expected_contract(
     return contract
 
 
+def resolved_validation_source(results: dict[str, object], resolved: dict[str, object]) -> str:
+    """Return the validation-source label from final or resolved metadata.
+
+    :param dict[str, object] results: Parsed ``run_results.json`` payload.
+    :param dict[str, object] resolved: Parsed ``resolved_config.json`` payload.
+    :return str: Validation-source label, or an empty string when absent.
+    """
+    source = results.get("validation_source")
+    if source:
+        return str(source).strip()
+    data = resolved.get("data", {}) if isinstance(resolved, dict) else {}
+    if isinstance(data, dict):
+        return str(data.get("validation_source", "")).strip()
+    return ""
+
+
+def run_results_evidence_grade(
+    results: dict[str, object],
+    resolved: dict[str, object],
+    *,
+    require_full_val: bool,
+) -> tuple[bool, str]:
+    """Return whether completed run artifacts are strong enough for reuse.
+
+    :param dict[str, object] results: Parsed ``run_results.json`` payload.
+    :param dict[str, object] resolved: Parsed ``resolved_config.json`` payload.
+    :param bool require_full_val: Whether final validation must cover the shard.
+    :return tuple[bool, str]: ``(ok, reason)`` for skip-done reuse.
+    """
+    status = str(results.get("artifact_status", "")).strip()
+    if status not in ARTIFACT_OK_STATUSES:
+        return False, f"artifact_status={status!r} is not evidence-grade"
+
+    artifact_bytes = parse_optional_int(results.get("artifact_estimate_bytes"))
+    if artifact_bytes is None or artifact_bytes <= 0 or artifact_bytes > ARTIFACT_LIMIT_BYTES:
+        return False, f"artifact_estimate_bytes={artifact_bytes!r} is invalid"
+
+    if not parse_bool(results.get("exact_val_bpb")):
+        return False, "exact_val_bpb is not true"
+
+    validation_source = resolved_validation_source(results, resolved)
+    if validation_source != "explicit_val_shard":
+        return False, f"validation_source={validation_source!r} is not explicit_val_shard"
+
+    if require_full_val:
+        if not parse_bool(results.get("last_eval_full_coverage")):
+            return False, "last_eval_full_coverage is false"
+
+        tokens = parse_optional_int(results.get("last_eval_tokens"))
+        denom = parse_optional_int(results.get("last_eval_coverage_denominator_tokens"))
+        positive = parse_optional_int(results.get("exact_bpb_positive_target_count"))
+        zero = parse_optional_int(results.get("exact_bpb_zero_byte_target_count"))
+        if tokens is None or denom is None:
+            return False, "full-val accounting fields are missing"
+        if denom <= 0 or tokens != denom:
+            return False, f"full-val token coverage mismatch: tokens={tokens}, denom={denom}"
+        if positive is None or zero is None:
+            return False, "exact-BPB target counts are missing"
+        if positive < 0 or zero < 0 or positive + zero != denom:
+            return (
+                False,
+                "exact-BPB target counts do not sum to the full-val denominator: "
+                f"positive={positive}, zero={zero}, denom={denom}",
+            )
+
+    return True, ""
+
+
 def validate_explicit_shared_spec_config(
     *,
     shared_spec_dir: Path,
@@ -528,24 +624,29 @@ def run_complete(
         training = resolved.get("training", {})
         if isinstance(training, dict):
             full_val_expected = bool(training.get("full_val_final", False))
-    if full_val_expected and not bool(results.get("last_eval_full_coverage")):
+    if expected_contract:
+        mismatches: list[str] = []
+        for key, expected in expected_contract.items():
+            actual = _contract_value(resolved, key)
+            if not _contract_values_match(actual, expected):
+                mismatches.append(f"{key}: actual={actual!r} expected={expected!r}")
+        if mismatches:
+            print(
+                f"Completed run exists but contract changed; not skipping {run_dir.name}:\n  - "
+                + "\n  - ".join(mismatches),
+                flush=True,
+            )
+            return False
+
+    ok, reason = run_results_evidence_grade(
+        results,
+        resolved,
+        require_full_val=full_val_expected,
+    )
+    if not ok:
         print(
-            f"Completed run exists but requested final full validation is absent; "
-            f"not skipping {run_dir.name}",
-            flush=True,
-        )
-        return False
-    if not expected_contract:
-        return True
-    mismatches: list[str] = []
-    for key, expected in expected_contract.items():
-        actual = _contract_value(resolved, key)
-        if not _contract_values_match(actual, expected):
-            mismatches.append(f"{key}: actual={actual!r} expected={expected!r}")
-    if mismatches:
-        print(
-            f"Completed run exists but contract changed; not skipping {run_dir.name}:\n  - "
-            + "\n  - ".join(mismatches),
+            f"Completed run exists but evidence proof is incomplete; "
+            f"not skipping {run_dir.name}: {reason}",
             flush=True,
         )
         return False

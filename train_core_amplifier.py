@@ -3379,6 +3379,7 @@ def main() -> None:
             if exact_bpb_target_validation is None
             else list(exact_bpb_target_validation.zero_byte_target_ids)
         ),
+        "validation_source": validation_source,
         "tokenizer_path": None if tok_path is None else str(tok_path),
         "tokenizer_sha256": tokenizer_sha256,
         "repo_code_bytes": int(repo_code_bytes),

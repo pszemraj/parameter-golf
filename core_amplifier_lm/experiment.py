@@ -112,6 +112,7 @@ SUMMARY_FIELDS = [
     "exact_bpb_positive_target_count",
     "exact_bpb_zero_byte_target_count",
     "exact_bpb_zero_byte_target_ids",
+    "validation_source",
     "data_path",
     "tokenizer_path",
     "tokenizer_sha256",
@@ -819,6 +820,11 @@ def summarize_run_dir(run_dir: str | Path) -> dict[str, str]:
                 or runtime.get("exact_bpb_zero_byte_target_ids")
                 or []
             )
+        ),
+        "validation_source": _stringify(
+            results.get("validation_source")
+            or data.get("validation_source")
+            or runtime.get("validation_source")
         ),
         "data_path": _stringify(data.get("source")),
         "tokenizer_path": _stringify(resolved.get("tokenizer_path")),
