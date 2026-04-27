@@ -35,8 +35,6 @@ from torch.optim import AdamW
 from core_amplifier_lm import (
     AmplifierSpec,
     CoreAmplifierLM,
-    build_amplifier_spec,
-    build_spec_optimized,
     load_train_val_int32,
 )
 from core_amplifier_lm.experiment import (
@@ -130,22 +128,6 @@ def unwrap_model(model: torch.nn.Module) -> torch.nn.Module:
     :return torch.nn.Module: The original module when wrapped by ``torch.compile``.
     """
     return model._orig_mod if hasattr(model, "_orig_mod") else model
-
-
-def parse_branch_lags(text: str) -> tuple[int, ...]:
-    """Parse a comma-separated branch-lag list.
-
-    :param str text: Comma-separated lag values.
-    :return tuple[int, ...]: Parsed lag tuple.
-    """
-    values = tuple(int(x) for x in text.split(",") if x)
-    if not values:
-        raise ValueError("branch_lags must be non-empty")
-    if len(set(values)) != len(values):
-        raise ValueError(f"branch_lags must be unique, got {values}")
-    if any(v <= 0 for v in values):
-        raise ValueError(f"branch_lags must all be positive, got {values}")
-    return values
 
 
 def load_tokens(
@@ -323,21 +305,6 @@ def maybe_split_tokens(tokens: np.ndarray, train_frac: float) -> tuple[np.ndarra
     split = int(tokens.size * train_frac)
     split = max(1, min(tokens.size - 1, split))
     return tokens[:split], tokens[split:]
-
-
-def fingerprint_tokens(tokens: np.ndarray, *, max_tokens: int = 1_000_000) -> str:
-    """Fingerprint token data for spec validation.
-
-    :param np.ndarray tokens: Token array to fingerprint.
-    :param int max_tokens: Maximum prefix size included in the digest.
-    :return str: Stable hexadecimal fingerprint.
-    """
-    sample = np.asarray(tokens[:max_tokens], dtype=np.int64)
-    digest = hashlib.blake2b(digest_size=16)
-    digest.update(np.asarray([tokens.size], dtype=np.int64).tobytes())
-    digest.update(np.asarray([int(sample.min()), int(sample.max())], dtype=np.int64).tobytes())
-    digest.update(sample.view(np.uint8))
-    return digest.hexdigest()
 
 
 def file_sha256(path: str | Path, *, chunk_size: int = 1024 * 1024) -> str:
@@ -735,19 +702,6 @@ class BasePathLookup(torch.nn.Module):
         :return torch.Tensor: Base-path logits.
         """
         return self.core_model.base_path_logits(input_ids)
-
-
-def maybe_move_tokens(tokens: torch.Tensor, device: torch.device, enabled: bool) -> torch.Tensor:
-    """Move tokens to a device when the transfer is enabled.
-
-    :param torch.Tensor tokens: Token tensor.
-    :param torch.device device: Destination device.
-    :param bool enabled: Whether device transfer is allowed.
-    :return torch.Tensor: Original or moved tensor.
-    """
-    if not enabled or device.type == "cpu":
-        return tokens
-    return tokens.to(device=device, non_blocking=(device.type == "cuda"))
 
 
 # ---------------------------------------------------------------------------
@@ -1577,163 +1531,6 @@ def format_eval_sample(result: EvalResult, *, validation_source: str) -> str:
             f"(source={validation_source})"
         )
     return f"{prefix} {result.tokens:,} target tokens (source={validation_source})"
-
-
-def build_expected_spec_metadata(
-    args: argparse.Namespace,
-    train_tokens: np.ndarray,
-    branch_lags: tuple[int, ...],
-) -> dict[str, object]:
-    """Build the spec metadata expected for a run.
-
-    :param argparse.Namespace args: Parsed CLI arguments.
-    :param np.ndarray train_tokens: Training token array.
-    :param tuple[int, ...] branch_lags: Branch lag tuple.
-    :return dict[str, object]: Expected spec metadata.
-    """
-    return {
-        "spec_version": 2,
-        "requested_core_dim": int(args.core_dim),
-        "vocab_size": int(args.vocab_size),
-        "branch_lags": branch_lags,
-        "num_blocks": int(args.num_blocks),
-        "readout_rank": None
-        if getattr(args, "readout_rank", None) in (None, 0)
-        else int(args.readout_rank),
-        "smoothing": float(args.smoothing),
-        "train_token_count": int(train_tokens.size),
-        "train_token_fingerprint": fingerprint_tokens(train_tokens),
-        "storage_dtype": str(args.storage_dtype),
-        "data_max_tokens": None if args.data_max_tokens is None else int(args.data_max_tokens),
-    }
-
-
-def assert_spec_matches(spec: AmplifierSpec, *, expected: dict[str, object]) -> None:
-    """Verify that a loaded spec matches the expected metadata.
-
-    :param AmplifierSpec spec: Loaded spec.
-    :param dict[str, object] expected: Expected metadata.
-    """
-    errors = []
-    if spec.vocab_size != int(expected["vocab_size"]):
-        errors.append(
-            f"vocab_size mismatch: spec={spec.vocab_size} requested={expected['vocab_size']}"
-        )
-    requested_core_dim = int(spec.metadata.get("requested_core_dim", spec.core_dim))
-    if requested_core_dim != int(expected["requested_core_dim"]):
-        errors.append(
-            f"core_dim mismatch: spec_requested={requested_core_dim} requested={expected['requested_core_dim']}"
-        )
-    if tuple(spec.branch_lags) != tuple(expected["branch_lags"]):
-        errors.append(
-            f"branch_lags mismatch: spec={spec.branch_lags} requested={expected['branch_lags']}"
-        )
-    if spec.num_blocks != int(expected["num_blocks"]):
-        errors.append(
-            f"num_blocks mismatch: spec={spec.num_blocks} requested={expected['num_blocks']}"
-        )
-    expected_readout_rank = expected.get("readout_rank")
-    spec_readout_rank = spec.metadata.get("readout_rank")
-    if expected_readout_rank not in (None, 0):
-        expected_readout_rank = int(expected_readout_rank)
-    else:
-        expected_readout_rank = None
-    if spec_readout_rank not in (None, 0):
-        spec_readout_rank = int(spec_readout_rank)
-    else:
-        spec_readout_rank = None
-    if spec_readout_rank != expected_readout_rank:
-        errors.append(
-            f"readout_rank mismatch: spec={spec_readout_rank} requested={expected_readout_rank}"
-        )
-    stored_smoothing = spec.metadata.get("smoothing")
-    if (
-        stored_smoothing is not None
-        and abs(float(stored_smoothing) - float(expected["smoothing"])) > 1e-8
-    ):
-        errors.append(
-            f"smoothing mismatch: spec={stored_smoothing} requested={expected['smoothing']}"
-        )
-    stored_fp = spec.metadata.get("train_token_fingerprint")
-    if stored_fp is not None and stored_fp != expected["train_token_fingerprint"]:
-        errors.append("training data fingerprint mismatch")
-    stored_count = spec.metadata.get("train_token_count")
-    if stored_count is not None and int(stored_count) != int(expected["train_token_count"]):
-        errors.append(
-            f"train_token_count mismatch: spec={stored_count} requested={expected['train_token_count']}"
-        )
-    if errors:
-        joined = "\n  - ".join(errors)
-        raise ValueError(
-            f"Existing spec does not match the requested run:\n  - {joined}\nUse --force-rebuild-spec to overwrite it."
-        )
-
-
-def build_spec_if_needed(
-    args: argparse.Namespace,
-    train_tokens: np.ndarray,
-    *,
-    data_source: Optional[str | Path] = None,
-) -> AmplifierSpec:
-    """Load or build the fixed amplifier spec for a run.
-
-    :param argparse.Namespace args: Parsed CLI arguments.
-    :param np.ndarray train_tokens: Training token array.
-    :param Optional[str | Path] data_source: Optional source path for optimized spec building.
-    :return AmplifierSpec: Loaded or newly built spec.
-    """
-    fixed_dtype = DTYPE_MAP[args.fixed_dtype]
-    branch_lags = parse_branch_lags(args.branch_lags)
-    expected = build_expected_spec_metadata(args, train_tokens, branch_lags)
-    spec_path = Path(args.spec_path) if args.spec_path else None
-    if spec_path is not None and spec_path.exists() and not args.force_rebuild_spec:
-        spec = AmplifierSpec.load(spec_path)
-        assert_spec_matches(spec, expected=expected)
-        print(f"Loaded fixed amplifier from {spec_path}")
-        print(spec.summary())
-        return spec
-
-    # Use the optimized builder when we have a data source path (handles
-    # both shard directories and single files, uses int32, single-pass counting).
-    # Fall back to the original monolithic builder if no source path is given.
-    if data_source is not None:
-        spec = build_spec_optimized(
-            data_source,
-            vocab_size=args.vocab_size,
-            core_dim=args.core_dim,
-            branch_lags=branch_lags,
-            num_blocks=args.num_blocks,
-            smoothing=args.smoothing,
-            fixed_dtype=fixed_dtype,
-            storage_dtype=args.storage_dtype,
-            max_tokens=args.spec_max_tokens,
-            num_workers=args.spec_workers,
-            strategy=args.spec_strategy,
-            readout_rank=None
-            if getattr(args, "readout_rank", None) in (None, 0)
-            else int(args.readout_rank),
-        )
-    else:
-        spec = build_amplifier_spec(
-            train_tokens,
-            vocab_size=args.vocab_size,
-            core_dim=args.core_dim,
-            branch_lags=branch_lags,
-            num_blocks=args.num_blocks,
-            smoothing=args.smoothing,
-            fixed_dtype=fixed_dtype,
-            max_tokens=args.spec_max_tokens,
-            readout_rank=None
-            if getattr(args, "readout_rank", None) in (None, 0)
-            else int(args.readout_rank),
-        )
-    spec.metadata.update(expected)
-    print(spec.summary())
-    if spec_path is not None:
-        spec_path.parent.mkdir(parents=True, exist_ok=True)
-        spec.save(spec_path)
-        print(f"Saved fixed amplifier to {spec_path}")
-    return spec
 
 
 def parse_args() -> argparse.Namespace:

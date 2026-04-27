@@ -54,7 +54,6 @@ BPTT_HOLD_STEPS = PROBE_HOLD_STEPS
 DEFAULT_BPTT_BATCH_SIZE = 128
 DEFAULT_BPTT_CHUNKS = 2
 DEFAULT_BPTT_IMPROVEMENT_BPB = 0.005
-DEFAULT_GATE_MAX_WORSE_BPB = 0.015
 DEFAULT_LEARNING_RATE = 0.0035
 DEFAULT_BATCH_SIZE = 256
 DEFAULT_SEQ_LEN = 512
@@ -108,7 +107,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     ap.add_argument("--repo-root", type=Path, default=REPO_ROOT)
     ap.add_argument(
         "--stage",
-        choices=("confirmations", "bptt", "k4", "gated-followup", "finalist"),
+        choices=("confirmations", "bptt", "k4", "finalist"),
         required=True,
     )
     ap.add_argument("--run-version", default="geom1")
@@ -135,15 +134,6 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         help=(
             "Minimum fixed-token BPB improvement required before combining "
             "BPTT2 with K4. Defaults to a small noise guard."
-        ),
-    )
-    ap.add_argument(
-        "--gate-max-worse-bpb",
-        type=float,
-        default=DEFAULT_GATE_MAX_WORSE_BPB,
-        help=(
-            "Maximum evidence deficit versus the completed baseline confirmation "
-            "before the gated follow-up is selected."
         ),
     )
     ap.add_argument("--screen-steps", type=int, default=SCREEN_PLANNED_STEPS)
@@ -177,42 +167,8 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     ap.add_argument("--screen-trigram-top-k", type=int, default=None)
     ap.add_argument("--screen-batch-size", type=int, default=None)
     ap.add_argument("--screen-bptt-chunks", type=int, default=None)
-    ap.add_argument(
-        "--allow-run-version-contract-inference",
-        action="store_true",
-        help=(
-            "Allow serious gated-followup runs to infer the baseline contract "
-            "from run-version names. Prefer explicit contract flags."
-        ),
-    )
     ap.add_argument("--bptt-batch-size", type=int, default=None)
     ap.add_argument("--bptt-chunks", type=int, default=DEFAULT_BPTT_CHUNKS)
-    ap.add_argument("--gate-evidence-run-version", default=None)
-    ap.add_argument("--gate-evidence-steps", type=int, default=None)
-    ap.add_argument("--gate-evidence-hold-steps", type=int, default=None)
-    ap.add_argument("--gate-evidence-trigram-top-k", type=int, default=None)
-    ap.add_argument("--gate-evidence-seq-len", type=int, default=None)
-    ap.add_argument("--gate-evidence-batch-size", type=int, default=None)
-    ap.add_argument("--gate-evidence-bptt-chunks", type=int, default=None)
-    ap.add_argument(
-        "--gate-evidence-full-val-final",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-    )
-    ap.add_argument("--gate-evidence-train-label", default=None)
-    ap.add_argument("--gate-followup-run-version", default=None)
-    ap.add_argument("--gate-followup-steps", type=int, default=None)
-    ap.add_argument("--gate-followup-hold-steps", type=int, default=None)
-    ap.add_argument("--gate-followup-trigram-top-k", type=int, default=None)
-    ap.add_argument("--gate-followup-seq-len", type=int, default=None)
-    ap.add_argument("--gate-followup-batch-size", type=int, default=None)
-    ap.add_argument("--gate-followup-bptt-chunks", type=int, default=None)
-    ap.add_argument(
-        "--gate-followup-full-val-final",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-    )
-    ap.add_argument("--gate-followup-train-label", default=None)
     ap.add_argument("--finalist-run-version", default=None)
     ap.add_argument("--finalist-seeds", default=None)
     ap.add_argument(
@@ -400,26 +356,6 @@ def screen_eligibility_errors(
     :return tuple[str, ...]: Human-readable validation errors.
     """
     return eligibility_errors(geometry, row, screen_contract(args))
-
-
-def gated_baseline_contract_errors(args: argparse.Namespace) -> tuple[str, ...]:
-    """Return missing explicit baseline contract fields for gated follow-up.
-
-    :param argparse.Namespace args: Parsed arguments.
-    :return tuple[str, ...]: Missing field names, or empty when acceptable.
-    """
-    if bool(args.allow_run_version_contract_inference):
-        return ()
-    missing: list[str] = []
-    for field, flag in (
-        ("screen_trigram_top_k", "--screen-trigram-top-k"),
-        ("seq_len", "--seq-len"),
-        ("screen_batch_size", "--screen-batch-size"),
-        ("screen_bptt_chunks", "--screen-bptt-chunks"),
-    ):
-        if getattr(args, field) is None:
-            missing.append(flag)
-    return tuple(missing)
 
 
 def row_is_completed(row: dict[str, str]) -> bool:
@@ -1331,59 +1267,6 @@ def plan_k4_stage(args: argparse.Namespace) -> StagePlan:
     return StagePlan("blocked", f"K4 prerequisites are inconsistent for {label}", [])
 
 
-def args_with_screen_contract(
-    args: argparse.Namespace,
-    *,
-    run_version: str,
-    trigram_top_k: int,
-    seq_len: int,
-    batch_size: int,
-    bptt_chunks: int,
-) -> argparse.Namespace:
-    """Return an args copy with an explicit screen contract.
-
-    :param argparse.Namespace args: Base parsed arguments.
-    :param str run_version: Run-version suffix to bind.
-    :param int trigram_top_k: Trigram top-K.
-    :param int seq_len: Sequence length.
-    :param int batch_size: Batch size.
-    :param int bptt_chunks: BPTT chunk count.
-    :return argparse.Namespace: Copied arguments.
-    """
-    out = copy.copy(args)
-    out.run_version = str(run_version)
-    out.screen_trigram_top_k = int(trigram_top_k)
-    out.seq_len = int(seq_len)
-    out.screen_batch_size = int(batch_size)
-    out.screen_bptt_chunks = int(bptt_chunks)
-    return out
-
-
-def required_stage_value(args: argparse.Namespace, field: str) -> str:
-    """Return a required string argument for gated planning.
-
-    :param argparse.Namespace args: Parsed arguments.
-    :param str field: Argument field name.
-    :return str: Non-empty argument value.
-    :raises SystemExit: If the field is empty.
-    """
-    value = getattr(args, field)
-    if value is None or str(value).strip() == "":
-        flag = "--" + field.replace("_", "-")
-        raise SystemExit(f"{flag} is required for --stage gated-followup")
-    return str(value)
-
-
-def optional_int(value: Optional[int], fallback: int) -> int:
-    """Return ``value`` when set, otherwise ``fallback``.
-
-    :param Optional[int] value: Optional value.
-    :param int fallback: Fallback value.
-    :return int: Resolved integer.
-    """
-    return int(fallback if value is None else value)
-
-
 def variant_steps(args: argparse.Namespace) -> int:
     """Return the resolved adaptive variant step count.
 
@@ -1440,90 +1323,6 @@ def token_budget_label(args: argparse.Namespace, steps: int) -> str:
     if planned_tokens % 1_000_000 == 0:
         return f"{planned_tokens // 1_000_000}m"
     return f"{int(steps)}steps"
-
-
-def gate_contract_args(
-    args: argparse.Namespace,
-    *,
-    run_version: str,
-    top_k: int,
-    seq_len: int,
-    batch_size: Optional[int],
-    bptt_chunks: int,
-) -> argparse.Namespace:
-    """Return args bound to one gated stage contract.
-
-    :param argparse.Namespace args: Base parsed arguments.
-    :param str run_version: Run-version suffix.
-    :param int top_k: Trigram top-K.
-    :param int seq_len: Sequence length.
-    :param Optional[int] batch_size: Optional explicit batch size.
-    :param int bptt_chunks: BPTT chunk count.
-    :return argparse.Namespace: Contract-bound args.
-    """
-    resolved_batch = (
-        int(batch_size)
-        if batch_size is not None
-        else batch_for_effective_tokens(args, seq_len=seq_len, bptt_chunks=bptt_chunks)
-    )
-    return args_with_screen_contract(
-        args,
-        run_version=run_version,
-        trigram_top_k=top_k,
-        seq_len=seq_len,
-        batch_size=resolved_batch,
-        bptt_chunks=bptt_chunks,
-    )
-
-
-def gated_evidence_args(args: argparse.Namespace) -> argparse.Namespace:
-    """Return args for the gated evidence contract.
-
-    :param argparse.Namespace args: Base parsed arguments.
-    :return argparse.Namespace: Contract-bound args.
-    """
-    base_contract = screen_contract(args)
-    return gate_contract_args(
-        args,
-        run_version=required_stage_value(args, "gate_evidence_run_version"),
-        top_k=optional_int(args.gate_evidence_trigram_top_k, base_contract.trigram_top_k),
-        seq_len=optional_int(args.gate_evidence_seq_len, base_contract.seq_len),
-        batch_size=args.gate_evidence_batch_size,
-        bptt_chunks=optional_int(args.gate_evidence_bptt_chunks, base_contract.bptt_chunks),
-    )
-
-
-def gated_followup_args(args: argparse.Namespace) -> argparse.Namespace:
-    """Return args for the gated follow-up contract.
-
-    :param argparse.Namespace args: Base parsed arguments.
-    :return argparse.Namespace: Contract-bound args.
-    """
-    base_contract = screen_contract(args)
-    return gate_contract_args(
-        args,
-        run_version=required_stage_value(args, "gate_followup_run_version"),
-        top_k=optional_int(args.gate_followup_trigram_top_k, base_contract.trigram_top_k),
-        seq_len=optional_int(args.gate_followup_seq_len, base_contract.seq_len),
-        batch_size=args.gate_followup_batch_size,
-        bptt_chunks=optional_int(args.gate_followup_bptt_chunks, int(args.bptt_chunks)),
-    )
-
-
-def valid_gated_followup_row(row: dict[str, str], args: argparse.Namespace) -> bool:
-    """Return whether a row satisfies the gated follow-up variant contract.
-
-    :param dict[str, str] row: Summary row.
-    :param argparse.Namespace args: Follow-up contract args.
-    :return bool: ``True`` when the row is completed and contract-matching.
-    """
-    return valid_screen_variant_row(
-        row,
-        args,
-        top_k=expected_screen_trigram_top_k(args),
-        batch_size=expected_screen_batch_size(args),
-        bptt_chunks=expected_screen_bptt_chunks(args),
-    )
 
 
 def split_cli_values(raw: Optional[str], *, fallback: str) -> list[str]:
@@ -1756,254 +1555,6 @@ def plan_finalist_stage(args: argparse.Namespace) -> StagePlan:
     )
 
 
-def gated_train_label(
-    args: argparse.Namespace,
-    contract: ScreenContract,
-    *,
-    explicit: Optional[str],
-    steps: int,
-    confirmation: bool,
-) -> str:
-    """Return a train-label for a gated command.
-
-    :param argparse.Namespace args: Parsed arguments.
-    :param ScreenContract contract: Contract to encode.
-    :param Optional[str] explicit: Optional user-supplied label.
-    :param int steps: Planned step count.
-    :param bool confirmation: Whether this is a confirmation run.
-    :return str: Train-label.
-    """
-    if explicit:
-        return str(explicit)
-    if bool(args.smoke_test):
-        return "smoke_gated_confirm" if confirmation else "smoke_gated_followup"
-    if confirmation:
-        return confirmation_train_label(contract)
-    return contract_train_label(contract, prefix=token_budget_label(args, int(steps)))
-
-
-def gated_evidence_command(
-    args: argparse.Namespace,
-    label: str,
-    baseline_bpb: float,
-    evidence_row: dict[str, str],
-) -> PlannedCommand:
-    """Return the evidence command required before a gated follow-up.
-
-    :param argparse.Namespace args: Parsed arguments.
-    :param str label: Geometry label.
-    :param float baseline_bpb: Completed baseline confirmation BPB.
-    :param dict[str, str] evidence_row: Existing evidence row, if any.
-    :return PlannedCommand: Evidence command.
-    """
-    evidence_args = gated_evidence_args(args)
-    evidence_contract = screen_contract(evidence_args)
-    existing_status = evidence_row.get("status", "missing") if evidence_row else "missing"
-    evidence_steps = optional_int(args.gate_evidence_steps, int(args.confirm_steps))
-    evidence_hold = optional_int(args.gate_evidence_hold_steps, int(args.confirm_hold_steps))
-    reason = (
-        "gated evidence contract is required before follow-up; "
-        f"baseline_bpb={baseline_bpb:.10f}; evidence_status={existing_status}"
-    )
-    return PlannedCommand(
-        stage="gated-followup",
-        label=label,
-        reason=reason,
-        command=geometry_command(
-            label,
-            run_version=required_stage_value(args, "gate_evidence_run_version"),
-            seed=str(args.seed),
-            num_steps=evidence_steps,
-            hold_steps=evidence_hold,
-            trigram_top_k=evidence_contract.trigram_top_k,
-            full_val_final=bool(args.gate_evidence_full_val_final),
-            val_every=1024,
-            log_every=512,
-            log_state_every=4096,
-            save_every=4096,
-            batch_size=evidence_contract.batch_size,
-            bptt_chunks=evidence_contract.bptt_chunks,
-            train_label=gated_train_label(
-                args,
-                evidence_contract,
-                explicit=args.gate_evidence_train_label,
-                steps=evidence_steps,
-                confirmation=True,
-            ),
-            seq_len=evidence_contract.seq_len,
-            target_effective_step_tokens=int(args.effective_step_tokens),
-            **shared_passthrough_kwargs(args),
-        ),
-    )
-
-
-def gated_followup_command(
-    args: argparse.Namespace,
-    label: str,
-    baseline_bpb: float,
-    evidence_bpb: float,
-) -> PlannedCommand:
-    """Return the selected gated follow-up command.
-
-    :param argparse.Namespace args: Parsed arguments.
-    :param str label: Geometry label.
-    :param float baseline_bpb: Baseline confirmation BPB.
-    :param float evidence_bpb: Evidence confirmation BPB.
-    :return PlannedCommand: Follow-up command.
-    """
-    followup_args = gated_followup_args(args)
-    followup_contract = screen_contract(followup_args)
-    followup_steps = optional_int(args.gate_followup_steps, variant_steps(args))
-    followup_hold = optional_int(args.gate_followup_hold_steps, variant_hold_steps(args))
-    full_val_final = (
-        variant_full_val_final(args)
-        if args.gate_followup_full_val_final is None
-        else bool(args.gate_followup_full_val_final)
-    )
-    reason = (
-        "evidence clears gate; "
-        f"evidence_bpb={evidence_bpb:.10f}; baseline_bpb={baseline_bpb:.10f}; "
-        f"delta={evidence_bpb - baseline_bpb:.6f}; "
-        f"max_worse={float(args.gate_max_worse_bpb):.6f}"
-    )
-    return PlannedCommand(
-        stage="gated-followup",
-        label=label,
-        reason=reason,
-        command=geometry_command(
-            label,
-            run_version=required_stage_value(args, "gate_followup_run_version"),
-            seed=str(args.seed),
-            num_steps=followup_steps,
-            hold_steps=followup_hold,
-            trigram_top_k=followup_contract.trigram_top_k,
-            full_val_final=full_val_final,
-            val_every=1024 if full_val_final else 512,
-            log_every=512 if full_val_final else 256,
-            log_state_every=4096 if full_val_final else 2048,
-            save_every=4096 if full_val_final else 2048,
-            batch_size=followup_contract.batch_size,
-            bptt_chunks=followup_contract.bptt_chunks,
-            train_label=gated_train_label(
-                args,
-                followup_contract,
-                explicit=args.gate_followup_train_label,
-                steps=followup_steps,
-                confirmation=False,
-            ),
-            seq_len=followup_contract.seq_len,
-            target_effective_step_tokens=int(args.effective_step_tokens),
-            **shared_passthrough_kwargs(args),
-        ),
-    )
-
-
-def plan_gated_followup_stage(args: argparse.Namespace) -> StagePlan:
-    """Plan a generic evidence-gated follow-up.
-
-    The current ``--run-version`` plus confirmation contract is the baseline.
-    The gate ensures an explicit evidence contract is completed, compares its
-    BPB against the baseline, and emits an explicit follow-up contract only when
-    the evidence is not worse than ``--gate-max-worse-bpb``.
-
-    :param argparse.Namespace args: Parsed arguments.
-    :return StagePlan: Stage status and planned commands.
-    """
-    required_stage_value(args, "gate_evidence_run_version")
-    required_stage_value(args, "gate_followup_run_version")
-    baseline_contract_errors = gated_baseline_contract_errors(args)
-    if baseline_contract_errors:
-        return StagePlan(
-            "blocked",
-            "gated-followup baseline contract must be explicit; missing "
-            + ", ".join(baseline_contract_errors),
-            [],
-        )
-    confirmations = completed_confirmations(args)
-    if not confirmations:
-        return StagePlan(
-            "blocked",
-            "no valid completed baseline confirmation is available for gated follow-up",
-            [],
-        )
-    label, baseline_row = confirmations[0]
-    geometry = parse_geometry(label)
-    baseline_bpb = screen_bpb(baseline_row)
-    if baseline_bpb is None:
-        return StagePlan("blocked", f"baseline confirmation for {label} has no BPB", [])
-
-    evidence_args = gated_evidence_args(args)
-    evidence_args.confirm_steps = optional_int(args.gate_evidence_steps, int(args.confirm_steps))
-    evidence_args.confirm_hold_steps = optional_int(
-        args.gate_evidence_hold_steps,
-        int(args.confirm_hold_steps),
-    )
-    evidence_args.confirm_full_val_final = bool(args.gate_evidence_full_val_final)
-    evidence_row = load_summary_row(
-        args.repo_root.resolve(),
-        geometry,
-        run_version=required_stage_value(args, "gate_evidence_run_version"),
-        seed=str(args.seed),
-        contract=confirmation_contract(evidence_args),
-    )
-    if not valid_confirmation_row(evidence_row, evidence_args):
-        return StagePlan(
-            "commands",
-            "gated evidence confirmation selected",
-            [gated_evidence_command(args, label, baseline_bpb, evidence_row)],
-        )
-
-    evidence_bpb = screen_bpb(evidence_row)
-    if evidence_bpb is None:
-        return StagePlan("blocked", f"evidence confirmation for {label} has no BPB", [])
-    delta = evidence_bpb - baseline_bpb
-    if delta > float(args.gate_max_worse_bpb):
-        return StagePlan(
-            "not_selected",
-            (
-                "gated follow-up not selected; evidence is too weak "
-                f"(evidence_bpb={evidence_bpb:.10f}, baseline_bpb={baseline_bpb:.10f}, "
-                f"delta={delta:.6f}, max_worse={float(args.gate_max_worse_bpb):.6f})"
-            ),
-            [],
-        )
-
-    followup_args = gated_followup_args(args)
-    followup_args.variant_steps = optional_int(args.gate_followup_steps, variant_steps(args))
-    followup_args.variant_hold_steps = optional_int(
-        args.gate_followup_hold_steps,
-        variant_hold_steps(args),
-    )
-    followup_args.variant_full_val_final = (
-        variant_full_val_final(args)
-        if args.gate_followup_full_val_final is None
-        else bool(args.gate_followup_full_val_final)
-    )
-    existing = load_summary_row(
-        args.repo_root.resolve(),
-        geometry,
-        run_version=required_stage_value(args, "gate_followup_run_version"),
-        seed=str(args.seed),
-        contract=variant_contract(
-            followup_args,
-            top_k=expected_screen_trigram_top_k(followup_args),
-            batch_size=expected_screen_batch_size(followup_args),
-            bptt_chunks=expected_screen_bptt_chunks(followup_args),
-        ),
-    )
-    if valid_gated_followup_row(existing, followup_args):
-        return StagePlan(
-            "already_complete",
-            f"gated follow-up already completed for {label}",
-            [],
-        )
-    return StagePlan(
-        "commands",
-        "gated follow-up selected",
-        [gated_followup_command(args, label, baseline_bpb, evidence_bpb)],
-    )
-
-
 def plan_stage(args: argparse.Namespace) -> StagePlan:
     """Plan and classify the requested adaptive stage.
 
@@ -2016,20 +1567,9 @@ def plan_stage(args: argparse.Namespace) -> StagePlan:
         return plan_bptt_stage(args)
     if args.stage == "k4":
         return plan_k4_stage(args)
-    if args.stage == "gated-followup":
-        return plan_gated_followup_stage(args)
     if args.stage == "finalist":
         return plan_finalist_stage(args)
     raise ValueError(f"unknown stage: {args.stage}")
-
-
-def plan_commands(args: argparse.Namespace) -> list[PlannedCommand]:
-    """Plan commands for the requested stage.
-
-    :param argparse.Namespace args: Parsed arguments.
-    :return list[PlannedCommand]: Planned commands.
-    """
-    return plan_stage(args).commands
 
 
 def write_shell_script(

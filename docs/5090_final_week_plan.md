@@ -100,78 +100,33 @@ without `--finalist-stability-check` returns `blocked`.
 
 ## Active Commands
 
-Single-seed K6 finalist closeout:
+Use the adaptive runner for the remaining local closeout. It plans K7 preflight,
+trains K7 only if the artifact gate passes, runs K7 stability only if the BPB
+promotion gate passes, and then runs the bounded `seq4096` probe.
 
 ```bash
-bash scripts/run_5090_finalist_closeout.sh \
-  --run-id k6_finalist_seed1337_v1 \
-  -- \
-  --run-version geom1_seq2048_bptt2_k6 \
-  --label blocks0_d128_l5_i512 \
-  --finalist-run-version geom1_seq2048_bptt2_k6 \
-  --finalist-seeds 1337 \
-  --finalist-trigram-top-k 6 \
-  --finalist-seq-len 2048 \
-  --finalist-batch-size 32 \
-  --finalist-bptt-chunks 2 \
-  --finalist-steps 8192 \
-  --finalist-hold-steps 7000 \
-  --finalist-train-label 1b_seq2048_bptt2_k6 \
+bash scripts/run_5090_adaptive_closeout.sh \
+  --start-at k7-preflight \
+  --stop-after seq4096 \
+  --run-id coreamp_k7_closeout_v1 \
   --count-workers 4
 ```
 
-This should no-op if seed `1337` already satisfies the exact contract.
-
-K7 artifact preflight:
+Use this tiny local path after changing adaptive planning logic:
 
 ```bash
-bash scripts/run_5090_finalist_closeout.sh \
-  --run-id k7_preflight_v1 \
-  -- \
-  --run-version geom1_seq2048_bptt2_k6 \
-  --label blocks0_d128_l5_i512 \
-  --finalist-run-version geom1_seq2048_bptt2_k7_preflight \
-  --finalist-seeds 1337 \
-  --finalist-trigram-top-k 7 \
-  --finalist-seq-len 2048 \
-  --finalist-batch-size 32 \
-  --finalist-bptt-chunks 2 \
-  --finalist-steps 8192 \
-  --finalist-hold-steps 7000 \
-  --finalist-train-label preflight_seq2048_bptt2_k7 \
-  --finalist-preflight-only \
-  --preflight-trainable-payload-bytes 1267367 \
-  --count-workers 4
+bash scripts/run_5090_adaptive_closeout.sh \
+  --smoke-test \
+  --run-id adaptive_closeout_smoke \
+  --no-run-benchmark \
+  --stop-after seq4096 \
+  --count-workers 1
 ```
 
-The payload value is the largest observed K6 `trainable_int8_zlib_bytes` among
-the stability rows. Preflight writes durable evidence as `artifact_preflight.json`
-beside the prepared shared spec. Train K7 only if preflight stays under the
-artifact cap with enough headroom for code growth and trainable payload. Do not
-run K8 before K7 proves both artifact viability and a real quality gain.
-
-Optional context probe:
-
-```bash
-bash scripts/run_5090_finalist_closeout.sh \
-  --run-id k6_seq4096_probe_v1 \
-  -- \
-  --run-version geom1_seq4096_bptt1_k6 \
-  --label blocks0_d128_l5_i512 \
-  --finalist-run-version geom1_seq4096_bptt1_k6 \
-  --finalist-seeds 1337 \
-  --finalist-trigram-top-k 6 \
-  --finalist-seq-len 4096 \
-  --finalist-batch-size 32 \
-  --finalist-bptt-chunks 1 \
-  --finalist-steps 8192 \
-  --finalist-hold-steps 7000 \
-  --finalist-train-label 1b_seq4096_k6 \
-  --count-workers 4
-```
-
-Run this only after K6/K7 top-K decisions. Promote it only if it beats K6
-`seq2048` BPTT2 by at least `0.004` BPB.
+The K7 preflight payload default is `1,267,367` bytes, the largest observed K6
+`trainable_int8_zlib_bytes` among the stability rows. Preflight writes durable
+evidence as `artifact_preflight.json` beside the prepared shared spec. Do not run
+K8 before K7 proves both artifact viability and a real quality gain.
 
 ## Stop Rules
 

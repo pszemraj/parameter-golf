@@ -14,8 +14,8 @@ does not preserve the upstream transformer baseline, MLX baseline, or historical
 - `scripts/run_5090_final3day_frontier_batch.sh`: staged final-three-day batch
 - `scripts/run_5090_trigram_geometry_matrix.sh`: geometry matrix launcher
 - `scripts/run_5090_trigram_aligned_geometry_screen.sh`: one geometry screen
-- `scripts/run_5090_adaptive_closeout.sh`: bounded adaptive closeout
-- `scripts/run_5090_finalist_closeout.sh`: explicit finalist/preflight runner
+- `scripts/run_5090_adaptive_closeout.sh`: bounded adaptive closeout, finalist
+  gates, and follow-up probes
 - `tools/plan_5090_adaptive_closeout.py`: reads summaries and emits bounded
   next-step commands
 
@@ -100,8 +100,7 @@ state.
 bash -n scripts/5090_common.sh scripts/run_5090_final3day_frontier_batch.sh \
   scripts/run_5090_trigram_geometry_matrix.sh \
   scripts/run_5090_trigram_aligned_geometry_screen.sh \
-  scripts/run_5090_adaptive_closeout.sh \
-  scripts/run_5090_finalist_closeout.sh
+  scripts/run_5090_adaptive_closeout.sh
 
 conda run -s --name train python -m py_compile \
   train_gpt.py inspect_model.py train_core_amplifier.py \

@@ -66,24 +66,6 @@ def trigram_memory_expected_metadata(
     }
 
 
-def trigram_memory_metadata_mismatches(
-    metadata: dict[str, Any],
-    expected: dict[str, Any],
-) -> list[str]:
-    """Return cache-safety metadata mismatches.
-
-    :param dict[str, Any] metadata: Existing metadata.
-    :param dict[str, Any] expected: Expected metadata fields.
-    :return list[str]: Human-readable mismatch strings.
-    """
-    mismatches: list[str] = []
-    for key, expected_value in expected.items():
-        actual_value = metadata.get(key)
-        if actual_value != expected_value:
-            mismatches.append(f"{key}: existing={actual_value!r} expected={expected_value!r}")
-    return mismatches
-
-
 def trigram_memory_table_cache_path(
     *,
     cache_root: str | Path,
