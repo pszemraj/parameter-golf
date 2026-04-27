@@ -48,6 +48,36 @@ ARTIFACT_RE = re.compile(
 ARTIFACT_SIZE_RE = re.compile(
     r"int8_zlib_bytes:(?P<int8>\d+) code_bytes:(?P<code>\d+) total:(?P<total>\d+)"
 )
+SUMMARY_HEADERS = [
+    "Candidate",
+    "Mode",
+    "Family",
+    "Step",
+    "ms/step",
+    "toks/s",
+    "Train loss",
+    "BPB",
+    "Equal-WC BPB",
+    "Equal-WC Status",
+    "Roundtrip",
+    "Size proxy",
+    "Size",
+]
+SUMMARY_ALIGN = [
+    "left",
+    "left",
+    "left",
+    "right",
+    "right",
+    "right",
+    "right",
+    "right",
+    "right",
+    "left",
+    "right",
+    "right",
+    "left",
+]
 
 
 def parse_args() -> argparse.Namespace:
@@ -413,13 +443,15 @@ def build_rows(
         row["trainer"] = entry.get("trainer", "train_gpt_hybrid.py")
         row["config"] = config
         row["candidate"] = strip_config_prefix(config) if config else run_id
+        row["family"] = infer_family(config, row.get("blocks", ""), row["trainer"])
         row["gdn_fla_recurrence_mode"] = (
-            entry.get("gdn_fla_recurrence_mode")
+            ""
+            if row["family"] == "exact-baseline"
+            else entry.get("gdn_fla_recurrence_mode")
             or row.get("log_recurrence_mode")
             or contract.get("gdn_fla_recurrence_mode")
             or entry.get("mode", "")
         )
-        row["family"] = infer_family(config, row.get("blocks", ""), row["trainer"])
         size_row = size_rows.get(row["candidate"], {})
         row["size_status"] = size_row.get("artifact_status")
         row["size_total_init_bytes"] = (
@@ -654,6 +686,77 @@ def compact_row(row: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in row.items() if key != "eval_points"}
 
 
+def markdown_escape(value: Any) -> str:
+    """Escape one markdown table cell.
+
+    :param Any value: Cell value.
+    :return str: Markdown-safe cell text.
+    """
+    text = "" if value is None else str(value)
+    return text.replace("\\", "\\\\").replace("|", "\\|").replace("\n", "<br>")
+
+
+def markdown_separator(align: str) -> str:
+    """Return one markdown table separator cell.
+
+    :param str align: Alignment name.
+    :return str: Separator cell.
+    """
+    if align == "right":
+        return "---:"
+    if align == "center":
+        return ":---:"
+    return "---"
+
+
+def render_markdown_table(
+    headers: list[str], rows: list[list[Any]], aligns: list[str]
+) -> list[str]:
+    """Render a GitHub-flavored markdown table.
+
+    :param list[str] headers: Column headers.
+    :param list[list[Any]] rows: Table rows.
+    :param list[str] aligns: Column alignments.
+    :raises ValueError: When table dimensions do not match.
+    :return list[str]: Markdown table lines.
+    """
+    if len(headers) != len(aligns):
+        raise ValueError("header/alignment counts must match")
+    for row in rows:
+        if len(row) != len(headers):
+            raise ValueError("row/header counts must match")
+    lines = [
+        "| " + " | ".join(markdown_escape(header) for header in headers) + " |",
+        "| " + " | ".join(markdown_separator(align) for align in aligns) + " |",
+    ]
+    for row in rows:
+        lines.append("| " + " | ".join(markdown_escape(cell) for cell in row) + " |")
+    return lines
+
+
+def summary_row(row: dict[str, Any]) -> list[str]:
+    """Return one human summary row.
+
+    :param dict[str, Any] row: Analyzer row.
+    :return list[str]: Formatted row cells.
+    """
+    return [
+        str(row["candidate"]),
+        str(row.get("gdn_fla_recurrence_mode") or ""),
+        str(row.get("family") or ""),
+        f"{row.get('final_step', 0)}/{row.get('planned_step', 0)}",
+        format_optional(row.get("final_step_ms"), digits=2),
+        format_optional(row.get("tokens_per_s"), digits=1),
+        format_optional(row.get("final_train_loss"), digits=4),
+        format_optional(row.get("final_sampled_bpb"), digits=4),
+        format_optional(row.get("equal_wallclock_bpb"), digits=4),
+        str(row.get("equal_wallclock_bpb_status") or ""),
+        format_optional(row.get("final_roundtrip_bpb"), digits=4),
+        format_int_optional(row.get("size_proxy_bytes")),
+        str(row.get("artifact_status") or row.get("size_status") or ""),
+    ]
+
+
 def summary_sort_key(
     row: dict[str, Any], metric: str
 ) -> tuple[float, float, float, str]:
@@ -747,31 +850,17 @@ def write_outputs(
         else "Equal-wallclock budget ms: n/a",
         f"Selection metric: {metric}",
         "",
-        "| Candidate | Mode | Family | Step | ms/step | toks/s | Train loss | BPB | Equal-WC BPB | Equal-WC Status | Roundtrip | Size proxy | Size |",
-        "|---|---|---|---:|---:|---:|---:|---:|---:|---|---:|---:|---|",
     ]
-    for row in sorted(rows, key=lambda item: summary_sort_key(item, metric)):
-        lines.append(
-            "| "
-            + " | ".join(
-                [
-                    str(row["candidate"]),
-                    str(row.get("gdn_fla_recurrence_mode") or ""),
-                    str(row.get("family") or ""),
-                    f"{row.get('final_step', 0)}/{row.get('planned_step', 0)}",
-                    format_optional(row.get("final_step_ms"), digits=2),
-                    format_optional(row.get("tokens_per_s"), digits=1),
-                    format_optional(row.get("final_train_loss"), digits=4),
-                    format_optional(row.get("final_sampled_bpb"), digits=4),
-                    format_optional(row.get("equal_wallclock_bpb"), digits=4),
-                    str(row.get("equal_wallclock_bpb_status") or ""),
-                    format_optional(row.get("final_roundtrip_bpb"), digits=4),
-                    format_int_optional(row.get("size_proxy_bytes")),
-                    str(row.get("artifact_status") or row.get("size_status") or ""),
-                ]
-            )
-            + " |"
+    lines.extend(
+        render_markdown_table(
+            SUMMARY_HEADERS,
+            [
+                summary_row(row)
+                for row in sorted(rows, key=lambda item: summary_sort_key(item, metric))
+            ],
+            SUMMARY_ALIGN,
         )
+    )
     (output_dir / "summary.md").write_text("\n".join(lines) + "\n")
 
 
@@ -893,24 +982,19 @@ def print_summary(
     print(f"equal_wallclock_budget_ms:{budget}")
     print(f"selection_metric:{metric}")
     print(
-        "| Candidate | Mode | Family | Step | ms/step | toks/s | Train loss | BPB | Equal-WC BPB | Equal-WC Status | Roundtrip | Size proxy | Size |"
-    )
-    print("|---|---|---|---:|---:|---:|---:|---:|---:|---|---:|---:|---|")
-    for row in sorted(rows, key=lambda item: summary_sort_key(item, metric))[:top]:
-        print(
-            f"| {row['candidate']} | {row.get('gdn_fla_recurrence_mode') or ''} | "
-            f"{row.get('family') or ''} | "
-            f"{row.get('final_step', 0)}/{row.get('planned_step', 0)} | "
-            f"{format_optional(row.get('final_step_ms'), digits=2)} | "
-            f"{format_optional(row.get('tokens_per_s'), digits=1)} | "
-            f"{format_optional(row.get('final_train_loss'), digits=4)} | "
-            f"{format_optional(row.get('final_sampled_bpb'), digits=4)} | "
-            f"{format_optional(row.get('equal_wallclock_bpb'), digits=4)} | "
-            f"{row.get('equal_wallclock_bpb_status') or ''} | "
-            f"{format_optional(row.get('final_roundtrip_bpb'), digits=4)} | "
-            f"{format_int_optional(row.get('size_proxy_bytes'))} | "
-            f"{row.get('artifact_status') or row.get('size_status') or ''} |"
+        "\n".join(
+            render_markdown_table(
+                SUMMARY_HEADERS,
+                [
+                    summary_row(row)
+                    for row in sorted(
+                        rows, key=lambda item: summary_sort_key(item, metric)
+                    )[:top]
+                ],
+                SUMMARY_ALIGN,
+            )
         )
+    )
 
 
 def main() -> None:

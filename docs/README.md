@@ -141,8 +141,10 @@ The resolver runs five legs under the same local wallclock cap: exact
 `train_gpt.py` baseline, primary `m2` HGDN, matched `r0_m2` attention-only
 diagnostic control, secondary OLMo-ish `6G2A`, and matched `r0_m1p25`
 attention-only diagnostic control. Defaults are `MAX_WALLCLOCK_SECONDS=600`,
-`TRAIN_BATCH_TOKENS=65536`, `TRAIN_SEQ_LEN=1024`, `VAL_MAX_SEQS=512`, and
-`GDN_FLA_RECURRENCE_MODE=direct_fused`.
+`TRAIN_BATCH_TOKENS=65536`, `TRAIN_SEQ_LEN=1024`, and `VAL_MAX_SEQS=512`.
+The primary recurrence mode defaults to `direct`; the secondary defaults to
+`direct_fused`. Set `GDN_FLA_RECURRENCE_MODE` only when intentionally forcing
+one mode across all hybrid legs.
 
 Outputs are written to `local-scratch/<prefix>_bundle/` and archived with
 `py7zr`. The resolver writes:

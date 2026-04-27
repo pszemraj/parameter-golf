@@ -47,7 +47,7 @@ max_wallclock_seconds="${MAX_WALLCLOCK_SECONDS:-600}"
 compile="${COMPILE:-1}"
 compile_strategy="${COMPILE_STRATEGY:-hybrid}"
 distributed_mode="${DISTRIBUTED_MODE:-parallel_muon}"
-gdn_fla_recurrence_mode="${GDN_FLA_RECURRENCE_MODE:-direct_fused}"
+gdn_fla_recurrence_mode="${GDN_FLA_RECURRENCE_MODE:-}"
 weight_decay="${WEIGHT_DECAY:-0}"
 grad_accum_steps_override="${GRAD_ACCUM_STEPS:-}"
 data_path="${DATA_PATH:-$HGDN_REPO_ROOT/data/datasets/fineweb10B_sp1024}"
@@ -58,6 +58,10 @@ primary_hgdn_config="${PRIMARY_HGDN_CONFIG:-configs/hgdn/naive_contract_l8_d512_
 primary_control_config="${PRIMARY_CONTROL_CONFIG:-configs/hgdn/naive_contract_l8_d512_r0_m2.toml}"
 secondary_hgdn_config="${SECONDARY_HGDN_CONFIG:-configs/hgdn/naive_contract_l8_d512_olmoish_6g2a_v2_m1p25.toml}"
 secondary_control_config="${SECONDARY_CONTROL_CONFIG:-configs/hgdn/naive_contract_l8_d512_r0_m1p25.toml}"
+primary_hgdn_recurrence_mode="${PRIMARY_GDN_FLA_RECURRENCE_MODE:-${gdn_fla_recurrence_mode:-direct}}"
+primary_control_recurrence_mode="${PRIMARY_CONTROL_GDN_FLA_RECURRENCE_MODE:-${primary_hgdn_recurrence_mode}}"
+secondary_hgdn_recurrence_mode="${SECONDARY_GDN_FLA_RECURRENCE_MODE:-${gdn_fla_recurrence_mode:-direct_fused}}"
+secondary_control_recurrence_mode="${SECONDARY_CONTROL_GDN_FLA_RECURRENCE_MODE:-${secondary_hgdn_recurrence_mode}}"
 primary_control_margin="${PRIMARY_CONTROL_MARGIN:-0.003}"
 secondary_primary_margin="${SECONDARY_PRIMARY_MARGIN:-0.005}"
 
@@ -74,7 +78,10 @@ git_branch="$(git rev-parse --abbrev-ref HEAD)"
 host_name="$(hostname)"
 timestamp_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-hgdn_validate_fla_recurrence_mode "${gdn_fla_recurrence_mode}"
+hgdn_validate_fla_recurrence_mode "${primary_hgdn_recurrence_mode}"
+hgdn_validate_fla_recurrence_mode "${primary_control_recurrence_mode}"
+hgdn_validate_fla_recurrence_mode "${secondary_hgdn_recurrence_mode}"
+hgdn_validate_fla_recurrence_mode "${secondary_control_recurrence_mode}"
 hgdn_ensure_python_module "${python_bin}" py7zr py7zr
 
 if ! awk "BEGIN { exit !(${max_wallclock_seconds} > 0) }"; then
@@ -161,6 +168,7 @@ check_cuda_jobs() {
 
 load_config_env() {
     local config_path="$1"
+    local recurrence_mode="$2"
     local raw_config_env=()
     mapfile -t raw_config_env < <(
         "${python_bin}" scripts/hgdn_helper_cli.py load-env --alias-aware --path "${config_path}"
@@ -169,7 +177,7 @@ load_config_env() {
         hgdn_filter_recurrence_env "${raw_config_env[@]}"
     )
     config_env+=("GDN_USE_DIRECT_FLA_LAYER_SEMANTICS=0")
-    config_env+=("GDN_FLA_RECURRENCE_MODE=${gdn_fla_recurrence_mode}")
+    config_env+=("GDN_FLA_RECURRENCE_MODE=${recurrence_mode}")
 }
 
 prepare_command_log() {
@@ -185,7 +193,7 @@ append_size_screen_command() {
         "${command_log}" \
         "${python_bin}" scripts/screen_hgdn_arch_sizes.py \
         --config "${size_screen_config}" \
-        --gdn-fla-recurrence-mode "${gdn_fla_recurrence_mode}" \
+        --gdn-fla-recurrence-mode "${primary_hgdn_recurrence_mode}" \
         --output-dir "${size_screen_output}"
 }
 
@@ -222,7 +230,8 @@ append_exact_baseline_command() {
 append_hybrid_command() {
     local config_path="$1"
     local run_id="$2"
-    load_config_env "${config_path}"
+    local recurrence_mode="$3"
+    load_config_env "${config_path}" "${recurrence_mode}"
     hgdn_append_command \
         "${command_log}" \
         "${common_thread_env[@]}" \
@@ -263,10 +272,10 @@ write_command_log() {
     prepare_command_log
     append_size_screen_command
     append_exact_baseline_command
-    append_hybrid_command "${primary_hgdn_config}" "${primary_hgdn_run_id}"
-    append_hybrid_command "${primary_control_config}" "${primary_control_run_id}"
-    append_hybrid_command "${secondary_hgdn_config}" "${secondary_hgdn_run_id}"
-    append_hybrid_command "${secondary_control_config}" "${secondary_control_run_id}"
+    append_hybrid_command "${primary_hgdn_config}" "${primary_hgdn_run_id}" "${primary_hgdn_recurrence_mode}"
+    append_hybrid_command "${primary_control_config}" "${primary_control_run_id}" "${primary_control_recurrence_mode}"
+    append_hybrid_command "${secondary_hgdn_config}" "${secondary_hgdn_run_id}" "${secondary_hgdn_recurrence_mode}"
+    append_hybrid_command "${secondary_control_config}" "${secondary_control_run_id}" "${secondary_control_recurrence_mode}"
 }
 
 check_planned_logs_are_fresh() {
@@ -307,7 +316,10 @@ print_plan() {
     echo "val_batch_size=${val_batch_size}"
     echo "compile=${compile}"
     echo "compile_strategy=${compile_strategy}"
-    echo "gdn_fla_recurrence_mode=${gdn_fla_recurrence_mode}"
+    echo "primary_gdn_fla_recurrence_mode=${primary_hgdn_recurrence_mode}"
+    echo "primary_control_gdn_fla_recurrence_mode=${primary_control_recurrence_mode}"
+    echo "secondary_gdn_fla_recurrence_mode=${secondary_hgdn_recurrence_mode}"
+    echo "secondary_control_gdn_fla_recurrence_mode=${secondary_control_recurrence_mode}"
     echo "data_path=${data_path}"
     echo "tokenizer_path=${tokenizer_path}"
     echo "vocab_size=${vocab_size}"
@@ -323,7 +335,7 @@ run_size_screen() {
     echo ">>> artifact-size screen"
     "${python_bin}" scripts/screen_hgdn_arch_sizes.py \
         --config "${size_screen_config}" \
-        --gdn-fla-recurrence-mode "${gdn_fla_recurrence_mode}" \
+        --gdn-fla-recurrence-mode "${primary_hgdn_recurrence_mode}" \
         --output-dir "${size_screen_output}"
 }
 
@@ -362,10 +374,12 @@ run_hybrid_config() {
     local label="$1"
     local config_path="$2"
     local run_id="$3"
-    load_config_env "${config_path}"
+    local recurrence_mode="$4"
+    load_config_env "${config_path}" "${recurrence_mode}"
     echo
     echo ">>> ${label}"
     echo "run_id=${run_id}"
+    echo "gdn_fla_recurrence_mode=${recurrence_mode}"
     hgdn_run_hybrid_train \
         "${label}" \
         "${common_thread_env[@]}" \
@@ -403,10 +417,10 @@ run_hybrid_config() {
 
 run_batch() {
     run_exact_baseline
-    run_hybrid_config "primary HGDN local wallclock resolver" "${primary_hgdn_config}" "${primary_hgdn_run_id}"
-    run_hybrid_config "primary attention-only baseline diagnostic control local wallclock resolver" "${primary_control_config}" "${primary_control_run_id}"
-    run_hybrid_config "secondary HGDN local wallclock resolver" "${secondary_hgdn_config}" "${secondary_hgdn_run_id}"
-    run_hybrid_config "secondary attention-only baseline diagnostic control local wallclock resolver" "${secondary_control_config}" "${secondary_control_run_id}"
+    run_hybrid_config "primary HGDN local wallclock resolver" "${primary_hgdn_config}" "${primary_hgdn_run_id}" "${primary_hgdn_recurrence_mode}"
+    run_hybrid_config "primary attention-only baseline diagnostic control local wallclock resolver" "${primary_control_config}" "${primary_control_run_id}" "${primary_control_recurrence_mode}"
+    run_hybrid_config "secondary HGDN local wallclock resolver" "${secondary_hgdn_config}" "${secondary_hgdn_run_id}" "${secondary_hgdn_recurrence_mode}"
+    run_hybrid_config "secondary attention-only baseline diagnostic control local wallclock resolver" "${secondary_control_config}" "${secondary_control_run_id}" "${secondary_control_recurrence_mode}"
 }
 
 build_bundle() {
@@ -460,6 +474,14 @@ build_bundle() {
     done
 
     local -a manifest_cmd
+    local manifest_recurrence_mode="mixed"
+    if [[ \
+        "${primary_hgdn_recurrence_mode}" == "${primary_control_recurrence_mode}" && \
+        "${primary_hgdn_recurrence_mode}" == "${secondary_hgdn_recurrence_mode}" && \
+        "${primary_hgdn_recurrence_mode}" == "${secondary_control_recurrence_mode}" \
+    ]]; then
+        manifest_recurrence_mode="${primary_hgdn_recurrence_mode}"
+    fi
     manifest_cmd=(
         "${python_bin}" scripts/hgdn_helper_cli.py write-local-wallclock-resolver-manifest
         --output "${bundle_stage_dir}/bundle_manifest.json"
@@ -491,7 +513,11 @@ build_bundle() {
         --compile-enabled "${compile}"
         --compile-strategy "${compile_strategy}"
         --distributed-mode "${distributed_mode}"
-        --gdn-fla-recurrence-mode "${gdn_fla_recurrence_mode}"
+        --gdn-fla-recurrence-mode "${manifest_recurrence_mode}"
+        --primary-hgdn-recurrence-mode "${primary_hgdn_recurrence_mode}"
+        --primary-control-recurrence-mode "${primary_control_recurrence_mode}"
+        --secondary-hgdn-recurrence-mode "${secondary_hgdn_recurrence_mode}"
+        --secondary-control-recurrence-mode "${secondary_control_recurrence_mode}"
         --weight-decay "${weight_decay}"
         --data-path "${data_path}"
         --tokenizer-path "${tokenizer_path}"

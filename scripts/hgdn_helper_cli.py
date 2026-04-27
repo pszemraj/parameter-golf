@@ -326,6 +326,10 @@ def cmd_write_local_wallclock_resolver_manifest(args: argparse.Namespace) -> int
             "compile": args.compile_enabled,
             "compile_strategy": args.compile_strategy,
             "gdn_fla_recurrence_mode": args.gdn_fla_recurrence_mode,
+            "primary_hgdn_recurrence_mode": args.primary_hgdn_recurrence_mode,
+            "primary_control_recurrence_mode": args.primary_control_recurrence_mode,
+            "secondary_hgdn_recurrence_mode": args.secondary_hgdn_recurrence_mode,
+            "secondary_control_recurrence_mode": args.secondary_control_recurrence_mode,
             "weight_decay": args.weight_decay,
             "torch_logs": args.torch_logs or None,
             "torch_trace": args.torch_trace or None,
@@ -363,7 +367,7 @@ def cmd_write_local_wallclock_resolver_manifest(args: argparse.Namespace) -> int
                 "mode": "primary",
                 "run_id": args.primary_hgdn_run_id,
                 "config": args.primary_hgdn_config,
-                "gdn_fla_recurrence_mode": args.gdn_fla_recurrence_mode,
+                "gdn_fla_recurrence_mode": args.primary_hgdn_recurrence_mode,
             },
             {
                 "label": "primary attention-only baseline diagnostic control local wallclock resolver",
@@ -371,7 +375,7 @@ def cmd_write_local_wallclock_resolver_manifest(args: argparse.Namespace) -> int
                 "mode": "primary_control",
                 "run_id": args.primary_control_run_id,
                 "config": args.primary_control_config,
-                "gdn_fla_recurrence_mode": args.gdn_fla_recurrence_mode,
+                "gdn_fla_recurrence_mode": args.primary_control_recurrence_mode,
             },
             {
                 "label": "secondary HGDN local wallclock resolver",
@@ -379,7 +383,7 @@ def cmd_write_local_wallclock_resolver_manifest(args: argparse.Namespace) -> int
                 "mode": "secondary",
                 "run_id": args.secondary_hgdn_run_id,
                 "config": args.secondary_hgdn_config,
-                "gdn_fla_recurrence_mode": args.gdn_fla_recurrence_mode,
+                "gdn_fla_recurrence_mode": args.secondary_hgdn_recurrence_mode,
             },
             {
                 "label": "secondary attention-only baseline diagnostic control local wallclock resolver",
@@ -387,7 +391,7 @@ def cmd_write_local_wallclock_resolver_manifest(args: argparse.Namespace) -> int
                 "mode": "secondary_control",
                 "run_id": args.secondary_control_run_id,
                 "config": args.secondary_control_config,
-                "gdn_fla_recurrence_mode": args.gdn_fla_recurrence_mode,
+                "gdn_fla_recurrence_mode": args.secondary_control_recurrence_mode,
             },
         ],
     }
@@ -630,6 +634,10 @@ def build_parser() -> argparse.ArgumentParser:
     local_wallclock.add_argument("--compile-strategy", required=True)
     local_wallclock.add_argument("--distributed-mode", required=True)
     local_wallclock.add_argument("--gdn-fla-recurrence-mode", required=True)
+    local_wallclock.add_argument("--primary-hgdn-recurrence-mode", required=True)
+    local_wallclock.add_argument("--primary-control-recurrence-mode", required=True)
+    local_wallclock.add_argument("--secondary-hgdn-recurrence-mode", required=True)
+    local_wallclock.add_argument("--secondary-control-recurrence-mode", required=True)
     local_wallclock.add_argument("--weight-decay", type=float, required=True)
     local_wallclock.add_argument("--data-path", required=True)
     local_wallclock.add_argument("--tokenizer-path", required=True)
