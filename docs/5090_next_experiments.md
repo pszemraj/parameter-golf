@@ -9,7 +9,9 @@ This note is the short working summary. Current protocol details live in:
 
 ## Frontier Snapshot
 
-Current best completed `1B` local points by three-seed mean:
+Historical best completed `1B` local points from the earlier three-seed check.
+This table is background evidence only; it is not an instruction to rerun
+additional seeds.
 
 | Rank | Run | Mean `val_bpb` | Std | Mean steady tok/s | Mean artifact bytes |
 |---|---|---:|---:|---:|---:|
@@ -104,10 +106,12 @@ unlucky controller initialization/order for an architecture result.
 Current policy:
 
 - default screens use one canonical seed: `1337`
-- rerun another seed only when a screen is close to a promotion threshold
+- do not rerun additional seeds for normal screens, LR selection, top-K
+  selection, or finalist closeout
 - normal finalist closeout is still single-seed
-- multi-seed finalist runs require an explicit `--finalist-stability-check`
-  flag and should be treated as stability evidence, not model selection
+- multi-seed finalist runs require both an explicit user request and
+  `--finalist-stability-check`; treat them as stability evidence, not model
+  selection
 - do not pick winners by best seed
 
 The top-2 trigram confirmation already showed low seed variation
@@ -144,7 +148,8 @@ Completed so far in the final-week lane:
   - `blocks1 10x12`: `lr=3.5e-3` beat `3.0e-3` by about `0.01303` bpb on seed `1337`
   - `blocks0 12x10`: `lr=3.5e-3` beat `3.0e-3` by about `0.01273` bpb on seed `1337`
   - decision:
-    - promote `lr=3.5e-3` for both reps to seed `2027`
+    - promote `lr=3.5e-3` as the LR setting; do not rerun additional seeds
+      for LR selection
 
 - gate screen:
   - `blocks1 10x12`:

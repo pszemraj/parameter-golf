@@ -26,7 +26,8 @@ Out of scope for this note:
 
 ## Locked Context
 
-Current confirmed frontier by three-seed mean:
+Historical confirmed frontier from the earlier three-seed check. This is
+background evidence only; it is not a current instruction to rerun seeds.
 
 | Rank | Run | Mean `val_bpb` | Mean steady tok/s |
 |---|---|---:|---:|
@@ -250,9 +251,8 @@ Seed policy:
 - seeds are not a tuning axis
 - use seed `1337` for normal screens and first confirmations
 - normal finalist closeout is single-seed
-- add `2027` / `3141` only behind an explicit
-  `--finalist-stability-check` run when the goal is a stability report, not
-  winner selection
+- do not add additional seeds unless the user explicitly requests a stability
+  report; the planner requires `--finalist-stability-check` for that mode
 - the completed top-2 trigram three-seed confirmation already showed low seed
   variation relative to effect size, so remaining headroom probes should not
   run all seeds by default

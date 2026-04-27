@@ -94,7 +94,8 @@ Lower-impact:
     selection
 - seed policy:
   - use seed `1337` for shape screens
-  - add seeds only for final evidence or threshold ambiguity
+  - do not add additional seeds unless the user explicitly requests a
+    stability report; seeds are not a selection axis
 
 ## Three-Day Frontier Batch
 
