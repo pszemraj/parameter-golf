@@ -531,6 +531,13 @@ EOF
     --base-bigram-delta "${BASE_BIGRAM_DELTA}"
     --trigram-memory "${TRIGRAM_MEMORY}"
     --trigram-log-scale-init "${TRIGRAM_LOG_SCALE_INIT}"
+    --trigram-top-k "${TRIGRAM_TOP_K}"
+    --trigram-smoothing 0.25
+    --trigram-residual-clip "${TRIGRAM_RESIDUAL_CLIP}"
+    --trigram-confidence-count-cap "${TRIGRAM_CONFIDENCE_COUNT_CAP}"
+    --trigram-chunk-size "${TRIGRAM_CHUNK_SIZE}"
+    --trigram-count-workers "${TRIGRAM_COUNT_WORKERS}"
+    --trigram-table-cache-root "${TRIGRAM_MEMORY_TABLE_CACHE_ROOT}"
     --residual-readout-delta-rank "${RESIDUAL_READOUT_DELTA_RANK}"
     --residual-readout-delta-init-std "${RESIDUAL_READOUT_DELTA_INIT_STD}"
     --scan-backend "${SCAN_BACKEND}"
@@ -552,7 +559,7 @@ EOF
   pg_5090_append_bool_flag "$(basename "$0")" sweep_cmd "autocast" "${AUTOCAST}"
   pg_5090_append_bool_flag "$(basename "$0")" sweep_cmd "tokens-on-device" "${TOKENS_ON_DEVICE}"
   pg_5090_append_bool_flag "$(basename "$0")" sweep_cmd "skip-done" "${SKIP_DONE}"
-  pg_5090_append_bool_flag "$(basename "$0")" sweep_cmd "rebuild-shared" "${REBUILD_SHARED}"
+  sweep_cmd+=(--no-rebuild-shared)
   pg_5090_append_bool_flag "$(basename "$0")" sweep_cmd "wandb" "${WANDB}"
   if [[ "${DRY_RUN:-0}" == "1" ]]; then
     printf '+'
