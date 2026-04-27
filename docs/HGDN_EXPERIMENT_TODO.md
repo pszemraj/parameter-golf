@@ -1,7 +1,7 @@
 # HGDN Experiment Follow-Ups
 
 These are deferred from the April 26 experiment-safety pass. They are not
-blockers for the local overnight adaptive pipeline, but should be closed before
+blockers for the local adaptive pipeline, but should be closed before
 paid H100 finalist runs or official-style comparisons.
 
 ## Before Paid H100 Runs

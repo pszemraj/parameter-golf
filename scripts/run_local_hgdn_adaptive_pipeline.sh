@@ -6,7 +6,7 @@ hgdn_setup_repo_root "${BASH_SOURCE[0]}"
 
 if [[ "$#" -ne 0 ]]; then
     echo "Run this script with no arguments." >&2
-    echo "It executes the staged local HGDN overnight pipeline." >&2
+    echo "It executes the staged local HGDN adaptive pipeline." >&2
     exit 1
 fi
 
@@ -160,7 +160,7 @@ check_cuda_jobs() {
             --format=csv,noheader,nounits 2>/dev/null | sed '/^[[:space:]]*$/d' || true
     )"
     if [[ -n "${active_jobs}" ]]; then
-        echo "Refusing to start overnight pipeline stage while CUDA compute jobs are active:" >&2
+        echo "Refusing to start adaptive pipeline stage while CUDA compute jobs are active:" >&2
         echo "${active_jobs}" >&2
         echo "Set ALLOW_ACTIVE_CUDA_JOBS=1 only if this overlap is intentional." >&2
         exit 1
@@ -289,7 +289,7 @@ PY
 
 print_plan() {
     echo
-    echo ">>> Local HGDN overnight hierarchy"
+    echo ">>> Local HGDN adaptive hierarchy"
     echo "pipeline_dir=${pipeline_dir}"
     echo "archive_output=${archive_output}"
     echo "run_stage0=${run_stage0} recurrence_iterations=${recurrence_iterations}"

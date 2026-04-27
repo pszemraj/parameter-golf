@@ -271,7 +271,7 @@ RUN_PREFIX_BASE=localrecurmatrix1 \
 bash scripts/run_local_hgdn_recurrence_matrix.sh
 ```
 
-For an unattended local hierarchy, use the overnight pipeline. It runs:
+For a staged local hierarchy, use the adaptive pipeline. It runs:
 
 1. the recurrence implementation matrix,
 2. a bounded architecture/control screen using the selected recurrence mode,
@@ -290,8 +290,8 @@ implementation check.
 ```bash
 USE_WANDB=0 WANDB_MODE=offline \
 TORCH_LOGS=recompiles,graph_breaks \
-RUN_PREFIX_BASE=localhgdn_overnight1 \
-bash scripts/run_local_hgdn_overnight_pipeline.sh
+RUN_PREFIX_BASE=localhgdn_adaptive1 \
+bash scripts/run_local_hgdn_adaptive_pipeline.sh
 ```
 
 The default screen is deliberately small. Override it with
@@ -342,7 +342,7 @@ conda run -s --name pg python scripts/check_bpb_sanity.py \
 - `scripts/run_local_hgdn_naive_contract_search.sh`: local sparse search.
 - `scripts/run_local_hgdn_recurrence_matrix.sh`: local recurrence
   implementation matrix.
-- `scripts/run_local_hgdn_overnight_pipeline.sh`: staged local implementation,
+- `scripts/run_local_hgdn_adaptive_pipeline.sh`: staged local implementation,
   architecture, and confirmation hierarchy.
 - `scripts/run_local_hgdn_wallclock_resolver.sh`: true same-wallclock local
   exact-baseline/HGDN resolver before paid H100 work.
@@ -358,7 +358,7 @@ Run these checks before handing off a branch or run bundle:
 bash -n scripts/hgdn_shell_common.sh \
   scripts/run_local_hgdn_naive_contract_search.sh \
   scripts/run_local_hgdn_recurrence_matrix.sh \
-  scripts/run_local_hgdn_overnight_pipeline.sh \
+  scripts/run_local_hgdn_adaptive_pipeline.sh \
   scripts/run_local_hgdn_wallclock_resolver.sh \
   scripts/run_h100_hgdn_naive_contract_round.sh \
   scripts/bootstrap_challenge_data.sh
