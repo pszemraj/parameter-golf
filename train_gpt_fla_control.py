@@ -462,6 +462,23 @@ def build_optimizers(
         if param.ndim < 2
         or any(key in name for key in ("scale", "A_log", "dt_bias", "norm", "bias"))
     ]
+    covered_ids = {id(param) for param in matrix_params + scalar_params}
+    other_params = [
+        param
+        for _name, param in block_named_params
+        if param.requires_grad and id(param) not in covered_ids
+    ]
+    covered_ids.update(id(param) for param in other_params)
+    missing_optimizer_params = [
+        name
+        for name, param in block_named_params
+        if param.requires_grad and id(param) not in covered_ids
+    ]
+    if missing_optimizer_params:
+        raise RuntimeError(
+            "Trainable native-FLA block params missing optimizer coverage: "
+            + ", ".join(missing_optimizer_params)
+        )
 
     token_lr = args.tied_embed_lr if args.tie_embeddings else args.embed_lr
     optimizers: list[torch.optim.Optimizer] = [adam(token_params, token_lr)]
@@ -481,6 +498,8 @@ def build_optimizers(
         optimizers.append(optimizer_muon)
     if scalar_params:
         optimizers.append(adam(scalar_params, args.scalar_lr))
+    if other_params:
+        optimizers.append(adam(other_params, args.scalar_lr))
     return optimizers, optimizer_muon
 
 

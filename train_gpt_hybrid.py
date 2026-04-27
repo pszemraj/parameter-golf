@@ -49,6 +49,7 @@ from model import (
     GDN_FLA_RECURRENCE_MODES,
     HybridGPT,
     attention_backend_name,
+    is_gdn_conv_param,
     is_gdn_decay_param,
     uses_scalar_optimizer,
     validate_gdn_w_g_optimizer,
@@ -1353,6 +1354,7 @@ def main() -> None:
 
     # ── Optimizers ────────────────────────────────────────────────────
     block_named_params = list(base_model.blocks.named_parameters())
+    gdn_conv_params = [p for n, p in block_named_params if is_gdn_conv_param(n)]
     matrix_params = [
         p
         for n, p in block_named_params
@@ -1362,6 +1364,7 @@ def main() -> None:
             param_ndim=p.ndim,
             gdn_w_g_optimizer=args.gdn_w_g_optimizer,
         )
+        and not is_gdn_conv_param(n)
     ]
     scalar_params = [
         p
@@ -1372,8 +1375,24 @@ def main() -> None:
             gdn_w_g_optimizer=args.gdn_w_g_optimizer,
         )
         and not is_gdn_decay_param(n)
+        and not is_gdn_conv_param(n)
     ]
     gdn_decay_params = [p for n, p in block_named_params if is_gdn_decay_param(n)]
+    optimizer_owned_ids = {
+        id(p)
+        for params in (matrix_params, scalar_params, gdn_conv_params, gdn_decay_params)
+        for p in params
+    }
+    missing_optimizer_params = [
+        n
+        for n, p in block_named_params
+        if p.requires_grad and id(p) not in optimizer_owned_ids
+    ]
+    if missing_optimizer_params:
+        raise RuntimeError(
+            "Trainable block params missing optimizer coverage: "
+            + ", ".join(missing_optimizer_params)
+        )
     if base_model.skip_weights.numel() > 0:
         scalar_params.append(base_model.skip_weights)
 
@@ -1408,6 +1427,21 @@ def main() -> None:
         weight_decay=args.weight_decay,
         fused=True,
     )
+    optimizer_gdn_conv = None
+    if gdn_conv_params:
+        optimizer_gdn_conv = torch.optim.Adam(
+            [
+                {
+                    "params": gdn_conv_params,
+                    "lr": args.scalar_lr,
+                    "base_lr": args.scalar_lr,
+                }
+            ],
+            betas=(args.beta1, args.beta2),
+            eps=args.adam_eps,
+            weight_decay=args.weight_decay,
+            fused=True,
+        )
     optimizer_gdn_decay = None
     if gdn_decay_params:
         optimizer_gdn_decay = torch.optim.Adam(
@@ -1425,6 +1459,8 @@ def main() -> None:
         )
     optimizer_head = None
     optimizers = [optimizer_tok, optimizer_muon, optimizer_scalar]
+    if optimizer_gdn_conv is not None:
+        optimizers.append(optimizer_gdn_conv)
     if optimizer_gdn_decay is not None:
         optimizers.append(optimizer_gdn_decay)
     if base_model.lm_head is not None:
@@ -1447,12 +1483,16 @@ def main() -> None:
     if use_parallel_muon_distributed:
         replicated_params.extend(optimizer_tok.param_groups[0]["params"])
         replicated_params.extend(scalar_params)
+        if optimizer_gdn_conv is not None:
+            replicated_params.extend(gdn_conv_params)
         if optimizer_gdn_decay is not None:
             replicated_params.extend(gdn_decay_params)
         if optimizer_head is not None:
             replicated_params.extend(optimizer_head.param_groups[0]["params"])
         replicated_grad_sync = ReplicatedGradSync(replicated_params)
     replicated_optimizers = [optimizer_tok, optimizer_scalar]
+    if optimizer_gdn_conv is not None:
+        replicated_optimizers.append(optimizer_gdn_conv)
     if optimizer_gdn_decay is not None:
         replicated_optimizers.append(optimizer_gdn_decay)
     if optimizer_head is not None:

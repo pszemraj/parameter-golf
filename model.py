@@ -57,6 +57,12 @@ _W_G_SCALAR_PARAM_PATTERN = "w_g."
 _VALID_GDN_W_G_OPTIMIZERS = {"scalar", "matrix"}
 SCALAR_PARAM_PATTERNS = _BASE_SCALAR_PARAM_PATTERNS + (_W_G_SCALAR_PARAM_PATTERN,)
 GDN_DECAY_PARAM_PATTERNS = ("A_log", "dt_bias")
+GDN_CONV_PARAM_PATTERNS = (
+    "q_conv.conv.weight",
+    "k_conv.conv.weight",
+    "v_conv.conv.weight",
+    "qkv_conv.conv.weight",
+)
 GDN_FLA_RECURRENCE_MODES = {"compile_visible", "direct", "direct_fused"}
 
 NormStyle = Literal["pre", "post", "keel"]
@@ -136,6 +142,15 @@ def is_gdn_decay_param(param_name: str) -> bool:
     :return bool: `True` for `A_log` and `dt_bias` parameters.
     """
     return any(pattern in param_name for pattern in GDN_DECAY_PARAM_PATTERNS)
+
+
+def is_gdn_conv_param(param_name: str) -> bool:
+    """Return whether one parameter is a GDN short-conv weight.
+
+    :param str param_name: Fully-qualified parameter name.
+    :return bool: `True` for trainable q/k/v short-conv weights.
+    """
+    return any(pattern in param_name for pattern in GDN_CONV_PARAM_PATTERNS)
 
 
 def init_gdn_decay_params(

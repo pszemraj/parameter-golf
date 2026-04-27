@@ -19,6 +19,8 @@ from model import (
     HybridGPT,
     gdn_recurrent_naive,
     init_gdn_decay_params,
+    is_gdn_conv_param,
+    is_gdn_decay_param,
     l2_norm,
     make_baseline_fill,
     make_attention_only_baseline,
@@ -641,6 +643,134 @@ def test_w_g_matrix_routing() -> None:
     assert any("w_g.weight" in name for name in muon_set), muon_set
     assert not any("w_g.weight" in name for name in adam_set), adam_set
     print("  ✓ w_g matrix routing OK")
+
+
+def _hybrid_block_optimizer_partition_names(
+    model: HybridGPT, *, gdn_w_g_optimizer: str
+) -> dict[str, set[str]]:
+    """Mirror trainer block-parameter partitioning by name.
+
+    :param HybridGPT model: Hybrid model fixture.
+    :param str gdn_w_g_optimizer: Active `w_g` routing mode.
+    :return dict[str, set[str]]: Optimizer bucket names.
+    """
+    block_named_params = list(model.blocks.named_parameters())
+    conv_names = {n for n, _p in block_named_params if is_gdn_conv_param(n)}
+    matrix_names = {
+        n
+        for n, p in block_named_params
+        if p.ndim == 2
+        and not uses_scalar_optimizer(
+            n,
+            param_ndim=p.ndim,
+            gdn_w_g_optimizer=gdn_w_g_optimizer,
+        )
+        and not is_gdn_conv_param(n)
+    }
+    scalar_names = {
+        n
+        for n, p in block_named_params
+        if uses_scalar_optimizer(
+            n,
+            param_ndim=p.ndim,
+            gdn_w_g_optimizer=gdn_w_g_optimizer,
+        )
+        and not is_gdn_decay_param(n)
+        and not is_gdn_conv_param(n)
+    }
+    decay_names = {n for n, _p in block_named_params if is_gdn_decay_param(n)}
+    trainable_names = {n for n, p in block_named_params if p.requires_grad}
+    return {
+        "conv": conv_names,
+        "matrix": matrix_names,
+        "scalar": scalar_names,
+        "decay": decay_names,
+        "trainable": trainable_names,
+    }
+
+
+def test_hybrid_optimizer_partition_covers_trainable_block_params() -> None:
+    """Keep trainer optimizer buckets exhaustive for GDN block parameters."""
+    for packed in (True, False):
+        model = HybridGPT(
+            vocab_size=16,
+            num_layers=4,
+            d_model=64,
+            attn_heads=4,
+            attn_kv_heads=2,
+            gdn_n_heads=4,
+            gdn_head_k_dim=8,
+            gdn_expand_v=2.0,
+            gdn_ratio=3,
+            mlp_mult=2,
+            gdn_use_packed_qkv_conv=packed,
+            gdn_use_packed_qkv_proj=packed,
+        )
+        buckets = _hybrid_block_optimizer_partition_names(
+            model, gdn_w_g_optimizer="matrix"
+        )
+        optimizer_buckets = ["matrix", "scalar", "decay", "conv"]
+        covered = set().union(*(buckets[name] for name in optimizer_buckets))
+        missing = sorted(buckets["trainable"] - covered)
+        duplicate = sorted(
+            name
+            for name in covered
+            if sum(name in buckets[bucket] for bucket in optimizer_buckets) > 1
+        )
+        assert not missing, f"Trainable params missing optimizer coverage: {missing}"
+        assert not duplicate, (
+            f"Params assigned to multiple optimizer buckets: {duplicate}"
+        )
+        if packed:
+            assert any("qkv_conv.conv.weight" in n for n in buckets["conv"])
+        else:
+            for expected in (
+                "q_conv.conv.weight",
+                "k_conv.conv.weight",
+                "v_conv.conv.weight",
+            ):
+                assert any(expected in n for n in buckets["conv"])
+    print("  ✓ hybrid optimizer partition covers trainable block params")
+
+
+def test_gdn_short_conv_weight_can_update() -> None:
+    """Verify packed GDN short-conv weights receive usable training updates."""
+    torch.manual_seed(42)
+    model = HybridGPT(
+        vocab_size=32,
+        num_layers=2,
+        d_model=64,
+        attn_heads=4,
+        attn_kv_heads=2,
+        gdn_n_heads=4,
+        gdn_head_k_dim=8,
+        gdn_expand_v=2.0,
+        gdn_ratio=1,
+        mlp_mult=2,
+        block_pattern="gdn,attn",
+        gdn_use_packed_qkv_conv=True,
+        gdn_use_packed_qkv_proj=True,
+    )
+    conv_weight = next(
+        param
+        for name, param in model.blocks.named_parameters()
+        if "qkv_conv.conv.weight" in name
+    )
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-2)
+    before = conv_weight.detach().clone()
+    conv_grad_norms = []
+    for _step in range(2):
+        optimizer.zero_grad(set_to_none=True)
+        loss = model(torch.randint(0, 32, (2, 16)), torch.randint(0, 32, (2, 16)))
+        loss.backward()
+        conv_grad_norms.append(float(conv_weight.grad.norm()))
+        optimizer.step()
+    assert conv_weight.grad is not None
+    assert conv_grad_norms[1] > 0.0, conv_grad_norms
+    optimizer.zero_grad(set_to_none=True)
+    assert conv_weight.grad is None
+    assert not torch.allclose(before, conv_weight.detach())
+    print("  ✓ GDN short-conv weight receives optimizer update")
 
 
 def test_block_pattern_override() -> None:
@@ -1295,6 +1425,11 @@ if __name__ == "__main__":
         ("Recurrence input dtypes", test_gdn_recurrence_input_dtypes),
         ("Direct fused FLA mode smoke", test_gdn_direct_fused_fla_mode_smoke),
         ("Muon routing", test_muon_routing),
+        (
+            "Hybrid optimizer coverage",
+            test_hybrid_optimizer_partition_covers_trainable_block_params,
+        ),
+        ("GDN short-conv optimizer update", test_gdn_short_conv_weight_can_update),
         ("Causal conv", test_causal_conv),
         ("Causal conv disable", test_causal_conv_disable),
         ("GDN conv toggles", test_gdn_conv_toggles),
