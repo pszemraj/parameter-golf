@@ -105,14 +105,15 @@ Current policy:
 
 - default screens use one canonical seed: `1337`
 - rerun another seed only when a screen is close to a promotion threshold
-- use `SEEDS="1337 2027 3141"` only for final evidence or when a result is
-  likely to become the submission candidate
+- normal finalist closeout is still single-seed
+- multi-seed finalist runs require an explicit `--finalist-stability-check`
+  flag and should be treated as stability evidence, not model selection
 - do not pick winners by best seed
 
 The top-2 trigram confirmation already showed low seed variation
 (`std=0.0018559894`) relative to the architecture gain (`~0.1342` bpb), so the
-remaining top-K/headroom probes should stay single-seed unless a result is
-being packaged as final evidence.
+remaining top-K/headroom probes and normal finalist closeout should stay
+single-seed unless a stability report is explicitly requested.
 
 ## Final-Week Execution Read
 
@@ -242,12 +243,12 @@ Next adaptive finalist run:
 set -euo pipefail
 
 bash scripts/run_5090_finalist_closeout.sh \
-  --run-id k6_finalist_replicates_v1 \
+  --run-id k6_finalist_seed1337_v1 \
   -- \
   --run-version geom1_seq2048_bptt2_k6 \
   --label blocks0_d128_l5_i512 \
   --finalist-run-version geom1_seq2048_bptt2_k6 \
-  --finalist-seeds "1337 2027 3141" \
+  --finalist-seeds 1337 \
   --finalist-trigram-top-k 6 \
   --finalist-seq-len 2048 \
   --finalist-batch-size 32 \
@@ -258,10 +259,11 @@ bash scripts/run_5090_finalist_closeout.sh \
   --count-workers 4
 ```
 
-The planner should skip the completed seed `1337` and emit only missing seeds
-`2027` and `3141`.
+The planner should no-op if the completed seed `1337` already satisfies the
+exact contract. Do not add more seeds unless the purpose is explicitly a
+stability report rather than model selection.
 
-After K6 replication:
+After K6 single-seed closeout:
 
 ```bash
 bash scripts/run_5090_finalist_closeout.sh \
@@ -286,7 +288,7 @@ Only train K7 if preflight stays under `16,000,000` bytes with at least about
 `500k` bytes headroom. Do not run K8 before K7 proves both artifact viability
 and a real quality gain.
 
-Optional context probe, only after K6 replication:
+Optional context probe, only after K6 single-seed closeout:
 
 ```bash
 bash scripts/run_5090_finalist_closeout.sh \
@@ -309,9 +311,9 @@ bash scripts/run_5090_finalist_closeout.sh \
 Promotion rule:
 
 - compare K6 to the K4 seq2048 BPTT2 `1B` result (`1.9722313128`)
-- if 3-seed K6 mean improves by at least `0.008` bpb, keep K6 as finalist
+- if single-seed K6 improves by at least `0.008` bpb, keep K6 as finalist
 - if K7 improves over K6 seed `1337` by at least `0.004` bpb and fits the
-  artifact cap, replicate K7; otherwise stop top-K expansion
+  artifact cap, promote K7; otherwise stop top-K expansion
 - promote seq4096 only if it beats K6 seq2048 BPTT2 by at least `0.004` bpb
 
 Replay `blocks1` only as a geometry check after the blocks0 top-K and aligned

@@ -214,6 +214,14 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     ap.add_argument("--gate-followup-train-label", default=None)
     ap.add_argument("--finalist-run-version", default=None)
     ap.add_argument("--finalist-seeds", default=None)
+    ap.add_argument(
+        "--finalist-stability-check",
+        action="store_true",
+        help=(
+            "Allow multiple finalist seeds for an explicit stability report. "
+            "Default finalist closeout is single-seed; seeds are not a search axis."
+        ),
+    )
     ap.add_argument("--finalist-trigram-top-k", type=int, default=None)
     ap.add_argument("--finalist-seq-len", type=int, default=None)
     ap.add_argument("--finalist-batch-size", type=int, default=None)
@@ -1678,11 +1686,21 @@ def plan_finalist_stage(args: argparse.Namespace) -> StagePlan:
             "finalist artifact preflight command selected",
             [finalist_command(args, seed=finalist_seeds(args)[0])],
         )
+    seeds = finalist_seeds(args)
+    if len(seeds) > 1 and not bool(args.finalist_stability_check):
+        return StagePlan(
+            "blocked",
+            (
+                "multiple finalist seeds require --finalist-stability-check; "
+                "normal finalist closeout is single-seed and seeds are not a search axis"
+            ),
+            [],
+        )
 
     geometry = parse_geometry(str(args.label[0]))
     contract = finalist_contract(args)
     commands: list[PlannedCommand] = []
-    for seed in finalist_seeds(args):
+    for seed in seeds:
         row = load_summary_row(
             args.repo_root.resolve(),
             geometry,

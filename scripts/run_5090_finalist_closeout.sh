@@ -37,6 +37,7 @@ Useful planner options:
   --finalist-hold-steps VALUE
   --finalist-train-label VALUE
   --finalist-preflight-only
+  --finalist-stability-check
   --count-workers VALUE
   --spec-max-tokens VALUE
 EOF

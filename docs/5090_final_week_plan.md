@@ -249,8 +249,10 @@ Seed policy:
 
 - seeds are not a tuning axis
 - use seed `1337` for normal screens and first confirmations
-- add `2027` / `3141` only for final evidence or when a result is near a
-  threshold
+- normal finalist closeout is single-seed
+- add `2027` / `3141` only behind an explicit
+  `--finalist-stability-check` run when the goal is a stability report, not
+  winner selection
 - the completed top-2 trigram three-seed confirmation already showed low seed
   variation relative to effect size, so remaining headroom probes should not
   run all seeds by default
@@ -355,16 +357,16 @@ Current interpretation:
 - K6 improves over K4 seq2048 BPTT2 by about `0.0149` bpb and still leaves
   about `2.20 MB` artifact headroom.
 
-Adaptive finalist replication:
+Adaptive finalist closeout:
 
 ```bash
 bash scripts/run_5090_finalist_closeout.sh \
-  --run-id k6_finalist_replicates_v1 \
+  --run-id k6_finalist_seed1337_v1 \
   -- \
   --run-version geom1_seq2048_bptt2_k6 \
   --label blocks0_d128_l5_i512 \
   --finalist-run-version geom1_seq2048_bptt2_k6 \
-  --finalist-seeds "1337 2027 3141" \
+  --finalist-seeds 1337 \
   --finalist-trigram-top-k 6 \
   --finalist-seq-len 2048 \
   --finalist-batch-size 32 \
@@ -377,12 +379,13 @@ bash scripts/run_5090_finalist_closeout.sh \
 
 Promotion rule:
 
-- the planner skips completed seed `1337` and runs missing K6 seeds
-- if 3-seed K6 mean beats K4 seq2048 BPTT2 by at least `0.008` bpb, keep K6
-  as the final local candidate
-- preflight K7 only after K6 replication; train K7 only if artifact estimate
+- the planner no-ops if completed seed `1337` already satisfies the exact
+  contract
+- do not use extra seeds to pick the winner; run them only with
+  `--finalist-stability-check` if a stability report is explicitly needed
+- preflight K7 only after K6 single-seed closeout; train K7 only if artifact estimate
   stays under cap with about `500k` bytes headroom
-- run one K6 seq4096 probe only after K6 replication, and promote only if it
+- run one K6 seq4096 probe only after K6 single-seed closeout, and promote only if it
   beats K6 seq2048 BPTT2 by at least `0.004` bpb
 
 ### 2. Optional adapter probes

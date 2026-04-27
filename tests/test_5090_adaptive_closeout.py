@@ -599,7 +599,7 @@ def test_probe_tier_accepts_probe_followup(tmp_path: Path) -> None:
 
 
 def test_finalist_stage_runs_only_missing_seeds(tmp_path: Path) -> None:
-    """Finalist replication should skip completed seeds and emit missing ones."""
+    """Explicit stability checks may skip completed seeds and emit missing ones."""
     label = "blocks0_d128_l5_i512"
     _write_summary(
         tmp_path,
@@ -622,6 +622,7 @@ def test_finalist_stage_runs_only_missing_seeds(tmp_path: Path) -> None:
     args.finalist_batch_size = 32
     args.finalist_bptt_chunks = 2
     args.finalist_train_label = "1b_seq2048_bptt2_k6"
+    args.finalist_stability_check = True
 
     stage = plan_stage(args)
 
@@ -637,27 +638,45 @@ def test_finalist_stage_runs_only_missing_seeds(tmp_path: Path) -> None:
     assert "--full-val-final" in shells
 
 
-def test_finalist_stage_reports_already_complete(tmp_path: Path) -> None:
-    """A fully completed finalist seed set should become a no-op."""
+def test_finalist_stage_blocks_multiple_seeds_by_default(tmp_path: Path) -> None:
+    """Normal finalist closeout should not silently become seed replication."""
     label = "blocks0_d128_l5_i512"
-    for seed in ("1337", "2027"):
-        _write_summary(
-            tmp_path,
-            label,
-            "geom1_seq2048_bptt2_k6_final",
-            seed=seed,
-            steps=8192,
-            bpb=1.957,
-            top_k=6,
-            batch_size=32,
-            seq_len=2048,
-            bptt_chunks=2,
-            full_coverage=True,
-        )
     args = _args(tmp_path, "finalist")
     args.label = [label]
     args.finalist_run_version = "geom1_seq2048_bptt2_k6_final"
-    args.finalist_seeds = "1337,2027"
+    args.finalist_seeds = "1337 2027"
+    args.finalist_trigram_top_k = 6
+    args.finalist_seq_len = 2048
+    args.finalist_batch_size = 32
+    args.finalist_bptt_chunks = 2
+
+    stage = plan_stage(args)
+
+    assert stage.status == "blocked"
+    assert "multiple finalist seeds require --finalist-stability-check" in stage.reason
+    assert stage.commands == []
+
+
+def test_finalist_stage_reports_already_complete(tmp_path: Path) -> None:
+    """A fully completed finalist seed set should become a no-op."""
+    label = "blocks0_d128_l5_i512"
+    _write_summary(
+        tmp_path,
+        label,
+        "geom1_seq2048_bptt2_k6_final",
+        seed="1337",
+        steps=8192,
+        bpb=1.957,
+        top_k=6,
+        batch_size=32,
+        seq_len=2048,
+        bptt_chunks=2,
+        full_coverage=True,
+    )
+    args = _args(tmp_path, "finalist")
+    args.label = [label]
+    args.finalist_run_version = "geom1_seq2048_bptt2_k6_final"
+    args.finalist_seeds = "1337"
     args.finalist_trigram_top_k = 6
     args.finalist_seq_len = 2048
     args.finalist_batch_size = 32
