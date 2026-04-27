@@ -2269,6 +2269,9 @@ def build_resolved_config_payload(
             "default_amp_dtype": dtype_name(default_amp_dtype),
             "amplifier_dtype": dtype_name(runtime_amp_dtype),
             "autocast": bool(use_autocast),
+            "no_mmap": bool(args.no_mmap),
+            "tokens_on_device": bool(args.tokens_on_device),
+            "force_device": "" if args.force_device is None else str(args.force_device),
             "gradient_checkpointing": bool(gradient_checkpointing),
             "exact_val_bpb": byte_count_lut is not None,
             "exact_bpb_positive_target_count": (
@@ -3360,6 +3363,7 @@ def main() -> None:
         "last_eval_steps": last_eval.get("eval_steps"),
         "last_eval_batch_size": last_eval.get("eval_batch_size"),
         "last_eval_seq_len": last_eval.get("eval_seq_len"),
+        "exact_val_bpb": byte_count_lut is not None,
         "exact_bpb_positive_target_count": (
             None
             if exact_bpb_target_validation is None
@@ -3375,6 +3379,8 @@ def main() -> None:
             if exact_bpb_target_validation is None
             else list(exact_bpb_target_validation.zero_byte_target_ids)
         ),
+        "tokenizer_path": None if tok_path is None else str(tok_path),
+        "tokenizer_sha256": tokenizer_sha256,
         "repo_code_bytes": int(repo_code_bytes),
         "spec_bytes": spec_bytes,
         "gzip_spec_bytes": gzip_spec_bytes,

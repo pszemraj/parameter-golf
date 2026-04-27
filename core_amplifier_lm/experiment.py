@@ -803,7 +803,7 @@ def summarize_run_dir(run_dir: str | Path) -> dict[str, str]:
         "artifact_estimate_bytes": _stringify(results.get("artifact_estimate_bytes")),
         "artifact_headroom_bytes": _stringify(results.get("artifact_headroom_bytes")),
         "artifact_status": _stringify(results.get("artifact_status")),
-        "exact_val_bpb": _stringify(runtime.get("exact_val_bpb")),
+        "exact_val_bpb": _stringify(results.get("exact_val_bpb", runtime.get("exact_val_bpb"))),
         "exact_bpb_positive_target_count": _stringify(
             results.get("exact_bpb_positive_target_count")
             or runtime.get("exact_bpb_positive_target_count")

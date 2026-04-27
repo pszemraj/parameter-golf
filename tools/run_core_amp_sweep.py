@@ -268,6 +268,14 @@ def controller_expected_contract(
     full_val_final: bool,
     gradient_checkpointing: bool,
     scan_backend: str,
+    compile_enabled: bool,
+    compile_after: int,
+    compile_mode: str,
+    compile_base_path: bool,
+    autocast: bool,
+    no_mmap: bool,
+    tokens_on_device: bool,
+    force_device: str,
 ) -> dict[str, object]:
     """Build the resolved-config contract required for skip-done reuse.
 
@@ -286,6 +294,14 @@ def controller_expected_contract(
     :param bool full_val_final: Whether final eval must cover validation once.
     :param bool gradient_checkpointing: Expected gradient-checkpointing flag.
     :param str scan_backend: Requested scan backend.
+    :param bool compile_enabled: Whether torch.compile is requested.
+    :param int compile_after: Compile trigger step.
+    :param str compile_mode: Requested torch.compile mode.
+    :param bool compile_base_path: Whether the base path is compiled.
+    :param bool autocast: Whether autocast is requested.
+    :param bool no_mmap: Whether mmap/direct-shard streaming is disabled.
+    :param bool tokens_on_device: Whether tokens are copied to the train device.
+    :param str force_device: Optional forced device string.
     :return dict[str, object]: Dotted resolved-config contract.
     """
     contract: dict[str, object] = {
@@ -313,6 +329,7 @@ def controller_expected_contract(
         "training.weight_decay": float(train_defaults["WEIGHT_DECAY"]),
         "training.hard_loss_gamma": float(train_defaults["HARD_LOSS_GAMMA"]),
         "training.hard_loss_cap": float(train_defaults["HARD_LOSS_CAP"]),
+        "training.dropout": float(train_defaults["DROPOUT"]),
         "training.val_every": int(train_defaults["VAL_EVERY"]),
         "training.val_steps": int(train_defaults["VAL_STEPS"]),
         "training.full_val_final": bool(full_val_final),
@@ -320,15 +337,168 @@ def controller_expected_contract(
         "training.log_state_every": int(train_defaults["LOG_STATE_EVERY"]),
         "training.save_every": int(train_defaults["SAVE_EVERY"]),
         "training.gradient_checkpointing": bool(gradient_checkpointing),
+        "runtime.amplifier_dtype": str(train_defaults["AMPLIFIER_DTYPE"]),
+        "runtime.autocast": bool(autocast),
         "runtime.scan_backend_requested": scan_backend,
+        "runtime.compile.enabled": bool(compile_enabled),
+        "runtime.compile.compile_after": int(compile_after),
+        "runtime.compile.compile_mode": compile_mode or "default",
+        "runtime.compile.compile_base_path": bool(compile_base_path),
+        "runtime.no_mmap": bool(no_mmap),
+        "runtime.tokens_on_device": bool(tokens_on_device),
+        "runtime.force_device": str(force_device),
         "runtime.exact_val_bpb": True,
         "data.source": str(data_path),
         "data.storage_dtype": str(storage_dtype),
     }
-    for key in ("core_dim", "num_blocks", "trigram_top_k"):
+    for key in (
+        "vocab_size",
+        "core_dim",
+        "num_blocks",
+        "trigram_top_k",
+        "spectral_neighbors",
+        "trigram_confidence_count_cap",
+    ):
         if key in shared_model and shared_model[key] is not None:
             contract[f"model.{key}"] = int(shared_model[key])
+    for key in (
+        "core_type",
+        "branch_temporal_mode",
+        "residual_token_gate_mode",
+        "branch_router_mode",
+        "base_bigram_delta",
+        "fixed_dtype",
+        "embedding_init",
+    ):
+        if key in shared_model and shared_model[key] is not None:
+            contract[f"model.{key}"] = str(shared_model[key])
+    for key in (
+        "branch_temporal_lag_scale",
+        "trigram_log_scale_init",
+        "trigram_smoothing",
+        "trigram_residual_clip",
+        "lag_identity_base",
+    ):
+        if key in shared_model and shared_model[key] is not None:
+            contract[f"model.{key}"] = float(shared_model[key])
+    if shared_model.get("branch_lags") is not None:
+        contract["model.branch_lags"] = [int(x) for x in shared_model["branch_lags"]]
+    if shared_model.get("readout_rank") is not None:
+        contract["model.readout_rank"] = int(shared_model["readout_rank"])
+    if shared_model.get("trigram_max_tokens") is not None:
+        contract["model.trigram_max_tokens"] = int(shared_model["trigram_max_tokens"])
     return contract
+
+
+def validate_explicit_shared_spec_config(
+    *,
+    shared_spec_dir: Path,
+    shared_config: dict[str, object],
+    data_path: str,
+    storage_dtype: str,
+) -> None:
+    """Fail if an explicit shared spec does not match requested spec knobs.
+
+    :param Path shared_spec_dir: Explicit shared-spec directory.
+    :param dict[str, object] shared_config: Parsed ``config.json`` payload.
+    :param str data_path: Resolved training-data path requested by the caller.
+    :param str storage_dtype: Requested token storage dtype.
+    """
+
+    def normalize_path(value: object) -> str:
+        """Return a resolved path string for comparison.
+
+        :param object value: Path-like value.
+        :return str: Resolved path string.
+        """
+        return str(Path(str(value)).expanduser().resolve())
+
+    def env_int(name: str, default: str) -> int:
+        """Resolve an integer environment-backed setting.
+
+        :param str name: Environment variable name.
+        :param str default: Default string.
+        :return int: Resolved integer value.
+        """
+        return int(env(name, default))
+
+    def env_float(name: str, default: str) -> float:
+        """Resolve a float environment-backed setting.
+
+        :param str name: Environment variable name.
+        :param str default: Default string.
+        :return float: Resolved float value.
+        """
+        return float(env(name, default))
+
+    def env_branch_lags(name: str, default: str) -> list[int]:
+        """Resolve comma-separated branch lags.
+
+        :param str name: Environment variable name.
+        :param str default: Default comma-separated lag string.
+        :return list[int]: Parsed lag list.
+        """
+        return [int(part) for part in env(name, default).split(",") if part]
+
+    model = shared_config.get("model", {}) if isinstance(shared_config, dict) else {}
+    data = shared_config.get("data", {}) if isinstance(shared_config, dict) else {}
+    spec_cfg = shared_config.get("spec", {}) if isinstance(shared_config, dict) else {}
+    if not isinstance(model, dict) or not isinstance(data, dict) or not isinstance(spec_cfg, dict):
+        raise SystemExit(f"invalid shared spec config structure: {shared_spec_dir / 'config.json'}")
+
+    expected: dict[str, object] = {
+        "data.source": normalize_path(data_path),
+        "data.storage_dtype": str(storage_dtype),
+        "model.vocab_size": env_int("VOCAB_SIZE", "1024"),
+        "model.core_dim": env_int("CORE_DIM", "48"),
+        "model.branch_lags": env_branch_lags("BRANCH_LAGS", "1,2,3,4,6,8,12,16,24,32,48,64"),
+        "model.branch_temporal_mode": env("BRANCH_TEMPORAL_MODE", "current"),
+        "model.branch_temporal_lag_scale": env_float("BRANCH_TEMPORAL_LAG_SCALE", "1.0"),
+        "model.residual_token_gate_mode": env("RESIDUAL_TOKEN_GATE_MODE", "none"),
+        "model.branch_router_mode": env("BRANCH_ROUTER_MODE", "none"),
+        "model.base_bigram_delta": env("BASE_BIGRAM_DELTA", "none"),
+        "model.trigram_memory": env("TRIGRAM_MEMORY", "none"),
+        "model.trigram_log_scale_init": env_float("TRIGRAM_LOG_SCALE_INIT", "0.0"),
+        "model.trigram_top_k": env_int("TRIGRAM_TOP_K", "2"),
+        "model.trigram_smoothing": env_float("TRIGRAM_SMOOTHING", "0.25"),
+        "model.trigram_residual_clip": env_float("TRIGRAM_RESIDUAL_CLIP", "8.0"),
+        "model.trigram_confidence_count_cap": env_int("TRIGRAM_CONFIDENCE_COUNT_CAP", "4096"),
+        "model.residual_readout_delta_rank": env_int("RESIDUAL_READOUT_DELTA_RANK", "0"),
+        "model.residual_readout_delta_init_std": env_float(
+            "RESIDUAL_READOUT_DELTA_INIT_STD", "0.02"
+        ),
+        "model.num_blocks": env_int("NUM_BLOCKS", "9"),
+        "model.fixed_dtype": env("FIXED_DTYPE", "bfloat16"),
+        "model.embedding_init": env("EMBEDDING_INIT", "spectral"),
+        "model.spectral_neighbors": env_int("SPECTRAL_NEIGHBORS", "64"),
+        "model.lag_identity_base": env_float("LAG_IDENTITY_BASE", "0.15"),
+        "model.core_layers": env_int("CORE_LAYERS", "5"),
+        "model.core_expansion": env_float("CORE_EXPANSION", "2.0"),
+        "model.residual_core": env_bool("RESIDUAL_CORE", True),
+        "model.residual_core_init": env_float("RESIDUAL_CORE_INIT", "-2.0"),
+        "training.scan_backend": env("SCAN_BACKEND", "auto"),
+        "spec.strategy": env("SPEC_STRATEGY", "auto"),
+        "spec.workers": env_int("SPEC_WORKERS", "-1"),
+    }
+    spec_max_tokens = env(
+        "SPEC_MAX_TOKENS", controller_spec_max_tokens_default(env("PRESET", "controller_default"))
+    )
+    expected["spec.max_tokens"] = None if spec_max_tokens == "" else int(spec_max_tokens)
+    if env("TRIGRAM_MAX_TOKENS", ""):
+        expected["model.trigram_max_tokens"] = int(env("TRIGRAM_MAX_TOKENS", ""))
+
+    mismatches: list[str] = []
+    for key, expected_value in expected.items():
+        actual = _contract_value(shared_config, key)
+        if key == "data.source" and actual is not None:
+            actual = normalize_path(actual)
+        if not _contract_values_match(actual, expected_value):
+            mismatches.append(f"{key}: actual={actual!r} expected={expected_value!r}")
+    if mismatches:
+        raise SystemExit(
+            "explicit shared spec config does not match requested protocol "
+            f"({shared_spec_dir}):\n  - " + "\n  - ".join(mismatches)
+        )
 
 
 def run_complete(
@@ -726,6 +896,7 @@ def update_controller_config(
     grad_accum: int,
     local_step_tokens: int,
     effective_step_tokens: int,
+    full_val_final: bool,
 ) -> None:
     """Write a per-run controller config snapshot before training starts.
 
@@ -741,6 +912,7 @@ def update_controller_config(
     :param int grad_accum: Resolved gradient accumulation steps.
     :param int local_step_tokens: Tokens processed by one local microbatch step.
     :param int effective_step_tokens: Tokens processed per optimizer step.
+    :param bool full_val_final: Whether final eval covers validation once.
     """
     cfg = ModelConfig.load(run_dir)
     branch_temporal_mode = env(
@@ -788,6 +960,8 @@ def update_controller_config(
     cfg.training["grad_clip"] = float(train_defaults["GRAD_CLIP"])
     cfg.training["hard_loss_gamma"] = float(train_defaults["HARD_LOSS_GAMMA"])
     cfg.training["hard_loss_cap"] = float(train_defaults["HARD_LOSS_CAP"])
+    cfg.training["dropout"] = float(train_defaults["DROPOUT"])
+    cfg.training["amplifier_dtype"] = train_defaults["AMPLIFIER_DTYPE"]
     cfg.training["scan_backend"] = env("SCAN_BACKEND", "auto")
     cfg.training["gradient_checkpointing"] = env_bool(
         "GRADIENT_CHECKPOINTING",
@@ -798,6 +972,7 @@ def update_controller_config(
     cfg.training["log_every"] = int(train_defaults["LOG_EVERY"])
     cfg.training["log_state_every"] = int(train_defaults["LOG_STATE_EVERY"])
     cfg.training["save_every"] = int(train_defaults["SAVE_EVERY"])
+    cfg.training["full_val_final"] = bool(full_val_final)
     if "TRAIN_FRAC" in os.environ:
         cfg.data["train_frac"] = float(os.environ["TRAIN_FRAC"])
     else:
@@ -840,6 +1015,11 @@ def run_controller_sweep(repo_root: Path) -> None:
     explicit_shared_spec_dir = "SHARED_SPEC_DIR" in os.environ
     shared_spec_dir = Path(env("SHARED_SPEC_DIR", str(model_root / "_shared_spec")))
     commands_txt = Path(env("COMMANDS_TXT", str(model_root / "commands.txt")))
+    if explicit_shared_spec_dir and rebuild_shared:
+        raise SystemExit(
+            "refusing to rebuild an explicit --shared-spec-dir inside run_core_amp_sweep.py; "
+            "prepare that shared spec in the launcher and call the sweep with --no-rebuild-shared"
+        )
 
     train_defaults = {
         "LR_SCHEDULE": env("LR_SCHEDULE", "cosine"),
@@ -848,6 +1028,8 @@ def run_controller_sweep(repo_root: Path) -> None:
         "GRAD_CLIP": env("GRAD_CLIP", "1.0"),
         "HARD_LOSS_GAMMA": env("HARD_LOSS_GAMMA", "0.5"),
         "HARD_LOSS_CAP": env("HARD_LOSS_CAP", "5.0"),
+        "DROPOUT": env("DROPOUT", "0.0"),
+        "AMPLIFIER_DTYPE": env("AMPLIFIER_DTYPE", "auto"),
         "VAL_EVERY": env("VAL_EVERY", "200"),
         "VAL_STEPS": env("VAL_STEPS", "20"),
         "LOG_EVERY": env("LOG_EVERY", "20"),
@@ -966,6 +1148,13 @@ def run_controller_sweep(repo_root: Path) -> None:
 
     if dry_run and explicit_shared_spec_dir:
         print(f"Dry-run assuming explicit shared spec is prepared: {shared_spec_dir}")
+    elif explicit_shared_spec_dir and not (
+        (shared_spec_dir / "spec.pt").exists() and (shared_spec_dir / "config.json").exists()
+    ):
+        raise SystemExit(
+            "explicit --shared-spec-dir is missing spec.pt/config.json; "
+            "prepare it before launching the sweep"
+        )
     elif (
         rebuild_shared
         or not (shared_spec_dir / "spec.pt").exists()
@@ -978,6 +1167,13 @@ def run_controller_sweep(repo_root: Path) -> None:
     else:
         print(f"Using existing shared spec: {shared_spec_dir}")
     shared_config = read_json(shared_spec_dir / "config.json")
+    if explicit_shared_spec_dir:
+        validate_explicit_shared_spec_config(
+            shared_spec_dir=shared_spec_dir,
+            shared_config=shared_config,
+            data_path=data_path,
+            storage_dtype=env("STORAGE_DTYPE", "uint16"),
+        )
     shared_model = shared_config.get("model", {}) if isinstance(shared_config, dict) else {}
 
     for spec in specs:
@@ -1016,6 +1212,14 @@ def run_controller_sweep(repo_root: Path) -> None:
             full_val_final=env_bool("FULL_VAL_FINAL", False),
             gradient_checkpointing=gradient_checkpointing,
             scan_backend=env("SCAN_BACKEND", "auto"),
+            compile_enabled=compile_enabled,
+            compile_after=int(compile_after),
+            compile_mode=compile_mode,
+            compile_base_path=compile_base_path,
+            autocast=not no_autocast,
+            no_mmap=no_mmap,
+            tokens_on_device=tokens_on_device,
+            force_device=force_device,
         )
         if skip_done and run_complete(
             run_dir,
@@ -1042,6 +1246,7 @@ def run_controller_sweep(repo_root: Path) -> None:
                 grad_accum=grad_accum,
                 local_step_tokens=local_step_tokens,
                 effective_step_tokens=effective_step_tokens,
+                full_val_final=env_bool("FULL_VAL_FINAL", False),
             )
         print(
             f"Batch contract for {spec.name}: local_batch_size={batch_size} seq_len={seq_len} "
@@ -1089,6 +1294,10 @@ def run_controller_sweep(repo_root: Path) -> None:
             train_defaults["HARD_LOSS_CAP"],
             "--grad-clip",
             train_defaults["GRAD_CLIP"],
+            "--dropout",
+            train_defaults["DROPOUT"],
+            "--amplifier-dtype",
+            train_defaults["AMPLIFIER_DTYPE"],
             "--core-layers",
             str(resolved_spec.core_layers),
             "--core-expansion",
@@ -1132,8 +1341,9 @@ def run_controller_sweep(repo_root: Path) -> None:
         ]
         if "TRAIN_FRAC" in os.environ:
             cmd += ["--train-frac", os.environ["TRAIN_FRAC"]]
-        if env_bool("FULL_VAL_FINAL", False):
-            cmd.append("--full-val-final")
+        cmd.append(
+            "--full-val-final" if env_bool("FULL_VAL_FINAL", False) else "--no-full-val-final"
+        )
         if train_defaults["DATA_MAX_TOKENS"]:
             cmd += ["--data-max-tokens", train_defaults["DATA_MAX_TOKENS"]]
         if no_mmap:

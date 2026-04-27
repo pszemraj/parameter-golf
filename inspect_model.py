@@ -89,6 +89,11 @@ def main() -> None:
         default=None,
         choices=["auto", "stream", "parallel", "preload", "gpu"],
     )
+    g.add_argument(
+        "--suppress-config-summary",
+        action="store_true",
+        help="Do not print the default config block after init.",
+    )
 
     args = p.parse_args()
 
@@ -159,7 +164,13 @@ def main() -> None:
         cfg = ModelConfig.create(args.model_dir, **overrides)
         cfg.save()
         print(f"Created {cfg.config_path}")
-        print(cfg.summary())
+        if args.suppress_config_summary:
+            print(
+                "Config summary suppressed for spec-only init; concrete training "
+                "runs write their resolved training contract separately."
+            )
+        else:
+            print(cfg.summary())
 
         fixed_dtype = dtype_map.get(cfg.model.get("fixed_dtype", "bfloat16"), torch.bfloat16)
         spec = build_spec_optimized(

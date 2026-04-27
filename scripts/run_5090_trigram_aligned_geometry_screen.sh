@@ -112,8 +112,14 @@ Options:
   --geometry-core-expansion VALUE
   --geometry-num-blocks VALUE
   --geometry-branch-lags VALUE
+  --geometry-batch-size VALUE | --batch-size VALUE
+  --geometry-seq-len VALUE | --seq-len VALUE
+  --geometry-bptt-chunks VALUE
+  --geometry-carry-chunks VALUE
   --num-steps VALUE
+  --lr-warmup-steps VALUE
   --lr-hold-steps VALUE
+  --min-lr VALUE
   --trigram-top-k VALUE
   --trigram-max-tokens VALUE
   --data-max-tokens VALUE
@@ -392,6 +398,7 @@ ensure_shared_spec() {
     "${PYTHON_BIN}" "${REPO_ROOT}/inspect_model.py" init "${out_dir}"
     --data "${DATA_PATH}"
     --storage-dtype "${STORAGE_DTYPE}"
+    --suppress-config-summary
     --vocab-size 1024
     --core-dim "${GEOMETRY_CORE_DIM}"
     --branch-lags "${GEOMETRY_BRANCH_LAGS}"
@@ -419,7 +426,7 @@ ensure_shared_spec() {
     --trigram-chunk-size "${TRIGRAM_CHUNK_SIZE}"
     --trigram-count-workers "${TRIGRAM_COUNT_WORKERS}"
     --trigram-table-cache-root "${TRIGRAM_MEMORY_TABLE_CACHE_ROOT}"
-    --scan-backend auto
+    --scan-backend "${SCAN_BACKEND}"
   )
   if [[ "${REBUILD_TRIGRAM_MEMORY_TABLE_CACHE}" == "1" ]]; then
     cmd+=(--rebuild-trigram-table-cache)
@@ -467,6 +474,7 @@ run_version=${RUN_VERSION}
 geometry_core_dim=${GEOMETRY_CORE_DIM} layers=${GEOMETRY_CORE_LAYERS} inner_dim=${GEOMETRY_CORE_INNER_DIM_RESOLVED} expansion=${GEOMETRY_CORE_EXPANSION} blocks=${GEOMETRY_NUM_BLOCKS}
 geometry_branch_lags=${GEOMETRY_BRANCH_LAGS}
 trigram_memory=${TRIGRAM_MEMORY} top_k=${TRIGRAM_TOP_K} log_scale_init=${TRIGRAM_LOG_SCALE_INIT} count_workers=${TRIGRAM_COUNT_WORKERS}
+rebuild_shared=${REBUILD_SHARED} rebuild_trigram_memory_table_cache=${REBUILD_TRIGRAM_MEMORY_TABLE_CACHE}
 artifact_preflight=${ARTIFACT_PREFLIGHT} preflight_trainable_payload_bytes=${PREFLIGHT_TRAINABLE_PAYLOAD_BYTES}
 learning_rate=${LEARNING_RATE}
 compile=${COMPILE} gradient_checkpointing=${GRADIENT_CHECKPOINTING} skip_done=${SKIP_DONE}
@@ -491,6 +499,7 @@ run_blocks0_seed() {
   local source_spec_dir
   source_spec_dir="$(shared_spec_dir)"
   ensure_shared_spec "${source_spec_dir}"
+  REBUILD_SHARED=0
   preflight_artifact_budget "${source_spec_dir}"
 
   local model_root="${REPO_ROOT}/experiments/5090_architecture/${GEOMETRY_LABEL}_trigram_seed${seed}_${RUN_VERSION}"
