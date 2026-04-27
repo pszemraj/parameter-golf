@@ -216,20 +216,24 @@ The `geom1` adaptive closeout completed. Current read:
 | `d128_l5_i512` K2 | `1B` full-val | `2.0031207874` | `1,137,730` | `8,830,483` |
 | `d128_l5_i512` K2 BPTT2 | `512M` screen | `2.0560344760` | `1,140,618` | `8,805,457` |
 | `d128_l5_i512` K4 BPTT2 | `512M` screen | `2.0155952297` | `1,140,404` | `11,281,814` |
+| `d128_l5_i512` K4 seq2048 | `1B` full-val | `1.9731361526` | `1,182,049` | `11,371,671` |
+| `d128_l5_i512` K4 seq2048 BPTT2 | `1B` full-val | `1.9722313128` | `1,177,934` | `11,405,945` |
+| `d128_l5_i512` K6 seq2048 BPTT2 | preflight only |  |  | `14,520,129` |
 
 Interpretation:
 
 - `d128_l5_i512` is the current geometry winner. It beats `d96_l6_i512` by
-  about `0.0233` bpb at `1B` while running faster.
+  about `0.0233` bpb at K2 `1B` while running faster.
 - `BPTT2` is not established. The K2 BPTT2 gain over K2 BPTT1 at `512M` is
   only `0.0003` bpb, which is noise for this screen.
-- `K4` is established as a real signal. K4+BPTT2 beats the matching K2+BPTT2
-  `512M` screen by about `0.0404` bpb and stays under the artifact cap with
-  about `4.7 MB` headroom.
-- The `1B` full-val rows were produced before the exact-tail full-validation
-  iterator fix. The over-count was only about `0.17%`, so the ranking is likely
-  stable, but final evidence should be rerun or re-evaluated with the fixed
-  iterator.
+- `K4` is established as a real signal. The current best local result is
+  `d128_l5_i512` K4 seq2048 BPTT2 at `1.9722313128` full-val BPB, under the
+  artifact cap with about `4.59 MB` headroom.
+- `seq4096` underperformed (`2.0467157896` at `512M`), so do not expand context
+  further by default.
+- `K6` has only passed artifact preflight. It did not train because the old
+  launcher/sweep rebuild boundary rejected the explicit shared spec. The K6
+  cache is valid and should be reused.
 
 Current trigram memory is a sparse additive boost into base logits with one
 learned global scale. The recurrent controller does not yet receive trigram
@@ -239,31 +243,31 @@ Next run:
 
 ```bash
 bash scripts/run_5090_trigram_aligned_geometry_screen.sh \
-  --run-version geom1_k4_confirm \
+  --run-version geom1_seq2048_bptt2_k6 \
   --seeds 1337 \
   --geometry-label blocks0_d128_l5_i512 \
   --geometry-core-dim 128 \
   --geometry-core-layers 5 \
   --geometry-core-inner-dim 512 \
-  --trigram-top-k 4 \
+  --geometry-batch-size 32 \
+  --geometry-seq-len 2048 \
+  --geometry-bptt-chunks 2 \
   --num-steps 8192 \
   --lr-hold-steps 7000 \
-  --full-val-final \
-  --val-every 512 \
-  --log-every 128 \
-  --log-state-every 512 \
-  --save-every 4096 \
-  --count-workers 4
+  --geometry-train-label 1b_seq2048_bptt2_k6 \
+  --trigram-top-k 6 \
+  --count-workers 4 \
+  --full-val-final
 ```
 
 Promotion rule:
 
-- if K4 `1B` beats K2 `1B` (`2.0031207874`) by at least `0.010` bpb, keep K4
-  as the new local finalist and run final fixed-iterator full-val evidence
-- if K4 `1B` is only flat to slightly better, rerun K4 with BPTT2 before
-  deciding because the existing K4 screen used BPTT2
-- if K4 `1B` regresses, treat the previous K4 screen as sampled-eval optimism
-  and keep K2 `d128_l5_i512` as the confirmed local finalist
+- compare K6 to the K4 seq2048 BPTT2 `1B` result (`1.9722313128`)
+- if K6 improves by at least `0.004` bpb and remains under the artifact cap,
+  promote K6 to final evidence
+- if K6 is flat within noise, keep K4 and stop top-K expansion
+- if K6 regresses or artifact headroom becomes too tight, keep K4 and move to
+  controller/trigram arbitration features instead of K8
 
 Replay `blocks1` only as a geometry check after the blocks0 top-K and aligned
 geometry decisions:

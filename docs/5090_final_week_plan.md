@@ -341,48 +341,51 @@ Aligned-geometry closeout read:
 | `d128_l5_i512` K2 | `1B` full-val | `2.0031207874` | `1,137,730` | `8,830,483` |
 | `d128_l5_i512` K2 BPTT2 | `512M` | `2.0560344760` | `1,140,618` | `8,805,457` |
 | `d128_l5_i512` K4 BPTT2 | `512M` | `2.0155952297` | `1,140,404` | `11,281,814` |
+| `d128_l5_i512` K4 seq2048 | `1B` full-val | `1.9731361526` | `1,182,049` | `11,371,671` |
+| `d128_l5_i512` K4 seq2048 BPTT2 | `1B` full-val | `1.9722313128` | `1,177,934` | `11,405,945` |
+| `d128_l5_i512` K6 seq2048 BPTT2 | preflight only |  |  | `14,520,129` |
 
 Current interpretation:
 
-- `d128_l5_i512` is the aligned K2 winner and should be treated as the current
-  local finalist.
+- `d128_l5_i512` is the aligned geometry winner and K4 seq2048 BPTT2 is the
+  current local finalist.
 - BPTT2 is not independently established; the K2 gain is only `0.0003` bpb at
   `512M`.
-- K4 is the next serious run. It improves the matching K2+BPTT2 screen by about
-  `0.0404` bpb and still leaves about `4.7 MB` artifact headroom.
-- The completed `1B` full-val rows predate the fixed exact-tail validation
-  iterator. The over-count was small, but final evidence should be generated
-  with the fixed iterator.
+- K4 is established: K4 seq2048 BPTT2 beats K2 `1B` by about `0.0309` bpb and
+  still leaves about `4.59 MB` artifact headroom.
+- K6 has only passed artifact preflight. It did not train because the old
+  launcher/sweep rebuild boundary rejected the explicit shared spec. Reuse the
+  valid K6 cache after the boundary fix.
 
 Top-K headroom confirmation:
 
 ```bash
 bash scripts/run_5090_trigram_aligned_geometry_screen.sh \
-  --run-version geom1_k4_confirm \
+  --run-version geom1_seq2048_bptt2_k6 \
   --seeds 1337 \
   --geometry-label blocks0_d128_l5_i512 \
   --geometry-core-dim 128 \
   --geometry-core-layers 5 \
   --geometry-core-inner-dim 512 \
-  --trigram-top-k 4 \
+  --geometry-batch-size 32 \
+  --geometry-seq-len 2048 \
+  --geometry-bptt-chunks 2 \
   --num-steps 8192 \
   --lr-hold-steps 7000 \
-  --full-val-final \
-  --val-every 512 \
-  --log-every 128 \
-  --log-state-every 512 \
-  --save-every 4096 \
-  --count-workers 4
+  --geometry-train-label 1b_seq2048_bptt2_k6 \
+  --trigram-top-k 6 \
+  --count-workers 4 \
+  --full-val-final
 ```
 
 Promotion rule:
 
-- compare to the `d128_l5_i512` K2 `1B` full-val result (`2.0031207874`)
-- if K4 improves by at least `0.010` bpb, keep K4 as the local finalist and
-  rerun final full-val evidence under the fixed iterator
-- if K4 is flat or slightly positive, run the paired K4+BPTT2 `1B` confirmation
-  before deciding
-- if K4 regresses, keep K2 `d128_l5_i512` as the local finalist
+- compare K6 to the K4 seq2048 BPTT2 `1B` result (`1.9722313128`)
+- if K6 improves by at least `0.004` bpb and remains under the artifact cap,
+  promote K6 to final evidence
+- if K6 is flat within noise, keep K4 and stop top-K expansion
+- if K6 regresses or artifact headroom becomes too tight, keep K4 and move to
+  controller/trigram arbitration features instead of K8
 
 ### 2. Optional adapter probes
 

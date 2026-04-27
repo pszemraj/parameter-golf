@@ -561,6 +561,7 @@ def confirmation_contract(args: argparse.Namespace) -> ScreenContract:
         seq_len=contract.seq_len,
         batch_size=contract.batch_size,
         bptt_chunks=contract.bptt_chunks,
+        lr_hold_steps=int(args.confirm_hold_steps),
     )
 
 
@@ -637,6 +638,7 @@ def variant_contract(
         seq_len=contract.seq_len,
         batch_size=int(batch_size if batch_size is not None else contract.batch_size),
         bptt_chunks=int(bptt_chunks if bptt_chunks is not None else contract.bptt_chunks),
+        lr_hold_steps=variant_hold_steps(args),
     )
 
 

@@ -1982,6 +1982,11 @@ def apply_cli_overrides(args: argparse.Namespace) -> None:
         os.environ["SKIP_DONE"] = "1" if args.skip_done else "0"
     if args.rebuild_shared is not None:
         os.environ["REBUILD_SHARED"] = "1" if args.rebuild_shared else "0"
+    elif args.shared_spec_dir is not None:
+        # Explicit shared specs are a consumption boundary. Ambient shell
+        # REBUILD_SHARED must not leak into this layer and reinterpret the
+        # prepared spec contract.
+        os.environ["REBUILD_SHARED"] = "0"
     if args.rebuild_trigram_table_cache is not None:
         os.environ["REBUILD_TRIGRAM_TABLE_CACHE"] = "1" if args.rebuild_trigram_table_cache else "0"
 

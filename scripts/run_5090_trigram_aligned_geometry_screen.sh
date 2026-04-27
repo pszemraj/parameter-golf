@@ -571,12 +571,12 @@ EOF
   sweep_cmd+=(--no-rebuild-shared)
   pg_5090_append_bool_flag "$(basename "$0")" sweep_cmd "wandb" "${WANDB}"
   if [[ "${DRY_RUN:-0}" == "1" ]]; then
-    printf '+'
+    printf '+ REBUILD_SHARED=0'
     printf ' %q' "${sweep_cmd[@]}"
     printf '\n'
     return 0
   fi
-  "${sweep_cmd[@]}"
+  REBUILD_SHARED=0 "${sweep_cmd[@]}"
 }
 
 main() {

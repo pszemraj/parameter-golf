@@ -48,6 +48,7 @@ def _summary_row(label: str, **overrides: str) -> dict[str, str]:
         "core_layers": str(geometry.layers),
         "core_inner_dim": str(geometry.inner_dim),
         "recurrent_cells": str(geometry.recurrent_cells),
+        "lr_hold_steps": "3500",
         "last_val_bpb": "2.06",
         "steady_state_tokens_per_sec": "900000",
     }
@@ -213,6 +214,7 @@ def test_summary_loader_selects_exact_contract_from_mixed_rows(tmp_path: Path):
             seq_len=2048,
             batch_size=32,
             bptt_chunks=2,
+            lr_hold_steps=7000,
         ),
     )
 
@@ -374,6 +376,7 @@ def test_cli_decision_grade_rows_do_not_emit_reconfirmation(tmp_path: Path):
         seq_len="2048",
         batch_size="32",
         bptt_chunks="2",
+        lr_hold_steps="7000",
         last_eval_tokens="62021845",
         last_eval_coverage_denominator_tokens="62021845",
         last_eval_full_coverage="true",

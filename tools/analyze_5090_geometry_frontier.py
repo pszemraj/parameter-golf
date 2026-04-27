@@ -88,6 +88,8 @@ class ScreenContract:
     seq_len: int
     batch_size: int
     bptt_chunks: int
+    lr_hold_steps: Optional[int] = None
+    run_name: Optional[str] = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -109,6 +111,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--seq-len", type=int, default=None)
     ap.add_argument("--screen-batch-size", type=int, default=None)
     ap.add_argument("--screen-bptt-chunks", type=int, default=None)
+    ap.add_argument("--lr-hold-steps", type=int, default=None)
     return ap.parse_args()
 
 
@@ -203,14 +206,19 @@ def screen_contract(args: argparse.Namespace) -> ScreenContract:
                 f"actual={actual_effective} expected={int(args.effective_step_tokens)}"
             )
     top_k = int(args.screen_trigram_top_k or infer_trigram_top_k(str(args.run_version)))
+    planned_steps = int(args.screen_steps or infer_planned_steps(str(args.run_version)))
+    lr_hold_steps = getattr(args, "lr_hold_steps", None)
+    if lr_hold_steps is None:
+        lr_hold_steps = 7000 if planned_steps >= DECISION_PLANNED_STEPS else 3500
     return ScreenContract(
-        planned_steps=int(args.screen_steps or infer_planned_steps(str(args.run_version))),
+        planned_steps=planned_steps,
         effective_step_tokens=int(args.effective_step_tokens),
         num_blocks=SCREEN_NUM_BLOCKS,
         trigram_top_k=top_k,
         seq_len=seq_len,
         batch_size=int(batch_size),
         bptt_chunks=bptt_chunks,
+        lr_hold_steps=int(lr_hold_steps),
     )
 
 
@@ -338,6 +346,10 @@ def row_matches_contract(
         "core_inner_dim": geometry.inner_dim,
         "recurrent_cells": geometry.recurrent_cells,
     }
+    if contract.lr_hold_steps is not None:
+        expected["lr_hold_steps"] = contract.lr_hold_steps
+    if contract.run_name is not None and str(row.get("run_name", "")) != str(contract.run_name):
+        return False
     return all(
         as_int(row.get(field)) == expected_value for field, expected_value in expected.items()
     )
@@ -556,10 +568,14 @@ def eligibility_errors(
         "core_inner_dim": geometry.inner_dim,
         "recurrent_cells": geometry.recurrent_cells,
     }
+    if contract.lr_hold_steps is not None:
+        expected["lr_hold_steps"] = contract.lr_hold_steps
     for field, expected_value in expected.items():
         actual = as_int(row.get(field))
         if actual != expected_value:
             errors.append(f"{field}!={expected_value}")
+    if contract.run_name is not None and str(row.get("run_name", "")) != str(contract.run_name):
+        errors.append(f"run_name!={contract.run_name}")
     errors.extend(full_eval_accounting_errors(row))
     return tuple(errors)
 
