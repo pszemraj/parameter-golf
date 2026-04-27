@@ -69,7 +69,18 @@ pg_5090_require_serious_launcher_defaults() {
   pg_5090_expect_env "${script_name}" "PRESET" "${expected_preset}"
   pg_5090_expect_env "${script_name}" "COMPILE" "0"
   pg_5090_expect_env "${script_name}" "GRADIENT_CHECKPOINTING" "0"
-  pg_5090_expect_env "${script_name}" "REBUILD_SHARED" "0"
+  case "${REBUILD_SHARED:-0}" in
+    0|false|no|off)
+      ;;
+    1|true|yes|on)
+      if [[ "${ALLOW_REBUILD_SHARED:-0}" != "1" ]]; then
+        pg_5090_fail "${script_name}" "REBUILD_SHARED=1 requires an explicit launcher-approved rebuild path"
+      fi
+      ;;
+    *)
+      pg_5090_fail "${script_name}" "REBUILD_SHARED must be boolean-like, got ${REBUILD_SHARED:-<unset>}"
+      ;;
+  esac
   pg_5090_expect_env "${script_name}" "SCAN_BACKEND" "auto"
   pg_5090_expect_env "${script_name}" "TORCH_BLAS_PREFER_CUBLASLT" "1"
   pg_5090_expect_env "${script_name}" "WANDB" "1"

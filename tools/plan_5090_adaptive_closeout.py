@@ -59,6 +59,7 @@ DEFAULT_BATCH_SIZE = 256
 DEFAULT_SEQ_LEN = 512
 SCREEN_PLANNED_STEPS = 4096
 SCREEN_TRIGRAM_TOP_K = 2
+ARTIFACT_LIMIT_BYTES = 16_000_000
 
 
 @dataclass(frozen=True)
@@ -174,6 +175,14 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     ap.add_argument("--screen-trigram-top-k", type=int, default=None)
     ap.add_argument("--screen-batch-size", type=int, default=None)
     ap.add_argument("--screen-bptt-chunks", type=int, default=None)
+    ap.add_argument(
+        "--allow-run-version-contract-inference",
+        action="store_true",
+        help=(
+            "Allow serious gated-followup runs to infer the baseline contract "
+            "from run-version names. Prefer explicit contract flags."
+        ),
+    )
     ap.add_argument("--bptt-batch-size", type=int, default=None)
     ap.add_argument("--bptt-chunks", type=int, default=DEFAULT_BPTT_CHUNKS)
     ap.add_argument("--gate-evidence-run-version", default=None)
@@ -357,6 +366,26 @@ def screen_eligibility_errors(
     return eligibility_errors(geometry, row, screen_contract(args))
 
 
+def gated_baseline_contract_errors(args: argparse.Namespace) -> tuple[str, ...]:
+    """Return missing explicit baseline contract fields for gated follow-up.
+
+    :param argparse.Namespace args: Parsed arguments.
+    :return tuple[str, ...]: Missing field names, or empty when acceptable.
+    """
+    if bool(args.allow_run_version_contract_inference):
+        return ()
+    missing: list[str] = []
+    for field, flag in (
+        ("screen_trigram_top_k", "--screen-trigram-top-k"),
+        ("seq_len", "--seq-len"),
+        ("screen_batch_size", "--screen-batch-size"),
+        ("screen_bptt_chunks", "--screen-bptt-chunks"),
+    ):
+        if getattr(args, field) is None:
+            missing.append(flag)
+    return tuple(missing)
+
+
 def row_is_completed(row: dict[str, str]) -> bool:
     """Return whether a summary row is completed.
 
@@ -389,6 +418,20 @@ def row_float_matches(
     """
     actual = as_float(row.get(field))
     return actual is not None and abs(actual - float(expected)) <= float(tol)
+
+
+def artifact_is_valid(row: dict[str, str], *, limit: int = ARTIFACT_LIMIT_BYTES) -> bool:
+    """Return whether a row has a known under-limit artifact estimate.
+
+    :param dict[str, str] row: Summary row.
+    :param int limit: Submission artifact byte limit.
+    :return bool: ``True`` when artifact status and bytes are evidence-grade.
+    """
+    status = str(row.get("artifact_status", "")).strip()
+    if status not in {"LEFT_ON_TABLE", "EXACT_LIMIT", "UNDER_LIMIT"}:
+        return False
+    nbytes = as_int(row.get("artifact_estimate_bytes") or row.get("artifact_bytes"))
+    return nbytes is not None and 0 < nbytes <= int(limit)
 
 
 def expected_screen_batch_size(args: argparse.Namespace) -> int:
@@ -491,7 +534,7 @@ def valid_confirmation_row(row: dict[str, str], args: argparse.Namespace) -> boo
         and as_int(row.get("lr_hold_steps")) == int(args.confirm_hold_steps)
         and row_float_matches(row, "learning_rate", DEFAULT_LEARNING_RATE)
         and row_bool(row, "exact_val_bpb")
-        and row.get("artifact_status") != "OVER_LIMIT"
+        and artifact_is_valid(row)
     )
     if not valid:
         return False
@@ -555,6 +598,8 @@ def valid_screen_variant_row(
     if not row_bool(row, "exact_val_bpb"):
         return False
     if row.get("artifact_status") == "OVER_LIMIT":
+        return False
+    if variant_full_val_final(args) and not artifact_is_valid(row):
         return False
     if batch_size is not None and as_int(row.get("batch_size")) != int(batch_size):
         return False
@@ -1566,6 +1611,14 @@ def plan_gated_followup_stage(args: argparse.Namespace) -> StagePlan:
     """
     required_stage_value(args, "gate_evidence_run_version")
     required_stage_value(args, "gate_followup_run_version")
+    baseline_contract_errors = gated_baseline_contract_errors(args)
+    if baseline_contract_errors:
+        return StagePlan(
+            "blocked",
+            "gated-followup baseline contract must be explicit; missing "
+            + ", ".join(baseline_contract_errors),
+            [],
+        )
     confirmations = completed_confirmations(args)
     if not confirmations:
         return StagePlan(

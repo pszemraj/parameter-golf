@@ -139,8 +139,12 @@ def infer_trigram_top_k(run_version: str) -> int:
     :param str run_version: Run-version suffix.
     :return int: Inferred trigram top-K.
     """
-    run_version = str(run_version)
-    return 4 if ("k4" in run_version or "_seq" in run_version) else SCREEN_TRIGRAM_TOP_K
+    run_version = str(run_version).lower()
+    if "k4" in run_version:
+        return 4
+    if "k2" in run_version:
+        return 2
+    return SCREEN_TRIGRAM_TOP_K
 
 
 def infer_planned_steps(run_version: str) -> int:
@@ -155,6 +159,26 @@ def infer_planned_steps(run_version: str) -> int:
     return SCREEN_PLANNED_STEPS
 
 
+def batch_for_effective_tokens(effective_tokens: int, *, seq_len: int, bptt_chunks: int) -> int:
+    """Return a batch size that exactly preserves an effective-token contract.
+
+    :param int effective_tokens: Expected tokens per optimizer step.
+    :param int seq_len: Sequence length.
+    :param int bptt_chunks: BPTT chunk count.
+    :return int: Exact batch size.
+    :raises SystemExit: If the contract is impossible.
+    """
+    denom = int(seq_len) * int(bptt_chunks)
+    if denom <= 0:
+        raise SystemExit(f"invalid seq_len*bptt_chunks denominator: {denom}")
+    if int(effective_tokens) % denom != 0:
+        raise SystemExit(
+            "effective-step tokens must divide evenly by seq_len*bptt_chunks "
+            f"({effective_tokens} vs {denom})"
+        )
+    return max(1, int(effective_tokens) // denom)
+
+
 def screen_contract(args: argparse.Namespace) -> ScreenContract:
     """Resolve the active screen contract from flags and run-version hints.
 
@@ -165,8 +189,19 @@ def screen_contract(args: argparse.Namespace) -> ScreenContract:
     bptt_chunks = int(args.screen_bptt_chunks or infer_bptt_chunks(str(args.run_version)))
     batch_size = args.screen_batch_size
     if batch_size is None:
-        denom = max(1, seq_len * bptt_chunks)
-        batch_size = max(1, int(args.effective_step_tokens) // denom)
+        batch_size = batch_for_effective_tokens(
+            int(args.effective_step_tokens),
+            seq_len=seq_len,
+            bptt_chunks=bptt_chunks,
+        )
+    else:
+        actual_effective = int(batch_size) * seq_len * bptt_chunks
+        if actual_effective != int(args.effective_step_tokens):
+            raise SystemExit(
+                "screen batch contract does not match effective-step tokens: "
+                f"batch={int(batch_size)} seq_len={seq_len} bptt={bptt_chunks} "
+                f"actual={actual_effective} expected={int(args.effective_step_tokens)}"
+            )
     top_k = int(args.screen_trigram_top_k or infer_trigram_top_k(str(args.run_version)))
     return ScreenContract(
         planned_steps=int(args.screen_steps or infer_planned_steps(str(args.run_version))),

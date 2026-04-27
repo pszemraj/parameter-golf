@@ -34,6 +34,10 @@ Useful planner contract options:
   --benchmark PATH
   --count-workers VALUE
   --gate-max-worse-bpb VALUE
+  --screen-trigram-top-k VALUE
+  --seq-len VALUE
+  --screen-batch-size VALUE
+  --screen-bptt-chunks VALUE
   --gate-evidence-trigram-top-k VALUE
   --gate-evidence-seq-len VALUE
   --gate-evidence-batch-size VALUE
@@ -114,7 +118,7 @@ script_status() {
   sed -n 's/^# adaptive_status=//p' "${script_path}" | head -n 1
 }
 
-execute_script_if_needed() {
+run_planned_pass() {
   local pass="$1"
   local script_path="$2"
   local status
@@ -122,16 +126,28 @@ execute_script_if_needed() {
   echo
   echo "=== planned_pass${pass} status=${status:-unknown} ==="
   sed -n '1,220p' "${script_path}"
-  if [[ "${status}" != "commands" ]]; then
-    return 1
-  fi
-  if [[ "${DRY_RUN}" == "1" ]]; then
-    return 1
-  fi
-  echo
-  echo "=== execute_pass${pass} ==="
-  bash "${script_path}" 2>&1 | tee "${LOG_DIR}/execute_pass${pass}.log"
-  return 0
+  case "${status}" in
+    commands)
+      if [[ "${DRY_RUN}" == "1" ]]; then
+        echo "DRY_RUN=1: not executing pass${pass}."
+        return 0
+      fi
+      echo
+      echo "=== execute_pass${pass} ==="
+      bash "${script_path}" 2>&1 | tee "${LOG_DIR}/execute_pass${pass}.log"
+      ;;
+    already_complete|not_selected)
+      echo "No execution needed for pass${pass}: ${status}"
+      ;;
+    blocked)
+      echo "Planner blocked pass${pass}; refusing to continue." >&2
+      return 2
+      ;;
+    *)
+      echo "Unknown adaptive_status for pass${pass}: ${status:-empty}" >&2
+      return 2
+      ;;
+  esac
 }
 
 cat <<EOF | tee "${LOG_DIR}/header.txt"
@@ -146,10 +162,9 @@ planner_args=${PLAN_ARGS[*]}
 EOF
 
 plan_once 1
-if execute_script_if_needed 1 "${PLAN_SCRIPT}"; then
-  plan_once 2
-  execute_script_if_needed 2 "${PLAN_SCRIPT}" || true
-fi
+run_planned_pass 1 "${PLAN_SCRIPT}"
+plan_once 2
+run_planned_pass 2 "${PLAN_SCRIPT}"
 
 echo
 echo "Gated follow-up runner complete. Logs: ${LOG_DIR}"

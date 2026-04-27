@@ -19,6 +19,7 @@ GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-0}"
 SCAN_BACKEND="${SCAN_BACKEND:-auto}"
 export TORCH_BLAS_PREFER_CUBLASLT="${TORCH_BLAS_PREFER_CUBLASLT:-1}"
 REBUILD_SHARED="${REBUILD_SHARED:-0}"
+ALLOW_REBUILD_SHARED="${ALLOW_REBUILD_SHARED:-0}"
 
 RUN_VERSION="${RUN_VERSION:-geom1}"
 SEEDS="${SEEDS:-1337}"
@@ -117,6 +118,7 @@ Options:
   --trigram-max-tokens VALUE
   --data-max-tokens VALUE
   --count-workers VALUE
+  --rebuild-shared | --no-rebuild-shared
   --artifact-preflight | --no-artifact-preflight
   --preflight-trainable-payload-bytes VALUE
   --full-val-final | --no-full-val-final
@@ -158,6 +160,8 @@ parse_args() {
       --trigram-confidence-count-cap) TRIGRAM_CONFIDENCE_COUNT_CAP="$2"; shift 2 ;;
       --trigram-chunk-size) TRIGRAM_CHUNK_SIZE="$2"; shift 2 ;;
       --trigram-count-workers|--count-workers) TRIGRAM_COUNT_WORKERS="$2"; shift 2 ;;
+      --rebuild-shared) REBUILD_SHARED=1; ALLOW_REBUILD_SHARED=1; shift ;;
+      --no-rebuild-shared) REBUILD_SHARED=0; shift ;;
       --artifact-preflight) ARTIFACT_PREFLIGHT=1; shift ;;
       --no-artifact-preflight) ARTIFACT_PREFLIGHT=0; shift ;;
       --preflight-trainable-payload-bytes) PREFLIGHT_TRAINABLE_PAYLOAD_BYTES="$2"; shift 2 ;;
@@ -277,9 +281,108 @@ shared_spec_dir() {
   printf '%s/shared_specs/%s' "${COREAMP_SPEC_CACHE_ROOT}" "${label}"
 }
 
+shared_spec_manifest() {
+  local mode="$1"
+  local out_dir="$2"
+  SPEC_MANIFEST_MODE="${mode}" \
+  SPEC_MANIFEST_PATH="${out_dir}/shared_spec_manifest.json" \
+  SPEC_REPO_ROOT="${REPO_ROOT}" \
+  SPEC_DATA_PATH="${DATA_PATH}" \
+  SPEC_STORAGE_DTYPE="${STORAGE_DTYPE}" \
+  SPEC_CORE_DIM="${GEOMETRY_CORE_DIM}" \
+  SPEC_CORE_LAYERS="${GEOMETRY_CORE_LAYERS}" \
+  SPEC_CORE_EXPANSION="${GEOMETRY_CORE_EXPANSION}" \
+  SPEC_CORE_INNER_DIM="${GEOMETRY_CORE_INNER_DIM_RESOLVED}" \
+  SPEC_BRANCH_LAGS="${GEOMETRY_BRANCH_LAGS}" \
+  SPEC_NUM_BLOCKS="${GEOMETRY_NUM_BLOCKS}" \
+  SPEC_TRIGRAM_MEMORY="${TRIGRAM_MEMORY}" \
+  SPEC_TRIGRAM_LOG_SCALE_INIT="${TRIGRAM_LOG_SCALE_INIT}" \
+  SPEC_TRIGRAM_TOP_K="${TRIGRAM_TOP_K}" \
+  SPEC_TRIGRAM_RESIDUAL_CLIP="${TRIGRAM_RESIDUAL_CLIP}" \
+  SPEC_TRIGRAM_CONFIDENCE_COUNT_CAP="${TRIGRAM_CONFIDENCE_COUNT_CAP}" \
+  SPEC_TRIGRAM_CHUNK_SIZE="${TRIGRAM_CHUNK_SIZE}" \
+  SPEC_TRIGRAM_MAX_TOKENS="${TRIGRAM_MAX_TOKENS:-}" \
+  SPEC_TRIGRAM_TABLE_CACHE_ROOT="${TRIGRAM_MEMORY_TABLE_CACHE_ROOT}" \
+  SPEC_SCAN_BACKEND="${SCAN_BACKEND}" \
+  "${PYTHON_BIN}" - <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+repo_root = Path(os.environ["SPEC_REPO_ROOT"]).resolve()
+if str(repo_root) not in sys.path:
+    sys.path.insert(0, str(repo_root))
+
+from core_amplifier_lm.spec_builder import training_token_file_fingerprint
+
+data_path = Path(os.environ["SPEC_DATA_PATH"]).expanduser().resolve()
+manifest_path = Path(os.environ["SPEC_MANIFEST_PATH"])
+expected = {
+    "data_path": str(data_path),
+    "train_fingerprint": training_token_file_fingerprint(data_path),
+    "storage_dtype": os.environ["SPEC_STORAGE_DTYPE"],
+    "vocab_size": 1024,
+    "core_dim": int(os.environ["SPEC_CORE_DIM"]),
+    "core_layers": int(os.environ["SPEC_CORE_LAYERS"]),
+    "core_expansion": os.environ["SPEC_CORE_EXPANSION"],
+    "core_inner_dim": int(os.environ["SPEC_CORE_INNER_DIM"]),
+    "branch_lags": os.environ["SPEC_BRANCH_LAGS"],
+    "num_blocks": int(os.environ["SPEC_NUM_BLOCKS"]),
+    "fixed_dtype": "bfloat16",
+    "embedding_init": "spectral",
+    "spectral_neighbors": 64,
+    "lag_identity_base": "0.15",
+    "residual_core": 1,
+    "residual_core_init": "-3.0",
+    "branch_temporal_mode": "current",
+    "residual_token_gate_mode": "none",
+    "branch_router_mode": "none",
+    "base_bigram_delta": "none",
+    "trigram_memory": os.environ["SPEC_TRIGRAM_MEMORY"],
+    "trigram_log_scale_init": os.environ["SPEC_TRIGRAM_LOG_SCALE_INIT"],
+    "trigram_top_k": int(os.environ["SPEC_TRIGRAM_TOP_K"]),
+    "trigram_smoothing": "0.25",
+    "trigram_residual_clip": os.environ["SPEC_TRIGRAM_RESIDUAL_CLIP"],
+    "trigram_confidence_count_cap": int(os.environ["SPEC_TRIGRAM_CONFIDENCE_COUNT_CAP"]),
+    "trigram_chunk_size": int(os.environ["SPEC_TRIGRAM_CHUNK_SIZE"]),
+    "trigram_max_tokens": os.environ["SPEC_TRIGRAM_MAX_TOKENS"],
+    "trigram_table_cache_root": str(
+        Path(os.environ["SPEC_TRIGRAM_TABLE_CACHE_ROOT"]).expanduser().resolve()
+    ),
+    "scan_backend": os.environ["SPEC_SCAN_BACKEND"],
+}
+mode = os.environ["SPEC_MANIFEST_MODE"]
+if mode == "write":
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(json.dumps(expected, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+elif mode == "validate":
+    if not manifest_path.exists():
+        raise SystemExit(f"missing shared spec manifest: {manifest_path}")
+    found = json.loads(manifest_path.read_text(encoding="utf-8"))
+    mismatches = {
+        key: (found.get(key), value)
+        for key, value in expected.items()
+        if found.get(key) != value
+    }
+    if mismatches:
+        print("shared spec cache contract mismatch:", file=sys.stderr)
+        for key, (actual, expected_value) in sorted(mismatches.items()):
+            print(f"  {key}: found={actual!r} expected={expected_value!r}", file=sys.stderr)
+        raise SystemExit(1)
+else:
+    raise SystemExit(f"unknown shared spec manifest mode: {mode}")
+PY
+}
+
 ensure_shared_spec() {
   local out_dir="$1"
-  if [[ "${REBUILD_GEOMETRY_SPEC:-0}" != "1" && -f "${out_dir}/spec.pt" && -f "${out_dir}/config.json" ]]; then
+  if [[ "${REBUILD_SHARED:-0}" != "1" && "${REBUILD_GEOMETRY_SPEC:-0}" != "1" && -f "${out_dir}/spec.pt" && -f "${out_dir}/config.json" ]]; then
+    if [[ "${DRY_RUN:-0}" == "1" ]]; then
+      echo "Dry-run would validate cached aligned shared spec manifest: ${out_dir}"
+      return 0
+    fi
+    shared_spec_manifest validate "${out_dir}"
     echo "Using cached aligned shared spec: ${out_dir}"
     return 0
   fi
@@ -331,6 +434,7 @@ ensure_shared_spec() {
     return 0
   fi
   "${cmd[@]}"
+  shared_spec_manifest write "${out_dir}"
 }
 
 preflight_artifact_budget() {

@@ -15,9 +15,11 @@ from tools.analyze_5090_geometry_frontier import (
     SCREEN_PLANNED_STEPS,
     SCREEN_TRIGRAM_TOP_K,
     ScreenContract,
+    batch_for_effective_tokens,
     decision,
     eligibility_errors,
     estimated_time_matched_steps,
+    infer_trigram_top_k,
     load_summary_row,
     parse_geometry,
     speed_ratio,
@@ -105,6 +107,23 @@ def test_probe_rows_do_not_emit_final_kill_verdicts():
     """Probe-tier rows can promote, but weak rows should not become final kills."""
     assert decision(0.08, 1.0, valid_screen_row=True, decision_grade=False) == "probe_only"
     assert decision(0.08, 1.0, valid_screen_row=True, decision_grade=True) == "kill"
+
+
+def test_seq_run_version_does_not_imply_k4():
+    """Sequence-length naming should not silently define trigram top-K."""
+    assert infer_trigram_top_k("geom1_seq2048") == SCREEN_TRIGRAM_TOP_K
+    assert infer_trigram_top_k("geom1_seq2048_k4") == 4
+
+
+def test_effective_token_batch_contract_must_divide_evenly():
+    """Impossible effective-token contracts should fail before launch planning."""
+    assert batch_for_effective_tokens(131072, seq_len=2048, bptt_chunks=2) == 32
+    try:
+        batch_for_effective_tokens(131072, seq_len=1536, bptt_chunks=2)
+    except SystemExit as exc:
+        assert "divide evenly" in str(exc)
+    else:
+        raise AssertionError("expected non-divisible batch contract to fail")
 
 
 def test_geometry_consistency_is_required_for_decisions():
@@ -313,6 +332,8 @@ def test_cli_auto_infers_k4_long_context_contract(tmp_path: Path):
             "geom1_seq2048",
             "--label",
             label,
+            "--screen-trigram-top-k",
+            "4",
         ],
         check=True,
         text=True,
