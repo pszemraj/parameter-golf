@@ -311,6 +311,67 @@ conda run -s --name pg python scripts/run_local_hgdn_adaptive_pipeline.py \
   --torch-logs recompiles,graph_breaks
 ```
 
+Recommended four-hour local adaptive run after the 2026-04-27 Python-runner
+cleanup:
+
+```bash
+conda run -s --name pg python scripts/run_local_hgdn_adaptive_pipeline.py \
+  --run-prefix-base localhgdn_adaptive_4h_$(date -u +%Y%m%d_%H%M%S) \
+  --use-wandb 0 \
+  --wandb-mode offline \
+  --wandb-watch none \
+  --check-cuda-idle 1 \
+  --allow-existing-logs 0 \
+  --compile 1 \
+  --compile-strategy hybrid \
+  --torchinductor-max-autotune 0 \
+  --torchinductor-max-autotune-gemm 0 \
+  --train-seq-len 1024 \
+  --train-batch-tokens 131072 \
+  --grad-accum-steps 8 \
+  --val-loss-every 100 \
+  --train-log-every 25 \
+  --min-val-seqs 512 \
+  --val-max-seqs 512 \
+  --val-batch-seqs 16 \
+  --recurrence-iterations 1000 \
+  --screen-iterations 700 \
+  --confirm-iterations 1000 \
+  --secondary-iterations 1000 \
+  --confirm-top-hgdn 2 \
+  --secondary-force 1 \
+  --secondary-gdn-fla-recurrence-mode direct_fused
+```
+
+This is the adaptive run only. After it finishes, feed
+`local-scratch/<prefix>_pipeline/stage2_decision.json` to the wallclock
+resolver if same-time exact-baseline evidence is needed.
+
+Local signal timing notes from 2026-04-27:
+
+- `25-50` steps per stage is useful for plumbing validation only. It verifies
+  that stage decisions, matched controls, forced secondary runs, archives, and
+  analyzer outputs work. Do not promote from these numbers.
+- The recurrence implementation signal appears earlier than architecture
+  quality. At `50` steps, the direct/direct-fused ordering can flip across
+  short runs by tiny margins, but `compile_visible` is already consistently
+  worse. At `500-600` steps, direct and direct-fused remain very close while
+  `compile_visible` is clearly slower/worse.
+- The first useful architecture/control signal starts around `300-500` steps
+  with the full validation prefix and final roundtrip enabled on confirmation.
+  A post-fix `500/300/500/500` run at `65536` tokens/step selected
+  `mid2_dk48_m2` over its matched `r0_m2` control by about `0.0141` roundtrip
+  BPB, and the forced 6G/2A secondary beat `r0_m1p25` by about `0.0723`
+  roundtrip BPB. That is real fixed-token/sample-efficiency signal, not
+  same-wallclock proof.
+- The accidental `600`-step recurrence run at `131072` tokens/step selected
+  `direct`: `direct` and `direct_fused` were effectively tied in roundtrip BPB
+  (`1.56494` vs `1.56500`), while `compile_visible` was worse (`1.56704`) and
+  the matched attention-only control was much worse (`1.58006`) but faster.
+- Treat local timing deltas under about `5%` as laptop noise. The 6G/2A
+  secondary is a quality-ceiling check; its fixed-step quality can be strong
+  while its wallclock competitiveness still needs the resolver.
+
 The default promotion metric is `equal_wallclock_bpb`; set
 `--recurrence-selection-metric final_step_ms` only for a speed-only recurrence
 implementation check. The default screen is deliberately small. Override it
