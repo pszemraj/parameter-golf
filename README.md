@@ -15,13 +15,14 @@ does not preserve the upstream transformer baseline, MLX baseline, or historical
 - `scripts/run_5090_trigram_geometry_matrix.sh`: geometry matrix launcher
 - `scripts/run_5090_trigram_aligned_geometry_screen.sh`: one geometry screen
 - `scripts/run_5090_adaptive_closeout.sh`: bounded adaptive closeout
+- `scripts/run_5090_finalist_closeout.sh`: explicit finalist/preflight runner
+- `tools/plan_5090_adaptive_closeout.py`: reads summaries and emits bounded
+  next-step commands
 
 Current planning docs:
 
-- [docs/5090_next_experiments.md](docs/5090_next_experiments.md)
 - [docs/5090_final_week_plan.md](docs/5090_final_week_plan.md)
 - [docs/5090_shape_reassessment.md](docs/5090_shape_reassessment.md)
-- [docs/5090_log.md](docs/5090_log.md)
 
 ## Local Environment
 
@@ -46,36 +47,22 @@ conda run -s --name train python tools/check_dataset_shards.py \
   --expected-val-files 1
 ```
 
-## Current Closeout Command
+## Current Candidate
 
-Dry-run the bounded adaptive closeout:
+Current local finalist:
 
-```bash
-bash scripts/run_5090_adaptive_closeout.sh \
-  --dry-run \
-  --frontier-batch-id geom1 \
-  --run-version geom1 \
-  --seed 1337 \
-  --no-run-benchmark \
-  --count-workers 2 \
-  --max-confirmations 2 \
-  --stop-after k4
+```text
+blocks0_d128_l5_i512
+trigram_top_k=6
+seq_len=2048
+bptt_chunks=2
+seed=1337
 ```
 
-Run it:
+The active finalist/preflight commands are in
+[docs/5090_final_week_plan.md](docs/5090_final_week_plan.md#active-commands).
 
-```bash
-bash scripts/run_5090_adaptive_closeout.sh \
-  --frontier-batch-id geom1 \
-  --run-version geom1 \
-  --seed 1337 \
-  --no-run-benchmark \
-  --count-workers 2 \
-  --max-confirmations 2 \
-  --stop-after k4
-```
-
-Tiny local smoke:
+Tiny local smoke for the adaptive closeout runner:
 
 ```bash
 bash scripts/run_5090_adaptive_closeout.sh \
@@ -96,6 +83,7 @@ Maintained 5090 runs are expected to keep:
 - `GRADIENT_CHECKPOINTING=0`
 - no `SPEC_MAX_TOKENS` / `DATA_MAX_TOKENS` cap
 - W&B project `pg-core-amp` for real ablations
+- seed `1337` unless the user explicitly asks for a stability report
 
 Do not silently fall back to slower scan backends, approximate BPB, capped spec
 builds, or transformer-like token-token mixing on maintained competition paths.
@@ -112,7 +100,8 @@ state.
 bash -n scripts/5090_common.sh scripts/run_5090_final3day_frontier_batch.sh \
   scripts/run_5090_trigram_geometry_matrix.sh \
   scripts/run_5090_trigram_aligned_geometry_screen.sh \
-  scripts/run_5090_adaptive_closeout.sh
+  scripts/run_5090_adaptive_closeout.sh \
+  scripts/run_5090_finalist_closeout.sh
 
 conda run -s --name train python -m py_compile \
   train_gpt.py inspect_model.py train_core_amplifier.py \

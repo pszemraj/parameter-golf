@@ -11,7 +11,6 @@ RETIRED_PROJECT = "pg-" + "hconv-ablations"
 PROJECT_CONTRACT_FILES = (
     "README.md",
     "docs/5090_final_week_plan.md",
-    "docs/5090_next_experiments.md",
     "scripts/5090_common.sh",
     "scripts/run_5090_trigram_aligned_geometry_screen.sh",
     "tools/run_core_amp_sweep.py",
