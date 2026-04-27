@@ -307,7 +307,7 @@ For a staged local hierarchy, use the adaptive pipeline. It runs:
 It analyzes each bundle with `scripts/analyze_hgdn_experiment_bundle.py` and
 writes JSON stage decisions under `local-scratch/<prefix>_pipeline`. It
 does not launch paid H100 work or generate H100 launch scripts. The user-facing
-entrypoint is argparse-first; the shell file is only a compatibility shim.
+entrypoint is argparse-first.
 Default local training uses `--train-batch-tokens 131072`, which resolves to
 `local_batch_size=16` for the default `seq=1024`, `grad_accum=8`, `ngpu=1`
 contract.
@@ -388,9 +388,6 @@ Run these checks before handing off a branch or run bundle:
 bash -n scripts/hgdn_shell_common.sh \
   scripts/run_local_hgdn_naive_contract_search.sh \
   scripts/run_local_hgdn_recurrence_matrix.sh \
-  scripts/run_local_hgdn_adaptive_pipeline.sh \
-  scripts/run_local_hgdn_wallclock_resolver.sh \
-  scripts/run_local_hgdn_batch_ladder.sh \
   scripts/run_h100_hgdn_naive_contract_round.sh \
   scripts/bootstrap_challenge_data.sh
 
