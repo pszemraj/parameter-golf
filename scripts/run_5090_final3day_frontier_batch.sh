@@ -25,6 +25,7 @@ LOG_EVERY="${LOG_EVERY:-}"
 LOG_STATE_EVERY="${LOG_STATE_EVERY:-}"
 SAVE_EVERY="${SAVE_EVERY:-}"
 TRIGRAM_MAX_TOKENS="${TRIGRAM_MAX_TOKENS:-}"
+SPEC_MAX_TOKENS="${SPEC_MAX_TOKENS:-}"
 DATA_MAX_TOKENS="${DATA_MAX_TOKENS:-}"
 GEOMETRY_TRAIN_LABEL="${GEOMETRY_TRAIN_LABEL:-}"
 WANDB="${WANDB:-}"
@@ -63,6 +64,7 @@ Options:
   --log-state-every VALUE
   --save-every VALUE
   --trigram-max-tokens VALUE
+  --spec-max-tokens VALUE
   --data-max-tokens VALUE
   --geometry-train-label VALUE
   --no-wandb
@@ -107,6 +109,7 @@ while [[ $# -gt 0 ]]; do
     --log-state-every) LOG_STATE_EVERY="$2"; shift 2 ;;
     --save-every) SAVE_EVERY="$2"; shift 2 ;;
     --trigram-max-tokens) TRIGRAM_MAX_TOKENS="$2"; shift 2 ;;
+    --spec-max-tokens) SPEC_MAX_TOKENS="$2"; shift 2 ;;
     --data-max-tokens) DATA_MAX_TOKENS="$2"; shift 2 ;;
     --geometry-train-label) GEOMETRY_TRAIN_LABEL="$2"; shift 2 ;;
     --no-wandb) WANDB=0; shift ;;
@@ -163,6 +166,7 @@ append_if_set "--log-every" "${LOG_EVERY}"
 append_if_set "--log-state-every" "${LOG_STATE_EVERY}"
 append_if_set "--save-every" "${SAVE_EVERY}"
 append_if_set "--trigram-max-tokens" "${TRIGRAM_MAX_TOKENS}"
+append_if_set "--spec-max-tokens" "${SPEC_MAX_TOKENS}"
 append_if_set "--data-max-tokens" "${DATA_MAX_TOKENS}"
 append_if_set "--geometry-train-label" "${GEOMETRY_TRAIN_LABEL}"
 if [[ "${WANDB:-}" == "0" ]]; then

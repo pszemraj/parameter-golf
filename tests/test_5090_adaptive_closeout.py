@@ -47,6 +47,7 @@ def _write_summary(
     artifact_estimate_bytes: int = 8_000_000,
     artifact_status: str = "LEFT_ON_TABLE",
     validation_source: str = "explicit_val_shard",
+    lr_hold_steps: int | None = None,
 ) -> None:
     """Write one summary TSV row for planner tests."""
     geometry_parts = label.split("_")
@@ -76,7 +77,9 @@ def _write_summary(
         "effective_step_tokens": str(effective_step_tokens),
         "planned_steps": str(steps),
         "learning_rate": "0.0035",
-        "lr_hold_steps": "7000" if steps == 8192 else "3500",
+        "lr_hold_steps": str(
+            lr_hold_steps if lr_hold_steps is not None else (7000 if steps == 8192 else 3500)
+        ),
         "last_val_bpb": str(bpb),
         "best_val_bpb": str(bpb),
         "steady_state_tokens_per_sec": "900000",
@@ -1093,11 +1096,13 @@ def test_smoke_contract_uses_tiny_steps_and_disables_wandb(tmp_path: Path) -> No
         batch_size=2,
         seq_len=64,
         effective_step_tokens=128,
+        lr_hold_steps=1,
     )
     args = _args(tmp_path, "confirmations")
     args.run_version = "smoke_adaptive"
     args.baseline_bpb = 99.0
     args.screen_steps = 2
+    args.lr_hold_steps = 1
     args.effective_step_tokens = 128
     args.confirm_steps = 3
     args.confirm_hold_steps = 1

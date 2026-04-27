@@ -32,6 +32,21 @@ SEQ4096_RUN_VERSION="geom1_seq4096_k6_probe"
 K7_PREFLIGHT_MAX_BYTES="15500000"
 K7_PROMOTION_BPB="0.004"
 PREFLIGHT_TRAINABLE_PAYLOAD_BYTES="1267367"
+K6_RUN_VERSION_SET="0"
+K7_PREFLIGHT_RUN_VERSION_SET="0"
+K7_RUN_VERSION_SET="0"
+SEQ4096_RUN_VERSION_SET="0"
+K7_PROMOTION_BPB_SET="0"
+K7_SEQ_LEN="2048"
+K7_BATCH_SIZE="32"
+K7_BPTT_CHUNKS="2"
+K7_STEPS="8192"
+K7_HOLD_STEPS="7000"
+SEQ4096_SEQ_LEN="4096"
+SEQ4096_BATCH_SIZE="32"
+SEQ4096_BPTT_CHUNKS="1"
+SEQ4096_STEPS="4096"
+SEQ4096_HOLD_STEPS="3500"
 SMOKE_GEOMETRY_SPECS="blocks0_d96_l6_i512 96 6 512"
 SMOKE_SCREEN_STEPS="2"
 SMOKE_CONFIRM_STEPS="3"
@@ -47,6 +62,7 @@ SMOKE_VAL_STEPS="1"
 SMOKE_LOG_EVERY="1"
 SMOKE_LOG_STATE_EVERY="0"
 SMOKE_SAVE_EVERY="0"
+SMOKE_SPEC_MAX_TOKENS="200000"
 SMOKE_TRIGRAM_MAX_TOKENS="200000"
 SMOKE_DATA_MAX_TOKENS="131072"
 
@@ -100,12 +116,12 @@ while [[ $# -gt 0 ]]; do
     --stop-after) STOP_AFTER="$2"; shift 2 ;;
     --baseline-bpb) BASELINE_BPB="$2"; shift 2 ;;
     --finalist-label) FINALIST_LABEL="$2"; shift 2 ;;
-    --k6-run-version) K6_RUN_VERSION="$2"; shift 2 ;;
-    --k7-preflight-run-version) K7_PREFLIGHT_RUN_VERSION="$2"; shift 2 ;;
-    --k7-run-version) K7_RUN_VERSION="$2"; shift 2 ;;
-    --seq4096-run-version) SEQ4096_RUN_VERSION="$2"; shift 2 ;;
+    --k6-run-version) K6_RUN_VERSION="$2"; K6_RUN_VERSION_SET="1"; shift 2 ;;
+    --k7-preflight-run-version) K7_PREFLIGHT_RUN_VERSION="$2"; K7_PREFLIGHT_RUN_VERSION_SET="1"; shift 2 ;;
+    --k7-run-version) K7_RUN_VERSION="$2"; K7_RUN_VERSION_SET="1"; shift 2 ;;
+    --seq4096-run-version) SEQ4096_RUN_VERSION="$2"; SEQ4096_RUN_VERSION_SET="1"; shift 2 ;;
     --k7-preflight-max-bytes) K7_PREFLIGHT_MAX_BYTES="$2"; shift 2 ;;
-    --k7-promotion-bpb) K7_PROMOTION_BPB="$2"; shift 2 ;;
+    --k7-promotion-bpb) K7_PROMOTION_BPB="$2"; K7_PROMOTION_BPB_SET="1"; shift 2 ;;
     --preflight-trainable-payload-bytes) PREFLIGHT_TRAINABLE_PAYLOAD_BYTES="$2"; shift 2 ;;
     --run-benchmark) RUN_BENCHMARK="1"; RUN_BENCHMARK_SET="1"; shift ;;
     --no-run-benchmark) RUN_BENCHMARK="0"; RUN_BENCHMARK_SET="1"; shift ;;
@@ -156,6 +172,31 @@ if [[ "${SMOKE_TEST}" == "1" ]]; then
   if [[ "${RUN_BENCHMARK_SET}" == "0" ]]; then
     RUN_BENCHMARK="0"
   fi
+  if [[ "${K7_PREFLIGHT_RUN_VERSION_SET}" == "0" ]]; then
+    K7_PREFLIGHT_RUN_VERSION="${RUN_VERSION}_k7_preflight"
+  fi
+  if [[ "${K7_RUN_VERSION_SET}" == "0" ]]; then
+    K7_RUN_VERSION="${RUN_VERSION}_k7"
+  fi
+  if [[ "${SEQ4096_RUN_VERSION_SET}" == "0" ]]; then
+    SEQ4096_RUN_VERSION="${RUN_VERSION}_seq4096"
+  fi
+  if [[ "${K6_RUN_VERSION_SET}" == "0" ]]; then
+    K6_RUN_VERSION="${K7_RUN_VERSION}"
+  fi
+  if [[ "${K7_PROMOTION_BPB_SET}" == "0" ]]; then
+    K7_PROMOTION_BPB="-999.0"
+  fi
+  K7_SEQ_LEN="${SMOKE_SEQ_LEN}"
+  K7_BATCH_SIZE="${SMOKE_BATCH_SIZE}"
+  K7_BPTT_CHUNKS="1"
+  K7_STEPS="${SMOKE_VARIANT_STEPS}"
+  K7_HOLD_STEPS="${SMOKE_HOLD_STEPS}"
+  SEQ4096_SEQ_LEN="${SMOKE_SEQ_LEN}"
+  SEQ4096_BATCH_SIZE="${SMOKE_BATCH_SIZE}"
+  SEQ4096_BPTT_CHUNKS="1"
+  SEQ4096_STEPS="${SMOKE_VARIANT_STEPS}"
+  SEQ4096_HOLD_STEPS="${SMOKE_HOLD_STEPS}"
 fi
 
 if [[ -z "${BENCHMARK_JSON}" ]]; then
@@ -239,6 +280,7 @@ write_plan() {
       --smoke-test
       --no-wandb
       --screen-steps "${SMOKE_SCREEN_STEPS}"
+      --lr-hold-steps "${SMOKE_HOLD_STEPS}"
       --effective-step-tokens "${SMOKE_EFFECTIVE_STEP_TOKENS}"
       --confirm-steps "${SMOKE_CONFIRM_STEPS}"
       --confirm-hold-steps "${SMOKE_HOLD_STEPS}"
@@ -251,6 +293,7 @@ write_plan() {
       --bptt-chunks "${SMOKE_BPTT_CHUNKS}"
       --seq-len "${SMOKE_SEQ_LEN}"
       --val-steps "${SMOKE_VAL_STEPS}"
+      --spec-max-tokens "${SMOKE_SPEC_MAX_TOKENS}"
       --trigram-max-tokens "${SMOKE_TRIGRAM_MAX_TOKENS}"
       --data-max-tokens "${SMOKE_DATA_MAX_TOKENS}"
     )
@@ -275,7 +318,16 @@ write_finalist_plan() {
       "$@"
   )
   if [[ "${SMOKE_TEST}" == "1" ]]; then
-    plan_cmd+=(--smoke-test --no-wandb)
+    plan_cmd+=(
+      --smoke-test
+      --no-wandb
+      --no-finalist-full-val-final
+      --effective-step-tokens "${SMOKE_EFFECTIVE_STEP_TOKENS}"
+      --val-steps "${SMOKE_VAL_STEPS}"
+      --spec-max-tokens "${SMOKE_SPEC_MAX_TOKENS}"
+      --trigram-max-tokens "${SMOKE_TRIGRAM_MAX_TOKENS}"
+      --data-max-tokens "${SMOKE_DATA_MAX_TOKENS}"
+    )
   fi
   run_logged "plan_${logical_stage}" "${plan_cmd[@]}"
   cp "${LOG_DIR}/plan_${logical_stage}.log" "${out_md}"
@@ -418,7 +470,9 @@ check_k7_preflight_gate() {
     return 0
   fi
 
-  local preflight_path artifact_status artifact_bytes
+  local preflight_path artifact_status artifact_bytes gate_log
+  gate_log="${LOG_DIR}/k7_preflight_gate.log"
+  : >"${gate_log}"
   if ! preflight_path="$(k7_preflight_json)"; then
     if [[ "${preflight_rc}" != "0" ]]; then
       return "${preflight_rc}"
@@ -428,12 +482,14 @@ check_k7_preflight_gate() {
   artifact_status="$(json_field "${preflight_path}" artifact_status)"
   artifact_bytes="$(json_field "${preflight_path}" artifact_estimate_bytes)"
 
-  echo
-  echo "=== k7_preflight_gate ==="
-  echo "artifact_preflight=${preflight_path}"
-  echo "artifact_status=${artifact_status}"
-  echo "artifact_estimate_bytes=${artifact_bytes}"
-  echo "k7_preflight_max_bytes=${K7_PREFLIGHT_MAX_BYTES}"
+  {
+    echo
+    echo "=== k7_preflight_gate ==="
+    echo "artifact_preflight=${preflight_path}"
+    echo "artifact_status=${artifact_status}"
+    echo "artifact_estimate_bytes=${artifact_bytes}"
+    echo "k7_preflight_max_bytes=${K7_PREFLIGHT_MAX_BYTES}"
+  } | tee -a "${gate_log}"
 
   K7_ALLOWED="1"
   if [[ "${artifact_status}" == "OVER_LIMIT" ]]; then
@@ -446,7 +502,7 @@ check_k7_preflight_gate() {
   fi
 
   if [[ "${K7_ALLOWED}" == "0" ]]; then
-    echo "K7 training skipped by artifact gate."
+    echo "K7 training skipped by artifact gate." | tee -a "${gate_log}"
     return 0
   fi
 
@@ -454,7 +510,7 @@ check_k7_preflight_gate() {
     echo "K7 preflight command failed despite an allowable artifact estimate." >&2
     return "${preflight_rc}"
   fi
-  echo "K7 artifact gate passed."
+  echo "K7 artifact gate passed." | tee -a "${gate_log}"
 }
 
 cat <<EOF | tee "${LOG_DIR}/header.txt"
@@ -478,6 +534,8 @@ seq4096_run_version=${SEQ4096_RUN_VERSION}
 k7_preflight_max_bytes=${K7_PREFLIGHT_MAX_BYTES}
 k7_promotion_bpb=${K7_PROMOTION_BPB}
 preflight_trainable_payload_bytes=${PREFLIGHT_TRAINABLE_PAYLOAD_BYTES}
+k7_contract=steps:${K7_STEPS} hold:${K7_HOLD_STEPS} seq:${K7_SEQ_LEN} batch:${K7_BATCH_SIZE} bptt:${K7_BPTT_CHUNKS}
+seq4096_contract=steps:${SEQ4096_STEPS} hold:${SEQ4096_HOLD_STEPS} seq:${SEQ4096_SEQ_LEN} batch:${SEQ4096_BATCH_SIZE} bptt:${SEQ4096_BPTT_CHUNKS}
 log_dir=${LOG_DIR}
 cublaslt=${TORCH_BLAS_PREFER_CUBLASLT}
 dry_run=${DRY_RUN}
@@ -513,6 +571,7 @@ if should_run_stage frontier; then
       --log-every "${SMOKE_LOG_EVERY}"
       --log-state-every "${SMOKE_LOG_STATE_EVERY}"
       --save-every "${SMOKE_SAVE_EVERY}"
+      --spec-max-tokens "${SMOKE_SPEC_MAX_TOKENS}"
       --trigram-max-tokens "${SMOKE_TRIGRAM_MAX_TOKENS}"
       --data-max-tokens "${SMOKE_DATA_MAX_TOKENS}"
       --geometry-train-label smoke_screen
@@ -547,11 +606,11 @@ if should_run_stage k7-preflight; then
     --finalist-run-version "${K7_PREFLIGHT_RUN_VERSION}" \
     --finalist-seeds "${SEED}" \
     --finalist-trigram-top-k 7 \
-    --finalist-seq-len 2048 \
-    --finalist-batch-size 32 \
-    --finalist-bptt-chunks 2 \
-    --finalist-steps 8192 \
-    --finalist-hold-steps 7000 \
+    --finalist-seq-len "${K7_SEQ_LEN}" \
+    --finalist-batch-size "${K7_BATCH_SIZE}" \
+    --finalist-bptt-chunks "${K7_BPTT_CHUNKS}" \
+    --finalist-steps "${K7_STEPS}" \
+    --finalist-hold-steps "${K7_HOLD_STEPS}" \
     --finalist-train-label preflight_seq2048_bptt2_k7 \
     --finalist-preflight-only \
     --preflight-trainable-payload-bytes "${PREFLIGHT_TRAINABLE_PAYLOAD_BYTES}"
@@ -572,11 +631,11 @@ if should_run_stage k7; then
       --finalist-run-version "${K7_RUN_VERSION}" \
       --finalist-seeds "${SEED}" \
       --finalist-trigram-top-k 7 \
-      --finalist-seq-len 2048 \
-      --finalist-batch-size 32 \
-      --finalist-bptt-chunks 2 \
-      --finalist-steps 8192 \
-      --finalist-hold-steps 7000 \
+      --finalist-seq-len "${K7_SEQ_LEN}" \
+      --finalist-batch-size "${K7_BATCH_SIZE}" \
+      --finalist-bptt-chunks "${K7_BPTT_CHUNKS}" \
+      --finalist-steps "${K7_STEPS}" \
+      --finalist-hold-steps "${K7_HOLD_STEPS}" \
       --finalist-train-label 1b_seq2048_bptt2_k7
     run_plan_script k7 "${PLAN_SCRIPT}"
   else
@@ -599,11 +658,11 @@ if should_run_stage k7-stability; then
       --finalist-seeds "1337 2027 3141" \
       --finalist-stability-check \
       --finalist-trigram-top-k 7 \
-      --finalist-seq-len 2048 \
-      --finalist-batch-size 32 \
-      --finalist-bptt-chunks 2 \
-      --finalist-steps 8192 \
-      --finalist-hold-steps 7000 \
+      --finalist-seq-len "${K7_SEQ_LEN}" \
+      --finalist-batch-size "${K7_BATCH_SIZE}" \
+      --finalist-bptt-chunks "${K7_BPTT_CHUNKS}" \
+      --finalist-steps "${K7_STEPS}" \
+      --finalist-hold-steps "${K7_HOLD_STEPS}" \
       --finalist-train-label 1b_seq2048_bptt2_k7
     run_plan_script k7-stability "${PLAN_SCRIPT}"
   else
@@ -612,14 +671,16 @@ if should_run_stage k7-stability; then
     k6_bpb="$(json_field "${k6_results}" last_val_bpb)"
     k7_bpb="$(json_field "${k7_results}" last_val_bpb)"
     improvement="$(bpb_improvement "${k6_bpb}" "${k7_bpb}")"
-    echo
-    echo "=== k7_promotion_gate ==="
-    echo "k6_results=${k6_results}"
-    echo "k7_results=${k7_results}"
-    echo "k6_last_val_bpb=${k6_bpb}"
-    echo "k7_last_val_bpb=${k7_bpb}"
-    echo "improvement_bpb=${improvement}"
-    echo "required_improvement_bpb=${K7_PROMOTION_BPB}"
+    {
+      echo
+      echo "=== k7_promotion_gate ==="
+      echo "k6_results=${k6_results}"
+      echo "k7_results=${k7_results}"
+      echo "k6_last_val_bpb=${k6_bpb}"
+      echo "k7_last_val_bpb=${k7_bpb}"
+      echo "improvement_bpb=${improvement}"
+      echo "required_improvement_bpb=${K7_PROMOTION_BPB}"
+    } | tee "${LOG_DIR}/k7_promotion_gate.log"
     if float_compare "${improvement}" ">=" "${K7_PROMOTION_BPB}"; then
       write_finalist_plan k7-stability \
         --run-version "${K7_RUN_VERSION}" \
@@ -628,11 +689,11 @@ if should_run_stage k7-stability; then
         --finalist-seeds "1337 2027 3141" \
         --finalist-stability-check \
         --finalist-trigram-top-k 7 \
-        --finalist-seq-len 2048 \
-        --finalist-batch-size 32 \
-        --finalist-bptt-chunks 2 \
-        --finalist-steps 8192 \
-        --finalist-hold-steps 7000 \
+        --finalist-seq-len "${K7_SEQ_LEN}" \
+        --finalist-batch-size "${K7_BATCH_SIZE}" \
+        --finalist-bptt-chunks "${K7_BPTT_CHUNKS}" \
+        --finalist-steps "${K7_STEPS}" \
+        --finalist-hold-steps "${K7_HOLD_STEPS}" \
         --finalist-train-label 1b_seq2048_bptt2_k7
       run_plan_script k7-stability "${PLAN_SCRIPT}"
     else
@@ -648,11 +709,11 @@ if should_run_stage seq4096; then
     --finalist-run-version "${SEQ4096_RUN_VERSION}" \
     --finalist-seeds "${SEED}" \
     --finalist-trigram-top-k 6 \
-    --finalist-seq-len 4096 \
-    --finalist-batch-size 32 \
-    --finalist-bptt-chunks 1 \
-    --finalist-steps 4096 \
-    --finalist-hold-steps 3500 \
+    --finalist-seq-len "${SEQ4096_SEQ_LEN}" \
+    --finalist-batch-size "${SEQ4096_BATCH_SIZE}" \
+    --finalist-bptt-chunks "${SEQ4096_BPTT_CHUNKS}" \
+    --finalist-steps "${SEQ4096_STEPS}" \
+    --finalist-hold-steps "${SEQ4096_HOLD_STEPS}" \
     --finalist-train-label 512m_seq4096_k6_probe
   run_plan_script seq4096 "${PLAN_SCRIPT}"
 fi

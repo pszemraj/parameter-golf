@@ -147,6 +147,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         ),
     )
     ap.add_argument("--screen-steps", type=int, default=SCREEN_PLANNED_STEPS)
+    ap.add_argument("--lr-hold-steps", type=int, default=None)
     ap.add_argument("--effective-step-tokens", type=int, default=SCREEN_EFFECTIVE_STEP_TOKENS)
     ap.add_argument("--confirm-steps", type=int, default=CONFIRM_STEPS)
     ap.add_argument("--confirm-hold-steps", type=int, default=CONFIRM_HOLD_STEPS)
