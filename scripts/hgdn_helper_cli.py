@@ -96,11 +96,11 @@ def collect_logs(bundle_dir: Path, *, recursive: bool) -> list[str]:
     return sorted(path.name for path in bundle_dir.glob("*.log") if path.is_file())
 
 
-def write_json(path: Path, payload: dict[str, Any]) -> None:
+def write_json(path: Path, payload: Any) -> None:
     """Write one JSON document with stable formatting.
 
     :param Path path: Output path.
-    :param dict[str, Any] payload: JSON payload to serialize.
+    :param Any payload: JSON payload to serialize.
     """
     path.write_text(
         json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"

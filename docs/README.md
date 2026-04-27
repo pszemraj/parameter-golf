@@ -132,19 +132,25 @@ resolver below when deciding whether the laptop evidence is strong enough to
 avoid running both HGDN candidates on H100:
 
 ```bash
-USE_WANDB=0 WANDB_MODE=offline \
-RUN_PREFIX_BASE=localhgdn_wallclock1 \
-bash scripts/run_local_hgdn_wallclock_resolver.sh
+conda run -s --name pg python scripts/run_local_hgdn_wallclock_resolver.py \
+  --run-prefix-base localhgdn_wallclock1 \
+  --use-wandb 0 \
+  --wandb-mode offline \
+  --run-plan primary
 ```
 
 The resolver runs five legs under the same local wallclock cap: exact
 `train_gpt.py` baseline, primary `m2` HGDN, matched `r0_m2` attention-only
 diagnostic control, secondary OLMo-ish `6G2A`, and matched `r0_m1p25`
-attention-only diagnostic control. Defaults are `MAX_WALLCLOCK_SECONDS=600`,
-`TRAIN_BATCH_TOKENS=65536`, `TRAIN_SEQ_LEN=1024`, and `VAL_MAX_SEQS=512`.
-The primary recurrence mode defaults to `direct`; the secondary defaults to
-`direct_fused`. Set `GDN_FLA_RECURRENCE_MODE` only when intentionally forcing
-one mode across all hybrid legs.
+attention-only diagnostic control. The default `--run-plan primary` runs only
+the exact baseline, primary HGDN, and matched primary control; use
+`--run-plan full` for all five legs or `--run-plan secondary` for the secondary
+pair. Defaults are `--max-wallclock-seconds 600`, `--train-batch-tokens 65536`,
+`--train-seq-len 1024`, and `--val-max-seqs 512`. The primary and secondary
+recurrence modes default to `direct_fused`, matching the refreshed local
+adaptive selection. Use
+`--gdn-fla-recurrence-mode` only when intentionally forcing one mode across all
+hybrid legs.
 
 Outputs are written to `local-scratch/<prefix>_bundle/` and archived with
 `py7zr`. The resolver writes:
@@ -156,10 +162,29 @@ Outputs are written to `local-scratch/<prefix>_bundle/` and archived with
 Decision defaults are intentionally conservative and use final roundtrip BPB
 from wallclock-stopped runs, matching the compressed-artifact objective. The
 primary must beat its matched attention-only diagnostic control by
-`PRIMARY_CONTROL_MARGIN=0.003` BPB, and the secondary only cleanly displaces the
-primary at `SECONDARY_PRIMARY_MARGIN=0.005` BPB. If any required wallclock
-roundtrip metric is missing or the primary/secondary margin is too close, the
-decision JSON sets `run_secondary_h100` to true for manual review.
+`--primary-control-margin 0.003` BPB, and the secondary only cleanly displaces
+the primary at `--secondary-primary-margin 0.005` BPB. If required wallclock
+roundtrip metrics are missing or the primary/secondary margin is too close, the
+decision JSON marks the secondary for manual review unless a selected candidate
+has already failed its matched attention-only diagnostic control. A candidate
+that loses to its matched attention-only diagnostic control is not marked for
+H100 promotion.
+
+For local VRAM/throughput packing, use the argparse batch ladder instead of
+assembling shell variables:
+
+```bash
+conda run -s --name pg python scripts/run_local_hgdn_batch_ladder.py \
+  --run-prefix-base localhgdn_batch_ladder1 \
+  --configs configs/hgdn/naive_contract_l8_d512_mid2_dk48_m2.toml,configs/hgdn/naive_contract_l8_d512_r0_m2.toml \
+  --batch-tokens 65536,131072,196608,262144,327680 \
+  --iterations 80 \
+  --use-wandb 0 \
+  --wandb-mode offline
+```
+
+The ladder writes `rows.json`, `rows.csv`, copied logs/configs, `commands.sh`,
+and a `py7zr` archive under `local-scratch/<prefix>_bundle`.
 
 Local sparse search helper:
 
@@ -261,13 +286,12 @@ nvidia-smi --query-compute-apps=pid,process_name,used_memory \
   --format=csv,noheader,nounits
 ```
 
-The local helper encodes that exact A/B/C/D matrix and refuses to start when
-other CUDA compute jobs are visible unless `ALLOW_ACTIVE_CUDA_JOBS=1` is set:
+The standalone matrix helper is still a shell entrypoint. Prefer the adaptive
+pipeline below for normal local screening; it runs this matrix as stage 0
+through argparse and refuses to start when other CUDA compute jobs are visible
+unless `--allow-active-cuda-jobs 1` is set.
 
 ```bash
-USE_WANDB=0 WANDB_MODE=offline \
-TORCH_LOGS=recompiles,graph_breaks \
-RUN_PREFIX_BASE=localrecurmatrix1 \
 bash scripts/run_local_hgdn_recurrence_matrix.sh
 ```
 
@@ -282,24 +306,28 @@ For a staged local hierarchy, use the adaptive pipeline. It runs:
 
 It analyzes each bundle with `scripts/analyze_hgdn_experiment_bundle.py` and
 writes JSON stage decisions under `local-scratch/<prefix>_pipeline`. It
-does not launch paid H100 work or generate H100 launch scripts. The default
-promotion metric is `equal_wallclock_bpb`; set
-`RECURRENCE_SELECTION_METRIC=final_step_ms` only for a speed-only recurrence
-implementation check.
+does not launch paid H100 work or generate H100 launch scripts. The user-facing
+entrypoint is argparse-first; the shell file is only a compatibility shim.
+Default local training uses `--train-batch-tokens 131072`, which resolves to
+`local_batch_size=16` for the default `seq=1024`, `grad_accum=8`, `ngpu=1`
+contract.
 
 ```bash
-USE_WANDB=0 WANDB_MODE=offline \
-TORCH_LOGS=recompiles,graph_breaks \
-RUN_PREFIX_BASE=localhgdn_adaptive1 \
-bash scripts/run_local_hgdn_adaptive_pipeline.sh
+conda run -s --name pg python scripts/run_local_hgdn_adaptive_pipeline.py \
+  --run-prefix-base localhgdn_adaptive1 \
+  --use-wandb 0 \
+  --wandb-mode offline \
+  --torch-logs recompiles,graph_breaks
 ```
 
-The default screen is deliberately small. Override it with
-`SCREEN_CANDIDATE_CONFIGS=path1.toml,path2.toml,...` when you want a different
-shortlist; the underlying local search helper also accepts `CANDIDATE_CONFIGS`
-for bounded one-off batches. Override the gated secondary check with
-`SECONDARY_CANDIDATE_CONFIGS=path1.toml,path2.toml,...`, or set
-`SECONDARY_FORCE=1` when you intentionally want the OLMo-ish sanity check even
+The default promotion metric is `equal_wallclock_bpb`; set
+`--recurrence-selection-metric final_step_ms` only for a speed-only recurrence
+implementation check. The default screen is deliberately small. Override it
+with `--screen-candidate-configs path1.toml,path2.toml,...` when you want a
+different shortlist; the underlying local search helper also accepts
+`CANDIDATE_CONFIGS` for bounded one-off batches. Override the gated secondary
+check with `--secondary-candidate-configs path1.toml,path2.toml,...`, or set
+`--secondary-force 1` when you intentionally want the OLMo-ish sanity check even
 if the primary candidate does not beat its matched control.
 
 Validation uses the dedicated `fineweb_val_*.bin` shard. Local and H100 helpers
@@ -342,10 +370,12 @@ conda run -s --name pg python scripts/check_bpb_sanity.py \
 - `scripts/run_local_hgdn_naive_contract_search.sh`: local sparse search.
 - `scripts/run_local_hgdn_recurrence_matrix.sh`: local recurrence
   implementation matrix.
-- `scripts/run_local_hgdn_adaptive_pipeline.sh`: staged local implementation,
+- `scripts/run_local_hgdn_adaptive_pipeline.py`: staged local implementation,
   architecture, and confirmation hierarchy.
-- `scripts/run_local_hgdn_wallclock_resolver.sh`: true same-wallclock local
+- `scripts/run_local_hgdn_wallclock_resolver.py`: true same-wallclock local
   exact-baseline/HGDN resolver before paid H100 work.
+- `scripts/run_local_hgdn_batch_ladder.py`: local batch-size/VRAM throughput
+  probe for shortlisted configs.
 - `scripts/run_h100_hgdn_naive_contract_round.sh`: H100 exact-baseline comparison.
 - `scripts/bundle_hgdn_run.py`: bundle helper.
 - `scripts/bootstrap_challenge_data.sh`: data bootstrap helper.
@@ -360,16 +390,21 @@ bash -n scripts/hgdn_shell_common.sh \
   scripts/run_local_hgdn_recurrence_matrix.sh \
   scripts/run_local_hgdn_adaptive_pipeline.sh \
   scripts/run_local_hgdn_wallclock_resolver.sh \
+  scripts/run_local_hgdn_batch_ladder.sh \
   scripts/run_h100_hgdn_naive_contract_round.sh \
   scripts/bootstrap_challenge_data.sh
 
 conda run -s --name pg python -m py_compile \
   model.py train_gpt.py train_gpt_hybrid.py train_gpt_fla_control.py \
   hgdn_fla.py hgdn_runtime_utils.py scripts/hgdn_helper_cli.py \
+  scripts/hgdn_local_runner.py \
   scripts/screen_hgdn_arch_sizes.py \
   scripts/analyze_local_naive_contract_bundle.py \
   scripts/analyze_hgdn_experiment_bundle.py \
   scripts/resolve_hgdn_wallclock_decision.py \
+  scripts/run_local_hgdn_adaptive_pipeline.py \
+  scripts/run_local_hgdn_wallclock_resolver.py \
+  scripts/run_local_hgdn_batch_ladder.py \
   scripts/check_bpb_sanity.py scripts/probe_fla_stack.py \
   scripts/bench_fla_recurrence_paths.py \
   scripts/bench_hgdn_full_layer_paths.py

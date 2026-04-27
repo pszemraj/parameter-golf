@@ -14,6 +14,15 @@ paid H100 finalist runs or official-style comparisons.
 
 ## Before Broad Local Sweeps
 
+- Finish the runner migration away from user-facing environment variables.
+  `scripts/run_local_hgdn_adaptive_pipeline.py`,
+  `scripts/run_local_hgdn_wallclock_resolver.py`, and
+  `scripts/run_local_hgdn_batch_ladder.py` are argparse-first now, but the
+  trainers and older local sweep helpers still consume an internal environment
+  adapter. After the new runners validate on one real local run, replace the
+  trainer `Hyperparameters` environment surface with an argparse/dataclass
+  config path and reduce the remaining shell helpers to compatibility shims or
+  delete them.
 - Replace prefix-only validation sampling with either full validation or fixed
   multi-window validation samples for confirmation stages.
 - Add `eligible_for_promotion` and `ineligible_reason` columns so human summaries

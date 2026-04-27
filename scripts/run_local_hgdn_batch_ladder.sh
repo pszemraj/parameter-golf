@@ -2,4 +2,4 @@
 set -euo pipefail
 
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-exec python scripts/run_local_hgdn_adaptive_pipeline.py "$@"
+exec python scripts/run_local_hgdn_batch_ladder.py "$@"
