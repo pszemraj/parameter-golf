@@ -5,7 +5,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 source "${SCRIPT_DIR}/5090_common.sh"
 
-PYTHON_BIN="${PYTHON:-/home/pszemraj/miniforge3/envs/train/bin/python}"
+if [[ -n "${PYTHON:-}" ]]; then
+  PYTHON_BIN="${PYTHON}"
+else
+  PYTHON_BIN="$(command -v python3 || command -v python || true)"
+fi
+if [[ -z "${PYTHON_BIN}" ]]; then
+  echo "$(basename "$0"): could not find python; set PYTHON=/path/to/python" >&2
+  exit 1
+fi
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export PYTHONUNBUFFERED=1

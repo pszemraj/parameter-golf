@@ -53,10 +53,12 @@ Current local finalist:
 
 ```text
 blocks0_d128_l5_i512
-trigram_top_k=6
+trigram_top_k=7
 seq_len=2048
 bptt_chunks=2
-seed=1337
+seeds=1337,2027,3141 stability read
+mean_full_val_bpb=1.9493757773
+artifact_estimate_bytes~=14,916,000
 ```
 
 The active finalist/preflight commands are in

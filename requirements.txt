@@ -11,3 +11,4 @@ sentencepiece
 pytest
 pyarrow
 accelerated-scan==0.3.1
+wandb

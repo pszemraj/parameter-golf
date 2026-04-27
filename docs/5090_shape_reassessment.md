@@ -67,11 +67,11 @@ num_blocks = 0
 branch_lags = 1,2,3,4,6,8,12,16,24,32,48,64
 ```
 
-With K6 `seq2048` BPTT2, this is the current local leader:
+With K7 `seq2048` BPTT2, this is the current local leader:
 
 ```text
-val_bpb = 1.9572908661
-artifact estimate = 13,798,090 bytes
+three-seed mean val_bpb = 1.9493757773
+artifact estimate ~= 14,916,000 bytes
 ```
 
 ## Reopen Only With Evidence

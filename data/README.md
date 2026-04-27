@@ -25,6 +25,7 @@ Serious 5090 runs expect:
 1 validation shard
 19,473,201,340 train tokens
 62,021,846 validation tokens
+dataset directory size ~= 85 GiB
 ```
 
 Check the local layout before long spec or trigram-memory builds:
@@ -73,6 +74,10 @@ that tokenizer family.
 
 The default published repo is `willdepueoai/parameter-golf`, with the export
 rooted under the repo subdirectory `datasets/`.
+
+On a fresh GPU host, keep the Hugging Face cache on the same filesystem as the
+repo or another large local volume. The downloader hard-links cached blobs into
+`data/` when possible and falls back to copying only when it has to.
 
 ## Rebuilding Tokenizers From Published Docs
 
