@@ -332,6 +332,18 @@ if str(repo_root) not in sys.path:
 
 from core_amplifier_lm.spec_builder import training_token_file_fingerprint
 
+def optional_int(raw):
+    if raw in (None, ""):
+        return None
+    return int(raw)
+
+
+def normalize_optional_int(value):
+    if value in (None, ""):
+        return None
+    return int(value)
+
+
 data_path = Path(os.environ["SPEC_DATA_PATH"]).expanduser().resolve()
 manifest_path = Path(os.environ["SPEC_MANIFEST_PATH"])
 expected = {
@@ -362,8 +374,8 @@ expected = {
     "trigram_residual_clip": os.environ["SPEC_TRIGRAM_RESIDUAL_CLIP"],
     "trigram_confidence_count_cap": int(os.environ["SPEC_TRIGRAM_CONFIDENCE_COUNT_CAP"]),
     "trigram_chunk_size": int(os.environ["SPEC_TRIGRAM_CHUNK_SIZE"]),
-    "trigram_max_tokens": os.environ["SPEC_TRIGRAM_MAX_TOKENS"],
-    "spec_max_tokens": os.environ["SPEC_MAX_TOKENS"],
+    "trigram_max_tokens": optional_int(os.environ["SPEC_TRIGRAM_MAX_TOKENS"]),
+    "spec_max_tokens": optional_int(os.environ["SPEC_MAX_TOKENS"]),
     "trigram_table_cache_root": str(
         Path(os.environ["SPEC_TRIGRAM_TABLE_CACHE_ROOT"]).expanduser().resolve()
     ),
@@ -377,6 +389,8 @@ elif mode == "validate":
     if not manifest_path.exists():
         raise SystemExit(f"missing shared spec manifest: {manifest_path}")
     found = json.loads(manifest_path.read_text(encoding="utf-8"))
+    for key in ("trigram_max_tokens", "spec_max_tokens"):
+        found[key] = normalize_optional_int(found.get(key))
     mismatches = {
         key: (found.get(key), value)
         for key, value in expected.items()
@@ -395,11 +409,11 @@ PY
 ensure_shared_spec() {
   local out_dir="$1"
   if [[ "${REBUILD_SHARED:-0}" != "1" && "${REBUILD_GEOMETRY_SPEC:-0}" != "1" && -f "${out_dir}/spec.pt" && -f "${out_dir}/config.json" ]]; then
+    shared_spec_manifest validate "${out_dir}"
     if [[ "${DRY_RUN:-0}" == "1" ]]; then
-      echo "Dry-run would validate cached aligned shared spec manifest: ${out_dir}"
+      echo "Dry-run validated cached aligned shared spec manifest: ${out_dir}"
       return 0
     fi
-    shared_spec_manifest validate "${out_dir}"
     echo "Using cached aligned shared spec: ${out_dir}"
     return 0
   fi
