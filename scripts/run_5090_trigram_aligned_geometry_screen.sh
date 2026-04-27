@@ -60,6 +60,7 @@ REBUILD_TRIGRAM_MEMORY_TABLE_CACHE="${REBUILD_TRIGRAM_MEMORY_TABLE_CACHE:-0}"
 TRIGRAM_MAX_TOKENS="${TRIGRAM_MAX_TOKENS:-}"
 ARTIFACT_PREFLIGHT="${ARTIFACT_PREFLIGHT:-1}"
 PREFLIGHT_TRAINABLE_PAYLOAD_BYTES="${PREFLIGHT_TRAINABLE_PAYLOAD_BYTES:-2000000}"
+PREFLIGHT_ONLY="${PREFLIGHT_ONLY:-0}"
 
 TARGET_EFFECTIVE_STEP_TOKENS="${TARGET_EFFECTIVE_STEP_TOKENS:-131072}"
 DATA_MAX_TOKENS="${DATA_MAX_TOKENS:-}"
@@ -127,6 +128,7 @@ Options:
   --rebuild-shared | --no-rebuild-shared
   --artifact-preflight | --no-artifact-preflight
   --preflight-trainable-payload-bytes VALUE
+  --preflight-only
   --full-val-final | --no-full-val-final
   --smoke-test
   --dry-run
@@ -171,6 +173,7 @@ parse_args() {
       --artifact-preflight) ARTIFACT_PREFLIGHT=1; shift ;;
       --no-artifact-preflight) ARTIFACT_PREFLIGHT=0; shift ;;
       --preflight-trainable-payload-bytes) PREFLIGHT_TRAINABLE_PAYLOAD_BYTES="$2"; shift 2 ;;
+      --preflight-only) PREFLIGHT_ONLY=1; shift ;;
       --target-effective-step-tokens) TARGET_EFFECTIVE_STEP_TOKENS="$2"; shift 2 ;;
       --data-max-tokens) DATA_MAX_TOKENS="$2"; shift 2 ;;
       --data-path) DATA_PATH="$2"; shift 2 ;;
@@ -476,6 +479,7 @@ geometry_branch_lags=${GEOMETRY_BRANCH_LAGS}
 trigram_memory=${TRIGRAM_MEMORY} top_k=${TRIGRAM_TOP_K} log_scale_init=${TRIGRAM_LOG_SCALE_INIT} count_workers=${TRIGRAM_COUNT_WORKERS}
 rebuild_shared=${REBUILD_SHARED} rebuild_trigram_memory_table_cache=${REBUILD_TRIGRAM_MEMORY_TABLE_CACHE}
 artifact_preflight=${ARTIFACT_PREFLIGHT} preflight_trainable_payload_bytes=${PREFLIGHT_TRAINABLE_PAYLOAD_BYTES}
+preflight_only=${PREFLIGHT_ONLY}
 learning_rate=${LEARNING_RATE}
 compile=${COMPILE} gradient_checkpointing=${GRADIENT_CHECKPOINTING} skip_done=${SKIP_DONE}
 lr_schedule=${LR_SCHEDULE} weight_decay=${WEIGHT_DECAY} grad_clip=${GRAD_CLIP} hard_loss_gamma=${HARD_LOSS_GAMMA} hard_loss_cap=${HARD_LOSS_CAP}
@@ -501,6 +505,14 @@ run_blocks0_seed() {
   ensure_shared_spec "${source_spec_dir}"
   REBUILD_SHARED=0
   preflight_artifact_budget "${source_spec_dir}"
+  if [[ "${PREFLIGHT_ONLY}" == "1" ]]; then
+    if [[ "${DRY_RUN:-0}" == "1" ]]; then
+      echo "Dry-run preflight-only requested; would stop after shared-spec artifact preflight."
+    else
+      echo "Preflight-only requested; shared spec is prepared and artifact budget check passed."
+    fi
+    return 0
+  fi
 
   local model_root="${REPO_ROOT}/experiments/5090_architecture/${GEOMETRY_LABEL}_trigram_seed${seed}_${RUN_VERSION}"
   local run_label="${GEOMETRY_TRAIN_LABEL}"

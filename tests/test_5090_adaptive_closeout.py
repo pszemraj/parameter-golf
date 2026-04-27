@@ -6,6 +6,8 @@ import csv
 import json
 from pathlib import Path
 
+import pytest
+
 from core_amplifier_lm.experiment import SUMMARY_FIELDS
 from tools.plan_5090_adaptive_closeout import (
     CONFIRM_STEPS,
@@ -594,6 +596,128 @@ def test_probe_tier_accepts_probe_followup(tmp_path: Path) -> None:
 
     assert stage.status == "already_complete"
     assert stage.commands == []
+
+
+def test_finalist_stage_runs_only_missing_seeds(tmp_path: Path) -> None:
+    """Finalist replication should skip completed seeds and emit missing ones."""
+    label = "blocks0_d128_l5_i512"
+    _write_summary(
+        tmp_path,
+        label,
+        "geom1_seq2048_bptt2_k6_final",
+        steps=8192,
+        bpb=1.957,
+        top_k=6,
+        batch_size=32,
+        seq_len=2048,
+        bptt_chunks=2,
+        full_coverage=True,
+    )
+    args = _args(tmp_path, "finalist")
+    args.label = [label]
+    args.finalist_run_version = "geom1_seq2048_bptt2_k6_final"
+    args.finalist_seeds = "1337 2027 3141"
+    args.finalist_trigram_top_k = 6
+    args.finalist_seq_len = 2048
+    args.finalist_batch_size = 32
+    args.finalist_bptt_chunks = 2
+    args.finalist_train_label = "1b_seq2048_bptt2_k6"
+
+    stage = plan_stage(args)
+
+    assert stage.status == "commands"
+    assert len(stage.commands) == 2
+    shells = "\n".join(command.shell for command in stage.commands)
+    assert "--seeds 2027" in shells
+    assert "--seeds 3141" in shells
+    assert "--seeds 1337" not in shells
+    assert "--trigram-top-k 6" in shells
+    assert "--geometry-seq-len 2048" in shells
+    assert "--geometry-bptt-chunks 2" in shells
+    assert "--full-val-final" in shells
+
+
+def test_finalist_stage_reports_already_complete(tmp_path: Path) -> None:
+    """A fully completed finalist seed set should become a no-op."""
+    label = "blocks0_d128_l5_i512"
+    for seed in ("1337", "2027"):
+        _write_summary(
+            tmp_path,
+            label,
+            "geom1_seq2048_bptt2_k6_final",
+            seed=seed,
+            steps=8192,
+            bpb=1.957,
+            top_k=6,
+            batch_size=32,
+            seq_len=2048,
+            bptt_chunks=2,
+            full_coverage=True,
+        )
+    args = _args(tmp_path, "finalist")
+    args.label = [label]
+    args.finalist_run_version = "geom1_seq2048_bptt2_k6_final"
+    args.finalist_seeds = "1337,2027"
+    args.finalist_trigram_top_k = 6
+    args.finalist_seq_len = 2048
+    args.finalist_batch_size = 32
+    args.finalist_bptt_chunks = 2
+
+    stage = plan_stage(args)
+
+    assert stage.status == "already_complete"
+    assert stage.commands == []
+
+
+def test_finalist_preflight_emits_preflight_only_command(tmp_path: Path) -> None:
+    """Artifact boundary probes should stop after shared-spec preflight."""
+    label = "blocks0_d128_l5_i512"
+    args = _args(tmp_path, "finalist")
+    args.label = [label]
+    args.finalist_run_version = "geom1_seq2048_bptt2_k7_preflight"
+    args.finalist_seeds = "1337 2027"
+    args.finalist_trigram_top_k = 7
+    args.finalist_seq_len = 2048
+    args.finalist_batch_size = 32
+    args.finalist_bptt_chunks = 2
+    args.finalist_train_label = "preflight_seq2048_bptt2_k7"
+    args.finalist_preflight_only = True
+
+    stage = plan_stage(args)
+
+    assert stage.status == "commands"
+    assert len(stage.commands) == 1
+    command = stage.commands[0].command
+    assert "--preflight-only" in command
+    assert "--trigram-top-k" in command
+    assert "7" in command
+    assert "--seeds" in command
+    assert "1337" in command
+
+
+def test_finalist_stage_requires_explicit_contract(tmp_path: Path) -> None:
+    """Finalist planning should not infer serious contracts from names."""
+    args = _args(tmp_path, "finalist")
+    args.label = ["blocks0_d128_l5_i512"]
+
+    stage = plan_stage(args)
+
+    assert stage.status == "blocked"
+    assert "--finalist-trigram-top-k" in stage.reason
+
+
+def test_finalist_stage_rejects_non_divisible_effective_tokens(tmp_path: Path) -> None:
+    """Finalist contracts should fail before launching impossible batch shapes."""
+    args = _args(tmp_path, "finalist")
+    args.label = ["blocks0_d128_l5_i512"]
+    args.finalist_run_version = "bad_contract"
+    args.finalist_trigram_top_k = 6
+    args.finalist_seq_len = 1536
+    args.finalist_batch_size = 42
+    args.finalist_bptt_chunks = 2
+
+    with pytest.raises(SystemExit, match="finalist batch contract"):
+        plan_stage(args)
 
 
 def test_k4_planner_combines_bptt_only_when_it_wins(tmp_path: Path) -> None:

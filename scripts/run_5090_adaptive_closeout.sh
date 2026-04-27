@@ -220,18 +220,38 @@ write_plan() {
 run_plan_script() {
   local stage="$1"
   local script_path="$2"
+  local status
   echo
-  echo "=== execute_${stage} ==="
+  status="$(sed -n 's/^# adaptive_status=//p' "${script_path}" 2>/dev/null | head -n 1)"
+  echo "=== planned_${stage} status=${status:-unknown} ==="
   if [[ -f "${script_path}" ]]; then
     sed -n '1,220p' "${script_path}"
   else
     echo "Missing generated plan script: ${script_path}" >&2
     exit 1
   fi
-  if [[ "${DRY_RUN}" == "1" ]]; then
-    return 0
-  fi
-  bash "${script_path}" 2>&1 | tee "${LOG_DIR}/execute_${stage}.log"
+  case "${status}" in
+    commands)
+      if [[ "${DRY_RUN}" == "1" ]]; then
+        echo "DRY_RUN=1: not executing ${stage}."
+        return 0
+      fi
+      echo
+      echo "=== execute_${stage} ==="
+      bash "${script_path}" 2>&1 | tee "${LOG_DIR}/execute_${stage}.log"
+      ;;
+    already_complete|not_selected)
+      echo "No execution needed for ${stage}: ${status}"
+      ;;
+    blocked)
+      echo "Planner blocked ${stage}; refusing to continue." >&2
+      return 2
+      ;;
+    *)
+      echo "Unknown adaptive_status for ${stage}: ${status:-empty}" >&2
+      return 2
+      ;;
+  esac
 }
 
 cat <<EOF | tee "${LOG_DIR}/header.txt"

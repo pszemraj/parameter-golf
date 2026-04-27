@@ -36,6 +36,7 @@ from tools.analyze_5090_geometry_frontier import (  # noqa: E402
     load_benchmark,
     load_summary_row,
     parse_geometry,
+    row_matches_contract,
     screen_bpb,
     screen_contract,
     speed_ratio,
@@ -107,7 +108,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     ap.add_argument("--repo-root", type=Path, default=REPO_ROOT)
     ap.add_argument(
         "--stage",
-        choices=("confirmations", "bptt", "k4", "gated-followup"),
+        choices=("confirmations", "bptt", "k4", "gated-followup", "finalist"),
         required=True,
     )
     ap.add_argument("--run-version", default="geom1")
@@ -211,6 +212,25 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         default=None,
     )
     ap.add_argument("--gate-followup-train-label", default=None)
+    ap.add_argument("--finalist-run-version", default=None)
+    ap.add_argument("--finalist-seeds", default=None)
+    ap.add_argument("--finalist-trigram-top-k", type=int, default=None)
+    ap.add_argument("--finalist-seq-len", type=int, default=None)
+    ap.add_argument("--finalist-batch-size", type=int, default=None)
+    ap.add_argument("--finalist-bptt-chunks", type=int, default=None)
+    ap.add_argument("--finalist-steps", type=int, default=None)
+    ap.add_argument("--finalist-hold-steps", type=int, default=None)
+    ap.add_argument(
+        "--finalist-full-val-final",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    ap.add_argument("--finalist-train-label", default=None)
+    ap.add_argument(
+        "--finalist-preflight-only",
+        action="store_true",
+        help="Prepare the shared spec and run artifact preflight without training.",
+    )
     ap.add_argument("--seq-len", type=int, default=None)
     ap.add_argument("--val-steps", type=int, default=None)
     ap.add_argument("--count-workers", type=int, default=None)
@@ -666,6 +686,7 @@ def geometry_command(
     data_max_tokens: Optional[int] = None,
     no_wandb: bool = False,
     smoke_test: bool = False,
+    preflight_only: bool = False,
 ) -> list[str]:
     """Build an aligned-geometry launcher command.
 
@@ -691,6 +712,7 @@ def geometry_command(
     :param Optional[int] data_max_tokens: Optional train-data token cap.
     :param bool no_wandb: Whether to disable W&B.
     :param bool smoke_test: Whether to mark the launcher as smoke/debug.
+    :param bool preflight_only: Whether to stop after shared-spec artifact preflight.
     :return list[str]: Command argv.
     """
     geometry = parse_geometry(label)
@@ -746,6 +768,8 @@ def geometry_command(
         cmd.extend(["--trigram-max-tokens", str(trigram_max_tokens)])
     if data_max_tokens is not None:
         cmd.extend(["--data-max-tokens", str(data_max_tokens)])
+    if preflight_only:
+        cmd.append("--preflight-only")
     if no_wandb:
         cmd.append("--no-wandb")
     if smoke_test:
@@ -1458,6 +1482,222 @@ def valid_gated_followup_row(row: dict[str, str], args: argparse.Namespace) -> b
     )
 
 
+def split_cli_values(raw: Optional[str], *, fallback: str) -> list[str]:
+    """Split a comma/space separated CLI value.
+
+    :param Optional[str] raw: Raw CLI string.
+    :param str fallback: Fallback string when ``raw`` is empty.
+    :return list[str]: Non-empty values in input order.
+    """
+    text = fallback if raw is None or str(raw).strip() == "" else str(raw)
+    return [part for part in text.replace(",", " ").split() if part]
+
+
+def finalist_run_version(args: argparse.Namespace) -> str:
+    """Return the run-version for a finalist contract.
+
+    :param argparse.Namespace args: Parsed arguments.
+    :return str: Finalist run-version.
+    """
+    return str(args.finalist_run_version or args.run_version)
+
+
+def finalist_seeds(args: argparse.Namespace) -> list[str]:
+    """Return seeds requested for a finalist contract.
+
+    :param argparse.Namespace args: Parsed arguments.
+    :return list[str]: Seed strings.
+    """
+    return split_cli_values(args.finalist_seeds, fallback=str(args.seed))
+
+
+def finalist_contract_errors(args: argparse.Namespace) -> tuple[str, ...]:
+    """Return missing finalist contract flags.
+
+    :param argparse.Namespace args: Parsed arguments.
+    :return tuple[str, ...]: Missing flag names.
+    """
+    missing: list[str] = []
+    if not args.label or len(args.label) != 1:
+        missing.append("exactly one --label")
+    for field, flag in (
+        ("finalist_trigram_top_k", "--finalist-trigram-top-k"),
+        ("finalist_seq_len", "--finalist-seq-len"),
+        ("finalist_batch_size", "--finalist-batch-size"),
+        ("finalist_bptt_chunks", "--finalist-bptt-chunks"),
+    ):
+        if getattr(args, field) is None:
+            missing.append(flag)
+    return tuple(missing)
+
+
+def finalist_contract(args: argparse.Namespace) -> ScreenContract:
+    """Return the exact finalist contract.
+
+    :param argparse.Namespace args: Parsed arguments.
+    :return ScreenContract: Finalist run contract.
+    """
+    seq_len = int(args.finalist_seq_len)
+    batch_size = int(args.finalist_batch_size)
+    bptt_chunks = int(args.finalist_bptt_chunks)
+    actual_effective = batch_size * seq_len * bptt_chunks
+    if actual_effective != int(args.effective_step_tokens):
+        raise SystemExit(
+            "finalist batch contract does not match effective-step tokens: "
+            f"batch={batch_size} seq_len={seq_len} bptt={bptt_chunks} "
+            f"actual={actual_effective} expected={int(args.effective_step_tokens)}"
+        )
+    return ScreenContract(
+        planned_steps=int(args.finalist_steps or args.confirm_steps),
+        effective_step_tokens=int(args.effective_step_tokens),
+        num_blocks=0,
+        trigram_top_k=int(args.finalist_trigram_top_k),
+        seq_len=seq_len,
+        batch_size=batch_size,
+        bptt_chunks=bptt_chunks,
+        lr_hold_steps=int(args.finalist_hold_steps or args.confirm_hold_steps),
+    )
+
+
+def finalist_train_label(args: argparse.Namespace, contract: ScreenContract) -> str:
+    """Return the train-label for a finalist command.
+
+    :param argparse.Namespace args: Parsed arguments.
+    :param ScreenContract contract: Finalist contract.
+    :return str: Train-label suffix.
+    """
+    if args.finalist_train_label:
+        return str(args.finalist_train_label)
+    prefix = token_budget_label(args, contract.planned_steps)
+    return contract_train_label(contract, prefix=prefix)
+
+
+def valid_finalist_row(
+    row: dict[str, str],
+    *,
+    geometry: Geometry,
+    contract: ScreenContract,
+    full_val_final: bool,
+) -> bool:
+    """Return whether a row satisfies a finalist contract.
+
+    :param dict[str, str] row: Summary row.
+    :param Geometry geometry: Expected geometry.
+    :param ScreenContract contract: Expected run contract.
+    :param bool full_val_final: Whether full final validation is required.
+    :return bool: ``True`` when the row is evidence-grade.
+    """
+    if not row_is_completed(row):
+        return False
+    if not row_matches_contract(geometry, row, contract):
+        return False
+    if not row_float_matches(row, "learning_rate", DEFAULT_LEARNING_RATE):
+        return False
+    if not row_bool(row, "exact_val_bpb"):
+        return False
+    if not artifact_is_valid(row):
+        return False
+    if full_val_final:
+        if not row_bool(row, "last_eval_full_coverage"):
+            return False
+        if not full_val_accounting_is_valid(row):
+            return False
+    return True
+
+
+def finalist_command(args: argparse.Namespace, *, seed: str) -> PlannedCommand:
+    """Return a finalist launcher command for one seed or preflight.
+
+    :param argparse.Namespace args: Parsed arguments.
+    :param str seed: Seed string.
+    :return PlannedCommand: Planned command.
+    """
+    label = str(args.label[0])
+    contract = finalist_contract(args)
+    reason = (
+        "finalist contract selected"
+        if not args.finalist_preflight_only
+        else "finalist artifact preflight selected"
+    )
+    return PlannedCommand(
+        stage="finalist",
+        label=label,
+        reason=f"{reason}; seed={seed}",
+        command=geometry_command(
+            label,
+            run_version=finalist_run_version(args),
+            seed=seed,
+            num_steps=contract.planned_steps,
+            hold_steps=int(contract.lr_hold_steps or args.confirm_hold_steps),
+            trigram_top_k=contract.trigram_top_k,
+            full_val_final=bool(args.finalist_full_val_final),
+            val_every=1024 if args.finalist_full_val_final else 512,
+            log_every=512 if args.finalist_full_val_final else 256,
+            log_state_every=4096 if args.finalist_full_val_final else 2048,
+            save_every=4096 if args.finalist_full_val_final else 2048,
+            batch_size=contract.batch_size,
+            bptt_chunks=contract.bptt_chunks,
+            train_label=finalist_train_label(args, contract),
+            seq_len=contract.seq_len,
+            target_effective_step_tokens=contract.effective_step_tokens,
+            val_steps=args.val_steps,
+            count_workers=args.count_workers,
+            trigram_max_tokens=args.trigram_max_tokens,
+            data_max_tokens=args.data_max_tokens,
+            no_wandb=bool(args.no_wandb),
+            smoke_test=bool(args.smoke_test),
+            preflight_only=bool(args.finalist_preflight_only),
+        ),
+    )
+
+
+def plan_finalist_stage(args: argparse.Namespace) -> StagePlan:
+    """Plan missing runs for an explicit finalist contract.
+
+    :param argparse.Namespace args: Parsed arguments.
+    :return StagePlan: Stage status and planned commands.
+    """
+    errors = finalist_contract_errors(args)
+    if errors:
+        return StagePlan(
+            "blocked",
+            "finalist contract must be explicit; missing " + ", ".join(errors),
+            [],
+        )
+    if args.finalist_preflight_only:
+        return StagePlan(
+            "commands",
+            "finalist artifact preflight command selected",
+            [finalist_command(args, seed=finalist_seeds(args)[0])],
+        )
+
+    geometry = parse_geometry(str(args.label[0]))
+    contract = finalist_contract(args)
+    commands: list[PlannedCommand] = []
+    for seed in finalist_seeds(args):
+        row = load_summary_row(
+            args.repo_root.resolve(),
+            geometry,
+            run_version=finalist_run_version(args),
+            seed=seed,
+            contract=contract,
+        )
+        if not valid_finalist_row(
+            row,
+            geometry=geometry,
+            contract=contract,
+            full_val_final=bool(args.finalist_full_val_final),
+        ):
+            commands.append(finalist_command(args, seed=seed))
+    if commands:
+        return StagePlan("commands", f"{len(commands)} finalist command(s) selected", commands)
+    return StagePlan(
+        "already_complete",
+        "all requested finalist seeds already satisfy the exact contract",
+        [],
+    )
+
+
 def gated_train_label(
     args: argparse.Namespace,
     contract: ScreenContract,
@@ -1720,6 +1960,8 @@ def plan_stage(args: argparse.Namespace) -> StagePlan:
         return plan_k4_stage(args)
     if args.stage == "gated-followup":
         return plan_gated_followup_stage(args)
+    if args.stage == "finalist":
+        return plan_finalist_stage(args)
     raise ValueError(f"unknown stage: {args.stage}")
 
 

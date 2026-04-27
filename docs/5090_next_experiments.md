@@ -218,7 +218,7 @@ The `geom1` adaptive closeout completed. Current read:
 | `d128_l5_i512` K4 BPTT2 | `512M` screen | `2.0155952297` | `1,140,404` | `11,281,814` |
 | `d128_l5_i512` K4 seq2048 | `1B` full-val | `1.9731361526` | `1,182,049` | `11,371,671` |
 | `d128_l5_i512` K4 seq2048 BPTT2 | `1B` full-val | `1.9722313128` | `1,177,934` | `11,405,945` |
-| `d128_l5_i512` K6 seq2048 BPTT2 | preflight only |  |  | `14,520,129` |
+| `d128_l5_i512` K6 seq2048 BPTT2 | `1B` full-val | `1.9572908661` | `1,169,965` | `13,798,090` |
 
 Interpretation:
 
@@ -226,48 +226,93 @@ Interpretation:
   about `0.0233` bpb at K2 `1B` while running faster.
 - `BPTT2` is not established. The K2 BPTT2 gain over K2 BPTT1 at `512M` is
   only `0.0003` bpb, which is noise for this screen.
-- `K4` is established as a real signal. The current best local result is
-  `d128_l5_i512` K4 seq2048 BPTT2 at `1.9722313128` full-val BPB, under the
-  artifact cap with about `4.59 MB` headroom.
+- `K6` is now the current local leader. It beats K4 seq2048 BPTT2 by about
+  `0.0149` bpb and remains under the artifact cap with about `2.20 MB`
+  headroom.
 - `seq4096` underperformed (`2.0467157896` at `512M`), so do not expand context
-  further by default.
-- `K6` has only passed artifact preflight. It did not train because the old
-  launcher/sweep rebuild boundary rejected the explicit shared spec. The K6
-  cache is valid and should be reused.
+  further by default unless the selected finalist is stable across seeds.
 
 Current trigram memory is a sparse additive boost into base logits with one
 learned global scale. The recurrent controller does not yet receive trigram
 hit/confidence/margin features and does not arbitrate when to trust the memory.
 
-Next run:
+Next adaptive finalist run:
 
 ```bash
-bash scripts/run_5090_trigram_aligned_geometry_screen.sh \
+set -euo pipefail
+
+bash scripts/run_5090_finalist_closeout.sh \
+  --run-id k6_finalist_replicates_v1 \
+  -- \
   --run-version geom1_seq2048_bptt2_k6 \
-  --seeds 1337 \
-  --geometry-label blocks0_d128_l5_i512 \
-  --geometry-core-dim 128 \
-  --geometry-core-layers 5 \
-  --geometry-core-inner-dim 512 \
-  --geometry-batch-size 32 \
-  --geometry-seq-len 2048 \
-  --geometry-bptt-chunks 2 \
-  --num-steps 8192 \
-  --lr-hold-steps 7000 \
-  --geometry-train-label 1b_seq2048_bptt2_k6 \
-  --trigram-top-k 6 \
-  --count-workers 4 \
-  --full-val-final
+  --label blocks0_d128_l5_i512 \
+  --finalist-run-version geom1_seq2048_bptt2_k6 \
+  --finalist-seeds "1337 2027 3141" \
+  --finalist-trigram-top-k 6 \
+  --finalist-seq-len 2048 \
+  --finalist-batch-size 32 \
+  --finalist-bptt-chunks 2 \
+  --finalist-steps 8192 \
+  --finalist-hold-steps 7000 \
+  --finalist-train-label 1b_seq2048_bptt2_k6 \
+  --count-workers 4
+```
+
+The planner should skip the completed seed `1337` and emit only missing seeds
+`2027` and `3141`.
+
+After K6 replication:
+
+```bash
+bash scripts/run_5090_finalist_closeout.sh \
+  --run-id k7_preflight_v1 \
+  -- \
+  --run-version geom1_seq2048_bptt2_k6 \
+  --label blocks0_d128_l5_i512 \
+  --finalist-run-version geom1_seq2048_bptt2_k7_preflight \
+  --finalist-seeds 1337 \
+  --finalist-trigram-top-k 7 \
+  --finalist-seq-len 2048 \
+  --finalist-batch-size 32 \
+  --finalist-bptt-chunks 2 \
+  --finalist-steps 8192 \
+  --finalist-hold-steps 7000 \
+  --finalist-train-label preflight_seq2048_bptt2_k7 \
+  --finalist-preflight-only \
+  --count-workers 4
+```
+
+Only train K7 if preflight stays under `16,000,000` bytes with at least about
+`500k` bytes headroom. Do not run K8 before K7 proves both artifact viability
+and a real quality gain.
+
+Optional context probe, only after K6 replication:
+
+```bash
+bash scripts/run_5090_finalist_closeout.sh \
+  --run-id k6_seq4096_probe_v1 \
+  -- \
+  --run-version geom1_seq4096_bptt1_k6 \
+  --label blocks0_d128_l5_i512 \
+  --finalist-run-version geom1_seq4096_bptt1_k6 \
+  --finalist-seeds 1337 \
+  --finalist-trigram-top-k 6 \
+  --finalist-seq-len 4096 \
+  --finalist-batch-size 32 \
+  --finalist-bptt-chunks 1 \
+  --finalist-steps 8192 \
+  --finalist-hold-steps 7000 \
+  --finalist-train-label 1b_seq4096_k6 \
+  --count-workers 4
 ```
 
 Promotion rule:
 
 - compare K6 to the K4 seq2048 BPTT2 `1B` result (`1.9722313128`)
-- if K6 improves by at least `0.004` bpb and remains under the artifact cap,
-  promote K6 to final evidence
-- if K6 is flat within noise, keep K4 and stop top-K expansion
-- if K6 regresses or artifact headroom becomes too tight, keep K4 and move to
-  controller/trigram arbitration features instead of K8
+- if 3-seed K6 mean improves by at least `0.008` bpb, keep K6 as finalist
+- if K7 improves over K6 seed `1337` by at least `0.004` bpb and fits the
+  artifact cap, replicate K7; otherwise stop top-K expansion
+- promote seq4096 only if it beats K6 seq2048 BPTT2 by at least `0.004` bpb
 
 Replay `blocks1` only as a geometry check after the blocks0 top-K and aligned
 geometry decisions:
