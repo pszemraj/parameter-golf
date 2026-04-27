@@ -100,6 +100,12 @@ def test_invalid_or_incomplete_rows_are_pending_even_with_good_bpb():
     assert estimated_time_matched_steps(row, 2.5, valid_screen_row=not errors) is None
 
 
+def test_probe_rows_do_not_emit_final_kill_verdicts():
+    """Probe-tier rows can promote, but weak rows should not become final kills."""
+    assert decision(0.08, 1.0, valid_screen_row=True, decision_grade=False) == "probe_only"
+    assert decision(0.08, 1.0, valid_screen_row=True, decision_grade=True) == "kill"
+
+
 def test_geometry_consistency_is_required_for_decisions():
     geometry = parse_geometry("blocks0_d96_l6_i512")
     row = _summary_row(geometry.label, core_inner_dim="480", recurrent_cells="2880")
@@ -217,7 +223,7 @@ def test_cli_prints_confirmation_only_for_valid_completed_screen_rows(tmp_path: 
     assert f"# {valid_label}: promote_1b" in result.stdout
     assert f"# {invalid_label}:" not in result.stdout
     assert (
-        "| blocks0_d96_l6_i512 | 3072 | completed | 2.0000000000 | -0.075172 | 2.460 | 10112 | promote_1b |  |"
+        "| blocks0_d96_l6_i512 | 2 | 512 | 1 | 256 | 4096 |  | no | completed | 2.0000000000 | -0.075172 | 2.460 | 10112 | promote_1b |  |"
         in result.stdout
     )
     assert "not_completed" in result.stdout
@@ -262,7 +268,14 @@ def test_cli_auto_infers_k4_long_context_contract(tmp_path: Path):
         "screen_contract: `steps=4096 eff_tokens=131072 k=4 seq=2048 batch=64 bptt=1`"
         in result.stdout
     )
-    assert "| blocks0_d128_l5_i512 | 2560 | completed | 2.0170000000" in result.stdout
+    assert (
+        "| geometry | k | seq | bptt | batch | steps | eval targets | full val | status | eval bpb"
+        in result.stdout
+    )
+    assert (
+        "| blocks0_d128_l5_i512 | 4 | 2048 | 1 | 64 | 4096 |  | no | completed | 2.0170000000"
+        in result.stdout
+    )
     assert "--trigram-top-k 4" in result.stdout
     assert "--geometry-seq-len 2048" in result.stdout
     assert "--geometry-batch-size 64" in result.stdout

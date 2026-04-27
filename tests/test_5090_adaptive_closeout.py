@@ -8,8 +8,8 @@ from pathlib import Path
 
 from core_amplifier_lm.experiment import SUMMARY_FIELDS
 from tools.plan_5090_adaptive_closeout import (
-    BPTT_STEPS,
     CONFIRM_STEPS,
+    DECISION_STEPS,
     DEFAULT_BPTT_BATCH_SIZE,
     DEFAULT_BPTT_CHUNKS,
     DEFAULT_BPTT_IMPROVEMENT_BPB,
@@ -143,8 +143,6 @@ def _gated_args(tmp_path: Path):
     args.gate_followup_trigram_top_k = 4
     args.gate_followup_seq_len = 2048
     args.gate_followup_bptt_chunks = 2
-    args.gate_followup_steps = 4096
-    args.gate_followup_hold_steps = 3500
     return args
 
 
@@ -191,7 +189,8 @@ def test_bptt_planner_uses_best_completed_confirmation(tmp_path: Path) -> None:
     assert "--geometry-bptt-chunks" in commands[0].command
     assert str(DEFAULT_BPTT_CHUNKS) in commands[0].command
     assert str(DEFAULT_BPTT_BATCH_SIZE) in commands[0].command
-    assert str(BPTT_STEPS) in commands[0].command
+    assert str(DECISION_STEPS) in commands[0].command
+    assert "--full-val-final" in commands[0].command
 
 
 def test_bptt_planner_preserves_k4_long_context_contract(tmp_path: Path) -> None:
@@ -220,7 +219,7 @@ def test_bptt_planner_preserves_k4_long_context_contract(tmp_path: Path) -> None
     assert "--geometry-seq-len" in command
     assert "2048" in command
     assert "--geometry-train-label" in command
-    assert "512m_seq2048_bptt2_k4" in command
+    assert "1b_seq2048_bptt2_k4" in command
     assert "--geometry-batch-size" in command
     assert "32" in command
 
@@ -334,7 +333,9 @@ def test_gated_followup_runs_long_context_bptt2_when_evidence_clears(tmp_path: P
     assert "--geometry-batch-size" in command
     assert "32" in command
     assert "--geometry-train-label" in command
-    assert "512m_seq2048_bptt2_k4" in command
+    assert "1b_seq2048_bptt2_k4" in command
+    assert "--full-val-final" in command
+    assert str(DECISION_STEPS) in command
 
 
 def test_gated_followup_reports_already_complete(tmp_path: Path) -> None:
@@ -367,14 +368,111 @@ def test_gated_followup_reports_already_complete(tmp_path: Path) -> None:
         tmp_path,
         label,
         "geom1_seq2048_bptt2",
-        steps=4096,
+        steps=8192,
         bpb=1.99,
+        top_k=4,
+        batch_size=32,
+        seq_len=2048,
+        bptt_chunks=2,
+        full_coverage=True,
+    )
+    args = _gated_args(tmp_path)
+
+    stage = plan_stage(args)
+
+    assert stage.status == "already_complete"
+    assert stage.commands == []
+
+
+def test_gated_followup_does_not_accept_probe_as_decision(tmp_path: Path) -> None:
+    """A 512M probe row must not satisfy the default decision-tier follow-up."""
+    label = "blocks0_d128_l5_i512"
+    _write_summary(
+        tmp_path,
+        label,
+        "geom1_seq2048_confirm",
+        steps=8192,
+        bpb=1.973,
+        top_k=4,
+        batch_size=64,
+        seq_len=2048,
+        full_coverage=True,
+    )
+    _write_summary(
+        tmp_path,
+        label,
+        "geom1_k4_bptt2_confirm",
+        steps=8192,
+        bpb=1.973,
+        top_k=4,
+        batch_size=128,
+        seq_len=512,
+        bptt_chunks=2,
+        full_coverage=True,
+    )
+    _write_summary(
+        tmp_path,
+        label,
+        "geom1_seq2048_bptt2",
+        steps=4096,
+        bpb=2.03,
         top_k=4,
         batch_size=32,
         seq_len=2048,
         bptt_chunks=2,
     )
     args = _gated_args(tmp_path)
+
+    stage = plan_stage(args)
+
+    assert stage.status == "commands"
+    command = stage.commands[0].command
+    assert "--num-steps" in command
+    assert "8192" in command
+    assert "--full-val-final" in command
+    assert "--geometry-train-label" in command
+    assert "1b_seq2048_bptt2_k4" in command
+
+
+def test_probe_tier_accepts_probe_followup(tmp_path: Path) -> None:
+    """Probe mode keeps 4096-step sampled variants available explicitly."""
+    label = "blocks0_d128_l5_i512"
+    _write_summary(
+        tmp_path,
+        label,
+        "geom1_seq2048_confirm",
+        steps=8192,
+        bpb=1.973,
+        top_k=4,
+        batch_size=64,
+        seq_len=2048,
+        full_coverage=True,
+    )
+    _write_summary(
+        tmp_path,
+        label,
+        "geom1_k4_bptt2_confirm",
+        steps=8192,
+        bpb=1.973,
+        top_k=4,
+        batch_size=128,
+        seq_len=512,
+        bptt_chunks=2,
+        full_coverage=True,
+    )
+    _write_summary(
+        tmp_path,
+        label,
+        "geom1_seq2048_bptt2",
+        steps=4096,
+        bpb=2.03,
+        top_k=4,
+        batch_size=32,
+        seq_len=2048,
+        bptt_chunks=2,
+    )
+    args = _gated_args(tmp_path)
+    args.experiment_tier = "probe"
 
     stage = plan_stage(args)
 
@@ -398,9 +496,11 @@ def test_k4_planner_combines_bptt_only_when_it_wins(tmp_path: Path) -> None:
         tmp_path,
         label,
         "geom1_bptt2",
+        steps=8192,
         bpb=2.05,
         batch_size=DEFAULT_BPTT_BATCH_SIZE,
         bptt_chunks=DEFAULT_BPTT_CHUNKS,
+        full_coverage=True,
     )
     args = _args(tmp_path, "k4")
 
@@ -410,6 +510,8 @@ def test_k4_planner_combines_bptt_only_when_it_wins(tmp_path: Path) -> None:
     assert "--trigram-top-k" in commands[0].command
     assert "4" in commands[0].command
     assert "--geometry-bptt-chunks" in commands[0].command
+    assert "--full-val-final" in commands[0].command
+    assert str(DECISION_STEPS) in commands[0].command
 
 
 def test_confirmation_planner_preserves_k4_long_context_contract(tmp_path: Path) -> None:
@@ -503,9 +605,11 @@ def test_k4_planner_uses_bptt1_when_bptt_gain_is_noise(tmp_path: Path) -> None:
         tmp_path,
         label,
         "geom1_bptt2",
+        steps=8192,
         bpb=2.0600 - (DEFAULT_BPTT_IMPROVEMENT_BPB / 2.0),
         batch_size=DEFAULT_BPTT_BATCH_SIZE,
         bptt_chunks=DEFAULT_BPTT_CHUNKS,
+        full_coverage=True,
     )
     args = _args(tmp_path, "k4")
 
@@ -553,9 +657,11 @@ def test_k4_planner_ignores_bptt_gain_when_base_screen_invalid(tmp_path: Path) -
         tmp_path,
         label,
         "geom1_bptt2",
+        steps=8192,
         bpb=2.00,
         batch_size=DEFAULT_BPTT_BATCH_SIZE,
         bptt_chunks=DEFAULT_BPTT_CHUNKS,
+        full_coverage=True,
     )
     args = _args(tmp_path, "k4")
 
@@ -619,9 +725,11 @@ def test_bptt_stage_reports_already_complete(tmp_path: Path) -> None:
         tmp_path,
         label,
         "geom1_bptt2",
+        steps=8192,
         bpb=2.02,
         batch_size=DEFAULT_BPTT_BATCH_SIZE,
         bptt_chunks=DEFAULT_BPTT_CHUNKS,
+        full_coverage=True,
     )
     args = _args(tmp_path, "bptt")
 

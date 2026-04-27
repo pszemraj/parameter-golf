@@ -23,6 +23,7 @@ DEFAULT_LABELS = (
 DEFAULT_BASELINE_BPB = 2.075171567328695
 DEFAULT_BASELINE_TOK_S = 571660.2196885378
 SCREEN_PLANNED_STEPS = 4096
+DECISION_PLANNED_STEPS = 8192
 SCREEN_EFFECTIVE_STEP_TOKENS = 131072
 SCREEN_NUM_BLOCKS = 0
 SCREEN_TRIGRAM_TOP_K = 2
@@ -102,7 +103,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--baseline-bpb", type=float, default=DEFAULT_BASELINE_BPB)
     ap.add_argument("--baseline-tok-s", type=float, default=DEFAULT_BASELINE_TOK_S)
     ap.add_argument("--label", action="append", default=None, help="Geometry label to analyze")
-    ap.add_argument("--screen-steps", type=int, default=SCREEN_PLANNED_STEPS)
+    ap.add_argument("--screen-steps", type=int, default=None)
     ap.add_argument("--effective-step-tokens", type=int, default=SCREEN_EFFECTIVE_STEP_TOKENS)
     ap.add_argument("--screen-trigram-top-k", type=int, default=None)
     ap.add_argument("--seq-len", type=int, default=None)
@@ -142,6 +143,18 @@ def infer_trigram_top_k(run_version: str) -> int:
     return 4 if ("k4" in run_version or "_seq" in run_version) else SCREEN_TRIGRAM_TOP_K
 
 
+def infer_planned_steps(run_version: str) -> int:
+    """Infer planned steps from a run-version suffix.
+
+    :param str run_version: Run-version suffix.
+    :return int: Inferred planned steps.
+    """
+    run_version = str(run_version)
+    if "confirm" in run_version or "1b" in run_version:
+        return DECISION_PLANNED_STEPS
+    return SCREEN_PLANNED_STEPS
+
+
 def screen_contract(args: argparse.Namespace) -> ScreenContract:
     """Resolve the active screen contract from flags and run-version hints.
 
@@ -156,7 +169,7 @@ def screen_contract(args: argparse.Namespace) -> ScreenContract:
         batch_size = max(1, int(args.effective_step_tokens) // denom)
     top_k = int(args.screen_trigram_top_k or infer_trigram_top_k(str(args.run_version)))
     return ScreenContract(
-        planned_steps=int(args.screen_steps),
+        planned_steps=int(args.screen_steps or infer_planned_steps(str(args.run_version))),
         effective_step_tokens=int(args.effective_step_tokens),
         num_blocks=SCREEN_NUM_BLOCKS,
         trigram_top_k=top_k,
@@ -500,12 +513,19 @@ def speed_ratio(
     return None
 
 
-def decision(delta_bpb: Optional[float], ratio: Optional[float], *, valid_screen_row: bool) -> str:
+def decision(
+    delta_bpb: Optional[float],
+    ratio: Optional[float],
+    *,
+    valid_screen_row: bool,
+    decision_grade: bool = True,
+) -> str:
     """Return the promotion decision for one row.
 
     :param Optional[float] delta_bpb: Geometry BPB minus baseline BPB.
     :param Optional[float] ratio: Speed ratio versus baseline.
     :param bool valid_screen_row: Whether the row is decision-eligible.
+    :param bool decision_grade: Whether non-promotion verdicts may be final.
     :return str: Decision label.
     """
     if not valid_screen_row or delta_bpb is None:
@@ -517,6 +537,8 @@ def decision(delta_bpb: Optional[float], ratio: Optional[float], *, valid_screen
         return "promote_time_matched_8192"
     if delta_bpb <= 0.035 and ratio >= 2.0:
         return "promote_time_matched_8192"
+    if not decision_grade:
+        return "probe_only"
     if delta_bpb > 0.040:
         return "kill"
     return "inspect_curve"
@@ -637,11 +659,32 @@ def format_optional_int(value: Optional[int]) -> str:
     return "" if value is None else str(value)
 
 
+def format_eval_targets(row: dict[str, str]) -> str:
+    """Format sampled/full eval target counts for tables.
+
+    :param dict[str, str] row: Summary row.
+    :return str: Eval target count summary.
+    """
+    targets = as_int(row.get("last_eval_tokens"))
+    denom = as_int(row.get("last_eval_coverage_denominator_tokens"))
+    full = str(row.get("last_eval_full_coverage", "")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+    if targets is None:
+        return ""
+    if full and denom is not None:
+        return f"{targets}/{denom}"
+    return str(targets)
+
+
 def main() -> None:
     """Analyze completed or pending geometry rows."""
     args = parse_args()
     repo_root = args.repo_root.resolve()
     contract = screen_contract(args)
+    decision_grade = contract.planned_steps >= DECISION_PLANNED_STEPS
     labels = tuple(args.label or DEFAULT_LABELS)
     geometries = [parse_geometry(label) for label in labels]
     benchmark = load_benchmark(args.benchmark)
@@ -662,7 +705,12 @@ def main() -> None:
             baseline_tok_s=args.baseline_tok_s,
             baseline_benchmark_tok_s=baseline_bench,
         )
-        verdict = decision(delta, ratio, valid_screen_row=valid_screen_row)
+        verdict = decision(
+            delta,
+            ratio,
+            valid_screen_row=valid_screen_row,
+            decision_grade=decision_grade,
+        )
         rows.append(
             AnalyzedRow(
                 geometry=geometry,
@@ -689,24 +737,39 @@ def main() -> None:
         f"k={contract.trigram_top_k} seq={contract.seq_len} "
         f"batch={contract.batch_size} bptt={contract.bptt_chunks}`"
     )
+    print(f"- evidence_tier: `{'decision' if decision_grade else 'probe'}`")
     if baseline_bench is not None:
         print(f"- benchmark_baseline: `current_d48_l12_i480` `{baseline_bench}` tok/s")
     if args.benchmark:
         print(f"- benchmark: `{args.benchmark}`")
     print()
     print(
-        "| geometry | cells | status | screen bpb | delta | speed ratio | est time-matched steps | decision | notes |"
+        "| geometry | k | seq | bptt | batch | steps | eval targets | full val | status | eval bpb | delta | speed ratio | est time-matched steps | decision | notes |"
     )
-    print("| --- | ---: | --- | ---: | ---: | ---: | ---: | --- | --- |")
+    print(
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- | ---: | ---: | ---: | ---: | --- | --- |"
+    )
     for row in rows:
         geometry = row.geometry
         status = row.summary.get("status", "missing")
         bpb = screen_bpb(row.summary)
         notes = ",".join(row.eligibility_errors)
+        full_val = (
+            str(row.summary.get("last_eval_full_coverage", "") if row.summary else "")
+            .strip()
+            .lower()
+        )
+        full_val = "yes" if full_val in {"1", "true", "yes"} else "no"
         print(
-            "| {label} | {cells} | {status} | {bpb} | {delta} | {ratio} | {steps} | {verdict} | {notes} |".format(
+            "| {label} | {top_k} | {seq_len} | {bptt} | {batch} | {planned_steps} | {eval_targets} | {full_val} | {status} | {bpb} | {delta} | {ratio} | {steps} | {verdict} | {notes} |".format(
                 label=geometry.label,
-                cells=geometry.recurrent_cells,
+                top_k=row.summary.get("trigram_top_k", ""),
+                seq_len=row.summary.get("seq_len", ""),
+                bptt=row.summary.get("bptt_chunks", ""),
+                batch=row.summary.get("batch_size", ""),
+                planned_steps=row.summary.get("planned_steps", ""),
+                eval_targets=format_eval_targets(row.summary),
+                full_val=full_val,
                 status=status,
                 bpb=format_optional(bpb, digits=10),
                 delta=format_optional(row.delta_bpb, digits=6),
@@ -740,9 +803,7 @@ def main() -> None:
     else:
         print("No geometry row currently clears the automatic promotion thresholds.")
         print()
-        print(
-            "If all rows are completed and killed, rerun the adaptive planner for the selected stage:"
-        )
+        print("For adaptive follow-ups, rerun the planner for the selected stage:")
         print(
             "python tools/plan_5090_adaptive_closeout.py "
             "--stage k4 --run-version geom1 --seed 1337 --emit markdown"

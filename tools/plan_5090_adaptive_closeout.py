@@ -21,6 +21,7 @@ from tools.analyze_5090_geometry_frontier import (  # noqa: E402
     DEFAULT_BASELINE_BPB,
     DEFAULT_BASELINE_TOK_S,
     DEFAULT_LABELS,
+    DECISION_PLANNED_STEPS,
     SCREEN_EFFECTIVE_STEP_TOKENS,
     AnalyzedRow,
     Geometry,
@@ -43,8 +44,12 @@ from tools.analyze_5090_geometry_frontier import (  # noqa: E402
 
 CONFIRM_STEPS = 8192
 CONFIRM_HOLD_STEPS = 7000
-BPTT_STEPS = 4096
-BPTT_HOLD_STEPS = 3500
+PROBE_STEPS = 4096
+PROBE_HOLD_STEPS = 3500
+DECISION_STEPS = CONFIRM_STEPS
+DECISION_HOLD_STEPS = CONFIRM_HOLD_STEPS
+BPTT_STEPS = PROBE_STEPS
+BPTT_HOLD_STEPS = PROBE_HOLD_STEPS
 DEFAULT_BPTT_BATCH_SIZE = 128
 DEFAULT_BPTT_CHUNKS = 2
 DEFAULT_BPTT_IMPROVEMENT_BPB = 0.005
@@ -149,8 +154,23 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         default=True,
         help="Require and emit a full final validation for confirmation rows.",
     )
-    ap.add_argument("--variant-steps", type=int, default=BPTT_STEPS)
-    ap.add_argument("--variant-hold-steps", type=int, default=BPTT_HOLD_STEPS)
+    ap.add_argument(
+        "--experiment-tier",
+        choices=("probe", "decision"),
+        default="decision",
+        help=(
+            "Default contract for adaptive variants. probe is sampled 512M; "
+            "decision is 1B plus full final validation."
+        ),
+    )
+    ap.add_argument("--variant-steps", type=int, default=None)
+    ap.add_argument("--variant-hold-steps", type=int, default=None)
+    ap.add_argument(
+        "--variant-full-val-final",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Whether adaptive variants run a full final validation.",
+    )
     ap.add_argument("--screen-trigram-top-k", type=int, default=None)
     ap.add_argument("--screen-batch-size", type=int, default=None)
     ap.add_argument("--screen-bptt-chunks", type=int, default=None)
@@ -179,7 +199,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     ap.add_argument(
         "--gate-followup-full-val-final",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=None,
     )
     ap.add_argument("--gate-followup-train-label", default=None)
     ap.add_argument("--seq-len", type=int, default=None)
@@ -233,6 +253,8 @@ def analyze_geometry_rows(args: argparse.Namespace) -> list[AnalyzedRow]:
     repo_root = args.repo_root.resolve()
     benchmark = load_benchmark(args.benchmark)
     baseline_bench = as_float(benchmark.get("current_d48_l12_i480", {}).get("tokens_per_sec"))
+    contract = screen_contract(args)
+    decision_grade = int(contract.planned_steps) >= DECISION_PLANNED_STEPS
     rows: list[AnalyzedRow] = []
     for label in tuple(args.label or DEFAULT_LABELS):
         geometry = parse_geometry(label)
@@ -258,7 +280,12 @@ def analyze_geometry_rows(args: argparse.Namespace) -> list[AnalyzedRow]:
                 summary=summary,
                 delta_bpb=delta,
                 speed_ratio=ratio,
-                verdict=decision(delta, ratio, valid_screen_row=valid),
+                verdict=decision(
+                    delta,
+                    ratio,
+                    valid_screen_row=valid,
+                    decision_grade=decision_grade,
+                ),
                 eligibility_errors=errors,
                 estimated_time_matched_steps=estimated_time_matched_steps(
                     summary,
@@ -483,7 +510,7 @@ def valid_screen_variant_row(
     batch_size: Optional[int] = None,
     bptt_chunks: Optional[int] = None,
 ) -> bool:
-    """Return whether a row is a completed 512M screen variant.
+    """Return whether a row is a completed adaptive variant.
 
     :param dict[str, str] row: Summary row.
     :param argparse.Namespace args: Parsed arguments.
@@ -494,7 +521,7 @@ def valid_screen_variant_row(
     """
     if not row_is_completed(row):
         return False
-    if as_int(row.get("planned_steps")) != int(args.variant_steps):
+    if as_int(row.get("planned_steps")) != variant_steps(args):
         return False
     if as_int(row.get("effective_step_tokens")) != int(args.effective_step_tokens):
         return False
@@ -502,7 +529,7 @@ def valid_screen_variant_row(
         return False
     if as_int(row.get("seq_len")) != expected_seq_len(args):
         return False
-    if as_int(row.get("lr_hold_steps")) != int(args.variant_hold_steps):
+    if as_int(row.get("lr_hold_steps")) != variant_hold_steps(args):
         return False
     if not row_float_matches(row, "learning_rate", DEFAULT_LEARNING_RATE):
         return False
@@ -514,6 +541,11 @@ def valid_screen_variant_row(
         return False
     if bptt_chunks is not None and as_int(row.get("bptt_chunks")) != int(bptt_chunks):
         return False
+    if variant_full_val_final(args):
+        if not row_bool(row, "last_eval_full_coverage"):
+            return False
+        if not full_val_accounting_is_valid(row):
+            return False
     return True
 
 
@@ -825,14 +857,14 @@ def plan_bptt(args: argparse.Namespace) -> list[PlannedCommand]:
                 label,
                 run_version=bptt_run_version(args),
                 seed=str(args.seed),
-                num_steps=int(args.variant_steps),
-                hold_steps=int(args.variant_hold_steps),
+                num_steps=variant_steps(args),
+                hold_steps=variant_hold_steps(args),
                 trigram_top_k=contract.trigram_top_k,
-                full_val_final=False,
-                val_every=256,
-                log_every=64,
-                log_state_every=256,
-                save_every=2048,
+                full_val_final=variant_full_val_final(args),
+                val_every=1024 if variant_full_val_final(args) else 512,
+                log_every=512 if variant_full_val_final(args) else 256,
+                log_state_every=4096 if variant_full_val_final(args) else 2048,
+                save_every=4096 if variant_full_val_final(args) else 2048,
                 batch_size=bptt_batch_size,
                 bptt_chunks=int(args.bptt_chunks),
                 train_label=(
@@ -848,7 +880,7 @@ def plan_bptt(args: argparse.Namespace) -> list[PlannedCommand]:
                             batch_size=bptt_batch_size,
                             bptt_chunks=int(args.bptt_chunks),
                         ),
-                        prefix="512m",
+                        prefix=token_budget_label(args, variant_steps(args)),
                     )
                 ),
                 **shared_command_kwargs(args),
@@ -972,14 +1004,46 @@ def plan_k4(args: argparse.Namespace) -> list[PlannedCommand]:
     ):
         return []
 
+    base_contract = screen_contract(args)
     extra_kwargs = {"batch_size": args.screen_batch_size}
-    train_label = "smoke_k4" if bool(args.smoke_test) else "512m_k4"
+    label_contract = ScreenContract(
+        planned_steps=base_contract.planned_steps,
+        effective_step_tokens=base_contract.effective_step_tokens,
+        num_blocks=base_contract.num_blocks,
+        trigram_top_k=4,
+        seq_len=base_contract.seq_len,
+        batch_size=base_contract.batch_size,
+        bptt_chunks=base_contract.bptt_chunks,
+    )
+    train_label = (
+        "smoke_k4"
+        if bool(args.smoke_test)
+        else contract_train_label(
+            label_contract, prefix=token_budget_label(args, variant_steps(args))
+        )
+    )
     if use_bptt:
         extra_kwargs = {
             "batch_size": expected_bptt_batch_size(args),
             "bptt_chunks": int(args.bptt_chunks),
         }
-        train_label = "smoke_bptt2_k4" if bool(args.smoke_test) else "512m_bptt2_k4"
+        label_contract = ScreenContract(
+            planned_steps=base_contract.planned_steps,
+            effective_step_tokens=base_contract.effective_step_tokens,
+            num_blocks=base_contract.num_blocks,
+            trigram_top_k=4,
+            seq_len=base_contract.seq_len,
+            batch_size=expected_bptt_batch_size(args),
+            bptt_chunks=int(args.bptt_chunks),
+        )
+        train_label = (
+            "smoke_bptt2_k4"
+            if bool(args.smoke_test)
+            else contract_train_label(
+                label_contract,
+                prefix=token_budget_label(args, variant_steps(args)),
+            )
+        )
 
     reason = (
         "best completed geometry confirmation; "
@@ -994,14 +1058,14 @@ def plan_k4(args: argparse.Namespace) -> list[PlannedCommand]:
                 label,
                 run_version=run_version,
                 seed=str(args.seed),
-                num_steps=int(args.variant_steps),
-                hold_steps=int(args.variant_hold_steps),
+                num_steps=variant_steps(args),
+                hold_steps=variant_hold_steps(args),
                 trigram_top_k=4,
-                full_val_final=False,
-                val_every=256,
-                log_every=64,
-                log_state_every=256,
-                save_every=2048,
+                full_val_final=variant_full_val_final(args),
+                val_every=1024 if variant_full_val_final(args) else 512,
+                log_every=512 if variant_full_val_final(args) else 256,
+                log_state_every=4096 if variant_full_val_final(args) else 2048,
+                save_every=4096 if variant_full_val_final(args) else 2048,
                 train_label=train_label,
                 **extra_kwargs,
                 **shared_command_kwargs(args),
@@ -1108,6 +1172,64 @@ def optional_int(value: Optional[int], fallback: int) -> int:
     :return int: Resolved integer.
     """
     return int(fallback if value is None else value)
+
+
+def variant_steps(args: argparse.Namespace) -> int:
+    """Return the resolved adaptive variant step count.
+
+    :param argparse.Namespace args: Parsed arguments.
+    :return int: Planned variant steps.
+    """
+    if args.variant_steps is not None:
+        return int(args.variant_steps)
+    if str(args.experiment_tier) == "probe":
+        return PROBE_STEPS
+    return DECISION_STEPS
+
+
+def variant_hold_steps(args: argparse.Namespace) -> int:
+    """Return the resolved adaptive variant LR hold length.
+
+    :param argparse.Namespace args: Parsed arguments.
+    :return int: Variant LR hold steps.
+    """
+    if args.variant_hold_steps is not None:
+        return int(args.variant_hold_steps)
+    if str(args.experiment_tier) == "probe":
+        return PROBE_HOLD_STEPS
+    return DECISION_HOLD_STEPS
+
+
+def variant_full_val_final(args: argparse.Namespace) -> bool:
+    """Return whether adaptive variants should run full final validation.
+
+    :param argparse.Namespace args: Parsed arguments.
+    :return bool: ``True`` for decision-grade variants.
+    """
+    if args.variant_full_val_final is not None:
+        return bool(args.variant_full_val_final)
+    return str(args.experiment_tier) == "decision"
+
+
+def token_budget_label(args: argparse.Namespace, steps: int) -> str:
+    """Return a compact token-budget label for run names.
+
+    :param argparse.Namespace args: Parsed arguments.
+    :param int steps: Planned optimizer steps.
+    :return str: Token-budget label.
+    """
+    if bool(args.smoke_test):
+        return "smoke"
+    planned_tokens = int(steps) * int(args.effective_step_tokens)
+    if planned_tokens == 4096 * 131072:
+        return "512m"
+    if planned_tokens == 8192 * 131072:
+        return "1b"
+    if planned_tokens % 1_000_000_000 == 0:
+        return f"{planned_tokens // 1_000_000_000}b"
+    if planned_tokens % 1_000_000 == 0:
+        return f"{planned_tokens // 1_000_000}m"
+    return f"{int(steps)}steps"
 
 
 def gate_contract_args(
@@ -1217,8 +1339,7 @@ def gated_train_label(
         return "smoke_gated_confirm" if confirmation else "smoke_gated_followup"
     if confirmation:
         return confirmation_train_label(contract)
-    prefix = "512m" if int(steps) == BPTT_STEPS else f"{int(steps)}steps"
-    return contract_train_label(contract, prefix=prefix)
+    return contract_train_label(contract, prefix=token_budget_label(args, int(steps)))
 
 
 def gated_evidence_command(
@@ -1292,8 +1413,13 @@ def gated_followup_command(
     """
     followup_args = gated_followup_args(args)
     followup_contract = screen_contract(followup_args)
-    followup_steps = optional_int(args.gate_followup_steps, int(args.variant_steps))
-    followup_hold = optional_int(args.gate_followup_hold_steps, int(args.variant_hold_steps))
+    followup_steps = optional_int(args.gate_followup_steps, variant_steps(args))
+    followup_hold = optional_int(args.gate_followup_hold_steps, variant_hold_steps(args))
+    full_val_final = (
+        variant_full_val_final(args)
+        if args.gate_followup_full_val_final is None
+        else bool(args.gate_followup_full_val_final)
+    )
     reason = (
         "evidence clears gate; "
         f"evidence_bpb={evidence_bpb:.10f}; baseline_bpb={baseline_bpb:.10f}; "
@@ -1311,11 +1437,11 @@ def gated_followup_command(
             num_steps=followup_steps,
             hold_steps=followup_hold,
             trigram_top_k=followup_contract.trigram_top_k,
-            full_val_final=bool(args.gate_followup_full_val_final),
-            val_every=512,
-            log_every=256,
-            log_state_every=2048,
-            save_every=2048,
+            full_val_final=full_val_final,
+            val_every=1024 if full_val_final else 512,
+            log_every=512 if full_val_final else 256,
+            log_state_every=4096 if full_val_final else 2048,
+            save_every=4096 if full_val_final else 2048,
             batch_size=followup_contract.batch_size,
             bptt_chunks=followup_contract.bptt_chunks,
             train_label=gated_train_label(
@@ -1394,10 +1520,15 @@ def plan_gated_followup_stage(args: argparse.Namespace) -> StagePlan:
         )
 
     followup_args = gated_followup_args(args)
-    followup_args.variant_steps = optional_int(args.gate_followup_steps, int(args.variant_steps))
+    followup_args.variant_steps = optional_int(args.gate_followup_steps, variant_steps(args))
     followup_args.variant_hold_steps = optional_int(
         args.gate_followup_hold_steps,
-        int(args.variant_hold_steps),
+        variant_hold_steps(args),
+    )
+    followup_args.variant_full_val_final = (
+        variant_full_val_final(args)
+        if args.gate_followup_full_val_final is None
+        else bool(args.gate_followup_full_val_final)
     )
     existing = load_summary_row(
         args.repo_root.resolve(),

@@ -202,6 +202,7 @@ write_plan() {
       --no-confirm-full-val-final
       --variant-steps "${SMOKE_VARIANT_STEPS}"
       --variant-hold-steps "${SMOKE_HOLD_STEPS}"
+      --no-variant-full-val-final
       --screen-batch-size "${SMOKE_BATCH_SIZE}"
       --bptt-batch-size "${SMOKE_BPTT_BATCH_SIZE}"
       --bptt-chunks "${SMOKE_BPTT_CHUNKS}"
