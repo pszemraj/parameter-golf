@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,11 +15,18 @@ from _repo_bootstrap import ensure_repo_root_on_sys_path
 
 ensure_repo_root_on_sys_path()
 
+from analyze_hgdn_experiment_bundle import run_bundle_analysis  # noqa: E402
 from hgdn_helper_cli import parse_bool_flag, write_json  # noqa: E402
+from hgdn_local_experiments import (  # noqa: E402
+    LocalTrainContract,
+    build_naive_search_plan,
+    build_recurrence_matrix_plan,
+    run_naive_contract_search,
+    run_recurrence_matrix,
+)
 from hgdn_local_runner import (  # noqa: E402
     RECURRENCE_MODES,
     REPO_ROOT,
-    bool_flag_value,
     check_cuda_jobs,
     create_7z_archive,
     csv_items,
@@ -29,56 +35,6 @@ from hgdn_local_runner import (  # noqa: E402
     resolve_grad_accum_steps,
     resolve_val_batch_size,
 )
-
-ADAPTER_ENV_KEYS = {
-    "PYTHON_BIN",
-    "USE_WANDB",
-    "WANDB_MODE",
-    "WANDB_PROJECT",
-    "WANDB_WATCH",
-    "WANDB_WATCH_LOG_FREQ",
-    "RUN_PREFIX_BASE",
-    "BUNDLE_STAGE_DIR",
-    "PIPELINE_DIR",
-    "ARCHIVE_OUTPUT",
-    "COMMAND_LOG",
-    "SIZE_SCREEN_OUTPUT",
-    "SIZE_SCREEN_CONFIG",
-    "TORCH_LOGS",
-    "TORCH_TRACE",
-    "ALLOW_EXISTING_LOGS",
-    "CHECK_CUDA_IDLE",
-    "ALLOW_ACTIVE_CUDA_JOBS",
-    "NGPU",
-    "TRAIN_BATCH_TOKENS",
-    "TRAIN_SEQ_LEN",
-    "GRAD_ACCUM_STEPS",
-    "VAL_LOSS_EVERY",
-    "TRAIN_LOG_EVERY",
-    "MIN_VAL_SEQS",
-    "VAL_MAX_SEQS",
-    "VAL_BATCH_SIZE",
-    "VAL_BATCH_SEQS",
-    "MAX_WALLCLOCK_SECONDS",
-    "COMPILE",
-    "COMPILE_STRATEGY",
-    "DISTRIBUTED_MODE",
-    "WEIGHT_DECAY",
-    "TORCHINDUCTOR_MAX_AUTOTUNE",
-    "TORCHINDUCTOR_MAX_AUTOTUNE_GEMM",
-    "DATA_PATH",
-    "TOKENIZER_PATH",
-    "VOCAB_SIZE",
-    "ITERATIONS",
-    "PERF_SKIP_FINAL_EVAL",
-    "CANDIDATE_CONFIGS",
-    "CONFIRM_CANDIDATE_CONFIGS",
-    "CANDIDATE_INDEXES",
-    "RUN_PREFIXES",
-    "ALLOW_CUSTOM_CANDIDATE_CONFIGS",
-    "GDN_FLA_RECURRENCE_MODE",
-    "GDN_USE_DIRECT_FLA_LAYER_SEMANTICS",
-}
 
 
 @dataclass(frozen=True)
@@ -345,77 +301,54 @@ def stage_command_log(stage_prefix: str) -> Path:
     return Path(f"local-scratch/{stage_prefix}_commands.sh")
 
 
-def clean_env() -> dict[str, str]:
-    """Return a subprocess environment without stale runner adapter keys.
-
-    :return dict[str, str]: Cleaned environment.
-    """
-    env = os.environ.copy()
-    for key in ADAPTER_ENV_KEYS:
-        env.pop(key, None)
-    return env
-
-
-def common_stage_env(args: argparse.Namespace, runtime: RuntimePlan) -> dict[str, str]:
-    """Build the common environment consumed by lower-level training helpers.
+def stage_contract(
+    args: argparse.Namespace,
+    runtime: RuntimePlan,
+    *,
+    iterations: int,
+    perf_skip_final_eval: bool,
+) -> LocalTrainContract:
+    """Build a structured trainer contract for one adaptive stage.
 
     :param argparse.Namespace args: Parsed arguments.
     :param RuntimePlan runtime: Resolved runtime plan.
-    :return dict[str, str]: Common environment overlay.
+    :param int iterations: Stage training iterations.
+    :param bool perf_skip_final_eval: Whether to skip final serialization/eval.
+    :return LocalTrainContract: Structured launch contract.
     """
-    env = {
-        "PYTHON_BIN": args.python_bin,
-        "USE_WANDB": bool_flag_value(args.use_wandb),
-        "WANDB_MODE": args.wandb_mode,
-        "WANDB_PROJECT": args.wandb_project,
-        "WANDB_WATCH": args.wandb_watch,
-        "WANDB_WATCH_LOG_FREQ": str(args.wandb_watch_log_freq),
-        "TORCHINDUCTOR_MAX_AUTOTUNE": str(args.torchinductor_max_autotune),
-        "TORCHINDUCTOR_MAX_AUTOTUNE_GEMM": str(args.torchinductor_max_autotune_gemm),
-        "DATA_PATH": str(args.data_path),
-        "TOKENIZER_PATH": str(args.tokenizer_path),
-        "VOCAB_SIZE": str(args.vocab_size),
-        "ALLOW_EXISTING_LOGS": bool_flag_value(args.allow_existing_logs),
-        "NGPU": str(args.ngpu),
-        "GRAD_ACCUM_STEPS": str(runtime.grad_accum_steps),
-        "TRAIN_BATCH_TOKENS": str(args.train_batch_tokens),
-        "TRAIN_SEQ_LEN": str(args.train_seq_len),
-        "VAL_LOSS_EVERY": str(args.val_loss_every),
-        "TRAIN_LOG_EVERY": str(args.train_log_every),
-        "MIN_VAL_SEQS": str(args.min_val_seqs),
-        "VAL_MAX_SEQS": str(args.val_max_seqs),
-        "VAL_BATCH_SIZE": str(runtime.val_batch_size),
-        "VAL_BATCH_SEQS": "",
-        "MAX_WALLCLOCK_SECONDS": f"{args.max_wallclock_seconds:g}",
-        "COMPILE": bool_flag_value(args.compile),
-        "COMPILE_STRATEGY": args.compile_strategy,
-        "DISTRIBUTED_MODE": args.distributed_mode,
-        "WEIGHT_DECAY": f"{args.weight_decay:g}",
-    }
-    if args.torch_logs:
-        env["TORCH_LOGS"] = args.torch_logs
-    if args.torch_trace:
-        env["TORCH_TRACE"] = args.torch_trace
-    return env
-
-
-def run_stage_command(
-    label: str, command: list[str], env_overlay: dict[str, str]
-) -> None:
-    """Run one required stage command.
-
-    :param str label: Human-readable stage label.
-    :param list[str] command: Command to execute.
-    :param dict[str, str] env_overlay: Environment overlay.
-    :raises SystemExit: If the command exits nonzero.
-    """
-    print()
-    print(f">>> {label}")
-    env = clean_env()
-    env.update(env_overlay)
-    result = subprocess.run(command, cwd=REPO_ROOT, env=env, check=False)
-    if result.returncode != 0:
-        raise SystemExit(result.returncode)
+    return LocalTrainContract.resolve(
+        python_bin=args.python_bin,
+        use_wandb=args.use_wandb,
+        wandb_mode=args.wandb_mode,
+        wandb_project=args.wandb_project,
+        wandb_watch=args.wandb_watch,
+        wandb_watch_log_freq=args.wandb_watch_log_freq,
+        ngpu=args.ngpu,
+        grad_accum_steps=runtime.grad_accum_steps,
+        iterations=iterations,
+        train_batch_tokens=args.train_batch_tokens,
+        train_seq_len=args.train_seq_len,
+        val_loss_every=args.val_loss_every,
+        train_log_every=args.train_log_every,
+        min_val_seqs=args.min_val_seqs,
+        val_max_seqs=args.val_max_seqs,
+        val_batch_size=runtime.val_batch_size,
+        val_batch_seqs=None,
+        max_wallclock_seconds=args.max_wallclock_seconds,
+        compile=args.compile,
+        compile_strategy=args.compile_strategy,
+        distributed_mode=args.distributed_mode,
+        weight_decay=args.weight_decay,
+        perf_skip_final_eval=perf_skip_final_eval,
+        torchinductor_max_autotune=args.torchinductor_max_autotune,
+        torchinductor_max_autotune_gemm=args.torchinductor_max_autotune_gemm,
+        torch_logs=args.torch_logs,
+        torch_trace=args.torch_trace,
+        data_path=args.data_path,
+        tokenizer_path=args.tokenizer_path,
+        vocab_size=args.vocab_size,
+        allow_existing_logs=args.allow_existing_logs,
+    )
 
 
 def analyze_stage(
@@ -439,27 +372,16 @@ def analyze_stage(
     :param Path decision_json: Output decision JSON.
     """
     output_dir = runtime.pipeline_dir / f"{stage_name}_analysis"
-    run_stage_command(
-        f"analyze {stage_name}",
-        [
-            args.python_bin,
-            "scripts/analyze_hgdn_experiment_bundle.py",
-            "--bundle-dir",
-            str(bundle_dir),
-            "--output-dir",
-            str(output_dir),
-            "--decision-json",
-            str(decision_json),
-            "--select",
-            select_kind,
-            "--metric",
-            metric,
-            "--confirm-top-n",
-            str(args.confirm_top_hgdn),
-            "--top",
-            "20",
-        ],
-        {},
+    print()
+    print(f">>> analyze {stage_name}")
+    run_bundle_analysis(
+        bundle_dir=bundle_dir,
+        output_dir=output_dir,
+        decision_json=decision_json,
+        select=select_kind,
+        metric=metric,
+        confirm_top_n=args.confirm_top_hgdn,
+        top=20,
     )
 
 
@@ -572,23 +494,22 @@ def run_recurrence_stage(args: argparse.Namespace, runtime: RuntimePlan) -> str:
     :return str: Selected recurrence mode.
     """
     stage_prefix = f"{args.run_prefix_base}_s0_recur"
-    check_cuda_jobs(args.check_cuda_idle, args.allow_active_cuda_jobs)
-    env = common_stage_env(args, runtime)
-    env.update(
-        {
-            "RUN_PREFIX_BASE": stage_prefix,
-            "BUNDLE_STAGE_DIR": str(stage_bundle_dir(stage_prefix)),
-            "ARCHIVE_OUTPUT": str(stage_archive(stage_prefix)),
-            "COMMAND_LOG": str(stage_command_log(stage_prefix)),
-            "CHECK_CUDA_IDLE": "0",
-            "ITERATIONS": str(args.recurrence_iterations),
-            "PERF_SKIP_FINAL_EVAL": "0",
-        }
+    contract = stage_contract(
+        args,
+        runtime,
+        iterations=args.recurrence_iterations,
+        perf_skip_final_eval=False,
     )
-    run_stage_command(
-        "stage0 recurrence implementation matrix",
-        ["bash", "scripts/run_local_hgdn_recurrence_matrix.sh"],
-        env,
+    run_recurrence_matrix(
+        build_recurrence_matrix_plan(
+            run_prefix_base=stage_prefix,
+            contract=contract,
+            bundle_stage_dir=stage_bundle_dir(stage_prefix),
+            archive_output=stage_archive(stage_prefix),
+            command_log=stage_command_log(stage_prefix),
+            check_cuda_idle=args.check_cuda_idle,
+            allow_active_cuda_jobs=args.allow_active_cuda_jobs,
+        )
     )
     decision_json = runtime.pipeline_dir / "stage0_decision.json"
     analyze_stage(
@@ -642,24 +563,24 @@ def run_search_stage(
     print(f"selected_mode={selected_mode}")
     print(f"candidate_configs={candidate_configs}")
     check_cuda_jobs(args.check_cuda_idle, args.allow_active_cuda_jobs)
-    env = common_stage_env(args, runtime)
-    env.update(
-        {
-            "RUN_PREFIX_BASE": stage_prefix,
-            "BUNDLE_STAGE_DIR": str(stage_bundle_dir(stage_prefix)),
-            "ARCHIVE_OUTPUT": str(stage_archive(stage_prefix)),
-            "COMMAND_LOG": str(stage_command_log(stage_prefix)),
-            "SIZE_SCREEN_OUTPUT": f"local-scratch/{stage_prefix}_size_screen",
-            "CANDIDATE_CONFIGS": candidate_configs,
-            "GDN_FLA_RECURRENCE_MODE": selected_mode,
-            "ITERATIONS": str(iterations),
-            "PERF_SKIP_FINAL_EVAL": bool_flag_value(perf_skip_final_eval),
-        }
+    contract = stage_contract(
+        args,
+        runtime,
+        iterations=iterations,
+        perf_skip_final_eval=perf_skip_final_eval,
     )
-    run_stage_command(
-        f"{stage_name} local naive-contract search",
-        ["bash", "scripts/run_local_hgdn_naive_contract_search.sh"],
-        env,
+    run_naive_contract_search(
+        build_naive_search_plan(
+            run_prefix_base=stage_prefix,
+            contract=contract,
+            gdn_fla_recurrence_mode=selected_mode,
+            bundle_stage_dir=stage_bundle_dir(stage_prefix),
+            archive_output=stage_archive(stage_prefix),
+            command_log=stage_command_log(stage_prefix),
+            size_screen_output=Path(f"local-scratch/{stage_prefix}_size_screen"),
+            candidate_configs=candidate_configs,
+            allow_custom_candidate_configs=True,
+        )
     )
     analyze_stage(
         args,

@@ -179,10 +179,11 @@ and a `py7zr` archive under `local-scratch/<prefix>_bundle`.
 Local sparse search helper:
 
 ```bash
-USE_WANDB=0 WANDB_MODE=offline \
-DISTRIBUTED_MODE=parallel_muon \
-RUN_PREFIX_BASE=localnaivehgdn_decayfix \
-bash scripts/run_local_hgdn_naive_contract_search.sh
+conda run -s --name pg python scripts/run_local_hgdn_naive_contract_search.py \
+  --run-prefix-base localnaivehgdn_decayfix \
+  --use-wandb 0 \
+  --wandb-mode offline \
+  --distributed-mode parallel_muon
 ```
 
 Active helpers launch `torchrun train_gpt_hybrid.py` directly.
@@ -276,13 +277,13 @@ nvidia-smi --query-compute-apps=pid,process_name,used_memory \
   --format=csv,noheader,nounits
 ```
 
-The standalone matrix helper is still a shell entrypoint. Prefer the adaptive
-pipeline below for normal local screening; it runs this matrix as stage 0
-through argparse and refuses to start when other CUDA compute jobs are visible
+The standalone matrix helper is a Python argparse entrypoint. Prefer the
+adaptive pipeline below for normal local screening; it calls the same Python
+runner as stage 0 and refuses to start when other CUDA compute jobs are visible
 unless `--allow-active-cuda-jobs 1` is set.
 
 ```bash
-bash scripts/run_local_hgdn_recurrence_matrix.sh
+conda run -s --name pg python scripts/run_local_hgdn_recurrence_matrix.py
 ```
 
 For a staged local hierarchy, use the adaptive pipeline. It runs:
@@ -356,8 +357,8 @@ conda run -s --name pg python scripts/check_bpb_sanity.py \
 - `train_gpt.py`: exact repo baseline.
 - `train_gpt_hybrid.py`: packed sparse HGDN and attention-only diagnostic path.
 - `train_gpt_fla_control.py`: isolated native-FLA calibration path.
-- `scripts/run_local_hgdn_naive_contract_search.sh`: local sparse search.
-- `scripts/run_local_hgdn_recurrence_matrix.sh`: local recurrence
+- `scripts/run_local_hgdn_naive_contract_search.py`: local sparse search.
+- `scripts/run_local_hgdn_recurrence_matrix.py`: local recurrence
   implementation matrix.
 - `scripts/run_local_hgdn_adaptive_pipeline.py`: staged local implementation,
   architecture, and confirmation hierarchy.
@@ -374,19 +375,18 @@ conda run -s --name pg python scripts/check_bpb_sanity.py \
 Run these checks before handing off a branch or run bundle:
 
 ```bash
-bash -n scripts/hgdn_shell_common.sh \
-  scripts/run_local_hgdn_naive_contract_search.sh \
-  scripts/run_local_hgdn_recurrence_matrix.sh \
-  scripts/bootstrap_challenge_data.sh
+bash -n scripts/hgdn_shell_common.sh scripts/bootstrap_challenge_data.sh
 
 conda run -s --name pg python -m py_compile \
   model.py train_gpt.py train_gpt_hybrid.py train_gpt_fla_control.py \
   hgdn_fla.py hgdn_runtime_utils.py scripts/hgdn_helper_cli.py \
-  scripts/hgdn_local_runner.py \
+  scripts/hgdn_local_runner.py scripts/hgdn_local_experiments.py \
   scripts/screen_hgdn_arch_sizes.py \
   scripts/analyze_hgdn_experiment_bundle.py \
   scripts/resolve_hgdn_wallclock_decision.py \
   scripts/run_local_hgdn_adaptive_pipeline.py \
+  scripts/run_local_hgdn_naive_contract_search.py \
+  scripts/run_local_hgdn_recurrence_matrix.py \
   scripts/run_local_hgdn_wallclock_resolver.py \
   scripts/run_local_hgdn_batch_ladder.py \
   scripts/run_h100_hgdn_naive_contract_round.py \

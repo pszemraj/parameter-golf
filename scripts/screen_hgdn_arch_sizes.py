@@ -94,7 +94,7 @@ def load_project_bindings() -> tuple[Any, Any, Any]:
     )
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse command-line arguments.
 
     :return argparse.Namespace: Parsed arguments.
@@ -123,7 +123,7 @@ def parse_args() -> argparse.Namespace:
         choices=FLA_RECURRENCE_MODES,
         help="Override gdn_fla_recurrence_mode for the screen.",
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def load_config(path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -405,25 +405,48 @@ def print_stdout_table(rows: list[dict[str, Any]], *, row_limit: int) -> None:
         )
 
 
-def main() -> None:
-    """Run the architecture size screen."""
+def run_size_screen(
+    *,
+    config: Path = DEFAULT_CONFIG,
+    output_dir: Path | None = None,
+    row_limit: int = 20,
+    gdn_fla_recurrence_mode: str | None = None,
+) -> Path:
+    """Run the architecture size screen and return the output directory.
 
-    args = parse_args()
-    base_cfg, candidates = load_config(args.config)
-    if args.gdn_fla_recurrence_mode is not None:
+    :param Path config: Candidate TOML config path.
+    :param Path | None output_dir: Optional output directory.
+    :param int row_limit: Number of rows to print to stdout.
+    :param str | None gdn_fla_recurrence_mode: Optional recurrence-mode override.
+    :return Path: Directory containing screen outputs.
+    """
+    base_cfg, candidates = load_config(config)
+    if gdn_fla_recurrence_mode is not None:
         base_cfg = dict(base_cfg)
-        base_cfg["gdn_fla_recurrence_mode"] = args.gdn_fla_recurrence_mode
+        base_cfg["gdn_fla_recurrence_mode"] = gdn_fla_recurrence_mode
     code_bytes = len(TRAINER_PATH.read_text(encoding="utf-8").encode("utf-8"))
     rows = [
         candidate_metrics(row["name"], base_cfg, row, code_bytes=code_bytes)
         for row in candidates
     ]
     add_reference_deltas(rows)
-    output_dir = args.output_dir or PROFILE_ROOT / args.config.stem
-    write_outputs(output_dir, rows)
-    print_stdout_table(rows, row_limit=args.row_limit)
+    resolved_output_dir = output_dir or PROFILE_ROOT / config.stem
+    write_outputs(resolved_output_dir, rows)
+    print_stdout_table(rows, row_limit=row_limit)
     print()
-    print(f"output_dir:{output_dir}")
+    print(f"output_dir:{resolved_output_dir}")
+    return resolved_output_dir
+
+
+def main(argv: list[str] | None = None) -> None:
+    """Run the architecture size screen."""
+    args = parse_args(argv)
+    run_size_screen(
+        config=args.config,
+        output_dir=args.output_dir,
+        row_limit=args.row_limit,
+        gdn_fla_recurrence_mode=args.gdn_fla_recurrence_mode,
+    )
 
 
 if __name__ == "__main__":

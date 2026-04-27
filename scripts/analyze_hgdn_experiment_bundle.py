@@ -80,7 +80,7 @@ SUMMARY_ALIGN = [
 ]
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse command-line arguments.
 
     :return argparse.Namespace: Parsed arguments.
@@ -117,7 +117,7 @@ def parse_args() -> argparse.Namespace:
         help="Include matched attention-only baseline controls in confirm configs.",
     )
     parser.add_argument("--top", type=int, default=12)
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def parse_float(value: str) -> float | None:
@@ -998,23 +998,65 @@ def print_summary(
     )
 
 
-def main() -> None:
-    """Run bundle analysis."""
-    args = parse_args()
-    rows, speed_budget_ms = build_rows(args.bundle_dir, args.speed_budget_ms)
-    if args.output_dir is not None:
-        write_outputs(args.output_dir, rows, speed_budget_ms, metric=args.metric)
-    if args.decision_json is not None:
+def run_bundle_analysis(
+    *,
+    bundle_dir: Path,
+    output_dir: Path | None = None,
+    decision_json: Path | None = None,
+    select: str = "none",
+    metric: str = "auto",
+    speed_budget_ms: float | None = None,
+    confirm_top_n: int = 2,
+    include_controls: bool = True,
+    top: int = 12,
+) -> tuple[list[dict[str, Any]], float | None]:
+    """Analyze a bundle and optionally write outputs/decision JSON.
+
+    :param Path bundle_dir: Bundle directory to analyze.
+    :param Path | None output_dir: Optional analysis output directory.
+    :param Path | None decision_json: Optional decision JSON path.
+    :param str select: Decision selection mode.
+    :param str metric: Ranking metric.
+    :param float | None speed_budget_ms: Optional equal-wallclock budget.
+    :param int confirm_top_n: Number of configs to promote.
+    :param bool include_controls: Whether to append matched controls.
+    :param int top: Number of rows to print.
+    :return tuple[list[dict[str, Any]], float | None]: Rows and resolved budget.
+    """
+    rows, resolved_speed_budget_ms = build_rows(bundle_dir, speed_budget_ms)
+    if output_dir is not None:
+        write_outputs(output_dir, rows, resolved_speed_budget_ms, metric=metric)
+    if decision_json is not None:
         write_decision_json(
-            args.decision_json,
+            decision_json,
             rows=rows,
-            select=args.select,
-            metric=args.metric,
-            confirm_top_n=args.confirm_top_n,
-            include_controls=args.include_controls,
+            select=select,
+            metric=metric,
+            confirm_top_n=confirm_top_n,
+            include_controls=include_controls,
         )
     print_summary(
-        rows, top=args.top, speed_budget_ms=speed_budget_ms, metric=args.metric
+        rows,
+        top=top,
+        speed_budget_ms=resolved_speed_budget_ms,
+        metric=metric,
+    )
+    return rows, resolved_speed_budget_ms
+
+
+def main(argv: list[str] | None = None) -> None:
+    """Run bundle analysis."""
+    args = parse_args(argv)
+    run_bundle_analysis(
+        bundle_dir=args.bundle_dir,
+        output_dir=args.output_dir,
+        decision_json=args.decision_json,
+        select=args.select,
+        metric=args.metric,
+        speed_budget_ms=args.speed_budget_ms,
+        confirm_top_n=args.confirm_top_n,
+        include_controls=args.include_controls,
+        top=args.top,
     )
 
 
